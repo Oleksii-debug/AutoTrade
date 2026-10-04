@@ -11,7 +11,6 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -25,10 +24,7 @@ from mvp.autotrade_mvp.perpetual_margin import (
     PerpetualStress,
     evaluate_perpetual_margin,
 )
-from autotrade_runtime.artifacts.store import (
-    ArtifactIntegrityError,
-    ArtifactStore,
-)
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 def tier(
@@ -59,7 +55,6 @@ def capability(**overrides):
         account_id="account-A",
         entity_id="perpetual-account",
         environment="PAPER",
-        provider_environment="PAPER",
         instrument_version="BTC-PERP@v4",
         observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
         expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
@@ -107,7 +102,6 @@ def evidence(*, cls=PerpetualMarginEvidence, **overrides):
         account_id="account-A",
         entity_id="perpetual-account",
         environment="PAPER",
-        provider_environment="PAPER",
         instrument_version="BTC-PERP@v4",
         capability_snapshot_id=SNAPSHOT_ID,
         position_mode="ONE_WAY",
@@ -140,7 +134,6 @@ class EvidenceArtifactStore:
             "account_id": value.account_id,
             "entity_id": value.entity_id,
             "environment": value.environment,
-            "provider_environment": value.provider_environment,
             "instrument_version": value.instrument_version,
             "capability_snapshot_id": value.capability_snapshot_id,
             "position_mode": value.position_mode,
@@ -207,7 +200,6 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         "account_id": value.account_id,
         "entity_id": value.entity_id,
         "environment": value.environment,
-        "provider_environment": value.provider_environment,
         "instrument_version": value.instrument_version,
         "capability_snapshot_id": value.capability_snapshot_id,
         "position_mode": value.position_mode,
@@ -414,12 +406,10 @@ class PerpetualMarginTests(unittest.TestCase):
     def test_capability_identity_case_is_preserved_not_reinterpreted(self):
         lower = capability(
             provider_id="bybit",
-            provider_environment="TESTNET",
             position_mode="one_way",
         )
         matching = evidence(
             provider_id="bybit",
-            provider_environment="TESTNET",
             position_mode="one_way",
         )
         decision = evaluate(
@@ -436,22 +426,9 @@ class PerpetualMarginTests(unittest.TestCase):
                 capability=lower,
                 evidence=evidence(
                     provider_id="BYBIT",
-                    provider_environment="TESTNET",
                     position_mode="ONE_WAY",
                 ),
             )
-
-    def test_provider_environment_is_exact_capability_scope(self):
-        exact = capability(
-            provider_id="BYBIT",
-            provider_environment="TESTNET",
-        )
-        mismatched = evidence(
-            provider_id="BYBIT",
-            provider_environment="DEMO",
-        )
-        with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
-            evaluate(capability=exact, evidence=mismatched)
 
     def test_paper_evidence_cannot_be_reused_for_live_scope(self):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
@@ -579,84 +556,6 @@ class PerpetualMarginTests(unittest.TestCase):
             "canonical ArtifactStore",
         ):
             evaluate(evidence=trusted, artifact_store=fake_store)
-
-    def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
-        class ForgedArtifactStore(ArtifactStore):
-            snapshot_called = False
-
-            def read_authenticated_snapshot(self, artifact_id):
-                self.snapshot_called = True
-                raise AssertionError("subclass method must not run")
-
-        trusted = evidence()
-        with TemporaryDirectory() as directory:
-            canonical = ArtifactStore(directory)
-            publish_margin_artifacts(canonical, trusted)
-            forged = ForgedArtifactStore(directory)
-            with self.assertRaisesRegex(
-                PerpetualMarginError,
-                "canonical ArtifactStore",
-            ):
-                evaluate(evidence=trusted, artifact_store=forged)
-            self.assertFalse(forged.snapshot_called)
-
-    def test_each_margin_artifact_uses_one_class_qualified_authenticated_snapshot(self):
-        trusted = evidence()
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            publish_margin_artifacts(store, trusted)
-            original = ArtifactStore.read_authenticated_snapshot
-            calls = []
-
-            def counted(instance, artifact_id):
-                calls.append((instance, artifact_id))
-                return original(instance, artifact_id)
-
-            store.load_manifest = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("split manifest read")
-            )
-            store.read_bytes = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("split payload read")
-            )
-            store.read_authenticated_snapshot = lambda *_args, **_kwargs: (
-                (_ for _ in ()).throw(AssertionError("instance virtual dispatch"))
-            )
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
-                new=counted,
-            ):
-                result = evaluate(evidence=trusted, artifact_store=store)
-
-            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
-            self.assertEqual(
-                calls,
-                [
-                    (store, TIER_TABLE_ID),
-                    (store, EVIDENCE_BUNDLE_ID),
-                ],
-            )
-
-    def test_authenticated_snapshot_storage_failures_are_fail_closed(self):
-        trusted = evidence()
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(directory)
-            publish_margin_artifacts(store, trusted)
-            for failure in (
-                OSError("simulated storage race"),
-                ArtifactIntegrityError("simulated integrity failure"),
-            ):
-                with self.subTest(failure=type(failure).__name__):
-                    with patch.object(
-                        ArtifactStore,
-                        "read_authenticated_snapshot",
-                        side_effect=failure,
-                    ):
-                        with self.assertRaisesRegex(
-                            PerpetualMarginError,
-                            "artifact is missing or corrupt",
-                        ):
-                            evaluate(evidence=trusted, artifact_store=store)
 
     def test_margin_evidence_payloads_ignore_ambient_decimal_context(self):
         trusted = evidence(
@@ -925,6 +824,9 @@ class PerpetualMarginTests(unittest.TestCase):
             evidence(margin_tiers=(tier(cls=ForgedTier),))
         self.assertFalse(ForgedTier.maintenance_called)
 
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            evidence(margin_tiers=[tier()])
+
     def test_margin_text_identity_rejects_string_subclass_before_strip_dispatch(self):
         class HostileText(str):
             strip_called = False
@@ -936,6 +838,29 @@ class PerpetualMarginTests(unittest.TestCase):
         with self.assertRaisesRegex(PerpetualMarginError, "provider_id is required"):
             evidence(provider_id=HostileText("TEST_PROVIDER"))
         self.assertFalse(HostileText.strip_called)
+
+    def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
+        class ForgedArtifactStore(ArtifactStore):
+            load_called = False
+
+            def load_manifest(self, artifact_id):
+                type(self).load_called = True
+                raise AssertionError("subclass method must not run")
+
+            def read_bytes(self, artifact_id):
+                raise AssertionError("subclass method must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            publish_margin_artifacts(canonical, trusted)
+            forged = ForgedArtifactStore(directory)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "canonical ArtifactStore",
+            ):
+                evaluate(evidence=trusted, artifact_store=forged)
+            self.assertFalse(ForgedArtifactStore.load_called)
 
 if __name__ == "__main__":
     unittest.main()

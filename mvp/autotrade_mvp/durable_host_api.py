@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from ._generated_common_scalars import is_valid_common_scalar
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 from .host_actions import canonical_host_action
 from .host_api import (
@@ -23,11 +23,7 @@ from .host_api import (
     command_result_payload,
     scoped_host_operation_id,
 )
-from .persistence import (
-    JournalStore,
-    payload_digest,
-    require_exact_journal_store_authority,
-)
+from .persistence import JournalStore, payload_digest
 from .operator_authority_commands import (
     OperatorAuthorityConflict,
     canonical_operator_payload,
@@ -77,10 +73,8 @@ class JournalBackedHostCommandStore:
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
-        journal_identity = require_exact_journal_store_authority(
-            journal,
-            subject="durable host JournalStore",
-        )
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be a JournalStore")
         if not isinstance(account_id, str) or not account_id.strip():
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
@@ -92,7 +86,6 @@ class JournalBackedHostCommandStore:
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
-        self._journal_identity = journal_identity
         self.account_id = account_id.strip()
         self.environment = environment
         self.aggregate_id = "host:" + payload_digest(
@@ -101,8 +94,7 @@ class JournalBackedHostCommandStore:
                 "environment": self.environment,
             }
         ).removeprefix("sha256:")
-        legacy = JournalStore.load_events(
-            journal,
+        legacy = self._journal.load_events(
             self.AGGREGATE_TYPE,
             self.LEGACY_AGGREGATE_ID,
         )
@@ -117,16 +109,6 @@ class JournalBackedHostCommandStore:
         self._now = now or (
             lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
-
-    def _journal_authority(self) -> JournalStore:
-        journal = self._journal
-        identity = require_exact_journal_store_authority(
-            journal,
-            subject="durable host JournalStore",
-        )
-        if identity != self._journal_identity:
-            raise PermissionError("durable host journal authority changed")
-        return journal
 
     @staticmethod
     def _required_text(command: Mapping[str, object], field: str) -> str:
@@ -215,12 +197,7 @@ class JournalBackedHostCommandStore:
         return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
-        journal = self._journal_authority()
-        return JournalStore.load_events(
-            journal,
-            self.AGGREGATE_TYPE,
-            self.aggregate_id,
-        )
+        return self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
 
     @property
     def state_version(self) -> int:
@@ -341,7 +318,7 @@ class JournalBackedHostCommandStore:
         # A durable accepted event is historical authority for an exact
         # lost-response retry.  Resolve it before comparing the caller's
         # historical expected_state_version with mutable current host state.
-        accepted_event = JournalStore.get_event(self._journal_authority(), event_id)
+        accepted_event = self._journal.get_event(event_id)
         if accepted_event is not None:
             if (
                 accepted_event.get("event_type") != "COMMAND_ACCEPTED"
@@ -419,7 +396,7 @@ class JournalBackedHostCommandStore:
                 accepted_event
             )
             try:
-                saved_result, inserted, _ = JournalStore.commit_command(self._journal_authority(), 
+                saved_result, inserted, _ = self._journal.commit_command(
                     command_id=scoped_command_id,
                     actor=actor,
                     environment=environment,
@@ -468,7 +445,7 @@ class JournalBackedHostCommandStore:
                 reason_codes=("stale_state_version",),
             )
             try:
-                stored, _ = JournalStore.record_command(self._journal_authority(), 
+                stored, _ = self._journal.record_command(
                     command_id=scoped_command_id,
                     actor=actor,
                     environment=environment,
@@ -487,7 +464,7 @@ class JournalBackedHostCommandStore:
             return self._command_result(stored)
 
         action_payload = canonical_operator_payload(
-            self._journal_authority(),
+            self._journal,
             action,
             command["payload"],
             command_id,
@@ -526,7 +503,7 @@ class JournalBackedHostCommandStore:
             },
         )
         try:
-            stored, inserted, _ = JournalStore.commit_command(self._journal_authority(), 
+            stored, inserted, _ = self._journal.commit_command(
                 command_id=scoped_command_id,
                 actor=actor,
                 environment=environment,
@@ -732,7 +709,7 @@ class JournalBackedHostCommandStore:
                     else:
                         action, action_payload, action_hash, accepted_at = contract
                         validate_authority_success_evidence(
-                            self._journal_authority(),
+                            self._journal,
                             action,
                             action_payload,
                             action_hash,
@@ -793,7 +770,7 @@ class JournalBackedHostCommandStore:
                 self._accepted_authority_contract(operation_id)
             )
             validate_authority_success_evidence(
-                self._journal_authority(),
+                self._journal,
                 action,
                 action_payload,
                 action_hash,
@@ -842,7 +819,7 @@ class JournalBackedHostCommandStore:
             aggregate_version=next_version,
             payload=payload,
         )
-        JournalStore.append_event(self._journal_authority(), envelope, outbox_topic="ui.host-events")
+        self._journal.append_event(envelope, outbox_topic="ui.host-events")
         return OperationResult(
             operation_id=operation_id,
             phase=phase,
@@ -871,7 +848,7 @@ class JournalBackedHostCommandStore:
             )
         try:
             result = execute_operator_authority_action(
-                self._journal_authority(),
+                self._journal,
                 action,
                 action_payload,
                 action_hash,
@@ -881,7 +858,7 @@ class JournalBackedHostCommandStore:
             )
         except OperatorAuthorityConflict:
             observed = observed_authority_operation_effects(
-                self._journal_authority(),
+                self._journal,
                 action,
                 action_payload,
                 action_hash,

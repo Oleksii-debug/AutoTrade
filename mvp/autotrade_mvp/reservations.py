@@ -86,12 +86,29 @@ class ReservationBook:
     def __init__(self) -> None:
         self._records: dict[str, ReservationSnapshot] = {}
 
-    def get(self, reservation_id: str) -> ReservationSnapshot:
+    @staticmethod
+    def _detached_snapshot(record: ReservationSnapshot) -> ReservationSnapshot:
+        if type(record) is not ReservationSnapshot:
+            raise TypeError("reservation record must be exact ReservationSnapshot")
+        return ReservationSnapshot(
+            reservation_id=record.reservation_id,
+            intent_id=record.intent_id,
+            original=MappingProxyType(dict(record.original)),
+            remaining=MappingProxyType(dict(record.remaining)),
+            consumed=MappingProxyType(dict(record.consumed)),
+            state=record.state,
+            resolution_evidence=record.resolution_evidence,
+        )
+
+    def _get_record(self, reservation_id: str) -> ReservationSnapshot:
         key = _text(reservation_id, name="reservation_id")
         try:
             return self._records[key]
         except KeyError as error:
             raise KeyError(f"Unknown reservation: {key}") from error
+
+    def get(self, reservation_id: str) -> ReservationSnapshot:
+        return self._detached_snapshot(self._get_record(reservation_id))
 
     def total_reserved(self, resource: str) -> Decimal:
         key = _text(resource, name="resource")
@@ -125,7 +142,7 @@ class ReservationBook:
                 raise ReservationConflict(
                     "reservation_id was already committed with different content"
                 )
-            return existing
+            return self._detached_snapshot(existing)
 
         if any(record.intent_id == iid for record in self._records.values()):
             raise ReservationConflict(
@@ -159,7 +176,7 @@ class ReservationBook:
             state="WORKING",
         )
         self._records[rid] = snapshot
-        return snapshot
+        return self._detached_snapshot(snapshot)
 
     def reserve_from_capital(
         self,
@@ -196,7 +213,7 @@ class ReservationBook:
         reservation_id: str,
         usage: Mapping[str, Decimal | str | int],
     ) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         if current.state not in ACTIVE_STATES:
             raise ReservationConflict("Cannot consume a terminal reservation")
         amounts = _amounts(usage)
@@ -228,14 +245,14 @@ class ReservationBook:
             resolution_evidence=current.resolution_evidence,
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def mark_unknown(self, reservation_id: str) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         if current.state in TERMINAL_STATES:
             raise ReservationConflict("A terminal reservation cannot become UNKNOWN")
         if current.state == "UNKNOWN":
-            return current
+            return self._detached_snapshot(current)
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
@@ -245,7 +262,7 @@ class ReservationBook:
             state="UNKNOWN",
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def mark_terminal(
         self,
@@ -254,7 +271,7 @@ class ReservationBook:
         outcome: str,
         resolution_evidence: str,
     ) -> ReservationSnapshot:
-        current = self.get(reservation_id)
+        current = self._get_record(reservation_id)
         normalized = _text(outcome, name="outcome").upper()
         if normalized not in TERMINAL_STATES:
             raise ValueError(f"Unsupported terminal outcome: {normalized}")
@@ -269,7 +286,7 @@ class ReservationBook:
                 raise ReservationConflict(
                     "Terminal reservation cannot be resolved differently"
                 )
-            return current
+            return self._detached_snapshot(current)
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
@@ -282,11 +299,11 @@ class ReservationBook:
             resolution_evidence=evidence,
         )
         self._records[current.reservation_id] = updated
-        return updated
+        return self._detached_snapshot(updated)
 
     def active(self) -> tuple[ReservationSnapshot, ...]:
         return tuple(
-            record
+            self._detached_snapshot(record)
             for record in self._records.values()
             if record.state in ACTIVE_STATES
         )

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-from typing import Any
+from typing import Any, Mapping
 
 
 def canonical_json(value: Any) -> str:
@@ -17,6 +17,56 @@ def canonical_json(value: Any) -> str:
 
 def payload_digest(value: Any) -> str:
     return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_WHOLE_STORE_STATE_TABLES = (
+    "events",
+    "outbox",
+    "command_dedupe",
+    "projection_checkpoints",
+    "global_projection_checkpoints",
+)
+
+
+def _whole_store_state_counts(
+    connection: sqlite3.Connection,
+) -> dict[str, int]:
+    """Read exact business-table cardinalities from one held SQLite snapshot."""
+
+    counts: dict[str, int] = {}
+    for table in _WHOLE_STORE_STATE_TABLES:
+        row = connection.execute(
+            f"SELECT COUNT(*) AS row_count FROM {table}"
+        ).fetchone()
+        if row is None or type(row["row_count"]) is not int:
+            raise RuntimeError(f"whole-store state count failed for {table}")
+        value = row["row_count"]
+        if value < 0:
+            raise ValueError(f"whole-store state count is invalid for {table}")
+        counts[table] = value
+    return counts
+
+
+def _validated_expected_whole_store_counts(
+    value: Mapping[str, int] | None,
+) -> dict[str, int] | None:
+    if value is None:
+        return None
+    if type(value) is not dict:
+        raise TypeError("expected_whole_store_counts must be an exact dict or None")
+    if set(value) != set(_WHOLE_STORE_STATE_TABLES):
+        raise ValueError(
+            "expected_whole_store_counts must cover the exact business-state tables"
+        )
+    result: dict[str, int] = {}
+    for table in _WHOLE_STORE_STATE_TABLES:
+        count = value[table]
+        if type(count) is not int or count < 0:
+            raise ValueError(
+                f"expected whole-store count must be a non-negative integer for {table}"
+            )
+        result[table] = count
+    return result
 
 
 def _outbox_envelope_digest(topic: str, payload_json: str) -> str:
@@ -61,35 +111,6 @@ def _projection_checkpoint_digest(
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
-_EVENT_TYPE_RETIREMENT_REJECT_TRIGGER = "autotrade_reject_retired_event_type"
-_EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER = "autotrade_reject_retirement_update"
-_EVENT_TYPE_RETIREMENT_DELETE_TRIGGER = "autotrade_reject_retirement_delete"
-_EVENT_TYPE_RETIREMENT_REJECT_SQL = """
-CREATE TRIGGER IF NOT EXISTS autotrade_reject_retired_event_type
-BEFORE INSERT ON events
-WHEN EXISTS (
-    SELECT 1 FROM retired_event_types
-    WHERE event_type = NEW.event_type
-)
-BEGIN
-    SELECT RAISE(ABORT, 'event type is retired');
-END
-"""
-_EVENT_TYPE_RETIREMENT_UPDATE_SQL = """
-CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_update
-BEFORE UPDATE ON retired_event_types
-BEGIN
-    SELECT RAISE(ABORT, 'event type retirement is immutable');
-END
-"""
-_EVENT_TYPE_RETIREMENT_DELETE_SQL = """
-CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_delete
-BEFORE DELETE ON retired_event_types
-BEGIN
-    SELECT RAISE(ABORT, 'event type retirement is immutable');
-END
-"""
-
 
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
@@ -121,7 +142,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 9
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -283,23 +304,6 @@ class JournalStore:
                 "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
                 "WHERE effect_kind IS NULL",
             )
-        if version == 10:
-            # Event-type retirement is a durable cross-runtime writer fence.
-            # A process that initialized under an older schema still executes
-            # INSERT against this same events table; the database trigger, not
-            # process-local code, therefore blocks a retired writer after cutover.
-            return (
-                """
-                CREATE TABLE IF NOT EXISTS retired_event_types (
-                    event_type TEXT PRIMARY KEY,
-                    retirement_id TEXT NOT NULL,
-                    retirement_hash TEXT NOT NULL
-                )
-                """,
-                _EVENT_TYPE_RETIREMENT_REJECT_SQL,
-                _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
-                _EVENT_TYPE_RETIREMENT_DELETE_SQL,
-            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -336,10 +340,6 @@ class JournalStore:
             required["global_projection_checkpoints"] = frozenset({
                 "projection_name", "journal_sequence",
                 "state_json", "state_hash", "updated_at",
-            })
-        if cls.SCHEMA_VERSION >= 10:
-            required["retired_event_types"] = frozenset({
-                "event_type", "retirement_id", "retirement_hash",
             })
         return required
 
@@ -446,12 +446,6 @@ class JournalStore:
                 "state_hash": ("TEXT", True),
                 "updated_at": ("TEXT", True),
             }
-        if cls.SCHEMA_VERSION >= 10:
-            required["retired_event_types"] = {
-                "event_type": ("TEXT", False),
-                "retirement_id": ("TEXT", True),
-                "retirement_hash": ("TEXT", True),
-            }
         return required
 
     @classmethod
@@ -531,8 +525,6 @@ class JournalStore:
             expected_primary_keys["global_projection_checkpoints"] = (
                 "projection_name",
             )
-        if cls.SCHEMA_VERSION >= 10:
-            expected_primary_keys["retired_event_types"] = ("event_type",)
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
@@ -606,55 +598,6 @@ class JournalStore:
             raise ValueError(
                 "Journal schema table outbox is missing event ownership foreign key"
             )
-
-    @classmethod
-    def _validate_event_type_retirement_contract(cls, connection) -> None:
-        if cls.SCHEMA_VERSION < 10:
-            return
-        expected_triggers = {
-            _EVENT_TYPE_RETIREMENT_REJECT_TRIGGER: _EVENT_TYPE_RETIREMENT_REJECT_SQL,
-            _EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER: _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
-            _EVENT_TYPE_RETIREMENT_DELETE_TRIGGER: _EVENT_TYPE_RETIREMENT_DELETE_SQL,
-        }
-        for trigger_name, expected_sql in expected_triggers.items():
-            row = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
-                (trigger_name,),
-            ).fetchone()
-            if row is None or not isinstance(row["sql"], str):
-                raise ValueError(
-                    "Journal schema is missing event-type retirement trigger: "
-                    + trigger_name
-                )
-            actual = " ".join(str(row["sql"]).split())
-            expected = " ".join(expected_sql.replace("IF NOT EXISTS ", "").split())
-            if actual != expected:
-                raise ValueError(
-                    "Journal event-type retirement trigger contract mismatch: "
-                    + trigger_name
-                )
-
-        for row in connection.execute(
-            "SELECT event_type, retirement_id, retirement_hash "
-            "FROM retired_event_types ORDER BY event_type"
-        ):
-            event_type = row["event_type"]
-            retirement_id = row["retirement_id"]
-            retirement_hash = row["retirement_hash"]
-            if (
-                not isinstance(event_type, str)
-                or not event_type.strip()
-                or event_type != event_type.strip()
-                or not isinstance(retirement_id, str)
-                or not retirement_id.strip()
-                or retirement_id != retirement_id.strip()
-            ):
-                raise ValueError("event type retirement record is not canonical")
-            expected_hash = payload_digest(
-                {"event_type": event_type, "retirement_id": retirement_id}
-            )
-            if retirement_hash != expected_hash:
-                raise ValueError("event type retirement hash mismatch")
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -874,8 +817,6 @@ class JournalStore:
                     required_tables.add("projection_checkpoints")
                 if self.SCHEMA_VERSION >= 7:
                     required_tables.add("global_projection_checkpoints")
-                if self.SCHEMA_VERSION >= 10:
-                    required_tables.add("retired_event_types")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -910,7 +851,6 @@ class JournalStore:
                         )
                 self._validate_column_contracts(connection)
                 self._validate_key_contracts(connection)
-                self._validate_event_type_retirement_contract(connection)
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -922,55 +862,6 @@ class JournalStore:
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()
         return 0 if row is None or row[0] is None else int(row[0])
-
-    def retire_event_type(self, event_type: str, *, retirement_id: str) -> bool:
-        """Durably fence all future inserts of one legacy event type.
-
-        The fence lives in SQLite rather than process memory so an already-running
-        older runtime using the same events table is blocked after the retirement
-        transaction commits. Existing historical events remain readable. retirement_id is a deterministic
-        migration/generation identity, never a wall-clock attestation.
-        """
-
-        if self.SCHEMA_VERSION < 10:
-            raise RuntimeError("event type retirement requires journal schema v10")
-        event_type = self._require_text(event_type, "event_type")
-        retirement_id = self._require_text(retirement_id, "retirement_id")
-        retirement_hash = payload_digest(
-            {"event_type": event_type, "retirement_id": retirement_id}
-        )
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                existing = connection.execute(
-                    "SELECT retirement_id, retirement_hash "
-                    "FROM retired_event_types WHERE event_type = ?",
-                    (event_type,),
-                ).fetchone()
-                if existing is not None:
-                    exact = (
-                        existing["retirement_id"] == retirement_id
-                        and existing["retirement_hash"] == retirement_hash
-                    )
-                    if not exact:
-                        raise ValueError(
-                            "event type retirement conflicts with existing fence"
-                        )
-                    self._validate_event_type_retirement_contract(connection)
-                    connection.commit()
-                    return False
-                connection.execute(
-                    "INSERT INTO retired_event_types("
-                    "event_type, retirement_id, retirement_hash"
-                    ") VALUES (?, ?, ?)",
-                    (event_type, retirement_id, retirement_hash),
-                )
-                self._validate_event_type_retirement_contract(connection)
-                connection.commit()
-                return True
-            except Exception:
-                connection.rollback()
-                raise
 
     @staticmethod
     def _now() -> str:
@@ -1204,14 +1095,8 @@ class JournalStore:
         after_sequence: int,
         *,
         limit: int = 10000,
-        allow_partial: bool = False,
     ) -> list[dict[str, Any]]:
-        """Load an integrity-checked journal tail after one durable global cut.
-
-        Complete projection rebuild is the default authority. A bounded page is
-        returned only when callers explicitly opt into partial traversal and are
-        therefore responsible for advancing by the returned journal_sequence.
-        """
+        """Load integrity-checked journal events strictly after a durable global cut."""
 
         if (
             type(after_sequence) is not int
@@ -1220,38 +1105,19 @@ class JournalStore:
             raise ValueError("after_sequence must be a non-negative integer")
         if type(limit) is not int or limit < 1 or limit > 100000:
             raise ValueError("limit must be between 1 and 100000")
-        if type(allow_partial) is not bool:
-            raise ValueError("allow_partial must be a boolean")
         with self._connect() as connection:
-            connection.execute("BEGIN")
-            try:
-                current = self._journal_sequence_value(connection)
-                if after_sequence > current:
-                    raise ValueError(
-                        "after_sequence cannot outrun the authoritative journal sequence"
-                    )
-                rows = connection.execute(
-                    """
-                    SELECT event_id, event_type, aggregate_type, aggregate_id,
-                           aggregate_version, payload_json, payload_hash, committed_at,
-                           envelope_json, envelope_hash, journal_sequence
-                    FROM events
-                    WHERE journal_sequence > ?
-                    ORDER BY journal_sequence
-                    LIMIT ?
-                    """,
-                    (after_sequence, limit + 1),
-                ).fetchall()
-                if not allow_partial and len(rows) > limit:
-                    raise ValueError(
-                        "journal tail exceeds limit; complete projection rebuild "
-                        "requires a larger limit or explicit allow_partial paging"
-                    )
-                rows = rows[:limit]
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
+            rows = connection.execute(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at,
+                       envelope_json, envelope_hash, journal_sequence
+                FROM events
+                WHERE journal_sequence > ?
+                ORDER BY journal_sequence
+                LIMIT ?
+                """,
+                (after_sequence, limit),
+            ).fetchall()
         decoded = [self._decode_event_row(row) for row in rows]
         expected = after_sequence + 1
         for event in decoded:
@@ -1261,13 +1127,16 @@ class JournalStore:
                     "journal events after cut are not contiguous; qualification cannot infer conservation"
                 )
             expected += 1
-        if not allow_partial and expected != current + 1:
-            raise ValueError(
-                "journal tail is incomplete; qualification cannot infer conservation"
-            )
         return decoded
 
-    def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
+    def append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
+    ) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
@@ -1294,6 +1163,19 @@ class JournalStore:
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence < 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1362,6 +1244,27 @@ class JournalStore:
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
+            journal_sequence_cut = (
+                self._journal_sequence_value(connection)
+                if self.SCHEMA_VERSION >= 6
+                else 0
+            )
+            if (
+                expected_journal_sequence is not None
+                and journal_sequence_cut != expected_journal_sequence
+            ):
+                connection.rollback()
+                raise ValueError(
+                    "journal sequence changed after whole-store validation"
+                )
+            if expected_counts is not None:
+                actual_counts = _whole_store_state_counts(connection)
+                if actual_counts != expected_counts:
+                    connection.rollback()
+                    raise ValueError(
+                        "whole-store state changed after bootstrap validation"
+                    )
+
             current = self._aggregate_version_value(
                 connection,
                 aggregate_type,
@@ -1375,7 +1278,7 @@ class JournalStore:
                 )
 
             if self.SCHEMA_VERSION >= 6:
-                journal_sequence = self._journal_sequence_value(connection) + 1
+                journal_sequence = journal_sequence_cut + 1
                 connection.execute(
                     """
                     INSERT INTO events(
@@ -2040,6 +1943,8 @@ class JournalStore:
         outbox_id: str,
         *,
         expected_envelope_hash: str,
+        expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> bool:
         """Acknowledge exactly the verified outbox envelope that was delivered.
 
@@ -2054,6 +1959,19 @@ class JournalStore:
         expected_envelope_hash = self._require_text(
             expected_envelope_hash,
             "expected_envelope_hash",
+        )
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence < 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
         )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2149,6 +2067,25 @@ class JournalStore:
                 if row["delivered_at"] is not None:
                     connection.commit()
                     return False
+
+                journal_sequence_cut = (
+                    self._journal_sequence_value(connection)
+                    if self.SCHEMA_VERSION >= 6
+                    else 0
+                )
+                if (
+                    expected_journal_sequence is not None
+                    and journal_sequence_cut != expected_journal_sequence
+                ):
+                    raise ValueError(
+                        "journal sequence changed after whole-store validation"
+                    )
+                if expected_counts is not None:
+                    actual_counts = _whole_store_state_counts(connection)
+                    if actual_counts != expected_counts:
+                        raise ValueError(
+                            "whole-store state changed after bootstrap validation"
+                        )
 
                 updated = connection.execute(
                     """
@@ -2466,6 +2403,7 @@ class JournalStore:
         state_version: int,
         events: list[tuple[dict[str, Any], str | None]],
         expected_journal_sequence: int | None = None,
+        expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> tuple[Any, bool, tuple[AppendResult, ...]]:
         """Atomically commit command dedupe, ordered events and outbox rows."""
 
@@ -2489,6 +2427,10 @@ class JournalStore:
             raise ValueError(
                 "expected_journal_sequence must be a non-negative integer"
             )
+
+        expected_counts = _validated_expected_whole_store_counts(
+            expected_whole_store_counts
+        )
 
         request_hash = payload_digest(request)
         result_json = canonical_json(result)
@@ -2619,6 +2561,12 @@ class JournalStore:
                     raise ValueError(
                         "journal sequence changed after financial evidence validation"
                     )
+                if expected_counts is not None:
+                    actual_counts = _whole_store_state_counts(connection)
+                    if actual_counts != expected_counts:
+                        raise ValueError(
+                            "whole-store state changed after financial evidence validation"
+                        )
                 batch_journal_sequences = list(
                     range(
                         journal_sequence_cut + 1,

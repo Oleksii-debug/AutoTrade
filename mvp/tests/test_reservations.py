@@ -119,6 +119,36 @@ class ReservationFoundationTests(unittest.TestCase):
             )
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
 
+    def test_returned_snapshot_mutation_cannot_release_private_capacity(self):
+        book = ReservationBook()
+        returned = book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "70"},
+            available={"CASH:USD": "100"},
+        )
+
+        object.__setattr__(returned, "state", "CANCELED")
+        object.__setattr__(returned, "remaining", {"CASH:USD": Decimal("0")})
+
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        current = book.get("r1")
+        self.assertIsNot(current, returned)
+        self.assertEqual(current.state, "WORKING")
+        self.assertEqual(current.remaining["CASH:USD"], Decimal("70"))
+
+        active = book.active()[0]
+        object.__setattr__(active, "state", "REJECTED")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+
+        with self.assertRaises(InsufficientAvailable):
+            book.reserve(
+                reservation_id="r2",
+                intent_id="i2",
+                requirements={"CASH:USD": "40"},
+                available={"CASH:USD": "100"},
+            )
+
     def test_partial_fill_reduces_reservation_and_cancel_releases_remainder(self):
         book = ReservationBook()
         book.reserve(

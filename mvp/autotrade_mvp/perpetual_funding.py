@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
+from threading import Lock
+import weakref
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
@@ -22,6 +24,13 @@ from .accounting import (
     transaction_digest,
 )
 from .instruments import InstrumentRegistry, InstrumentVersion
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    exact_sum,
+    exact_multiply,
+    as_fraction,
+)
 from .perpetuals import (
     FundingConvention,
     MarketSnapshot,
@@ -29,8 +38,14 @@ from .perpetuals import (
     PerpetualError,
     funding_cashflow,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_activity_accounting import DurableProviderEconomicBook
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .provider_activity_accounting import AccountingConflict, DurableProviderEconomicBook
 from .provider_core import ProviderResponseObservation, Surface
 
 
@@ -52,11 +67,9 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise PerpetualFundingError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
         raise PerpetualFundingError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise PerpetualFundingError(f"{name} must be a finite decimal")
     return result
 
 
@@ -327,6 +340,10 @@ class FundingApplyResult:
     currency: str
 
 
+_FUNDING_AUTHORITY_BINDING_LOCK = Lock()
+_FUNDING_AUTHORITY_BINDINGS: dict[int, tuple[object, ...]] = {}
+
+
 class DurablePerpetualFundingAuthority:
     """Exactly-once provider funding bridge over the canonical economic book."""
 
@@ -344,13 +361,13 @@ class DurablePerpetualFundingAuthority:
         funding_endpoints: frozenset[str],
         permission_scope: str,
     ) -> None:
-        if not isinstance(store, JournalStore):
+        if type(store) is not JournalStore:
             raise TypeError("store must be JournalStore")
-        if not isinstance(economic_book, DurableProviderEconomicBook):
+        if type(economic_book) is not DurableProviderEconomicBook:
             raise TypeError("economic_book must be DurableProviderEconomicBook")
         if economic_book.store is not store:
             raise ValueError("funding authority and economic book must share one JournalStore")
-        if not isinstance(instrument_registry, InstrumentRegistry):
+        if type(instrument_registry) is not InstrumentRegistry:
             raise TypeError("instrument_registry must be InstrumentRegistry")
         if not callable(evidence_resolver):
             raise TypeError("evidence_resolver must be callable")
@@ -371,9 +388,86 @@ class DurablePerpetualFundingAuthority:
             economic_book.account_id,
             economic_book.environment,
         )
+        bound_identity = require_exact_journal_store_authority(
+            store,
+            subject="perpetual funding JournalStore",
+        )
+        bound_scope = (
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+            economic_book.book_id,
+        )
+        binding_key = id(self)
+
+        def cleanup(ref: weakref.ReferenceType[DurablePerpetualFundingAuthority]) -> None:
+            with _FUNDING_AUTHORITY_BINDING_LOCK:
+                current = _FUNDING_AUTHORITY_BINDINGS.get(binding_key)
+                if current is not None and current[0] is ref:
+                    _FUNDING_AUTHORITY_BINDINGS.pop(binding_key, None)
+
+        ref = weakref.ref(self, cleanup)
+        with _FUNDING_AUTHORITY_BINDING_LOCK:
+            _FUNDING_AUTHORITY_BINDINGS[binding_key] = (
+                ref,
+                store,
+                economic_book,
+                bound_identity,
+                bound_scope,
+            )
+
+    def _require_bound_financial_authority(self) -> object:
+        with _FUNDING_AUTHORITY_BINDING_LOCK:
+            binding = _FUNDING_AUTHORITY_BINDINGS.get(id(self))
+        if binding is None or binding[0]() is not self:
+            raise PerpetualFundingConflict(
+                "funding authority durable binding is not canonically issued"
+            )
+        _, bound_store, bound_book, bound_identity, bound_scope = binding
+        if (
+            self.store is not bound_store
+            or self.economic_book is not bound_book
+            or bound_book.store is not bound_store
+        ):
+            raise PerpetualFundingConflict(
+                "funding authority durable store binding changed after construction"
+            )
+        current_scope = (
+            bound_book.provider_id,
+            bound_book.account_id,
+            bound_book.environment,
+            bound_book.book_id,
+        )
+        if (
+            any(type(value) is not str for value in current_scope)
+            or current_scope != bound_scope
+        ):
+            raise PerpetualFundingConflict(
+                "funding authority economic-book scope changed after construction"
+            )
+        try:
+            current_identity = require_exact_journal_store_authority(
+                bound_store,
+                subject="perpetual funding bound JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise PerpetualFundingConflict(
+                "funding authority durable store identity is no longer valid"
+            ) from error
+        if current_identity != bound_identity:
+            raise PerpetualFundingConflict(
+                "funding authority durable store generation changed after construction"
+            )
+        return bound_identity
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
+        identity = self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            return JournalStore.load_events(
+                self.store,
+                self._AGGREGATE_TYPE,
+                self.aggregate_id,
+            )
 
     @staticmethod
     def _payload(event: Mapping[str, object]) -> Mapping[str, object]:
@@ -385,6 +479,7 @@ class DurablePerpetualFundingAuthority:
     def _observation(
         self, evidence_ref: str
     ) -> tuple[PerpetualFundingObservation, ProviderResponseObservation]:
+        self._require_bound_financial_authority()
         reference = _text(evidence_ref, "evidence_ref")
         try:
             source = self.evidence_resolver(reference)
@@ -433,8 +528,9 @@ class DurablePerpetualFundingAuthority:
         observation: PerpetualFundingObservation,
     ) -> tuple[InstrumentVersion, PerpetualContract, str]:
         try:
-            version = self.instrument_registry.exact(observation.instrument_version)
-            effective = self.instrument_registry.at(
+            version = InstrumentRegistry.exact(self.instrument_registry, observation.instrument_version)
+            effective = InstrumentRegistry.at(
+                self.instrument_registry,
                 version.instrument_id,
                 observation.effective_at,
             )
@@ -460,6 +556,8 @@ class DurablePerpetualFundingAuthority:
             )
         if version.payoff not in {"LINEAR", "INVERSE"}:
             raise PerpetualFundingError("perpetual payoff is not canonically qualified")
+        if as_fraction(observation.signed_contracts) % as_fraction(version.quantity_step):
+            raise PerpetualFundingError("funding position is off canonical quantity grid")
 
         contract = PerpetualContract(
             instrument_id=version.provider_symbol,
@@ -487,20 +585,66 @@ class DurablePerpetualFundingAuthority:
         )
         return version, contract, contract_digest
 
-    @staticmethod
-    def _project_position_at_cut(
-        transactions: tuple[JournalTransaction, ...],
+    def _position_cut(
+        self,
+        observation: PerpetualFundingObservation,
         *,
-        instrument: str,
-        effective_at: datetime,
-        evidence_observed_at: datetime,
-    ) -> tuple[Decimal, tuple[str, ...], tuple[str, ...]]:
+        frozen: Mapping[str, object] | None = None,
+    ) -> FundingPositionCut:
+        """Replay the original durable visibility cut for corrections/restarts.
+
+        The funding event, rather than a new provider revision or current book,
+        owns the original visibility and evidence-observation boundaries.
+        """
+
+        identity = self._require_bound_financial_authority()
+        DurableProviderEconomicBook.refresh(self.economic_book)
+        self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            journal_sequence = JournalStore.current_journal_sequence(self.store)
+        observed_cut = observation.observed_at
+        if frozen is not None:
+            if type(frozen) is not dict or type(frozen.get("journal_sequence")) is not int:
+                raise PerpetualFundingConflict("frozen funding cut has invalid visibility")
+            journal_sequence = frozen["journal_sequence"]
+            if journal_sequence <= 0 or frozen.get("effective_at") != _utc_text(observation.effective_at):
+                raise PerpetualFundingConflict("frozen funding cut has invalid period identity")
+            try:
+                observed_cut = datetime.fromisoformat(frozen["evidence_observed_at"].replace("Z", "+00:00"))
+                observed_cut = _utc(observed_cut, "frozen observation")
+            except (AttributeError, TypeError, ValueError) as error:
+                raise PerpetualFundingConflict("frozen funding cut has invalid observation boundary") from error
+            if observed_cut > observation.observed_at:
+                raise PerpetualFundingConflict("funding correction predates its original evidence")
+        self._require_bound_financial_authority()
+        with journal_store_authority_scope(self.store, identity):
+            economic_events = JournalStore.load_events(
+                self.store,
+                "economic_book",
+                self.economic_book.book_id,
+            )
+        visible = [event for event in economic_events if event["journal_sequence"] <= journal_sequence]
+        if not visible:
+            raise PerpetualFundingConflict("provider funding position does not match canonical position at funding cut")
+        try:
+            economic_cut = DurableProviderEconomicBook.resolve_historical_cut(
+                self.economic_book, visible[-1]["aggregate_version"],
+                visibility_journal_sequence=journal_sequence,
+            )
+        except (AccountingConflict, TypeError, ValueError) as error:
+            raise PerpetualFundingConflict("frozen funding economic cut cannot be reconstructed") from error
+        book_digest = economic_cut.resulting_book_digest
+        instrument = observation.instrument_id
         position_account = f"POSITION:{instrument}"
         position = Decimal("0")
         transaction_ids: list[str] = []
         transaction_digests: list[str] = []
 
-        for transaction in transactions:
+        by_id = {transaction.transaction_id: transaction for transaction in self.economic_book.transactions}
+        for transaction_id, digest in economic_cut.transaction_digests:
+            transaction = by_id.get(transaction_id)
+            if transaction is None or transaction_digest(transaction) != digest:
+                raise PerpetualFundingConflict("historical funding transaction differs from canonical cut")
             position_postings = tuple(
                 item
                 for item in transaction.postings
@@ -517,10 +661,10 @@ class DurablePerpetualFundingAuthority:
                     "canonical position history lacks causal economic ordering evidence"
                 )
             try:
-                transaction_effective_at = datetime.fromisoformat(
+                effective_at = datetime.fromisoformat(
                     transaction.economic_effective_at.replace("Z", "+00:00")
                 ).astimezone(timezone.utc)
-                transaction_observed_at = datetime.fromisoformat(
+                observed_at = datetime.fromisoformat(
                     transaction.observed_at.replace("Z", "+00:00")
                 ).astimezone(timezone.utc)
             except ValueError as error:
@@ -529,269 +673,64 @@ class DurablePerpetualFundingAuthority:
                 ) from error
 
             if (
-                transaction_effective_at <= effective_at
-                and transaction_observed_at <= evidence_observed_at
+                effective_at <= observation.effective_at
+                and observed_at <= observed_cut
             ):
-                position += sum(
-                    (item.signed_amount for item in position_postings),
-                    Decimal("0"),
-                )
+                if effective_at == observation.effective_at:
+                    raise PerpetualFundingConflict("position at the exact funding boundary has ambiguous ordering")
+                position = exact_sum((position, *(item.signed_amount for item in position_postings)))
                 transaction_ids.append(transaction.transaction_id)
                 transaction_digests.append(transaction_digest(transaction))
 
-        return (
-            position,
-            tuple(transaction_ids),
-            tuple(transaction_digests),
-        )
-
-    @staticmethod
-    def _position_cut_material(
-        *,
-        instrument: str,
-        effective_at: str,
-        evidence_observed_at: str,
-        position: Decimal,
-        economic_book_digest: str,
-        journal_sequence: int,
-        contributing_transaction_ids: tuple[str, ...],
-        contributing_transaction_digests: tuple[str, ...],
-    ) -> dict[str, object]:
-        return {
+        material = {
             "schema_version": "1.0.0",
             "instrument": instrument,
-            "effective_at": effective_at,
-            "evidence_observed_at": evidence_observed_at,
+            "effective_at": _utc_text(observation.effective_at),
+            "evidence_observed_at": _utc_text(observed_cut),
             "position": format(position, "f"),
-            "economic_book_digest": economic_book_digest,
+            "economic_book_digest": book_digest,
             "journal_sequence": journal_sequence,
             "contributing_transactions": [
                 {"transaction_id": transaction_id, "digest": digest}
                 for transaction_id, digest in zip(
-                    contributing_transaction_ids,
-                    contributing_transaction_digests,
+                    transaction_ids,
+                    transaction_digests,
                     strict=True,
                 )
             ],
         }
-
-    def _position_cut(
-        self,
-        observation: PerpetualFundingObservation,
-        *,
-        economic_cut=None,
-    ) -> FundingPositionCut:
-        """Project one new funding-period position from one current economic cut."""
-
-        if economic_cut is None:
-            economic_cut = self.economic_book.read_cut()
-        journal_sequence = self.store.current_journal_sequence()
-        position, transaction_ids, transaction_digests = (
-            self._project_position_at_cut(
-                economic_cut.transactions,
-                instrument=observation.instrument_id,
-                effective_at=observation.effective_at,
-                evidence_observed_at=observation.observed_at,
-            )
-        )
-        effective_text = _utc_text(observation.effective_at)
-        observed_text = _utc_text(observation.observed_at)
-        material = self._position_cut_material(
-            instrument=observation.instrument_id,
-            effective_at=effective_text,
-            evidence_observed_at=observed_text,
+        result = FundingPositionCut(
+            instrument=instrument,
+            effective_at=material["effective_at"],
+            evidence_observed_at=material["evidence_observed_at"],
             position=position,
-            economic_book_digest=economic_cut.book_digest,
+            economic_book_digest=book_digest,
             journal_sequence=journal_sequence,
-            contributing_transaction_ids=transaction_ids,
-            contributing_transaction_digests=transaction_digests,
-        )
-        return FundingPositionCut(
-            instrument=observation.instrument_id,
-            effective_at=effective_text,
-            evidence_observed_at=observed_text,
-            position=position,
-            economic_book_digest=economic_cut.book_digest,
-            journal_sequence=journal_sequence,
-            contributing_transaction_ids=transaction_ids,
-            contributing_transaction_digests=transaction_digests,
+            contributing_transaction_ids=tuple(transaction_ids),
+            contributing_transaction_digests=tuple(transaction_digests),
             digest=payload_digest(material),
         )
+        if frozen is not None and self._position_cut_payload(result) != frozen:
+            raise PerpetualFundingConflict("frozen funding position cut differs from canonical replay")
+        return result
 
-    def _historical_position_cut(
-        self,
-        prior_payload: Mapping[str, object],
-        correction: PerpetualFundingObservation,
-    ) -> FundingPositionCut:
-        """Rehydrate and verify the predecessor's immutable funding-period cut.
+    @staticmethod
+    def _saved_position_cut(payload: Mapping[str, object]) -> dict[str, object]:
+        cut = payload.get("position_cut")
+        if type(cut) is not dict:
+            raise PerpetualFundingConflict("durable funding event is missing its frozen position cut")
+        return cut
 
-        A correction may arrive after later fills/backfills.  Those current
-        economics belong to the mutation CAS, not to the historical funding
-        period.  Reconstruct the predecessor economic book only through its
-        persisted global journal cut, then independently recompute every
-        position-cut field and digest.
-        """
-
-        raw = prior_payload.get("position_cut")
-        required = {
-            "digest",
-            "instrument",
-            "effective_at",
-            "evidence_observed_at",
-            "position",
-            "economic_book_digest",
-            "journal_sequence",
-            "contributing_transaction_ids",
-            "contributing_transaction_digests",
+    @staticmethod
+    def _position_cut_payload(cut: FundingPositionCut) -> dict[str, object]:
+        return {
+            "digest": cut.digest, "instrument": cut.instrument,
+            "effective_at": cut.effective_at, "evidence_observed_at": cut.evidence_observed_at,
+            "position": format(cut.position, "f"), "economic_book_digest": cut.economic_book_digest,
+            "journal_sequence": cut.journal_sequence,
+            "contributing_transaction_ids": list(cut.contributing_transaction_ids),
+            "contributing_transaction_digests": list(cut.contributing_transaction_digests),
         }
-        if not isinstance(raw, Mapping) or set(raw) != required:
-            raise PerpetualFundingConflict(
-                "prior funding position cut has invalid durable shape"
-            )
-
-        instrument = _text(raw["instrument"], "position_cut.instrument")
-        effective_text = _text(
-            raw["effective_at"],
-            "position_cut.effective_at",
-        )
-        observed_text = _text(
-            raw["evidence_observed_at"],
-            "position_cut.evidence_observed_at",
-        )
-        try:
-            historical_effective_at = datetime.fromisoformat(
-                effective_text.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-            historical_observed_at = datetime.fromisoformat(
-                observed_text.replace("Z", "+00:00")
-            ).astimezone(timezone.utc)
-        except (TypeError, ValueError) as error:
-            raise PerpetualFundingConflict(
-                "prior funding position cut has invalid timestamps"
-            ) from error
-        if (
-            not effective_text.endswith("Z")
-            or _utc_text(historical_effective_at) != effective_text
-            or not observed_text.endswith("Z")
-            or _utc_text(historical_observed_at) != observed_text
-        ):
-            raise PerpetualFundingConflict(
-                "prior funding position cut timestamps are not canonical UTC"
-            )
-        if instrument != correction.instrument_id:
-            raise PerpetualFundingConflict(
-                "funding correction position cut instrument mismatch"
-            )
-        if effective_text != _utc_text(correction.effective_at):
-            raise PerpetualFundingConflict(
-                "funding correction position cut effective time mismatch"
-            )
-        if correction.observed_at < historical_observed_at:
-            raise PerpetualFundingConflict(
-                "funding correction predates predecessor position evidence"
-            )
-
-        journal_sequence = raw["journal_sequence"]
-        if type(journal_sequence) is not int or journal_sequence < 0:
-            raise PerpetualFundingConflict(
-                "prior funding position cut has invalid journal_sequence"
-            )
-        if journal_sequence > self.store.current_journal_sequence():
-            raise PerpetualFundingConflict(
-                "prior funding position cut is beyond current durable journal"
-            )
-
-        economic_events = self.store.load_events(
-            "economic_book",
-            self.economic_book.book_id,
-        )
-        historical_events: list[dict[str, object]] = []
-        for event in economic_events:
-            sequence = event.get("journal_sequence")
-            if type(sequence) is not int or sequence <= 0:
-                raise PerpetualFundingConflict(
-                    "economic history lacks canonical journal sequence"
-                )
-            if sequence <= journal_sequence:
-                historical_events.append(event)
-
-        try:
-            historical_book = DurableProviderEconomicBook._replay(
-                self.economic_book,
-                historical_events,
-            )
-        except Exception as error:
-            raise PerpetualFundingConflict(
-                "prior funding position cut economic history is invalid"
-            ) from error
-
-        economic_book_digest = _text(
-            raw["economic_book_digest"],
-            "position_cut.economic_book_digest",
-        )
-        if historical_book.audit_digest() != economic_book_digest:
-            raise PerpetualFundingConflict(
-                "prior funding position cut economic book digest is invalid"
-            )
-
-        position, transaction_ids, transaction_digests = (
-            self._project_position_at_cut(
-                historical_book.transactions,
-                instrument=instrument,
-                effective_at=historical_effective_at,
-                evidence_observed_at=historical_observed_at,
-            )
-        )
-        stored_position = _decimal(
-            raw["position"],
-            "position_cut.position",
-        )
-        if format(stored_position, "f") != raw["position"] or stored_position != position:
-            raise PerpetualFundingConflict(
-                "prior funding position cut position is invalid"
-            )
-
-        raw_ids = raw["contributing_transaction_ids"]
-        raw_digests = raw["contributing_transaction_digests"]
-        if (
-            not isinstance(raw_ids, list)
-            or not all(type(value) is str and value for value in raw_ids)
-            or not isinstance(raw_digests, list)
-            or not all(type(value) is str and value for value in raw_digests)
-            or tuple(raw_ids) != transaction_ids
-            or tuple(raw_digests) != transaction_digests
-        ):
-            raise PerpetualFundingConflict(
-                "prior funding position cut contributors are invalid"
-            )
-
-        material = self._position_cut_material(
-            instrument=instrument,
-            effective_at=effective_text,
-            evidence_observed_at=observed_text,
-            position=position,
-            economic_book_digest=economic_book_digest,
-            journal_sequence=journal_sequence,
-            contributing_transaction_ids=transaction_ids,
-            contributing_transaction_digests=transaction_digests,
-        )
-        digest = _text(raw["digest"], "position_cut.digest")
-        if digest != payload_digest(material):
-            raise PerpetualFundingConflict(
-                "prior funding position cut digest is invalid"
-            )
-
-        return FundingPositionCut(
-            instrument=instrument,
-            effective_at=effective_text,
-            evidence_observed_at=observed_text,
-            position=position,
-            economic_book_digest=economic_book_digest,
-            journal_sequence=journal_sequence,
-            contributing_transaction_ids=transaction_ids,
-            contributing_transaction_digests=transaction_digests,
-            digest=digest,
-        )
 
     def _transaction(
         self,
@@ -849,7 +788,7 @@ class DurablePerpetualFundingAuthority:
             cause_event_id=cause_event_id,
             postings=(
                 posting(f"CASH:{currency}", currency, amount),
-                posting(f"FUNDING_PNL:{currency}", currency, -amount),
+                posting(f"FUNDING_PNL:{currency}", currency, exact_multiply(amount, Decimal("-1"))),
             ),
             economic_effective_at=_utc_text(observation.effective_at),
             economic_order_key=(
@@ -900,6 +839,7 @@ class DurablePerpetualFundingAuthority:
                 raise PerpetualFundingConflict(
                     "external funding identity was reused with changed evidence"
                 )
+            self._position_cut(observation, frozen=self._saved_position_cut(saved))
             active_id = str(saved["active_transaction_id"])
             economic_ids = {
                 item.transaction_id for item in self.economic_book.transactions
@@ -940,7 +880,6 @@ class DurablePerpetualFundingAuthority:
                 "a changed provider fact requires explicit correction lineage"
             )
 
-        current_economic_cut = self.economic_book.read_cut()
         prior_event = None
         prior_payload = None
         old_transaction = None
@@ -986,8 +925,7 @@ class DurablePerpetualFundingAuthority:
                     "funding correction requires fresh provider evidence"
                 )
             by_id = {
-                item.transaction_id: item
-                for item in current_economic_cut.transactions
+                item.transaction_id: item for item in self.economic_book.transactions
             }
             old_id = str(prior_payload.get("active_transaction_id"))
             old_transaction = by_id.get(old_id)
@@ -996,14 +934,10 @@ class DurablePerpetualFundingAuthority:
                     "prior funding economics are missing from canonical economic book"
                 )
 
-        position_cut = (
-            self._position_cut(
-                observation,
-                economic_cut=current_economic_cut,
-            )
-            if prior_payload is None
-            else self._historical_position_cut(prior_payload, observation)
+        position_cut = self._position_cut(
+            observation, frozen=None if prior_payload is None else self._saved_position_cut(prior_payload)
         )
+        write_book_digest = DurableProviderEconomicBook.audit_digest(self.economic_book)
         if position_cut.position != observation.signed_contracts:
             raise PerpetualFundingConflict(
                 "provider funding position does not match canonical position at funding cut"
@@ -1054,11 +988,12 @@ class DurablePerpetualFundingAuthority:
             )
             batch = (reversal, replacement)
 
-        economic_plan = self.economic_book.prepare_batch_mutation(
+        economic_plan = DurableProviderEconomicBook.prepare_batch_mutation(
+            self.economic_book,
             batch,
             committed_at=_utc_text(observation.observed_at),
-            expected_previous_book_digest=current_economic_cut.book_digest,
         )
+        self._require_bound_financial_authority()
         if economic_plan.already_committed:
             raise PerpetualFundingConflict(
                 "funding economics exist without the canonical funding authority event"
@@ -1069,11 +1004,11 @@ class DurablePerpetualFundingAuthority:
         if (
             not isinstance(economic_payload, Mapping)
             or economic_payload.get("previous_book_digest")
-            != current_economic_cut.book_digest
+            != write_book_digest
         ):
             self.economic_book.refresh()
             raise PerpetualFundingConflict(
-                "economic book changed after the current funding mutation cut"
+                "economic book changed after the canonical funding position cut"
             )
 
         next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
@@ -1096,21 +1031,7 @@ class DurablePerpetualFundingAuthority:
             "provider_evidence_digest": provider_evidence_digest,
             "observation_digest": observation_digest,
             "instrument_contract_digest": contract_digest,
-            "position_cut": {
-                "digest": position_cut.digest,
-                "instrument": position_cut.instrument,
-                "effective_at": position_cut.effective_at,
-                "evidence_observed_at": position_cut.evidence_observed_at,
-                "position": format(position_cut.position, "f"),
-                "economic_book_digest": position_cut.economic_book_digest,
-                "journal_sequence": position_cut.journal_sequence,
-                "contributing_transaction_ids": list(
-                    position_cut.contributing_transaction_ids
-                ),
-                "contributing_transaction_digests": list(
-                    position_cut.contributing_transaction_digests
-                ),
-            },
+            "position_cut": self._position_cut_payload(position_cut),
             "active_transaction_id": replacement.transaction_id,
             "reversal_transaction_id": (
                 None if reversal is None else reversal.transaction_id
@@ -1157,9 +1078,12 @@ class DurablePerpetualFundingAuthority:
                 ),
             )
         )
+        identity = self._require_bound_financial_authority()
         try:
-            _, inserted, _ = self.store.commit_command(
-                command_id=command_id,
+            with journal_store_authority_scope(self.store, identity):
+                _, inserted, _ = JournalStore.commit_command(
+                    self.store,
+                    command_id=command_id,
                 actor=self._ACTOR,
                 environment=observation.environment,
                 idempotency_key=(
@@ -1179,11 +1103,13 @@ class DurablePerpetualFundingAuthority:
                     (envelope, None),
                     (economic_plan.envelope, "autotrade.economic.events"),
                 ],
-            )
+                )
         except Exception:
-            self.economic_book.refresh()
+            DurableProviderEconomicBook.refresh(self.economic_book)
             raise
-        self.economic_book.refresh()
+        self._require_bound_financial_authority()
+        DurableProviderEconomicBook.refresh(self.economic_book)
+        self._require_bound_financial_authority()
         return FundingApplyResult(
             funding_event_id=event_id,
             inserted=inserted,

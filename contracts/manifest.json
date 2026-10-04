@@ -24,5 +24,21 @@
     "csharp": "src/AutoTrade.Contracts/ContractBaseline.cs",
     "python": "contracts/bindings/python/common_scalars.py",
     "typescript": "contracts/bindings/typescript/commonScalars.d.ts"
-  }
+  },
+  "semantic_validators": [
+    {
+      "id": "dataset-manifest-content-authority-v1",
+      "schema": "data.schema.json",
+      "definition": "DatasetManifest",
+      "corpus": "contracts/fixtures/dataset-manifest.semantic.corpus.json",
+      "bindings": {
+        "python": "contracts/bindings/python/dataset_manifest.py",
+        "csharp": "src/AutoTrade.Contracts/DatasetManifestContracts.cs",
+        "typescript": "contracts/bindings/typescript/datasetManifest.js"
+      },
+      "installed_bindings": {
+        "python": "autotrade_numeric/dataset_manifest.py"
+      }
+    }
+  ]
 }

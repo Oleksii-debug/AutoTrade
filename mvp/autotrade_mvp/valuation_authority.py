@@ -26,11 +26,11 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from .provider_domain import ProviderDomainError, provider_financial_scope
+from .provider_domain import ProviderDomainError, ProviderFinancialScope, normalize_provider_environment
 from .risk_policy_authority import (
-    DurableRiskPolicyRegistry,
     ResolvedRiskPolicy,
     RiskPolicyAuthorityError,
+    journal_store_identity_digest,
     require_registry_issued_resolved_policy,
 )
 from .store_identity import (
@@ -75,13 +75,9 @@ def _digest(value: object, name: str) -> str:
 
 
 def _instant(value: datetime, name: str) -> datetime:
-    # An exact datetime can still carry a caller-defined tzinfo subclass.
-    # Reject nested polymorphism before any utcoffset/dst/fromutc callback.
-    if type(value) is not datetime or type(value.tzinfo) is not timezone:
-        raise ValuationError(
-            f"{name} must be an exact datetime with datetime.timezone"
-        )
-    return datetime.astimezone(value, timezone.utc)
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ValuationError(f"{name} must be an exact timezone-aware datetime")
+    return value.astimezone(timezone.utc)
 
 
 def _instant_text(value: datetime) -> str:
@@ -163,22 +159,24 @@ class ValuationObservation:
         provider = _text(self.provider_id, "provider_id").upper()
         environment = _text(self.environment, "environment").upper()
         try:
-            scope = provider_financial_scope(
+            scope = ProviderFinancialScope(
                 provider_id=provider,
-                environment=environment,
-                provider_environment=self.provider_environment,
-                route_policy_id=self.route_policy_id,
+                runtime_environment=environment,
+                provider_environment=normalize_provider_environment(
+                    provider_id=provider, environment=environment,
+                    provider_environment=self.provider_environment),
+                entity_policy_id=self.route_policy_id,
             )
         except ProviderDomainError as error:
             raise ValuationError(str(error)) from error
         object.__setattr__(self, "provider_id", scope.provider_id)
-        object.__setattr__(self, "environment", scope.environment)
+        object.__setattr__(self, "environment", scope.runtime_environment)
         object.__setattr__(
             self,
             "provider_environment",
             scope.provider_environment,
         )
-        object.__setattr__(self, "route_policy_id", scope.route_policy_id)
+        object.__setattr__(self, "route_policy_id", _text(self.route_policy_id, "route_policy_id"))
 
         for name in (
             "account_id",
@@ -540,17 +538,15 @@ def evaluate_valuation_freshness(
     observation: ValuationObservation,
     policy: ResolvedRiskPolicy,
     *,
-    policy_store: JournalStore,
     as_of: datetime,
     journal_sequence_cut: int,
 ) -> ValuationFreshnessEvidence:
-    """Prove freshness under policy authority from the exact durable journal."""
+    """Prove one selected observation is fresh under one registry-issued policy."""
 
     observation = _canonical_observation(observation)
     try:
-        registry = DurableRiskPolicyRegistry(policy_store)
-        policy = registry.require_resolved_policy(policy)
-    except (TypeError, RiskPolicyAuthorityError) as error:
+        policy = require_registry_issued_resolved_policy(policy)
+    except RiskPolicyAuthorityError as error:
         raise ValuationError(str(error)) from error
     if type(journal_sequence_cut) is not int or journal_sequence_cut < 0:
         raise ValuationError("journal_sequence_cut must be a non-negative integer")
@@ -774,31 +770,111 @@ def _store_identity_payload(identity: JournalStoreIdentity) -> dict[str, object]
         identity,
         subject="valuation JournalStore identity",
     )
+    if exact.identity_source == "windows_by_handle":
+        return {
+            "schema_version": "1.0.0",
+            "identity_source": exact.identity_source,
+            "windows_volume_serial": exact.windows_volume_serial,
+            "windows_file_index_high": exact.windows_file_index_high,
+            "windows_file_index_low": exact.windows_file_index_low,
+        }
     return {
         "schema_version": "1.0.0",
+        "identity_source": exact.identity_source,
         "canonical_path": exact.canonical_path,
         "filesystem_device": exact.filesystem_device,
         "filesystem_inode": exact.filesystem_inode,
-        "identity_source": exact.identity_source,
-        "windows_volume_serial": exact.windows_volume_serial,
-        "windows_file_index_high": exact.windows_file_index_high,
-        "windows_file_index_low": exact.windows_file_index_low,
     }
 
 
 def _store_identity_digest(identity: JournalStoreIdentity) -> str:
-    return payload_digest(_store_identity_payload(identity))
+    return journal_store_identity_digest(identity)
 
 
-# The visible fields on DurableValuationBook are diagnostics, not composition
-# authority. Keep the originally selected exact JournalStore generation in
-# module-owned weak bindings so attribute mutation/re-init cannot retarget
-# financial observation history.
-_VALUATION_BOOK_BINDINGS: dict[
-    int,
-    tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
-] = {}
-_VALUATION_BOOK_BINDINGS_LOCK = threading.RLock()
+@dataclass(frozen=True, slots=True)
+class _ValuationBookBinding:
+    store: JournalStore
+    store_identity: JournalStoreIdentity
+    store_identity_digest: str
+
+
+def _build_valuation_book_binding_methods():
+    # This table and its lock are closure-owned. They are never exported as
+    # module attributes, so re-creating historical module-global names cannot
+    # retarget the store generation selected for an existing financial book.
+    bindings: weakref.WeakKeyDictionary[object, _ValuationBookBinding] = (
+        weakref.WeakKeyDictionary()
+    )
+    lock = threading.RLock()
+
+    def initialize(value: object, store: JournalStore) -> None:
+        if type(value) is not DurableValuationBook:
+            raise TypeError("book must be exact DurableValuationBook")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
+
+        with lock:
+            if value in bindings:
+                raise ValuationConflict(
+                    "valuation journal composition is already initialized"
+                )
+            selected_identity = require_exact_journal_store_authority(
+                store,
+                subject="selected valuation JournalStore",
+            )
+            exact_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="original valuation JournalStore identity",
+            )
+            identity_digest = _store_identity_digest(exact_identity)
+
+            # Visible slots are diagnostics only. The closure-owned binding below
+            # is the original-selection authority and is established only after
+            # all inputs have been validated.
+            object.__setattr__(value, "store", store)
+            object.__setattr__(value, "store_identity", exact_identity)
+            object.__setattr__(value, "store_identity_digest", identity_digest)
+            bindings[value] = _ValuationBookBinding(
+                store=store,
+                store_identity=exact_identity,
+                store_identity_digest=identity_digest,
+            )
+
+    def require(value: object) -> tuple[JournalStore, JournalStoreIdentity]:
+        if type(value) is not DurableValuationBook:
+            raise TypeError("book must be exact DurableValuationBook")
+        with lock:
+            binding = bindings.get(value)
+        if binding is None:
+            raise ValuationConflict(
+                "valuation book lacks original journal composition"
+            )
+
+        if object.__getattribute__(value, "store") is not binding.store:
+            raise ValuationConflict("valuation journal composition changed")
+        visible_identity = require_exact_journal_store_identity(
+            object.__getattribute__(value, "store_identity"),
+            subject="visible valuation JournalStore identity",
+        )
+        if (
+            visible_identity != binding.store_identity
+            or object.__getattribute__(value, "store_identity_digest")
+            != binding.store_identity_digest
+        ):
+            raise ValuationConflict("valuation journal composition changed")
+
+        try:
+            current = require_exact_journal_store_authority(
+                binding.store,
+                subject="current valuation JournalStore",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ValuationConflict("valuation journal authority changed") from error
+        if current != binding.store_identity:
+            raise ValuationConflict("valuation journal authority changed")
+        return binding.store, binding.store_identity
+
+    return initialize, require
 
 
 class DurableValuationBook:
@@ -814,86 +890,7 @@ class DurableValuationBook:
     def __init_subclass__(cls, **_kwargs) -> None:
         raise TypeError("DurableValuationBook cannot be subclassed")
 
-    def __init__(self, store: JournalStore) -> None:
-        if type(self) is not DurableValuationBook:
-            raise TypeError("book must be exact DurableValuationBook")
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact JournalStore")
-
-        book_id = id(self)
-        with _VALUATION_BOOK_BINDINGS_LOCK:
-            existing = _VALUATION_BOOK_BINDINGS.get(book_id)
-            if existing is not None:
-                existing_book = existing[0]()
-                if existing_book is self:
-                    raise ValuationConflict(
-                        "valuation journal composition is already initialized"
-                    )
-                if existing_book is not None:
-                    raise ValuationConflict(
-                        "valuation journal binding identity collision"
-                    )
-                _VALUATION_BOOK_BINDINGS.pop(book_id, None)
-
-            selected_identity = require_exact_journal_store_authority(
-                store,
-                subject="selected valuation JournalStore",
-            )
-            visible_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="visible valuation JournalStore identity",
-            )
-            module_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="module-owned valuation JournalStore identity",
-            )
-            self.store = store
-            self.store_identity = visible_identity
-            self.store_identity_digest = _store_identity_digest(visible_identity)
-            _VALUATION_BOOK_BINDINGS[book_id] = (
-                weakref.ref(self),
-                weakref.ref(store),
-                module_identity,
-            )
-
-    def _journal_store_authority(
-        self,
-    ) -> tuple[JournalStore, JournalStoreIdentity]:
-        if type(self) is not DurableValuationBook:
-            raise TypeError("book must be exact DurableValuationBook")
-        with _VALUATION_BOOK_BINDINGS_LOCK:
-            binding = _VALUATION_BOOK_BINDINGS.get(id(self))
-        if binding is None or binding[0]() is not self:
-            raise ValuationConflict(
-                "valuation book lacks original journal composition"
-            )
-        selected_store = binding[1]()
-        if selected_store is None:
-            raise ValuationConflict(
-                "valuation book original JournalStore is unavailable"
-            )
-        expected = require_exact_journal_store_identity(
-            binding[2],
-            subject="module-owned valuation JournalStore identity",
-        )
-        if self.store is not selected_store:
-            raise ValuationConflict("valuation journal composition changed")
-        visible_identity = require_exact_journal_store_identity(
-            self.store_identity,
-            subject="visible valuation JournalStore identity",
-        )
-        if (
-            visible_identity != expected
-            or self.store_identity_digest != _store_identity_digest(expected)
-        ):
-            raise ValuationConflict("valuation journal composition changed")
-        current = require_exact_journal_store_authority(
-            selected_store,
-            subject="current valuation JournalStore",
-        )
-        if current != expected:
-            raise ValuationConflict("valuation journal authority changed")
-        return selected_store, expected
+    __init__, _journal_store_authority = _build_valuation_book_binding_methods()
 
     def _stable_scope_events(
         self,
@@ -1152,11 +1149,13 @@ class DurableValuationBook:
 
         normalized_kind = _text(kind, "kind").upper()
         try:
-            scope = provider_financial_scope(
+            scope = ProviderFinancialScope(
                 provider_id=provider_id,
-                environment=environment,
-                provider_environment=provider_environment,
-                route_policy_id=route_policy_id,
+                runtime_environment=environment,
+                provider_environment=normalize_provider_environment(
+                    provider_id=provider_id, environment=environment,
+                    provider_environment=provider_environment),
+                entity_policy_id=route_policy_id,
             )
         except ProviderDomainError as error:
             raise ValuationError(str(error)) from error
@@ -1165,9 +1164,9 @@ class DurableValuationBook:
             "kind": normalized_kind,
             "provider_id": scope.provider_id,
             "account_id": _text(account_id, "account_id"),
-            "environment": scope.environment,
+            "environment": scope.runtime_environment,
             "provider_environment": scope.provider_environment,
-            "route_policy_id": scope.route_policy_id,
+            "route_policy_id": _text(route_policy_id, "route_policy_id"),
         }
         if normalized_kind == "MARK":
             scope_payload["instrument_version"] = _text(
@@ -1236,11 +1235,9 @@ class DurableValuationBook:
     ) -> tuple[ValuationObservation, ValuationFreshnessEvidence]:
         """Resolve one production observation and prove freshness at the same cut."""
 
-        _store, expected_identity = self._journal_store_authority()
         try:
-            registry = DurableRiskPolicyRegistry(_store)
-            policy = registry.require_resolved_policy(policy)
-        except (TypeError, RiskPolicyAuthorityError) as error:
+            policy = require_registry_issued_resolved_policy(policy)
+        except RiskPolicyAuthorityError as error:
             raise ValuationError(str(error)) from error
         if (
             type(journal_sequence_cut) is not int
@@ -1253,6 +1250,7 @@ class DurableValuationBook:
             raise ValuationError(
                 "valuation and risk policy must resolve at the same journal sequence cut"
             )
+        _store, expected_identity = self._journal_store_authority()
         if (
             policy.journal_store_identity_digest
             != _store_identity_digest(expected_identity)
@@ -1277,9 +1275,7 @@ class DurableValuationBook:
         freshness = evaluate_valuation_freshness(
             selected,
             policy,
-            policy_store=_store,
             as_of=as_of,
             journal_sequence_cut=journal_sequence_cut,
         )
         return selected, freshness
-

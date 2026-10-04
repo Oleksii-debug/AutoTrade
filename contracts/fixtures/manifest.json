@@ -47,6 +47,15 @@
         "csharp",
         "typescript"
       ]
+    },
+    {
+      "path": "dataset-manifest.semantic.corpus.json",
+      "scope": "dataset-manifest-content-authority-v1",
+      "languages": [
+        "python",
+        "csharp",
+        "typescript"
+      ]
     }
   ]
 }

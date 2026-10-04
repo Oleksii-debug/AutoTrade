@@ -27,9 +27,7 @@ def render_operation_list(operations: Mapping[str, object]) -> str:
     if not operations:
         return "<p>No operations are currently recorded.</p>"
     parts = ["<ul>"]
-    for operation_id, phase in sorted(
-        operations.items(), key=lambda item: str(item[0])
-    ):
+    for operation_id, phase in sorted(operations.items()):
         parts.append(
             "<li>"
             f"<span class=\"operation-id\">{escape(str(operation_id))}</span>: "

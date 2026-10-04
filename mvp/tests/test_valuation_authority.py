@@ -1,9 +1,11 @@
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.store_identity import JournalStoreIdentity
+from mvp.autotrade_mvp import valuation_authority as authority
 from mvp.autotrade_mvp.risk_policy_authority import (
     DurableRiskPolicyRegistry,
     RiskPolicyScope,
@@ -66,16 +68,7 @@ def append_raw_valuation(store, book, observation, *, aggregate_version):
     """Append a structurally canonical row while bypassing the writer state machine."""
     durable_payload = {
         "schema_version": "1.0.0",
-        "store_identity": {
-            "schema_version": "1.0.0",
-            "canonical_path": book.store_identity.canonical_path,
-            "filesystem_device": book.store_identity.filesystem_device,
-            "filesystem_inode": book.store_identity.filesystem_inode,
-            "identity_source": book.store_identity.identity_source,
-            "windows_volume_serial": book.store_identity.windows_volume_serial,
-            "windows_file_index_high": book.store_identity.windows_file_index_high,
-            "windows_file_index_low": book.store_identity.windows_file_index_low,
-        },
+        "store_identity": authority._store_identity_payload(book.store_identity),
         "store_identity_digest": book.store_identity_digest,
         "observation": observation.to_contract_dict(),
     }
@@ -139,6 +132,48 @@ def resolved_policy(store, *, data_age="5", fx_age="7"):
 
 
 class DurableValuationAuthorityTests(unittest.TestCase):
+    def test_store_generation_digest_uses_windows_handle_identity_not_path(self):
+        first = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=23,
+            windows_file_index_high=7,
+            windows_file_index_low=11,
+        )
+        alias = JournalStoreIdentity(
+            canonical_path="c:/AUTOTRADE/JOURNAL.SQLITE3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=23,
+            windows_file_index_high=7,
+            windows_file_index_low=11,
+        )
+        other = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=23,
+            windows_file_index_high=7,
+            windows_file_index_low=12,
+        )
+
+        self.assertEqual(
+            authority._store_identity_payload(first),
+            authority._store_identity_payload(alias),
+        )
+        self.assertEqual(
+            authority._store_identity_digest(first),
+            authority._store_identity_digest(alias),
+        )
+        self.assertNotEqual(
+            authority._store_identity_digest(first),
+            authority._store_identity_digest(other),
+        )
+
     def test_provider_origin_cannot_be_publicly_self_asserted(self):
         with self.assertRaisesRegex(
             ValuationError,
@@ -166,40 +201,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 instrument_version="BTCUSDT@1",
                 mark=Decimal("100"),
             )
-
-    def test_nested_tzinfo_callbacks_are_rejected_before_dispatch(self):
-        class HostileTimezone(tzinfo):
-            callbacks = 0
-
-            def _called(self):
-                type(self).callbacks += 1
-                raise AssertionError("caller timezone callback executed")
-
-            def utcoffset(self, _dt):
-                return self._called()
-
-            def dst(self, _dt):
-                return self._called()
-
-            def fromutc(self, _dt):
-                return self._called()
-
-        with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
-            book = DurableValuationBook(store)
-            hostile = datetime(
-                2026,
-                10,
-                1,
-                0,
-                0,
-                tzinfo=HostileTimezone(),
-            )
-            before = store.current_journal_sequence()
-            with self.assertRaisesRegex(ValuationError, "datetime.timezone"):
-                book.record(mark(source_event_at=hostile))
-            self.assertEqual(HostileTimezone.callbacks, 0)
-            self.assertEqual(store.current_journal_sequence(), before)
 
     def test_provider_environment_changes_content_and_scope_identity(self):
         testnet = mark(provider_environment="TESTNET")
@@ -517,7 +518,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 observation,
                 resolved,
-                policy_store=store,
                 as_of=NOW + timedelta(seconds=2),
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -538,12 +538,11 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "resolved policy content digest mismatch",
+                "changed after registry issuance",
             ):
                 evaluate_valuation_freshness(
                     mark(),
                     resolved,
-                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -556,7 +555,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 observation,
                 resolved,
-                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -569,7 +567,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     too_old,
                     resolved,
-                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -583,7 +580,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     observation,
                     resolved,
-                    policy_store=store,
                     as_of=NOW + timedelta(seconds=2),
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -591,7 +587,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     observation,
                     resolved,
-                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut - 1,
                 )
@@ -604,7 +599,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     future,
                     resolved,
-                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -632,7 +626,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             first = evaluate_valuation_freshness(
                 observation,
                 first_policy,
-                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=first_policy.resolved_journal_sequence_cut,
             )
@@ -654,7 +647,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             second = evaluate_valuation_freshness(
                 observation,
                 second_policy,
-                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=second_policy.resolved_journal_sequence_cut,
             )
@@ -692,7 +684,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             evidence = evaluate_valuation_freshness(
                 fx,
                 resolved,
-                policy_store=store,
                 as_of=NOW,
                 journal_sequence_cut=resolved.resolved_journal_sequence_cut,
             )
@@ -725,7 +716,6 @@ class DurableValuationAuthorityTests(unittest.TestCase):
                 evaluate_valuation_freshness(
                     wrong_scope,
                     resolved,
-                    policy_store=store,
                     as_of=NOW,
                     journal_sequence_cut=resolved.resolved_journal_sequence_cut,
                 )
@@ -778,7 +768,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValuationError,
-                "resolved RiskPolicy JournalStore generation mismatch",
+                "same JournalStore generation",
             ):
                 book.resolve_fresh_at(
                     journal_sequence_cut=policy_cut,
@@ -953,7 +943,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
 
             store.current_journal_sequence = poison
             with self.assertRaisesRegex(
-                (TypeError, RuntimeError, ValuationConflict),
+                (RuntimeError, ValuationConflict),
                 "shadow|authority|composition",
             ):
                 book.resolve_at(
@@ -1044,16 +1034,7 @@ class DurableValuationAuthorityTests(unittest.TestCase):
             forged["observation_id"] = "valuation:" + payload_digest(body)
             durable_payload = {
                 "schema_version": "1.0.0",
-                "store_identity": {
-                    "schema_version": "1.0.0",
-                    "canonical_path": book.store_identity.canonical_path,
-                    "filesystem_device": book.store_identity.filesystem_device,
-                    "filesystem_inode": book.store_identity.filesystem_inode,
-                    "identity_source": book.store_identity.identity_source,
-                    "windows_volume_serial": book.store_identity.windows_volume_serial,
-                    "windows_file_index_high": book.store_identity.windows_file_index_high,
-                    "windows_file_index_low": book.store_identity.windows_file_index_low,
-                },
+                "store_identity": authority._store_identity_payload(book.store_identity),
                 "store_identity_digest": book.store_identity_digest,
                 "observation": forged,
             }

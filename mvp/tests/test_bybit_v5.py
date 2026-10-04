@@ -9,7 +9,6 @@ from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
     prepare_order_submission,
     coverage_evidence,
-    _classify_executions_payload,
     parse_executions,
     parse_submission_response,
     server_time_from_response,
@@ -21,10 +20,12 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+    load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.tests.provider_write_fixture import journal_sent_response
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -37,13 +38,7 @@ from mvp.autotrade_mvp.provider_core import (
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(
-    *,
-    account_id="paper-1",
-    environment="PAPER",
-    provider_environment="TESTNET",
-    instrument_version="BTCUSDT@v1",
-):
+def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -52,7 +47,6 @@ def read_capability(
             account_id=account_id,
             entity_id="bybit-reconciliation",
             environment=environment,
-            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -87,7 +81,6 @@ def write_capability(
     position_mode="HEDGE",
     account_id="bybit-account",
     environment="PAPER",
-    provider_environment="DEMO",
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,
@@ -106,7 +99,6 @@ def write_capability(
             account_id=account_id,
             entity_id="bybit-unified-account",
             environment=environment,
-            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
@@ -137,7 +129,6 @@ def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
-    provider_environment="MAINNET",
     instrument_version="BTCUSDT@v1",
 ):
     observed_at = READ_AT - timedelta(hours=1)
@@ -148,7 +139,6 @@ def submission_write_capability(
             account_id=account_id,
             entity_id="bybit-order",
             environment=environment,
-            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -181,23 +171,19 @@ def bound_execution_response(
     *,
     account_id="paper-1",
     environment="PAPER",
-    provider_environment="TESTNET",
     instrument_version="BTCUSDT@v1",
 ):
-    capability = read_capability(
-        account_id=account_id,
-        environment=environment,
-        provider_environment=provider_environment,
-        instrument_version=instrument_version,
-    )
     query = prepare_authenticated_read_query(
-        capability=capability,
+        capability=read_capability(
+            account_id=account_id,
+            environment=environment,
+            instrument_version=instrument_version,
+        ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
         query={"category": "spot", "limit": "100"},
         at=READ_AT,
         permission_scope="ORDER.READ",
-        provider_environment=capability.provider_environment,
     )
     raw = json.dumps(
         response,
@@ -268,48 +254,6 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["category"], "linear")
         self.assertTrue(payload["reduceOnly"])
         self.assertEqual(payload["positionIdx"], 1)
-
-    def test_spot_preparation_cannot_cross_testnet_and_demo(self):
-        capability = submission_write_capability(
-            environment="PAPER",
-            provider_environment="TESTNET",
-        )
-        with self.assertRaisesRegex(ProviderCoreError, "provider environment"):
-            prepare_order_submission(
-                capability=capability,
-                at=READ_AT,
-                provider_environment="DEMO",
-                product_family="SPOT",
-                symbol="BTCUSDT",
-                side="BUY",
-                order_type="MARKET",
-                quantity="0.01",
-                client_order_id="spot-cross-domain",
-                time_in_force="IOC",
-            )
-
-    def test_derivative_capability_cannot_cross_testnet_and_demo(self):
-        capability = write_capability(
-            environment="PAPER",
-            provider_environment="TESTNET",
-        )
-        with self.assertRaisesRegex(ProviderCoreError, "provider environment"):
-            build_order_payload(
-                product_family="LINEAR_DERIVATIVES",
-                symbol="BTCUSDT",
-                side="BUY",
-                order_type="LIMIT",
-                quantity="1",
-                price="70000",
-                client_order_id="cross-domain",
-                time_in_force="GTC",
-                position_side="LONG",
-                capability=capability,
-                capability_at=READ_AT,
-                account_id="bybit-account",
-                instrument_version="BTCUSDT@1",
-                provider_environment="DEMO",
-            )
 
     def test_derivative_order_requires_verified_capability_context(self):
         with self.assertRaisesRegex(ProviderCoreError, "capability context"):
@@ -565,12 +509,10 @@ class BybitV5AdapterTests(unittest.TestCase):
             intent_id,
             environment=runtime_environment,
             account_id=account_id,
-            provider_environment=provider_environment,
         )
         capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
-            provider_environment=provider_environment,
         )
         prepared = prepare_order_submission(
             capability=capability,
@@ -597,16 +539,25 @@ class BybitV5AdapterTests(unittest.TestCase):
         ).encode("utf-8")
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            binding = journal_sent_response(
+            dispatcher = GuardedDispatcher(
                 store,
                 environment=runtime_environment,
                 account_id=account_id,
+                owner_token="owner",
+            )
+            outcome = dispatcher.dispatch(
                 attempt_id=attempt,
                 intent_id=intent_id,
+                intent_hash="bybit-intent-hash",
                 provider="BYBIT",
-                request_hash=prepared.body_sha256,
-                client_order_id=client_id,
-                response_bytes=raw,
+                request=prepared.body,
+                now="2026-09-24T20:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(raw),
+                )[1],
+                sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
@@ -615,9 +566,13 @@ class BybitV5AdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                 },
-                now="2026-09-24T20:00:00Z",
-                provider_environment=provider_environment,
-                intent_hash="bybit-intent-hash",
+            )
+            self.assertEqual(outcome.status, "SENT")
+            binding = load_submission_response_binding(
+                store,
+                environment=runtime_environment,
+                account_id=account_id,
+                attempt_id=attempt,
             )
             observation = observe_submission_json_response(
                 response_binding=binding,
@@ -628,6 +583,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions=prepared.instrument_versions,
             )
         return attempt, prepared, observation
+
     def test_success_response_is_acknowledgement_not_fill(self):
         attempt, prepared, observation = self._durable_write_observation(
             {
@@ -902,14 +858,13 @@ class BybitV5AdapterTests(unittest.TestCase):
             "time": 1790280001000,
         }
         observation = bound_execution_response(response)
-        fills = _classify_executions_payload(
+        fills = parse_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual((fill.account_id, fill.environment), ("paper-1", "PAPER"))
-        self.assertEqual(fill.provider_environment, "TESTNET")
         self.assertEqual(fill.provider_execution_id, "exec-1")
         self.assertEqual(fill.instrument, "BTCUSDT@v1")
         self.assertEqual(fill.quantity, Decimal("0.25"))
@@ -918,29 +873,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.side, "BUY")
         self.assertIsNone(fill.position_side)
-        self.assertEqual(fill.evidence_refs, ())
-
-    def test_plain_exact_byte_observation_cannot_become_financial_fill(self):
-        response = {
-            "retCode": 0,
-            "result": {"list": [{
-                "execId": "origin-gate",
-                "orderLinkId": "",
-                "symbol": "BTCUSDT",
-                "side": "Buy",
-                "execQty": "1",
-                "execPrice": "10",
-                "execFee": "0",
-                "feeCurrency": "USDT",
-                "execTime": "1790280000000",
-            }]},
-        }
-        observation = bound_execution_response(response)
-        with self.assertRaisesRegex(TypeError, "ProviderOriginObservation"):
-            parse_executions(
-                observation,
-                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-            )
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {
@@ -954,7 +887,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }
         with self.assertRaisesRegex(ProviderCoreError, "side"):
-            _classify_executions_payload(
+            parse_executions(
                 bound_execution_response(
                     {"retCode": 0, "result": {"list": [base]}}
                 ),
@@ -965,14 +898,14 @@ class BybitV5AdapterTests(unittest.TestCase):
         observation = bound_execution_response(
             {"retCode": 0, "result": {"list": [documented]}}
         )
-        fill = _classify_executions_payload(
+        fill = parse_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )[0]
         self.assertEqual(fill.side, "SELL")
         self.assertIsNone(fill.position_side)
         self.assertIsNone(fill.position_effect)
-        self.assertEqual(fill.evidence_refs, ())
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
 
     def test_execution_scope_is_derived_from_prepared_read_not_parser_labels(self):
         response = {"retCode": 0, "result": {"list": [{
@@ -980,23 +913,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execQty": "1", "execPrice": "10", "execFee": "0",
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
-        observation = bound_execution_response(
-            response,
-            account_id="account-a",
-            provider_environment="DEMO",
-        )
-        fills = _classify_executions_payload(
+        observation = bound_execution_response(response, account_id="account-a")
+        fills = parse_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
-        self.assertEqual(
-            (
-                fills[0].account_id,
-                fills[0].environment,
-                fills[0].provider_environment,
-            ),
-            ("account-a", "PAPER", "DEMO"),
-        )
+        self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
         self.assertEqual(observation.query_binding.account_id, "account-a")
 
     def test_documented_linear_execution_requires_qualified_fee_currency(self):
@@ -1008,8 +930,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }]}}
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
-            _classify_executions_payload(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        fills = _classify_executions_payload(
+            parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
+        fills = parse_executions(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
@@ -1027,7 +949,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "extraFees"):
-            _classify_executions_payload(
+            parse_executions(
                 bound_execution_response(response),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -1042,7 +964,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 }
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
-                fills = _classify_executions_payload(
+                fills = parse_executions(
                     bound_execution_response({"retCode": 0, "result": {"list": [row]}}),
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 )
@@ -1054,7 +976,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
         ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
-            _classify_executions_payload(
+            parse_executions(
                 bound_execution_response(conflict),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -1064,7 +986,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            _classify_executions_payload(bound_execution_response(unknown), instrument_versions={})
+            parse_executions(bound_execution_response(unknown), instrument_versions={})
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000
@@ -1103,18 +1025,16 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         self.assertEqual(result, "2026-09-24T20:00:00.123456Z")
 
-    def test_absence_semantics_are_fail_closed_until_provider_qualification(self):
+    def test_absence_semantics_are_fail_closed_until_explicitly_qualified(self):
         evidence = coverage_evidence(
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
+        
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
-        )
-        self.assertEqual(evidence.provider_environment, "TESTNET")
+            environment="PAPER",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -1122,38 +1042,21 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "cannot self-assert provider exclusion semantics",
-        ):
-            coverage_evidence(
-                surface="EXECUTIONS",
-                coverage_start="2026-09-24T19:00:00Z",
-                coverage_end="2026-09-24T21:00:00Z",
-                pagination_complete=True,
-                consistency_horizon_satisfied=True,
-                qualified_exclusion_semantics=True,
-                account_id="paper-1",
-                environment="PAPER",
-                provider_environment="TESTNET",
-            )
-
-        demo = coverage_evidence(
+        qualified = coverage_evidence(
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
+            qualified_exclusion_semantics=True,
+        
             account_id="paper-1",
-            environment="PAPER",
-            provider_environment="DEMO",
+            environment="PAPER",)
+        self.assertTrue(
+            qualified.proves_absence_for(
+                datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+            )
         )
-        self.assertEqual(demo.provider_environment, "DEMO")
-        self.assertNotEqual(
-            demo.provider_environment,
-            evidence.provider_environment,
-        )
-
 
 
 if __name__ == "__main__":

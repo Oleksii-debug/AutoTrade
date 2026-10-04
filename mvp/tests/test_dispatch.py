@@ -3,15 +3,12 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
-from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
     SubmissionResponseBinding,
-    _issue_financial_authority_check,
     load_submission_response_binding,
-    provider_domain_submission_attempt_key,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -167,16 +164,10 @@ class DispatchTests(unittest.TestCase):
                 return {"ok": True}
 
             paper = GuardedDispatcher(
-                store,
-                environment="SIMULATION",
-                account_id="acct",
-                owner_token="simulation-owner",
+                store, environment="PAPER", account_id="acct", owner_token="paper-owner"
             )
             live = GuardedDispatcher(
-                store,
-                environment="REPLAY",
-                account_id="acct",
-                owner_token="replay-owner",
+                store, environment="LIVE", account_id="acct", owner_token="live-owner"
             )
             for dispatcher in (paper, live):
                 outcome = dispatcher.dispatch(
@@ -202,9 +193,9 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(len(paper_events), 3)
             self.assertEqual(len(live_events), 3)
-            self.assertEqual(paper_events[0]["payload"]["environment"], "SIMULATION")
+            self.assertEqual(paper_events[0]["payload"]["environment"], "PAPER")
             self.assertEqual(paper_events[0]["payload"]["account_id"], "acct")
-            self.assertEqual(live_events[0]["payload"]["environment"], "REPLAY")
+            self.assertEqual(live_events[0]["payload"]["environment"], "LIVE")
             self.assertEqual(live_events[0]["payload"]["account_id"], "acct")
             self.assertNotEqual(
                 paper_events[0]["aggregate_id"],
@@ -887,8 +878,6 @@ class DispatchTests(unittest.TestCase):
                 submission_scope_hash="sha256:" + "2" * 64,
                 response_bytes=b'{"ok":true}',
                 response_sha256="sha256:" + "3" * 64,
-                terminal_state="SENT",
-                response_encoding="utf-8-json",
             )
 
     def test_unserializable_provider_response_after_send_becomes_unknown(self):
@@ -1093,28 +1082,12 @@ class DispatchTests(unittest.TestCase):
         for environment in ("PAPER", "LIVE"):
             with self.subTest(environment=environment), TemporaryDirectory() as directory:
                 store = self.store(directory)
-                recovery = RecoveryController(
-                    owner_store=store,
-                    owner_scope=f"{environment}:acct",
-                )
-                recovery.start("owner")
-                dispatcher = recovery.build_guarded_dispatcher(
+                dispatcher = GuardedDispatcher(
                     store,
                     environment=environment,
                     account_id="acct",
-                )
-                authority = AuthorityService(store)
-                authority_check = _issue_financial_authority_check(
-                    authority,
-                    store=store,
-                    admission_id="sender-fence-fixture",
-                    account_id="acct",
-                    environment=environment,
-                    instrument_id="11111111-1111-4111-8111-111111111111",
-                    instrument_version=1,
-                    action="ORDER.SUBMIT",
-                    provider_id="SIM",
-                    provider_environment=environment,
+                    owner_token="owner",
+                    owner_epoch=1,
                 )
                 outbound = 0
 
@@ -1124,64 +1097,53 @@ class DispatchTests(unittest.TestCase):
                     outbound += 1
                     return {"provider_order_id": "must-not-happen"}
 
-                with patch.object(
-                    AuthorityService,
-                    "dispatch_allowed",
-                    autospec=True,
-                    return_value=(True, "fixture_allowed"),
-                ):
-                    result = dispatcher.dispatch(
-                        attempt_id="fence-required",
-                        intent_id="i1",
-                        intent_hash="h1",
-                        provider="sim",
-                        request={},
-                        now="2026-09-24T18:00:00Z",
-                        authority_check=authority_check,
-                        transport_send=transport,
-                    )
-                    self.assertEqual(result.status, "BLOCKED")
-                self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+                result = dispatcher.dispatch(
+                    attempt_id="fence-required",
+                    intent_id="i1",
+                    intent_hash="h1",
+                    provider="sim",
+                    request={},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(result.reason, "sender_fence_required")
                 self.assertEqual(outbound, 0)
                 events = store.load_events(
                     "submission_attempt",
-                    dispatcher._aggregate_id(
-                        provider_domain_submission_attempt_key(
-                            attempt_id="fence-required",
-                            provider_id="SIM",
-                            environment=environment,
-                            provider_environment=environment,
-                        )
-                    ),
+                    dispatcher._aggregate_id("fence-required"),
                 )
                 self.assertEqual(
                     [event["event_type"] for event in events],
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_takeover_during_provider_wait_cannot_cross_sender_gate(self):
+    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
                 owner_store=store,
-                owner_scope="SIMULATION:acct",
+                owner_scope="PAPER:acct",
             )
             owner = recovery.start("host-a")
             self.durable_ready(recovery, store, reconciliation_id="dispatch-ready")
-            dispatcher = recovery.build_guarded_dispatcher(
+            dispatcher = GuardedDispatcher(
                 store,
-                environment="SIMULATION",
+                environment="PAPER",
                 account_id="acct",
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
             )
             outbound = 0
-            takeover = RecoveryController(
-                owner_store=store,
-                owner_scope="SIMULATION:acct",
-            )
 
             def transport(_client_id, _request, final_guard):
                 nonlocal outbound
-                takeover.takeover_durable_owner("host-b")
+                recovery.transfer_owner(
+                    new_owner_id="host-b",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
@@ -1195,16 +1157,11 @@ class DispatchTests(unittest.TestCase):
                 now="2026-09-24T18:00:00Z",
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
+                sender_check=recovery.validate_sender,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "transport_failed_before_send")
+            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
             self.assertEqual(outbound, 0)
-            self.assertEqual(
-                [(item.owner_id, item.epoch) for item in recovery.durable_owner_chain()],
-                [(owner.owner_id, owner.epoch)],
-            )
-            self.assertIsNone(takeover.owner)
-            recovery.validate_sender(owner.owner_id, owner.epoch)
 
     def test_paper_send_succeeds_only_with_current_durable_sender(self):
         with TemporaryDirectory() as directory:
@@ -1215,23 +1172,12 @@ class DispatchTests(unittest.TestCase):
             )
             owner = recovery.start("host-a")
             self.durable_ready(recovery, store, reconciliation_id="paper-send-ready")
-            dispatcher = recovery.build_guarded_dispatcher(
+            dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",
                 account_id="acct",
-            )
-            authority = AuthorityService(store)
-            authority_check = _issue_financial_authority_check(
-                authority,
-                store=store,
-                admission_id="paper-send-fixture",
-                account_id="acct",
-                environment="PAPER",
-                instrument_id="11111111-1111-4111-8111-111111111111",
-                instrument_version=1,
-                action="ORDER.SUBMIT",
-                provider_id="SIM",
-                provider_environment="PAPER",
+                owner_token=owner.owner_id,
+                owner_epoch=owner.epoch,
             )
             outbound = 0
 
@@ -1241,34 +1187,22 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p-1"}
 
-            with patch.object(
-                AuthorityService,
-                "dispatch_allowed",
-                autospec=True,
-                return_value=(True, "fixture_allowed"),
-            ):
-                result = dispatcher.dispatch(
-                    attempt_id="paper-current-owner",
-                    intent_id="i1",
-                    intent_hash="h1",
-                    provider="sim",
-                    request={},
-                    now="2026-09-24T18:00:00Z",
-                    authority_check=authority_check,
-                    transport_send=transport,
-                )
-                self.assertEqual(result.status, "SENT")
+            result = dispatcher.dispatch(
+                attempt_id="paper-current-owner",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request={},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=recovery.validate_sender,
+            )
+            self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)
             events = store.load_events(
                 "submission_attempt",
-                dispatcher._aggregate_id(
-                    provider_domain_submission_attempt_key(
-                        attempt_id="paper-current-owner",
-                        provider_id="SIM",
-                        environment="PAPER",
-                        provider_environment="PAPER",
-                    )
-                ),
+                dispatcher._aggregate_id("paper-current-owner"),
             )
             self.assertEqual(
                 [event["owner_epoch"] for event in events],

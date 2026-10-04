@@ -85,7 +85,6 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
-        provider_environment: str | None = None,
     ) -> ContextManager[str]: ...
 
 
@@ -1729,7 +1728,7 @@ class KrakenSpotDurableNonceAllocator:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -1959,7 +1958,7 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "WhiteBIT order transport requires WHITEBIT LIVE policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -2634,7 +2633,7 @@ class KrakenSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "Kraken Spot order transport requires KRAKEN LIVE policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -2829,7 +2828,7 @@ class KrakenSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Kraken Spot authenticated-read transport requires KRAKEN LIVE policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -3105,7 +3104,7 @@ class AlpacaTradingHttpTransport:
             raise ProviderTransportScopeError(
                 "Alpaca Trading transport requires ALPACA policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -3462,14 +3461,13 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "Bybit policy does not match exact provider environment"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -3650,7 +3648,6 @@ class BybitV5HttpTransport:
                 account_id=self.account_id,
                 entity_id=entity_id,
                 environment=self.policy.environment,
-                provider_environment=self.provider_environment,
                 instrument_version=instrument_version,
                 at=point,
             )
@@ -3665,7 +3662,6 @@ class BybitV5HttpTransport:
             or current.account_id != self.account_id
             or current.entity_id != entity_id
             or current.environment != self.policy.environment
-            or current.provider_environment != self.provider_environment
             or current.instrument_version != instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -3741,7 +3737,6 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5Signer.sign(
@@ -3792,18 +3787,6 @@ class BybitV5AuthenticatedReadSigner:
         ):
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
-            )
-        matching_domains = tuple(
-            name
-            for name, candidate in BYBIT_V5_ENDPOINT_POLICIES.items()
-            if candidate == policy
-        )
-        if (
-            len(matching_domains) != 1
-            or query_binding.provider_environment != matching_domains[0]
-        ):
-            raise ProviderTransportScopeError(
-                "authenticated-read binding provider environment mismatch"
             )
         _bybit_authenticated_read_rule(query_binding)
         if (
@@ -3901,14 +3884,13 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Bybit read policy does not match exact provider environment"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -3984,7 +3966,6 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
-                provider_environment=self.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )
@@ -3999,7 +3980,6 @@ class BybitV5AuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
-            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4023,7 +4003,6 @@ class BybitV5AuthenticatedReadTransport:
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
-            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(
@@ -4050,7 +4029,6 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-            provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
                 signed = BybitV5AuthenticatedReadSigner.sign(
@@ -4225,7 +4203,7 @@ class BinanceSpotHttpTransport:
             raise ProviderTransportScopeError(
                 "Binance Spot transport requires BINANCE policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
@@ -4496,7 +4474,7 @@ class BinanceSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "Binance authenticated-read transport requires BINANCE policy"
             )
-        if type(credential_handle) is not PersistentCredentialHandle:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )

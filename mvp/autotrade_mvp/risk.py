@@ -12,6 +12,11 @@ import re
 from typing import Mapping, Sequence
 from uuid import UUID
 
+from research.autotrade_research.artifacts import (
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
+
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
@@ -435,15 +440,19 @@ def _verify_liquidation_headroom_evidence(
         or evidence_store is None
     ):
         return False
+    if type(evidence_store) is not ArtifactStore:
+        return False
     if evidence.scope != expected_scope or evidence.state_version != expected_state_version:
         return False
     point = _utc(decision_time, name="decision_time")
     if not (evidence.observed_at <= point < evidence.expires_at):
         return False
     try:
-        manifest, raw = evidence_store.read_authenticated_snapshot(
-            evidence.artifact_id
+        authenticated_read = trusted_authenticated_reader(
+            evidence_store.root,
+            publication_store=evidence_store,
         )
+        manifest, raw = authenticated_read(evidence.artifact_id)
     except Exception:
         return False
     if type(manifest) is not dict or not isinstance(raw, bytes):
@@ -1429,11 +1438,19 @@ def evaluate_bound_risk(
     evidence_store: object | None = None,
     authoritative_risk_snapshot_id: str | None = None,
 ) -> RiskDecision:
+    # A bound financial decision must never acquire liquidation authority from a
+    # caller-selected store.  Until the product-owned sealed evidence/root
+    # composition is wired into this boundary, liquidation evidence on the bound
+    # path is intentionally fail-closed.  Unbound evaluate_risk() retains the
+    # explicit store seam for simulation and evidence-verification tests.
+    if evidence_store is not None:
+        raise ValueError(
+            "caller-selected evidence_store cannot bind financial risk"
+        )
     decision = evaluate_risk(
         intent,
         context,
         policy,
-        evidence_store=evidence_store,
     )
     return bind_risk_decision(
         decision,

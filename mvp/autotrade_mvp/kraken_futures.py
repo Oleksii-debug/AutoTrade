@@ -595,7 +595,6 @@ def parse_position_executions(
     response = observation.payload
     account_id = observation.account_id
     environment = observation.environment
-    provider_environment = observation.provider_environment
     envelope = _mapping(response, name="response")
     elements = envelope.get("elements")
     if not isinstance(elements, (list, tuple)):
@@ -624,7 +623,6 @@ def parse_position_executions(
             provider_id="KRAKEN",
             account_id=account_id,
             environment=environment,
-            provider_environment=provider_environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -647,7 +645,6 @@ def coverage_evidence(
     *,
     account_id: str,
     environment: str,
-    provider_environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -675,7 +672,6 @@ def coverage_evidence(
         provider_id="KRAKEN",
         account_id=account_id,
         environment=environment,
-        provider_environment=provider_environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

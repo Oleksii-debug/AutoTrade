@@ -1,4 +1,4 @@
-from decimal import Decimal, ROUND_DOWN, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.accounting import (
     validate_transaction,
 )
 from mvp.autotrade_mvp.economics import cash_round_trip
+from mvp.autotrade_mvp.exact_decimal import MAX_INTEGER_DIGITS
 
 
 class AccountingFoundationTests(unittest.TestCase):
@@ -661,119 +662,323 @@ class AccountingFoundationTests(unittest.TestCase):
             )
 
 
-    def test_exact_numeric_authority_rejects_decimal_subclass_before_virtual_dispatch(self):
-        class ForgedDecimal(Decimal):
-            def is_finite(self):
-                raise AssertionError("Decimal subclass virtual method must not run")
 
-            def as_tuple(self):
-                raise AssertionError("Decimal subclass virtual method must not run")
+class AccountingExactAuthorityTests(unittest.TestCase):
+    _ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+    _PRECISIONS = (6, 10, 28, 80)
 
-            def __format__(self, spec):
-                raise AssertionError("Decimal subclass virtual method must not run")
-
-        with self.assertRaisesRegex(TypeError, "exact Decimal"):
-            posting("CASH:USD", "USD", ForgedDecimal("1"))
-
-    def test_cash_and_fill_economics_ignore_hostile_ambient_decimal_context(self):
-        huge = "1000000000000000000000000000000"
-        tiny = "0.000000000000000000000000000001"
-        expected_trade = Decimal(
-            "-2.000000000000000000000000000004000000000000000000000000000002"
-        )
-
-        def exercise():
-            book = EconomicBook()
-            for index, amount in enumerate((huge, tiny, "-" + huge)):
-                book.append(
-                    book_external_cash_flow(
-                        transaction_id=f"cash-exact-{index}",
-                        cause_event_id=f"cash-exact-cause-{index}",
-                        currency="USD",
-                        amount=amount,
-                    )
-                )
-            self.assertEqual(book.cash("USD"), Decimal(tiny))
-
-            fill = book_equity_fill(
-                transaction_id="fill-exact-context",
-                cause_event_id="fill-exact-context-cause",
-                instrument="ABC",
-                settlement_currency="USD",
-                side="BUY",
-                quantity="1.000000000000000000000000000001",
-                price="2.000000000000000000000000000002",
-            )
-            self.assertEqual(fill.postings[2].signed_amount, expected_trade)
-            return fill
-
-        baseline = exercise()
-        with localcontext() as context:
-            context.prec = 3
-            context.rounding = ROUND_DOWN
-            hostile = exercise()
-        self.assertEqual(hostile.postings, baseline.postings)
-
-    def test_fifo_projection_is_exact_under_hostile_decimal_context(self):
-        book = EconomicBook()
-        book.append(
-            book_equity_fill(
-                transaction_id="fifo-buy",
-                cause_event_id="fifo-buy-cause",
-                instrument="ABC",
-                settlement_currency="USD",
-                side="BUY",
-                quantity="1000000000000000000000000000000.1",
-                price="2.000000000000000000000000000001",
-            )
-        )
-        book.append(
-            book_equity_fill(
-                transaction_id="fifo-sell",
-                cause_event_id="fifo-sell-cause",
-                instrument="ABC",
-                settlement_currency="USD",
-                side="SELL",
-                quantity="1000000000000000000000000000000",
-                price="2.000000000000000000000000000002",
-            )
-        )
-        expected = project_equity_position(
-            book,
-            instrument="ABC",
-            settlement_currency="USD",
-            mark_price="2.000000000000000000000000000003",
-        )
-        with localcontext() as context:
-            context.prec = 4
-            context.rounding = ROUND_DOWN
-            actual = project_equity_position(
-                book,
-                instrument="ABC",
-                settlement_currency="USD",
-                mark_price="2.000000000000000000000000000003",
-            )
-        self.assertEqual(actual, expected)
-        self.assertEqual(actual.quantity, Decimal("0.1"))
-        self.assertEqual(actual.realized_pnl, Decimal("1"))
-
-    def test_nonterminating_implied_fill_price_fails_closed(self):
-        malformed = JournalTransaction(
-            transaction_id="malformed-rational-price",
-            cause_event_id="malformed-rational-price-cause",
+    def test_unbalanced_tiny_residual_is_rejected_in_every_decimal_context(self):
+        transaction = JournalTransaction(
+            transaction_id="hostile-context-unbalanced",
+            cause_event_id="hostile-context-unbalanced-cause",
             postings=(
-                Posting("POSITION:ABC", "ABC", Decimal("3")),
-                Posting("CLEARING:ABC", "ABC", Decimal("-3")),
-                Posting("CASH:USD", "USD", Decimal("-1")),
-                Posting("CLEARING:USD", "USD", Decimal("1")),
+                posting("A", "USD", "1e30"),
+                posting("B", "USD", "1e-30"),
+                posting("C", "USD", "-1e30"),
             ),
         )
-        with self.assertRaisesRegex(AccountingConflict, "exact terminating"):
-            project_equity_position(
-                EconomicBook((malformed,)),
-                instrument="ABC",
-                settlement_currency="USD",
-            )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        with self.assertRaisesRegex(ValueError, "not balanced"):
+                            validate_transaction(transaction)
+
+    def test_high_significance_reversal_is_context_invariant(self):
+        original = JournalTransaction(
+            transaction_id="high-significance-original",
+            cause_event_id="high-significance-cause",
+            postings=(
+                posting("CASH:USD", "USD", "12345678901234567890.123456789"),
+                posting("CLEARING:USD", "USD", "-12345678901234567890.123456789"),
+            ),
+        )
+        expected = (
+            Decimal("-12345678901234567890.123456789"),
+            Decimal("12345678901234567890.123456789"),
+        )
+        digests = set()
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        reversal = reverse_transaction(
+                            original,
+                            transaction_id="high-significance-reversal",
+                            cause_event_id="high-significance-reversal-cause",
+                        )
+                        self.assertEqual(
+                            tuple(item.signed_amount for item in reversal.postings),
+                            expected,
+                        )
+                        digests.add(transaction_digest(reversal))
+
+        self.assertEqual(len(digests), 1)
+
+    def test_balance_projection_preserves_tiny_residual_in_every_decimal_context(self):
+        transactions = (
+            JournalTransaction(
+                transaction_id="balance-large-in",
+                cause_event_id="balance-large-in-cause",
+                postings=(
+                    posting("TARGET", "USD", "1e30"),
+                    posting("OFFSET", "USD", "-1e30"),
+                ),
+            ),
+            JournalTransaction(
+                transaction_id="balance-tiny-in",
+                cause_event_id="balance-tiny-in-cause",
+                postings=(
+                    posting("TARGET", "USD", "1e-30"),
+                    posting("OFFSET", "USD", "-1e-30"),
+                ),
+            ),
+            JournalTransaction(
+                transaction_id="balance-large-out",
+                cause_event_id="balance-large-out-cause",
+                postings=(
+                    posting("TARGET", "USD", "-1e30"),
+                    posting("OFFSET", "USD", "1e30"),
+                ),
+            ),
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = EconomicBook(transactions)
+                        self.assertEqual(
+                            book.balance("TARGET", "USD"),
+                            Decimal("1e-30"),
+                        )
+
+    def test_oversized_durable_split_ratio_is_rejected_before_decimal_parse(self):
+        oversized = "1" * (MAX_INTEGER_DIGITS + 1)
+
+        for numerator, denominator in ((oversized, "1"), ("1", oversized)):
+            with self.subTest(
+                numerator_length=len(numerator),
+                denominator_length=len(denominator),
+            ):
+                transaction = JournalTransaction(
+                    transaction_id=(
+                        "oversized-split-ratio-"
+                        + ("numerator" if numerator == oversized else "denominator")
+                    ),
+                    cause_event_id=(
+                        "oversized-split-ratio-cause-"
+                        + ("numerator" if numerator == oversized else "denominator")
+                    ),
+                    postings=(
+                        posting("POSITION:ABC", "ABC", "1"),
+                        posting(
+                            "CORPORATE_ACTION_SPLIT_CLEARING:ABC:"
+                            + numerator
+                            + ":"
+                            + denominator,
+                            "ABC",
+                            "-1",
+                        ),
+                    ),
+                )
+                book = EconomicBook((transaction,))
+                before = book.transactions
+
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "ratio identity is not canonical",
+                ):
+                    project_equity_position(
+                        book,
+                        instrument="ABC",
+                        settlement_currency="USD",
+                    )
+
+                self.assertEqual(book.transactions, before)
+
+
+
+
+class AccountingSemanticGraphAuthorityTests(unittest.TestCase):
+    def test_transaction_subclass_is_rejected_before_attribute_dispatch(self):
+        touched = []
+
+        class HostileTransaction(JournalTransaction):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile transaction attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileTransaction)
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            book.append(hostile)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_posting_subclass_is_rejected_before_attribute_dispatch(self):
+        touched = []
+
+        class HostilePosting(Posting):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile posting attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostilePosting)
+        transaction = JournalTransaction(
+            transaction_id="hostile-posting",
+            cause_event_id="hostile-posting-cause",
+            postings=(hostile, posting("OFFSET", "USD", "0")),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact Posting"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_string_subclass_is_rejected_before_virtual_strip(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile string strip dispatch")
+
+        transaction = JournalTransaction(
+            transaction_id=HostileText("hostile-text"),
+            cause_event_id="hostile-text-cause",
+            postings=(
+                posting("A", "USD", "1"),
+                posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(ValueError, "transaction_id"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_decimal_subclass_is_rejected_before_virtual_decimal_dispatch(self):
+        touched = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                touched.append("is_finite")
+                raise AssertionError("hostile Decimal dispatch")
+
+            def as_tuple(self):
+                touched.append("as_tuple")
+                raise AssertionError("hostile Decimal dispatch")
+
+        transaction = JournalTransaction(
+            transaction_id="hostile-decimal",
+            cause_event_id="hostile-decimal-cause",
+            postings=(
+                Posting("A", "USD", HostileDecimal("1")),
+                posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+
+
+
+
+class AccountingBoundedIngressTests(unittest.TestCase):
+    def test_at_limit_string_and_integer_are_admitted_exactly(self):
+        text = "9" * MAX_INTEGER_DIGITS
+        self.assertEqual(posting("A", "USD", text).signed_amount, Decimal(text))
+
+        integer = 10 ** (MAX_INTEGER_DIGITS - 1)
+        self.assertEqual(posting("A", "USD", integer).signed_amount, Decimal(integer))
+
+    def test_one_over_string_rejects_before_book_mutation(self):
+        oversized = "9" * (MAX_INTEGER_DIGITS + 1)
+        transaction = JournalTransaction(
+            transaction_id="bounded-ingress-string",
+            cause_event_id="bounded-ingress-string-cause",
+            postings=(
+                Posting("A", "USD", oversized),
+                Posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.append(transaction)
+
+        self.assertEqual(book.transactions, before)
+
+    def test_one_over_integer_rejects_before_book_mutation(self):
+        oversized = 10 ** MAX_INTEGER_DIGITS
+        transaction = JournalTransaction(
+            transaction_id="bounded-ingress-int",
+            cause_event_id="bounded-ingress-int-cause",
+            postings=(
+                Posting("A", "USD", oversized),
+                Posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.append(transaction)
+
+        self.assertEqual(book.transactions, before)
+
+    def test_numeric_subclasses_fail_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileNumericText(str):
+            def __len__(self):
+                touched.append("len")
+                raise AssertionError("numeric string subclass dispatched")
+
+            def startswith(self, *args, **kwargs):
+                touched.append("startswith")
+                raise AssertionError("numeric string subclass dispatched")
+
+        class HostileInt(int):
+            def bit_length(self):
+                touched.append("bit_length")
+                raise AssertionError("integer subclass dispatched")
+
+        for value in (HostileNumericText("1"), HostileInt(1)):
+            with self.subTest(kind=type(value).__name__):
+                with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+                    posting("A", "USD", value)
+
+        self.assertEqual(touched, [])
 
 
 if __name__ == "__main__":

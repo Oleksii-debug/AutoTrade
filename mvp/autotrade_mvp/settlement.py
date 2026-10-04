@@ -22,7 +22,6 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
 )
 from .persistence import payload_digest
-from .provider_domain import normalize_provider_environment
 
 
 class SettlementConflict(ValueError):
@@ -64,11 +63,36 @@ class SettlementAccountScope:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         environment = _text(self.environment, name="environment").upper()
-        provider_environment = normalize_provider_environment(
-            provider_id=provider,
-            environment=environment,
-            provider_environment=self.provider_environment,
+        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("unsupported environment")
+        provider_environment = (
+            environment
+            if self.provider_environment is None
+            else _text(self.provider_environment, name="provider_environment").upper()
         )
+        if provider == "BYBIT":
+            if self.provider_environment is None:
+                raise ValueError(
+                    "BYBIT settlement scope requires explicit provider_environment"
+                )
+            if provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+                raise ValueError(
+                    "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+                )
+            if (
+                environment == "LIVE" and provider_environment != "MAINNET"
+            ) or (
+                environment == "PAPER"
+                and provider_environment not in {"TESTNET", "DEMO"}
+            ):
+                raise ValueError(
+                    "BYBIT provider_environment does not match runtime environment"
+                )
+        elif provider_environment != environment:
+            raise ValueError(
+                "provider_environment must equal runtime environment until an exact "
+                "provider-domain policy is qualified"
+            )
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_environment", provider_environment)
 
@@ -556,7 +580,10 @@ class SettlementBook:
                 "settlement evidence was not yet available as of projection date"
             )
         current = self._settled_cash.get(obligation.currency, Decimal("0"))
-        self._settled_cash[obligation.currency] = exact_add(current, obligation.amount)
+        self._settled_cash[obligation.currency] = exact_add(
+            current,
+            obligation.amount,
+        )
         self._settled_ids.add(key)
         self._settlement_evidence[key] = settlement_evidence
         return True
@@ -664,18 +691,55 @@ class SettlementBook:
         old settlement facts cannot release capital twice.
         """
 
-        if not isinstance(economic_book, (EconomicBook, ScopedEconomicBook)):
-            raise TypeError(
-                "economic_book must be an EconomicBook or ScopedEconomicBook"
+        owner_scope = None
+        if type(economic_book) is EconomicBook:
+            canonical_book = economic_book
+        elif type(economic_book) is ScopedEconomicBook:
+            from .accounting import _require_scoped_economic_book_owner, AccountingConflict
+            try:
+                environment, account_id, canonical_book = _require_scoped_economic_book_owner(economic_book)
+            except AccountingConflict as error:
+                raise SettlementConflict(str(error)) from error
+            owner_scope = (None, account_id, environment)
+        else:
+            # The durable financial book has its own original provider/account/
+            # store generation seal. Validate it before obtaining the projection.
+            from .provider_activity_accounting import (
+                DurableProviderEconomicBook, _require_durable_provider_economic_book_authority,
             )
+            if type(economic_book) is not DurableProviderEconomicBook:
+                raise TypeError("economic_book must be an exact canonical economic authority")
+            authority = _require_durable_provider_economic_book_authority(economic_book)
+            owner_scope = (authority.provider_id, authority.account_id, authority.environment)
+            canonical_book = object.__getattribute__(economic_book, "_book")
+            if type(canonical_book) is not EconomicBook:
+                raise TypeError("durable economic authority must own an exact EconomicBook")
+
+        # Take one canonical class-owned transaction cut and use it throughout
+        # the projection.  This keeps caller-polymorphic properties/methods and
+        # per-instance method shadows outside financial authority.
+        transactions = EconomicBook.transactions.__get__(
+            canonical_book,
+            EconomicBook,
+        )
+
         items = tuple(obligations)
+        if owner_scope is not None:
+            provider, account, environment = owner_scope
+            for item in items:
+                scope = None if item.rule_binding is None else item.rule_binding.scope
+                if scope is None or (
+                    scope.account_id != account or scope.environment != environment
+                    or (provider is not None and scope.provider_id != provider)
+                ):
+                    raise SettlementConflict("scoped economic book differs from settlement scope")
         by_transaction = {
             transaction.transaction_id: transaction
-            for transaction in economic_book.transactions
+            for transaction in transactions
         }
         reversed_ids = {
             transaction.reverses_transaction_id
-            for transaction in economic_book.transactions
+            for transaction in transactions
             if transaction.reverses_transaction_id is not None
         }
 
@@ -696,7 +760,7 @@ class SettlementBook:
             source_transaction_id
             for source_transaction_id, _currency in bound_source_currencies
         }
-        for transaction in economic_book.transactions:
+        for transaction in transactions:
             corrected_id = transaction.corrects_transaction_id
             if (
                 corrected_id is None
@@ -727,7 +791,7 @@ class SettlementBook:
         active: list[SettlementObligation] = []
         active_source_currency: set[tuple[str, str]] = set()
         currencies: set[str] = set()
-        for transaction in economic_book.transactions:
+        for transaction in transactions:
             for posting in transaction.postings:
                 if (
                     posting.ledger_account.startswith("CASH:")
@@ -777,7 +841,7 @@ class SettlementBook:
         # Explicit external cash flows are intentionally outside this fence;
         # equity/FX trading legs require source-transaction settlement coverage
         # before their cash can participate in a settlement projection.
-        for transaction in economic_book.transactions:
+        for transaction in transactions:
             if (
                 transaction.transaction_id in reversed_ids
                 or transaction.reverses_transaction_id is not None
@@ -816,7 +880,13 @@ class SettlementBook:
         }
         opening_cash = {
             currency: exact_subtract(
-                economic_book.cash(currency),
+                exact_sum(
+                    posting.signed_amount
+                    for transaction in transactions
+                    for posting in transaction.postings
+                    if posting.ledger_account == f"CASH:{currency}"
+                    and posting.asset_or_currency == currency
+                ),
                 exact_sum(
                     item.amount
                     for item in active

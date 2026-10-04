@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 
@@ -31,7 +31,6 @@ from .exact_decimal import (
     canonical_decimal_text,
     exact_add,
     exact_multiply,
-    parse_bounded_exact_decimal,
 )
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
@@ -46,12 +45,15 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if type(value) not in (Decimal, str, int):
+    if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        return parse_bounded_exact_decimal(value)
-    except ExactDecimalError as error:
-        raise ValueError(f"{name} must be a bounded exact decimal") from error
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, ValueError, TypeError) as error:
+        raise ValueError(f"{name} must be a finite decimal") from error
+    if not result.is_finite():
+        raise ValueError(f"{name} must be a finite decimal")
+    return result
 
 
 def _utc_text(value: str, *, name: str) -> str:
@@ -179,6 +181,42 @@ class ProjectedFillEvidence:
         )
 
 
+def _provider_fill_accounting_evidence_payload(
+    *,
+    provider: str,
+    book: ScopedEconomicBook,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+) -> dict[str, object]:
+    """Serialize the exact revision-bearing evidence used by fill identities.
+
+    Validation stays in _validated_fill_evidence. This helper is deliberately
+    representation-preserving so durable correction replay can recompute the
+    same identity material that originally named the economic transaction.
+    """
+
+    return {
+        "schema_version": "1.0.0",
+        "provider_id": provider,
+        "environment": book.environment,
+        "account_id": book.account_id,
+        "provider_execution_id": provider_fill.provider_execution_id,
+        "client_order_id": projected_fill.client_order_id,
+        "fill_id": projected_fill.fill_id,
+        "intent_id": projected_fill.intent_id,
+        "side": provider_fill.side,
+        "position_side": provider_fill.position_side,
+        "position_effect": provider_fill.position_effect,
+        "instrument": provider_fill.instrument,
+        "quantity": format(provider_fill.quantity, "f"),
+        "price": format(provider_fill.price, "f"),
+        "fee_amount": format(provider_fill.fee_amount, "f"),
+        "fee_currency": provider_fill.fee_currency,
+        "trade_time": provider_fill.trade_time,
+        "provider_revision": projected_fill.provider_revision,
+    }
+
+
 def _validated_fill_evidence(
     *,
     book: ScopedEconomicBook,
@@ -269,16 +307,10 @@ def _validated_fill_evidence(
     if projected_fill.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict("provider execution identity does not match projection")
     if (
-        projected_fill.client_order_id is None
-        or provider_fill.client_order_id is None
+        provider_fill.client_order_id is not None
+        and projected_fill.client_order_id != provider_fill.client_order_id
     ):
-        raise AccountingConflict(
-            "admitted provider fill requires exact client order identity"
-        )
-    if projected_fill.client_order_id != provider_fill.client_order_id:
-        raise AccountingConflict(
-            "provider client order identity does not match projection"
-        )
+        raise AccountingConflict("provider client order identity does not match projection")
     if projected_fill.quantity != provider_fill.quantity:
         raise AccountingConflict("provider fill quantity does not match projection")
     if projected_fill.price != provider_fill.price:
@@ -286,26 +318,12 @@ def _validated_fill_evidence(
     if provider_fill.instrument != instrument:
         raise AccountingConflict("provider instrument does not match expected instrument")
 
-    evidence: dict[str, object] = {
-        "schema_version": "1.0.0",
-        "provider_id": provider,
-        "environment": book.environment,
-        "account_id": book.account_id,
-        "provider_execution_id": provider_fill.provider_execution_id,
-        "client_order_id": projected_fill.client_order_id,
-        "fill_id": projected_fill.fill_id,
-        "intent_id": projected_fill.intent_id,
-        "side": provider_fill.side,
-        "position_side": provider_fill.position_side,
-        "position_effect": provider_fill.position_effect,
-        "instrument": provider_fill.instrument,
-        "quantity": format(provider_fill.quantity, "f"),
-        "price": format(provider_fill.price, "f"),
-        "fee_amount": format(provider_fill.fee_amount, "f"),
-        "fee_currency": provider_fill.fee_currency,
-        "trade_time": provider_fill.trade_time,
-        "provider_revision": projected_fill.provider_revision,
-    }
+    evidence = _provider_fill_accounting_evidence_payload(
+        provider=provider,
+        book=book,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+    )
     return provider, instrument, settlement, evidence
 
 
@@ -684,12 +702,9 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "cash-equity reservation consumption is qualified only for BUY fills"
         )
-    if (
-        provider_fill.position_side is not None
-        or provider_fill.position_effect is not None
-    ):
+    if provider_fill.position_side is not None:
         raise AccountingConflict(
-            "cash-equity reservation consumption rejects derivative position identity"
+            "cash-equity reservation consumption rejects derivative position_side"
         )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()
@@ -835,15 +850,6 @@ def build_provider_fill_correction_transactions(
         raise AccountingConflict("correction side changed")
     if corrected_provider_fill.position_side != original_provider_fill.position_side:
         raise AccountingConflict("correction provider position_side changed")
-    if (
-        original_provider_fill.position_side is not None
-        or original_provider_fill.position_effect is not None
-        or corrected_provider_fill.position_side is not None
-        or corrected_provider_fill.position_effect is not None
-    ):
-        raise AccountingConflict(
-            "cash-equity correction rejects derivative position identity"
-        )
 
     observation = _utc_text(correction_observed_at, name="correction_observed_at")
     order_key = _economic_order_key(
@@ -990,6 +996,136 @@ def build_provider_fill_correction_transactions(
         corrects_transaction_id=committed_original.transaction_id,
     )
     return reversal, replacement
+
+def build_provider_fill_bust_transaction(
+    *,
+    book: ScopedEconomicBook,
+    provider_id: str,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    expected_instrument: str,
+    settlement_currency: str,
+    bust_provider_revision: str,
+    bust_observed_at: str,
+) -> JournalTransaction:
+    """Derive one exact economic reversal for a provider-evidenced fill bust.
+
+    A bust is compensation, not a new fill. The immutable provider execution
+    remains historical truth while its currently active economic transaction is
+    reversed exactly. Exact retry resolves to the same reversal; a stale or
+    contradictory provider fact fails closed.
+    """
+
+    provider, _instrument, settlement, active_evidence = _validated_fill_evidence(
+        book=book,
+        provider_id=provider_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=expected_instrument,
+        settlement_currency=settlement_currency,
+        allow_correction=projected_fill.correction_of is not None,
+    )
+    revision = _text(bust_provider_revision, name="bust_provider_revision")
+    if projected_fill.provider_revision == revision:
+        raise AccountingConflict(
+            "fill bust requires a provider revision distinct from the active fill"
+        )
+    observation = _utc_text(bust_observed_at, name="bust_observed_at")
+    order_key = _economic_order_key(
+        provider,
+        provider_fill.provider_execution_id,
+    )
+
+    reversed_ids = {
+        item.reverses_transaction_id
+        for item in book.transactions
+        if item.reverses_transaction_id is not None
+    }
+    candidates = [
+        item
+        for item in book.transactions
+        if item.reverses_transaction_id is None
+        and item.economic_order_key == order_key
+        and (
+            (projected_fill.correction_of is None and item.corrects_transaction_id is None)
+            or (
+                projected_fill.correction_of is not None
+                and item.corrects_transaction_id is not None
+            )
+        )
+        and _transaction_matches_provider_fill(
+            item,
+            projected_fill=projected_fill,
+            provider_fill=provider_fill,
+            settlement_currency=settlement,
+            economic_order_key=order_key,
+        )
+    ]
+    if not candidates:
+        raise AccountingConflict(
+            "provider fill bust evidence does not match any canonical economic fact"
+        )
+
+    def expected_reversal(source: JournalTransaction) -> JournalTransaction:
+        evidence = {
+            "schema_version": "1.0.0",
+            "provider_id": provider,
+            "environment": book.environment,
+            "account_id": book.account_id,
+            "provider_execution_id": provider_fill.provider_execution_id,
+            "fill_id": projected_fill.fill_id,
+            "correction_of": projected_fill.correction_of,
+            "bust_provider_revision": revision,
+            "bust_observed_at": observation,
+            "source_transaction_id": source.transaction_id,
+            "active_fill": active_evidence,
+        }
+        digest = payload_digest(evidence).removeprefix("sha256:")
+        cause_prefix = (
+            f"provider:{provider}:environment:{book.environment}:"
+            f"account:{book.account_id}:bust:{digest}"
+        )
+        return reverse_transaction(
+            source,
+            transaction_id=f"provider-fill-bust-reversal:{digest}",
+            cause_event_id=f"{cause_prefix}:reversal",
+            observed_at=observation,
+        )
+
+    active = [
+        item for item in candidates if item.transaction_id not in reversed_ids
+    ]
+    if len(active) == 1:
+        return expected_reversal(active[0])
+    if len(active) > 1:
+        raise AccountingConflict(
+            "provider execution has multiple active economic facts during bust"
+        )
+
+    # Exact retry after the bust: locate the single deterministic reversal
+    # derived from the same immutable provider evidence and source transaction.
+    replays: list[JournalTransaction] = []
+    by_id = {item.transaction_id: item for item in book.transactions}
+    for source in candidates:
+        expected = expected_reversal(source)
+        existing = by_id.get(expected.transaction_id)
+        if existing is None:
+            continue
+        if existing != expected:
+            raise AccountingConflict(
+                "existing fill bust reversal conflicts with immutable bust evidence"
+            )
+        replays.append(existing)
+    if len(replays) == 1:
+        return replays[0]
+    if len(replays) > 1:
+        raise AccountingConflict(
+            "provider fill bust evidence resolves to multiple reversal lineages"
+        )
+    raise AccountingConflict(
+        "provider fill is already inactive without the supplied bust lineage"
+    )
+
 def book_provider_fill(
     *,
     book: ScopedEconomicBook,

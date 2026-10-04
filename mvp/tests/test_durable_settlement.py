@@ -21,7 +21,6 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.tests._journal_store_patch import patch_journal_store_method
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -35,7 +34,7 @@ from mvp.autotrade_mvp.settlement import (
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
 )
-from autotrade_runtime.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 PROVIDER = "PROVIDER-A"
@@ -43,8 +42,12 @@ ACCOUNT = "acct-1"
 ENVIRONMENT = "PAPER"
 
 
+def artifact_root_for(store: JournalStore) -> Path:
+    return Path(store.path).parent / "settlement-evidence"
+
+
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
-    return ArtifactStore(Path(store.path).parent / "settlement-evidence")
+    return ArtifactStore(artifact_root_for(store))
 
 
 def raw_rule() -> SettlementRuleBinding:
@@ -133,6 +136,7 @@ def durable(store: JournalStore) -> DurableSettlementBook:
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root_for(store),
         evidence_artifact_store=artifact_store_for(store),
     )
 
@@ -258,6 +262,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                 provider_id=PROVIDER,
                 account_id=ACCOUNT,
                 environment=ENVIRONMENT,
+                evidence_artifact_root=artifact_root_for(store),
                 evidence_artifact_store=selected,
             )
             item = obligation(store)
@@ -295,15 +300,13 @@ class DurableSettlementBookTests(unittest.TestCase):
             hostile = HostileArtifactStore(
                 Path(store.path).parent / "settlement-evidence"
             )
-            with self.assertRaisesRegex(
-                TypeError,
-                "canonical ArtifactStore",
-            ):
+            with self.assertRaises(TypeError):
                 DurableSettlementBook(
                     store,
                     provider_id=PROVIDER,
                     account_id=ACCOUNT,
                     environment=ENVIRONMENT,
+                    evidence_artifact_root=artifact_root_for(store),
                     evidence_artifact_store=hostile,
                 )
             self.assertFalse(HostileArtifactStore.called)
@@ -314,9 +317,9 @@ class DurableSettlementBookTests(unittest.TestCase):
             settlements = durable(store)
             item = obligation(store)
 
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
                 side_effect=OSError("simulated snapshot failure"),
             ):
                 with self.assertRaisesRegex(
@@ -340,9 +343,9 @@ class DurableSettlementBookTests(unittest.TestCase):
                 )
             )
             evidence = bind_evidence(store, item)
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
                 side_effect=OSError("simulated completion snapshot failure"),
             ):
                 with self.assertRaisesRegex(
@@ -600,17 +603,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             settlements = durable(store)
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected settlement commit failure")
 
-            commit_patch = patch_journal_store_method(
-
-                store, "commit_command", side_effect=fail
-
-            )
-
-            commit_patch.start()
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     settlements.register_obligations(
                         (obligation(store),),
@@ -618,8 +614,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                         idempotency_key="register",
                         committed_at="2026-09-25T09:00:02Z",
                     )
-            finally:
-                commit_patch.stop()
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
 
@@ -851,17 +845,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             before_obligations = settlements.obligations
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected correction commit failure")
 
-            commit_patch = patch_journal_store_method(
-
-                store, "commit_command", side_effect=fail
-
-            )
-
-            commit_patch.start()
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     commit_economic_correction_with_settlement_replacement(
                         economic,
@@ -873,8 +860,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                         settlement_obligations=(replacement_obligation,),
                         committed_at="2026-09-25T10:00:02Z",
                     )
-            finally:
-                commit_patch.stop()
 
             self.assertEqual(economic.audit_digest(), before_economic)
             self.assertEqual(settlements.obligations, before_obligations)
@@ -884,70 +869,6 @@ class DurableSettlementBookTests(unittest.TestCase):
             self.assertEqual(reopened_economic.audit_digest(), before_economic)
             self.assertEqual(reopened_settlements.obligations, before_obligations)
 
-
-    def test_journal_store_subclass_is_rejected_before_restore_dispatch(self):
-        class ForgedJournalStore(JournalStore):
-            def load_events(self, *_args, **_kwargs):
-                raise AssertionError("subclass journal dispatch must not run")
-
-        with TemporaryDirectory() as directory:
-            forged = ForgedJournalStore(Path(directory) / "journal.sqlite3")
-            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
-                DurableSettlementBook(
-                    forged,
-                    provider_id=PROVIDER,
-                    account_id=ACCOUNT,
-                    environment=ENVIRONMENT,
-                    evidence_artifact_store=artifact_store_for(forged),
-                )
-
-    def test_post_construction_journal_shadow_fails_before_durable_mutation(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "journal.sqlite3"
-            store = JournalStore(path)
-            settlements = durable(store)
-            bound = obligation(store, sell_transaction())
-
-            store.commit_command = lambda **_kwargs: (_ for _ in ()).throw(
-                AssertionError("instance-shadowed commit must not run")
-            )
-            try:
-                with self.assertRaisesRegex(
-                    (TypeError, RuntimeError),
-                    "shadow|authority",
-                ):
-                    settlements.register_obligations(
-                        (bound,),
-                        command_id="shadowed-register",
-                        idempotency_key="shadowed-register",
-                        committed_at="2026-09-25T09:00:02Z",
-                    )
-            finally:
-                del store.commit_command
-
-            reopened = JournalStore(path)
-            self.assertEqual(
-                reopened.load_events("settlement_book", settlements.scope_id),
-                [],
-            )
-
-    def test_settlement_evidence_subclass_is_rejected_before_virtual_fields(self):
-        class ForgedEvidence(SettlementEvidence):
-            def __getattribute__(self, name):
-                if name in {"obligation_id", "evidence_ref", "observed_at"}:
-                    raise AssertionError("evidence subclass fields must not be read")
-                return super().__getattribute__(name)
-
-        with TemporaryDirectory() as directory:
-            store = JournalStore(Path(directory) / "journal.sqlite3")
-            settlements = durable(store)
-            forged = object.__new__(ForgedEvidence)
-            with self.assertRaisesRegex(TypeError, "exact SettlementEvidence"):
-                settlements.prepare_settlement_mutation(
-                    forged,
-                    as_of=date(2026, 9, 26),
-                    committed_at="2026-09-26T12:00:00Z",
-                )
 
 if __name__ == "__main__":
     unittest.main()

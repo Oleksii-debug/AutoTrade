@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,11 +19,12 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -103,68 +103,36 @@ def durable_observation(*, payload, intent_id: str):
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
-    submission_scope = {
-        "endpoint": request.endpoint,
-        "prepared_request_sha256": request.body_sha256,
-        "capability_snapshot_ids": list(request.capability_snapshot_ids),
-        "instrument_versions": list(request.instrument_versions),
-    }
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
             store,
             environment="PAPER",
             account_id="contract-account",
-            owner_token="contract-fixture-owner",
+            owner_token="contract-owner",
         )
-        scope_hash = "sha256:" + sha256(
-            canonical_json(submission_scope).encode("utf-8")
-        ).hexdigest()
-        dispatcher._append(
+        outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
-            event_type="SubmissionPrepared",
-            version=1,
-            payload={
-                "attempt_id": attempt_id,
-                "intent_id": intent_id,
-                "intent_hash": "contract-intent-hash",
-                "provider": "ALPACA",
-                "request_hash": request.body_sha256,
-                "client_order_id": client_order_id,
-                "environment": "PAPER",
-                "account_id": "contract-account",
-                "owner_token": dispatcher.owner_token,
-                "owner_epoch": dispatcher.owner_epoch,
-                "prepared_at": "2026-09-24T20:00:00Z",
-                "submission_scope": submission_scope,
-                "submission_scope_hash": scope_hash,
-            },
+            intent_id=intent_id,
+            intent_hash="contract-intent-hash",
+            provider="ALPACA",
+            request=request.body,
             now="2026-09-24T20:00:00Z",
-        )
-        dispatcher._append(
-            attempt_id=attempt_id,
-            event_type="SubmissionSending",
-            version=2,
-            payload={
-                "client_order_id": client_order_id,
-                "owner_token": dispatcher.owner_token,
-                "owner_epoch": dispatcher.owner_epoch,
-                "reason": "final_send_barrier_passed",
+            authority_check=lambda _hash, _now: (True, "allowed"),
+            transport_send=lambda _cid, _request, guard: (
+                guard(),
+                ExactJsonTransportResponse(raw),
+            )[1],
+            sender_check=lambda _owner, _epoch: None,
+            submission_scope={
+                "endpoint": request.endpoint,
+                "prepared_request_sha256": request.body_sha256,
+                "capability_snapshot_ids": list(request.capability_snapshot_ids),
+                "instrument_versions": list(request.instrument_versions),
             },
-            now="2026-09-24T20:00:00Z",
         )
-        dispatcher._append(
-            attempt_id=attempt_id,
-            event_type="SubmissionSent",
-            version=3,
-            payload={
-                "client_order_id": client_order_id,
-                "response_text": raw.decode("utf-8"),
-                "response_sha256": "sha256:" + sha256(raw).hexdigest(),
-                "response_encoding": "utf-8-json",
-            },
-            now="2026-09-24T20:00:00Z",
-        )
+        if outcome.status != "SENT":
+            raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
         binding = load_submission_response_binding(
             store,
             environment="PAPER",

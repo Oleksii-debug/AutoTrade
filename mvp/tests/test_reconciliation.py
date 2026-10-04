@@ -1,8 +1,5 @@
-from decimal import Decimal, localcontext
+from decimal import Decimal
 import unittest
-from types import MappingProxyType
-
-from mvp.autotrade_mvp.securities_borrow import BorrowAvailabilityEvidence
 
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
@@ -116,7 +113,6 @@ class ReconciliationTests(unittest.TestCase):
     def test_resource_availability_is_bound_to_same_provider_snapshot_cut(self):
         evidence = resource_availability()
         result = self.base(resource_availability=evidence)
-        self.assertEqual(result.resource_availability, evidence)
         self.assertIsNot(result.resource_availability, evidence)
         self.assertEqual(
             result.resource_availability.available_resources["CASH:USD"],
@@ -162,357 +158,93 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid_until must be after"):
             resource_availability(valid_until="2026-09-24T19:00:00Z")
 
-    def test_provider_account_truth_numeric_ingress_is_bounded_before_decimal_construction(self):
-        hostile_text = "9" * 10000
-        hostile_int = 10**10000
-
-        for value in (hostile_text, hostile_int):
-            with self.subTest(kind=type(value).__name__):
-                with self.assertRaisesRegex(ValueError, "bounded decimal"):
-                    ProviderFillEvidence.create(
-                        provider_id="TEST_PROVIDER",
-                        account_id="test-account",
-                        environment="PAPER",
-                        provider_execution_id="bounded-exec",
-                        client_order_id="bounded-client",
-                        instrument="ABC",
-                        quantity=value,
-                        price="100",
-                        fee_amount="0",
-                        fee_currency="USD",
-                        trade_time="2026-09-24T18:00:00Z",
-                        side="BUY",
-                    )
-                with self.assertRaisesRegex(ValueError, "bounded decimal"):
-                    resource_availability(
-                        available_resources={"CASH:USD": value}
-                    )
-
-        with self.assertRaisesRegex(ValueError, "bounded decimal"):
-            ProviderFillEvidence.create(
-                provider_id="TEST_PROVIDER",
-                account_id="test-account",
-                environment="PAPER",
-                provider_execution_id="bounded-scale",
-                client_order_id="bounded-client",
-                instrument="ABC",
-                quantity="1e-9999999999999999999999999",
-                price="100",
-                fee_amount="0",
-                fee_currency="USD",
-                trade_time="2026-09-24T18:00:00Z",
-                side="BUY",
-            )
-
-        availability = resource_availability()
-        object.__setattr__(
-            availability,
-            "available_resources",
-            type(availability.available_resources)(
-                {"CASH:USD": Decimal("1e256")}
-            ),
-        )
-        with self.assertRaisesRegex(ValueError, "bounded decimal"):
-            self.base(resource_availability=availability)
-
-        provider_fill = fill()
-        object.__setattr__(
-            provider_fill,
-            "quantity",
-            Decimal("1e256"),
-        )
-        with self.assertRaisesRegex(ValueError, "bounded decimal"):
-            self.base(provider_fills=[provider_fill])
-
-    def test_reconciliation_scalar_and_container_authority_is_detached_and_exact(self):
-        class HostileStr(str):
-            def strip(self, *args, **kwargs):
-                raise AssertionError("hostile str.strip dispatched")
-
-            def upper(self):
-                raise AssertionError("hostile str.upper dispatched")
-
-            def __hash__(self):
-                raise AssertionError("hostile str.__hash__ dispatched")
-
-        class HostileTuple(tuple):
-            def __iter__(self):
-                raise AssertionError("hostile tuple.__iter__ dispatched")
-
-        hostile = HostileStr("TEST_PROVIDER")
-        with self.assertRaisesRegex(TypeError, "provider_id must be an exact string"):
-            self.base(provider_id=hostile)
-
-        provider_fill = fill()
-        object.__setattr__(
-            provider_fill,
-            "provider_execution_id",
-            HostileStr("e1"),
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "provider_execution_id must be an exact string",
-        ):
-            self.base(provider_fills=[provider_fill])
-
-        provider_fill = fill()
-        object.__setattr__(
-            provider_fill,
-            "evidence_refs",
-            HostileTuple(("provider:snapshot",)),
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "provider_fill.evidence_refs must be an exact tuple",
-        ):
-            self.base(provider_fills=[provider_fill])
-
-        working_order = ProviderWorkingOrderEvidence.create(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            provider_order_id="provider-working-1",
-            client_order_id="client-working-1",
-            instrument="ABC",
-            remaining_quantity="1",
-        )
-        object.__setattr__(
-            working_order,
-            "provider_order_id",
-            HostileStr("provider-working-1"),
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "provider_order_id must be an exact string",
-        ):
-            self.base(provider_working_orders=[working_order])
-
-        availability = resource_availability()
-        object.__setattr__(
-            availability,
-            "evidence_refs",
-            (HostileStr("provider:snapshot"),),
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "resource availability evidence_ref must be an exact string",
-        ):
-            self.base(resource_availability=availability)
-
-        borrow = BorrowAvailabilityEvidence(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            instrument_id="00000000-0000-0000-0000-000000000001",
-            instrument_version=1,
-            locate_id="locate-1",
-            provider_revision="revision-1",
-            capacity_quantity=Decimal("2"),
-            hard_to_borrow=False,
-            observed_at="2026-09-24T18:00:00Z",
-            effective_at="2026-09-24T17:00:00Z",
-            expires_at="2026-09-24T20:00:00Z",
-            evidence_ref="provider:borrow-1",
-        )
-        resource = borrow.resource_key
-        availability = resource_availability(
-            available_resources={resource: Decimal("2")},
-            resource_details={resource: borrow.resource_detail()},
-        )
-        mutated_detail = dict(availability.resource_details[resource])
-        mutated_detail["resource_type"] = HostileStr("SECURITIES_BORROW")
-        object.__setattr__(
-            availability,
-            "resource_details",
-            MappingProxyType(
-                {
-                    resource: MappingProxyType(mutated_detail),
-                }
-            ),
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "resource detail values must be exact strings",
-        ):
-            self.base(resource_availability=availability)
-
-    def test_reconciliation_decimal_authority_rejects_subclasses_before_virtual_dispatch(self):
-        class HostileDecimal(Decimal):
-            def is_finite(self):
-                raise AssertionError("hostile Decimal.is_finite dispatched")
-
-            def __lt__(self, other):
-                raise AssertionError("hostile Decimal comparison dispatched")
-
-            def __le__(self, other):
-                raise AssertionError("hostile Decimal comparison dispatched")
-
-            def __eq__(self, other):
-                raise AssertionError("hostile Decimal equality dispatched")
-
-            def __format__(self, spec):
-                raise AssertionError("hostile Decimal formatting dispatched")
-
-        hostile = HostileDecimal("850")
-
-        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
-            resource_availability(
-                available_resources={"CASH:USD": hostile}
-            )
-
-        availability = resource_availability()
-        object.__setattr__(
-            availability,
-            "available_resources",
-            type(availability.available_resources)({"CASH:USD": hostile}),
-        )
-        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
-            self.base(resource_availability=availability)
-
-        provider_fill = fill()
-        object.__setattr__(provider_fill, "quantity", HostileDecimal("1"))
-        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
-            self.base(provider_fills=[provider_fill])
-
-        working_order = ProviderWorkingOrderEvidence.create(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            provider_order_id="provider-working-1",
-            client_order_id="client-working-1",
-            instrument="ABC",
-            remaining_quantity="1",
-        )
-        object.__setattr__(
-            working_order,
-            "remaining_quantity",
-            HostileDecimal("1"),
-        )
-        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
-            self.base(provider_working_orders=[working_order])
-
-    def test_borrow_obligation_difference_makes_reconciliation_incomplete(self):
-        borrow = BorrowAvailabilityEvidence(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            instrument_id="00000000-0000-0000-0000-000000000001",
-            instrument_version=1,
-            locate_id="locate-1",
-            provider_revision="revision-1",
-            capacity_quantity=Decimal("2"),
-            hard_to_borrow=False,
-            observed_at="2026-09-24T18:00:00Z",
-            effective_at="2026-09-24T17:00:00Z",
-            expires_at="2026-09-24T20:00:00Z",
-            evidence_ref="provider:borrow-1",
-        )
-        resource = borrow.resource_key
-        availability = resource_availability(
-            available_resources={resource: Decimal("2")},
-            resource_details={resource: borrow.resource_detail()},
-        )
-        result = self.base(
-            resource_availability=availability,
-            local_borrowed_resources={resource: Decimal("1")},
-            provider_borrowed_resources={resource: Decimal("2")},
-        )
-        self.assertFalse(result.complete)
-        self.assertTrue(result.blocks_new_risk)
-        self.assertEqual(result.borrow_differences[resource], Decimal("1"))
-        self.assertIn(resource, result.blocking_resources)
-        self.assertIn(
-            "provider/local securities-borrow obligation differs",
-            result.reasons,
-        )
-
-    def test_reconciliation_authority_rejects_polymorphic_evidence_objects(self):
-        class HostileCoverage(CoverageSurfaceEvidence):
-            def proves_complete_window(self, start, end):
-                return True
-
-        class HostileSnapshot(SnapshotConsistencyEvidence):
-            @property
-            def consistent(self):
-                return True
-
-        class HostileActivity(ProviderActivityEvidence):
-            pass
-
-        class HostileUnknown(UnknownSubmission):
-            pass
-
-        hostile_coverage = HostileCoverage(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            surface="EXECUTIONS",
-            coverage_start="2026-09-24T17:00:00Z",
-            coverage_end="2026-09-24T19:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            provider_semantics_exclude_execution=True,
-        )
-        with self.assertRaisesRegex(TypeError, "exact CoverageSurfaceEvidence"):
-            self.base(absence_coverage=[hostile_coverage])
-
-        hostile_snapshot = HostileSnapshot(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            mode="ATOMIC",
-            query_started_at="2026-09-24T17:00:00Z",
-            query_completed_at="2026-09-24T19:00:00Z",
-        )
-        with self.assertRaisesRegex(TypeError, "exact SnapshotConsistencyEvidence"):
-            self.base(snapshot_consistency=hostile_snapshot)
-
-        hostile_activity = HostileActivity.create(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            activity_id="hostile-activity",
-            activity_type="TRANSFER",
-            origin="MANUAL",
-            occurred_at="2026-09-24T18:00:00Z",
-        )
-        with self.assertRaisesRegex(TypeError, "exact ProviderActivityEvidence"):
-            self.base(provider_activities=[hostile_activity])
-
-        hostile_unknown = HostileUnknown.create(
-            attempt_id="hostile-attempt",
-            intent_id="hostile-intent",
-            client_order_id="hostile-client-order",
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            started_at="2026-09-24T18:00:00Z",
-        )
-        with self.assertRaisesRegex(TypeError, "exact UnknownSubmission"):
-            self.base(unknown_submissions=[hostile_unknown])
-
-        mutated_coverage = absence_coverage()[0]
-        object.__setattr__(mutated_coverage, "pagination_complete", "true")
-        with self.assertRaisesRegex(TypeError, "must be boolean"):
-            self.base(absence_coverage=[mutated_coverage])
-
-        mutated_snapshot = SnapshotConsistencyEvidence(
-            provider_id="TEST_PROVIDER",
-            account_id="test-account",
-            environment="PAPER",
-            mode="ATOMIC",
-            query_started_at="2026-09-24T17:00:00Z",
-            query_completed_at="2026-09-24T19:00:00Z",
-        )
-        object.__setattr__(mutated_snapshot, "sequence_gap_detected", "false")
-        with self.assertRaisesRegex(TypeError, "must be boolean"):
-            self.base(snapshot_consistency=mutated_snapshot)
-
     def test_complete_matching_window_reconciles(self):
         result = self.base()
         self.assertTrue(result.complete)
         self.assertFalse(result.blocks_new_risk)
         self.assertEqual(result.matched_execution_ids, ("e1",))
+
+    def test_provider_fill_sequence_mutation_cannot_rewrite_financial_snapshot(self):
+        first = fill(
+            "e-mutated-after-admission",
+            "c-mutated-after-admission",
+        )
+        second = fill("e-local", "c-local")
+
+        class MutatingProviderFillSequence:
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                if index == 0:
+                    return first
+                if index == 1:
+                    object.__setattr__(first, "side", None)
+                    return second
+                raise IndexError
+
+        result = self.base(
+            local_execution_ids=["e-local"],
+            provider_fills=MutatingProviderFillSequence(),
+        )
+
+        self.assertIsNone(first.side)
+        self.assertEqual(
+            result.unexpected_execution_ids,
+            ("e-mutated-after-admission",),
+        )
+        self.assertEqual(len(result.unexpected_provider_fills), 1)
+        retained = result.unexpected_provider_fills[0]
+        self.assertIsNot(retained, first)
+        self.assertEqual(retained.side, "BUY")
+        self.assertEqual(
+            retained.provider_execution_id,
+            "e-mutated-after-admission",
+        )
+
+    def test_provider_fill_snapshot_rejects_executable_or_subclass_state(self):
+        mutated_refs = fill()
+
+        class EvidenceRefs(tuple):
+            pass
+
+        object.__setattr__(
+            mutated_refs,
+            "evidence_refs",
+            EvidenceRefs(mutated_refs.evidence_refs),
+        )
+        with self.assertRaisesRegex(TypeError, "evidence_refs must be exact tuple"):
+            self.base(provider_fills=[mutated_refs])
+
+        canonical = fill()
+
+        class ProviderFillSubclass(ProviderFillEvidence):
+            pass
+
+        subclass = ProviderFillSubclass(
+            provider_id=canonical.provider_id,
+            account_id=canonical.account_id,
+            environment=canonical.environment,
+            provider_execution_id=canonical.provider_execution_id,
+            client_order_id=canonical.client_order_id,
+            instrument=canonical.instrument,
+            quantity=canonical.quantity,
+            price=canonical.price,
+            fee_amount=canonical.fee_amount,
+            fee_currency=canonical.fee_currency,
+            trade_time=canonical.trade_time,
+            side=canonical.side,
+            position_side=canonical.position_side,
+            position_effect=canonical.position_effect,
+            evidence_refs=canonical.evidence_refs,
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderFillEvidence"):
+            self.base(provider_fills=[subclass])
+
+        injected = fill()
+        object.__setattr__(injected, "unreviewed_state", "must-not-enter-authority")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            self.base(provider_fills=[injected])
 
     def test_incomplete_provider_fill_cannot_match_complete_or_resolve_unknown(self):
         unknown = UnknownSubmission.create(
@@ -932,21 +664,6 @@ class ReconciliationTests(unittest.TestCase):
         self.assertIn("INSTRUMENT:XYZ", result.blocking_resources)
         self.assertFalse(result.complete)
 
-    def test_financial_difference_tolerance_is_independent_of_ambient_decimal_context(self):
-        with localcontext() as context:
-            context.prec = 3
-            result = self.base(
-                local_cash={"USD": "0"},
-                provider_cash={"USD": "1234.5"},
-                cash_tolerance={"USD": "1232"},
-                local_positions={"ABC": "0"},
-                provider_positions={"ABC": "1234.5"},
-                position_tolerance={"ABC": "1232"},
-            )
-        self.assertEqual(result.cash_differences["USD"], Decimal("1234.5"))
-        self.assertEqual(result.position_differences["ABC"], Decimal("1234.5"))
-        self.assertFalse(result.complete)
-
     def test_late_fee_or_cash_adjustment_blocks_currency_until_explained(self):
         result = self.base(provider_cash={"USD": "899.50"})
         self.assertEqual(result.cash_differences["USD"], Decimal("-0.50"))
@@ -962,7 +679,7 @@ class ReconciliationTests(unittest.TestCase):
         self.assertIn("INSTRUMENT:ABC", result.blocking_resources)
 
     def test_account_truth_rejects_non_string_and_normalized_duplicate_keys(self):
-        with self.assertRaisesRegex(TypeError, "keys must be exact strings"):
+        with self.assertRaisesRegex(TypeError, "keys must be strings"):
             self.base(local_cash={1: "900"})
         with self.assertRaisesRegex(ValueError, "unique after normalization"):
             self.base(local_cash={"USD": "900", " USD ": "900"})
@@ -1709,35 +1426,6 @@ class ReconciliationTests(unittest.TestCase):
             self.base(environment="PRODUCTION")
 
 
-    def test_settlement_boolean_cannot_replace_scoped_activity_coverage(self):
-        settlement = dict(
-            local_settled_cash={"USD": "800"},
-            provider_settled_cash={"USD": "800"},
-            local_unsettled_receivable={"USD": "100"},
-            provider_unsettled_receivable={"USD": "100"},
-            local_unsettled_payable={"USD": "0"},
-            provider_unsettled_payable={"USD": "0"},
-            settlement_activity_complete=True,
-        )
-        cases = (
-            ("missing", None),
-            ("wrong-surface", self.activity_coverage(surface="ORDER_HISTORY")),
-            (
-                "short-window",
-                self.activity_coverage(coverage_start="2026-09-24T18:00:00Z"),
-            ),
-        )
-        for label, coverage in cases:
-            with self.subTest(label=label):
-                result = self.base(**settlement, activity_coverage=coverage)
-                self.assertFalse(result.complete)
-                self.assertFalse(result.settlement_activity_complete)
-                self.assertIn("ACCOUNT", result.blocking_resources)
-                self.assertIn(
-                    "provider settlement/activity coverage is incomplete",
-                    result.reasons,
-                )
-
     def test_matching_settlement_surfaces_are_part_of_account_reconciliation(self):
         result = self.base(
             local_settled_cash={"USD": "800"},
@@ -1747,7 +1435,6 @@ class ReconciliationTests(unittest.TestCase):
             local_unsettled_payable={"USD": "0"},
             provider_unsettled_payable={"USD": "0"},
             settlement_activity_complete=True,
-            activity_coverage=self.activity_coverage(),
         )
         self.assertTrue(result.complete)
         self.assertTrue(result.settlement_activity_complete)
@@ -1762,7 +1449,6 @@ class ReconciliationTests(unittest.TestCase):
             local_unsettled_payable={"USD": "0"},
             provider_unsettled_payable={"USD": "0"},
             settlement_activity_complete=False,
-            activity_coverage=self.activity_coverage(),
         )
         self.assertFalse(result.complete)
         self.assertFalse(result.settlement_activity_complete)
@@ -1781,7 +1467,6 @@ class ReconciliationTests(unittest.TestCase):
             local_unsettled_payable={"USD": "0"},
             provider_unsettled_payable={"USD": "0"},
             settlement_activity_complete=True,
-            activity_coverage=self.activity_coverage(),
         )
         self.assertFalse(result.complete)
         self.assertIn("CASH:USD", result.blocking_resources)

@@ -17,11 +17,7 @@ from .authority import (
     InstrumentVersionIdentity,
 )
 from .host_actions import canonical_host_action
-from .persistence import (
-    JournalStore,
-    payload_digest,
-    require_exact_journal_store_authority,
-)
+from .persistence import JournalStore, payload_digest
 from .risk import _canonical_decimal_text
 
 
@@ -134,17 +130,8 @@ def _policy_from_mapping(value: Mapping[str, object]) -> AuthorityPolicy:
     return policy
 
 
-def _journal_authority(journal: object) -> JournalStore:
-    require_exact_journal_store_authority(
-        journal,
-        subject="operator authority JournalStore",
-    )
-    return journal
-
-
 def _events(journal: JournalStore) -> list[dict[str, Any]]:
-    journal = _journal_authority(journal)
-    events = JournalStore.load_events(journal, AUTHORITY_TYPE, AUTHORITY_ID)
+    events = journal.load_events(AUTHORITY_TYPE, AUTHORITY_ID)
     versions = [int(item["aggregate_version"]) for item in events]
     if versions != list(range(1, len(events) + 1)):
         raise OperatorAuthorityConflict("authority event versions are not contiguous")
@@ -208,7 +195,8 @@ def canonical_operator_payload(
 ) -> dict[str, object]:
     """Create the immutable secret-free payload stored with COMMAND_ACCEPTED."""
 
-    journal = _journal_authority(journal)
+    if not isinstance(journal, JournalStore):
+        raise TypeError("journal must be a JournalStore")
     if not isinstance(raw_payload, Mapping):
         raise ValueError("payload must be an object")
     action_name = canonical_host_action(action)
@@ -861,7 +849,6 @@ def execute_operator_authority_action(
 ) -> AuthorityExecutionResult:
     """Execute or idempotently resume one accepted authority action."""
 
-    journal = _journal_authority(journal)
     action_name = canonical_host_action(action)
     accepted = _text(accepted_at, "accepted_at")
     payload = validate_persisted_payload(
@@ -1098,7 +1085,6 @@ def observed_authority_operation_effects(
 ) -> AuthorityExecutionResult:
     """Return only durable authority effects attributable to this accepted action."""
 
-    journal = _journal_authority(journal)
     action_name = canonical_host_action(action)
     accepted = _text(accepted_at, "accepted_at")
     payload = validate_persisted_payload(
@@ -1197,7 +1183,6 @@ def validate_authority_success_evidence(
 ) -> None:
     """Verify terminal success from canonical authority events, read-only."""
 
-    journal = _journal_authority(journal)
     action_name = canonical_host_action(action)
     payload = validate_persisted_payload(
         action_name,

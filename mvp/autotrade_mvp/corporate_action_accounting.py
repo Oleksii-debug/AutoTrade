@@ -31,14 +31,13 @@ from .corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
-from .exact_decimal import (
-    ExactDecimalError,
-    canonical_decimal_text,
-    exact_add,
-    exact_subtract,
-    exact_sum,
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
 
@@ -51,56 +50,16 @@ def _identity(kind: str, *parts: str) -> str:
     ).hexdigest()
 
 
-def _provider_scope_parts(
-    accepted: AuthoritativeCorporateAction,
-) -> tuple[str, ...]:
-    parts = [
-        accepted.provider_id,
-        accepted.account_id,
-        accepted.environment,
-    ]
-    if accepted.provider_environment != accepted.environment:
-        parts.append(accepted.provider_environment)
-    return tuple(parts)
-
-
-def _order_key(
-    accepted: AuthoritativeCorporateAction,
-    external_event_id: str,
-) -> str:
-    if accepted.provider_environment == accepted.environment:
-        return _identity("corporate-action-order", external_event_id)
-    return _identity(
-        "corporate-action-order",
-        *_provider_scope_parts(accepted),
-        external_event_id,
-    )
-
-
-def _cause_id(
-    accepted: AuthoritativeCorporateAction,
-    suffix: str,
-) -> str:
-    if accepted.provider_environment == accepted.environment:
-        return _identity(
-            "corporate-action-cause",
-            accepted.external_event_id,
-            accepted.provenance_digest,
-            suffix,
-        )
-    return _identity(
-        "corporate-action-cause",
-        *_provider_scope_parts(accepted),
-        accepted.external_event_id,
-        accepted.provenance_digest,
-        suffix,
-    )
+def _order_key(external_event_id: str) -> str:
+    return _identity("corporate-action-order", external_event_id)
 
 
 def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
     return _identity(
         "corporate-action-transaction",
-        *_provider_scope_parts(accepted),
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
         accepted.external_event_id,
         accepted.provenance_digest,
         suffix,
@@ -212,15 +171,10 @@ def _canonical_entitlement_position_proof(
                 "canonical position history contains invalid entitlement timestamps"
             ) from error
         if effective <= event.effective_at and observed <= observed_cut:
-            try:
-                position_delta = exact_sum(
-                    posting.signed_amount for posting in position_postings
-                )
-                quantity = exact_add(quantity, position_delta)
-            except ExactDecimalError as error:
-                raise AccountingConflict(
-                    "canonical entitlement position exceeds exact resource envelope"
-                ) from error
+            quantity += sum(
+                (posting.signed_amount for posting in position_postings),
+                Decimal("0"),
+            )
             contributors.append(
                 {
                     "transaction_id": transaction.transaction_id,
@@ -246,7 +200,7 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": canonical_decimal_text(quantity),
+        "quantity": str(quantity),
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)
@@ -312,25 +266,21 @@ def _dividend_transaction(
     economic_effective_at: str | None = None,
     observed_at: str | None = None,
 ) -> JournalTransaction | None:
-    try:
-        amount = exact_subtract(
-            transition.after.unsettled_cash,
-            transition.before.unsettled_cash,
-        )
-        offset = exact_subtract(Decimal("0"), amount)
-    except ExactDecimalError as error:
-        raise AccountingConflict(
-            "corporate-action dividend economics exceed exact resource envelope"
-        ) from error
+    amount = transition.after.unsettled_cash - transition.before.unsettled_cash
     if amount == 0:
         return None
     currency = transition.after.currency
     transaction = JournalTransaction(
         transaction_id=_transaction_id(accepted, "effect"),
-        cause_event_id=_cause_id(accepted, "effect"),
+        cause_event_id=_identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            "effect",
+        ),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
-            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, offset),
+            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
         ),
         economic_effective_at=(
             economic_effective_at
@@ -373,7 +323,7 @@ def _correction_transactions(
     target_id = accepted.corrects_external_event_id
     if target_id is None:
         raise AssertionError("correction target is required")
-    order_key = _order_key(accepted, target_id)
+    order_key = _order_key(target_id)
     expected_reversal_id = _transaction_id(accepted, "reversal")
     expected_replacement_id = _transaction_id(accepted, "effect")
 
@@ -451,7 +401,12 @@ def _correction_transactions(
     reversal = reverse_transaction(
         original,
         transaction_id=expected_reversal_id,
-        cause_event_id=_cause_id(accepted, "reversal"),
+        cause_event_id=_identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            "reversal",
+        ),
         observed_at=accepted.observed_at,
     )
     replacement = _dividend_transaction(
@@ -485,7 +440,7 @@ def _economic_transactions(
             exact_retry=exact_retry,
         )
 
-    order_key = _order_key(accepted, accepted.external_event_id)
+    order_key = _order_key(accepted.external_event_id)
     transaction = _dividend_transaction(
         accepted,
         transition,
@@ -522,35 +477,40 @@ def commit_authoritative_corporate_action(
     qualified host clock/scheduler boundary.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(evidence_store, DurableCorporateActionEvidenceStore):
+    store_identity = require_exact_journal_store_authority(
+        store,
+        subject="corporate-action financial JournalStore",
+    )
+    if type(evidence_store) is not DurableCorporateActionEvidenceStore:
         raise TypeError(
-            "evidence_store must be DurableCorporateActionEvidenceStore"
+            "evidence_store must be exact DurableCorporateActionEvidenceStore"
         )
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(corporate_book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
-    if not isinstance(accepted, AuthoritativeCorporateAction):
+    if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError(
-            "accepted must be AuthoritativeCorporateAction from sealed provider evidence"
+            "economic_book must be exact DurableProviderEconomicBook"
         )
-    if evidence_store.store is not store or economic_book.store is not store:
+    if type(corporate_book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be exact CorporateActionBook")
+    if type(accepted) is not AuthoritativeCorporateAction:
+        raise TypeError(
+            "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"
+        )
+    (
+        evidence_journal,
+        _,
+        evidence_provider_id,
+        evidence_account_id,
+        evidence_environment,
+        _,
+    ) = DurableCorporateActionEvidenceStore._composition(evidence_store)
+    if evidence_journal is not store or economic_book.store is not store:
         raise ValueError(
             "corporate-action evidence and economics must share one JournalStore"
         )
     if (
-        evidence_store.provider_id != economic_book.provider_id
-        or evidence_store.account_id != economic_book.account_id
-        or evidence_store.environment != economic_book.environment
-        or evidence_store.provider_environment
-        != economic_book.provider_environment
-        or accepted.provider_id != economic_book.provider_id
-        or accepted.account_id != economic_book.account_id
-        or accepted.environment != economic_book.environment
-        or accepted.provider_environment
-        != economic_book.provider_environment
+        evidence_provider_id != economic_book.provider_id
+        or evidence_account_id != economic_book.account_id
+        or evidence_environment != economic_book.environment
     ):
         raise ValueError("corporate-action durable authorities have different scope")
 
@@ -573,7 +533,10 @@ def commit_authoritative_corporate_action(
     if activation_cut is None or activation_cut < effective_at:
         # Admission and activation are deliberately separate.  This preserves
         # causal provider truth without making a future-effective posting visible.
-        retained = evidence_store.record(accepted)
+        retained = DurableCorporateActionEvidenceStore.record(
+            evidence_store,
+            accepted,
+        )
         return CorporateActionFinancialResult(
             inserted=retained.inserted,
             source_event_id=retained.event_id,
@@ -584,7 +547,10 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
-    evidence_plan = evidence_store.prepare_record_mutation(accepted)
+    evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        evidence_store,
+        accepted,
+    )
     candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
 
@@ -626,7 +592,8 @@ def commit_authoritative_corporate_action(
 
     # Fresh economic authority must be derived from one durable global journal
     # cut and CAS that exact cut at commit.
-    source_journal_sequence = store.current_journal_sequence()
+    with journal_store_authority_scope(store, store_identity):
+        source_journal_sequence = JournalStore.current_journal_sequence(store)
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
@@ -637,7 +604,10 @@ def commit_authoritative_corporate_action(
 
     # Re-prepare after the captured cut so every mutable plan is derived from
     # the same attempted journal state.  Any later advance is rejected by CAS.
-    evidence_plan = evidence_store.prepare_record_mutation(accepted)
+    evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
+        evidence_store,
+        accepted,
+    )
     candidate, transition = _candidate_book(corporate_book, accepted)
     transactions = _economic_transactions(
         economic_book,
@@ -730,7 +700,9 @@ def commit_authoritative_corporate_action(
             "https://commands.autotrade.local/corporate-action-financial/"
             + canonical_json(
                 [
-                    *_provider_scope_parts(accepted),
+                    accepted.provider_id,
+                    accepted.account_id,
+                    accepted.environment,
                     accepted.external_event_id,
                     accepted.provenance_digest,
                 ]
@@ -739,25 +711,29 @@ def commit_authoritative_corporate_action(
     )
     idempotency_key = _identity(
         "corporate-action-financial",
-        *_provider_scope_parts(accepted),
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
         accepted.external_event_id,
         accepted.provenance_digest,
     )
     try:
-        _, inserted, _ = store.commit_command(
-            command_id=command_id,
-            actor="corporate-action-financial-integration",
-            environment=accepted.environment,
-            idempotency_key=idempotency_key,
-            request=request,
-            result=result,
-            state_version=max(
-                evidence_plan.aggregate_version,
-                0 if economic_plan is None else economic_plan.aggregate_version,
-            ),
-            events=events,
-            expected_journal_sequence=source_journal_sequence,
-        )
+        with journal_store_authority_scope(store, store_identity):
+            _, inserted, _ = JournalStore.commit_command(
+                store,
+                command_id=command_id,
+                actor="corporate-action-financial-integration",
+                environment=accepted.environment,
+                idempotency_key=idempotency_key,
+                request=request,
+                result=result,
+                state_version=max(
+                    evidence_plan.aggregate_version,
+                    0 if economic_plan is None else economic_plan.aggregate_version,
+                ),
+                events=events,
+                expected_journal_sequence=source_journal_sequence,
+            )
     except Exception:
         economic_book.refresh()
         raise

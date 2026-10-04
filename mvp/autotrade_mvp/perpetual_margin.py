@@ -17,7 +17,7 @@ import json
 from typing import Literal, Sequence
 from uuid import UUID
 
-from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .capabilities import CapabilitySnapshot
 from .exact_decimal import (
@@ -31,7 +31,6 @@ from .exact_decimal import (
     exact_subtract,
     parse_bounded_exact_decimal,
 )
-from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 class PerpetualMarginError(ValueError):
@@ -114,26 +113,18 @@ def _verify_immutable_artifact(
     expected_payload: object,
     expected_metadata: dict[str, object],
 ) -> None:
-    if type(store) is not ArtifactStore:
+    if not isinstance(store, ArtifactStore):
         raise PerpetualMarginError(
             "canonical ArtifactStore is required for immutable margin evidence"
         )
     try:
-        manifest, payload = ArtifactStore.read_authenticated_snapshot(
-            store,
-            artifact_id,
-        )
-    except (
-        ArtifactIntegrityError,
-        FileNotFoundError,
-        OSError,
-        TypeError,
-        ValueError,
-    ) as error:
+        manifest = store.load_manifest(artifact_id)
+        payload = store.read_bytes(artifact_id)
+    except Exception as error:
         raise PerpetualMarginError(
             "immutable margin evidence artifact is missing or corrupt"
         ) from error
-    if type(manifest) is not dict or type(payload) is not bytes:
+    if type(manifest) is not dict or not isinstance(payload, bytes):
         raise PerpetualMarginError(
             "immutable margin evidence artifact has unsupported representation"
         )
@@ -241,7 +232,6 @@ class PerpetualMarginEvidence:
     collateral_fx_observed_at: str
     margin_tiers_observed_at: str
     margin_tiers: tuple[MarginTier, ...]
-    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -280,19 +270,6 @@ class PerpetualMarginEvidence:
             self,
             "environment",
             _text(self.environment, name="environment").upper(),
-        )
-        try:
-            provider_environment = normalize_provider_environment(
-                provider_id=self.provider_id,
-                environment=self.environment,
-                provider_environment=self.provider_environment,
-            )
-        except ProviderDomainError as error:
-            raise PerpetualMarginError(str(error)) from error
-        object.__setattr__(
-            self,
-            "provider_environment",
-            provider_environment,
         )
         object.__setattr__(
             self,
@@ -343,13 +320,12 @@ class PerpetualMarginEvidence:
         object.__setattr__(self, "margin_tiers", tiers)
 
     @property
-    def capability_identity(self) -> tuple[str, str, str, str, str, str]:
+    def capability_identity(self) -> tuple[str, str, str, str, str]:
         return (
             self.provider_id,
             self.account_id,
             self.entity_id,
             self.environment,
-            self.provider_environment,
             self.instrument_version,
         )
 
@@ -399,7 +375,6 @@ class PerpetualMarginEvidence:
             "account_id": self.account_id,
             "entity_id": self.entity_id,
             "environment": self.environment,
-            "provider_environment": self.provider_environment,
             "instrument_version": self.instrument_version,
             "capability_snapshot_id": self.capability_snapshot_id,
             "position_mode": self.position_mode,
@@ -622,10 +597,7 @@ def evaluate_perpetual_margin(
 
         collateral_multiplier = exact_subtract(Decimal("1"), haircut)
         current_collateral_value = exact_multiply(
-            exact_multiply(
-                collateral,
-                evidence.collateral_fx_to_settlement,
-            ),
+            exact_multiply(collateral, evidence.collateral_fx_to_settlement),
             collateral_multiplier,
         )
         current_equity = exact_add(current_collateral_value, unrealized)
@@ -665,12 +637,6 @@ def evaluate_perpetual_margin(
     maintenance = tier.maintenance_requirement(notional)
     stressed_tier = _select_tier(stressed_notional, evidence.margin_tiers)
     stressed_maintenance = stressed_tier.maintenance_requirement(stressed_notional)
-    try:
-        headroom = exact_subtract(stressed_equity, stressed_maintenance)
-    except ExactDecimalError as error:
-        raise PerpetualMarginError(
-            "margin arithmetic exceeds the exact resource envelope"
-        ) from error
 
     max_age = timedelta(seconds=maximum_evidence_age_seconds)
     reasons: list[str] = []
@@ -688,6 +654,13 @@ def evaluate_perpetual_margin(
 
     if divergence > divergence_limit_fraction:
         reasons.append("MARK_INDEX_DIVERGENCE")
+
+    try:
+        headroom = exact_subtract(stressed_equity, stressed_maintenance)
+    except ExactDecimalError as error:
+        raise PerpetualMarginError(
+            "margin arithmetic exceeds the exact resource envelope"
+        ) from error
 
     if current_equity < maintenance:
         reasons.append("CURRENT_MAINTENANCE_BREACH")

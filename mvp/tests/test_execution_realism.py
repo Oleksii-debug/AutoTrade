@@ -122,6 +122,37 @@ class ExecutionRealismTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
             simulate_execution(exact_order, exact_observation, derived_model)
 
+    def test_simulation_revalidates_exact_objects_after_frozen_mutation(self):
+        exact_observation = top()
+        exact_model = model()
+
+        mutated_order = order()
+        object.__setattr__(mutated_order, "quantity", Decimal("-1"))
+        with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):
+            simulate_execution(mutated_order, exact_observation, exact_model)
+
+        mutated_observation = top()
+        object.__setattr__(
+            mutated_observation,
+            "available_at",
+            "2026-09-24T09:59:59Z",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "available_at cannot precede market_time",
+        ):
+            simulate_execution(order(), mutated_observation, exact_model)
+
+        mutated_model = model()
+        object.__setattr__(mutated_model, "latency_ms", -1)
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            simulate_execution(order(), exact_observation, mutated_model)
+
+        injected_order = order()
+        object.__setattr__(injected_order, "shadow_authority", "forged")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            simulate_execution(injected_order, exact_observation, exact_model)
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

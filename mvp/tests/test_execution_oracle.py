@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.execution_oracle import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionRealismError,
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
@@ -117,6 +118,88 @@ class ExecutionOracleTests(unittest.TestCase):
                 observation=exact_observation,
                 model=exact_model,
                 result=derived_result,
+            )
+
+    def test_oracle_revalidates_exact_objects_after_frozen_mutation(self):
+        class HostileDecimal(Decimal):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile Decimal comparison executed")
+
+            def __gt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile Decimal comparison executed")
+
+        class HostileText(str):
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                raise AssertionError("hostile text equality executed")
+
+        o, q, m = order(), observation(), model()
+        mutated_result = simulate_execution(o, q, m)
+        object.__setattr__(
+            mutated_result,
+            "filled_quantity",
+            HostileDecimal("1"),
+        )
+        with self.assertRaisesRegex(TypeError, "filled_quantity must be exact Decimal"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=mutated_result,
+            )
+        self.assertEqual(HostileDecimal.compare_calls, 0)
+
+        mutated_text_result = simulate_execution(o, q, m)
+        object.__setattr__(
+            mutated_text_result,
+            "model_fingerprint",
+            HostileText(mutated_text_result.model_fingerprint),
+        )
+        with self.assertRaisesRegex(TypeError, "model_fingerprint must be exact text"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=mutated_text_result,
+            )
+        self.assertEqual(HostileText.equality_calls, 0)
+
+        injected_result = simulate_execution(o, q, m)
+        object.__setattr__(injected_result, "shadow_authority", "forged")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=injected_result,
+            )
+
+        mutated_order = order()
+        object.__setattr__(mutated_order, "quantity", Decimal("-1"))
+        with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):
+            assert_conservative_execution(
+                order=mutated_order,
+                observation=q,
+                model=m,
+                result=simulate_execution(o, q, m),
+            )
+
+    def test_oracle_rejects_forged_arrival_evidence(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, arrival_at="2026-09-24T10:00:00Z")
+        with self.assertRaisesRegex(ExecutionOracleError, "independently derived arrival"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
             )
 
     def test_existing_conservative_market_fill_passes_independent_oracle(self):

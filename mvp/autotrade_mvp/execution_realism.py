@@ -8,7 +8,7 @@ exact Decimal-compatible values; binary floats are rejected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from hashlib import sha256
@@ -515,6 +515,23 @@ class SimulatedExecution:
         return self.scenario == "OPTIMISTIC"
 
 
+def _detached_dataclass_input(value, expected_type, *, name: str):
+    """Take one held canonical snapshot of a caller-owned execution DTO."""
+
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise TypeError(f"{name} must expose canonical dataclass state")
+    snapshot = dict(state)
+    expected_fields = tuple(field.name for field in fields(expected_type))
+    if set(snapshot) != set(expected_fields):
+        raise TypeError(f"{name} has unexpected state fields")
+    return expected_type(
+        **{field_name: snapshot[field_name] for field_name in expected_fields}
+    )
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
     lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
     return lots * lot_size
@@ -617,12 +634,13 @@ def simulate_execution(
     that same or earlier liquidity by default.
     """
 
-    if type(order) is not SimulatedOrder:
-        raise TypeError("order must be exact SimulatedOrder")
-    if type(observation) is not LiquidityObservation:
-        raise TypeError("observation must be exact LiquidityObservation")
-    if type(model) is not ExecutionModel:
-        raise TypeError("model must be exact ExecutionModel")
+    order = _detached_dataclass_input(order, SimulatedOrder, name="order")
+    observation = _detached_dataclass_input(
+        observation,
+        LiquidityObservation,
+        name="observation",
+    )
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
     if observation.instrument_version != order.instrument_version:
         raise ExecutionRealismError(
             "liquidity instrument_version must exactly match order instrument_version"

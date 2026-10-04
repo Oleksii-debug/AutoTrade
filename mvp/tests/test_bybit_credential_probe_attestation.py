@@ -98,9 +98,22 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 api_key_echo_confirmed=True,
             )
 
-    def test_wire_boundary_attests_success_after_exact_provider_echo(self):
+    def test_injected_wire_client_cannot_mint_success_attestation(self):
         client = _FakeWireClient(
             b'{"retCode":0,"retMsg":"OK","result":{"apiKey":"probe-key","secret":""}}'
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "direct production transport"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=_headers(),
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertEqual(len(client.requests), 1)
+
+    def test_injected_wire_client_can_exercise_nonattested_rejection_path(self):
+        client = _FakeWireClient(
+            b'{"retCode":10003,"retMsg":"API key is invalid"}'
         )
         result = execute_bybit_credential_probe_wire_query(
             source_uri="https://api.bybit.com/v5/user/query-api",
@@ -109,9 +122,8 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
             wire_client=client,
         )
         self.assertEqual(len(client.requests), 1)
-        self.assertEqual(result.ret_code, 0)
-        self.assertTrue(result.api_key_echo_confirmed)
-        self.assertNotIn("probe-key", repr(result))
+        self.assertEqual(result.ret_code, 10003)
+        self.assertFalse(result.api_key_echo_confirmed)
 
     def test_wire_boundary_rejects_success_for_different_api_key(self):
         client = _FakeWireClient(

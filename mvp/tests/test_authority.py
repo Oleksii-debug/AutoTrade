@@ -416,6 +416,158 @@ class AuthorityTests(unittest.TestCase):
                 self.assertEqual(result.outcome, "REJECTED")
                 self.assertEqual(result.reason, "confirmation_scope_mismatch")
 
+    def test_public_financial_admission_requires_bound_confirmation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_confirmation(
+                confirmation_id="legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            result = authority.admit(
+                command_id="cmd-legacy-confirmation",
+                idempotency_key="idem-legacy-confirmation",
+                admission_id="admission-legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_id="intent-legacy-confirmation",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-legacy-confirmation",
+                confirmation_id="legacy-confirmation",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(result.outcome, "REJECTED")
+            self.assertEqual(
+                result.reason,
+                "confirmation_financial_binding_missing",
+            )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+    def test_financial_confirmation_invalidates_material_envelope_changes(self):
+        variants = (
+            (
+                "quantity",
+                public_risk_intent().replace(quantity=Decimal("2"))
+                if hasattr(public_risk_intent(), "replace")
+                else RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="2",
+                    price="100",
+                    expected_state_version=7,
+                ),
+                public_risk_policy(),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "price",
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="101",
+                    expected_state_version=7,
+                ),
+                public_risk_policy(),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "risk-policy",
+                public_risk_intent(),
+                public_risk_policy(max_single_notional="900"),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "reservation",
+                public_risk_intent(),
+                public_risk_policy(),
+                {"CASH:USD": "110"},
+            ),
+        )
+        for label, changed_intent, changed_policy, changed_requirements in variants:
+            with self.subTest(label=label), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority = authority_service(
+                    store,
+                    risk_policy=changed_policy,
+                )
+                item = policy(environments={"SIMULATION"})
+                authority.register_policy(item)
+                authority.add_financial_confirmation(
+                    confirmation_id=f"bound-{label}",
+                    policy_id=item.policy_id,
+                    intent_hash=PUBLIC_INTENT_HASH,
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    expires_at="2026-09-24T23:00:00Z",
+                    risk_intent=public_risk_intent(),
+                    risk_policy=public_risk_policy(),
+                    reservation_requirements={"CASH:USD": "100"},
+                )
+                reservations = DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                )
+                result = authority.admit(
+                    command_id=f"cmd-bound-{label}",
+                    idempotency_key=f"idem-bound-{label}",
+                    admission_id=f"admission-bound-{label}",
+                    policy_id=item.policy_id,
+                    intent_id=f"intent-bound-{label}",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_book=reservations,
+                    reservation_id=f"reservation-bound-{label}",
+                    confirmation_id=f"bound-{label}",
+                    **public_financial_kwargs(
+                        store,
+                        risk_intent=changed_intent,
+                        risk_policy=changed_policy,
+                        reservation_requirements=changed_requirements,
+                    ),
+                )
+                self.assertEqual(result.outcome, "REJECTED")
+                self.assertEqual(
+                    result.reason,
+                    "confirmation_financial_binding_mismatch",
+                )
+                self.assertEqual(
+                    reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
+
     def test_symbol_alias_is_not_an_authority_identity(self):
         with self.assertRaisesRegex(TypeError, "instrument"):
             policy(instruments={"ABC"})
@@ -1596,7 +1748,7 @@ class AuthorityTests(unittest.TestCase):
             item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
             confirmation_id = "confirm-transaction-a-fault"
-            authority.add_confirmation(
+            authority.add_financial_confirmation(
                 confirmation_id=confirmation_id,
                 policy_id=item.policy_id,
                 intent_hash=PUBLIC_INTENT_HASH,
@@ -1607,6 +1759,9 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="100",
                 expires_at="2026-09-24T23:00:00Z",
+                risk_intent=public_risk_intent(),
+                risk_policy=public_risk_policy(),
+                reservation_requirements={"CASH:USD": "100"},
             )
             reservations = DurableReservationBook(
                 store,

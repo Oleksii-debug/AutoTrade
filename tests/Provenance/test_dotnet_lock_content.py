@@ -424,7 +424,7 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 }
             }
             (project.parent / 'packages.lock.json').write_text(json.dumps(payload), encoding='utf-8')
-            with self.assertRaisesRegex(ValueError, 'invalid NuGet content hash'):
+            with self.assertRaisesRegex(ValueError, 'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID'):
                 dotnet_locked_dependency_graph(root, [project])
 
     def test_missing_package_version_fails_closed(self):

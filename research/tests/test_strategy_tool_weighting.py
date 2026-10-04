@@ -849,5 +849,36 @@ class StrategyToolWeightingTests(unittest.TestCase):
         )
 
 
+    def test_mutated_coverage_mapping_is_rejected_before_callbacks(self):
+        p = policy()
+        strategy = p.registered_strategies[0]
+        protocol = coverage_protocol(strategy)
+        assessment = coverage_assessment(protocol)
+        touched = {"count": 0}
+
+        class HostileDict(dict):
+            def items(self):
+                touched["count"] += 1
+                raise AssertionError("hostile mapping executed")
+
+        object.__setattr__(
+            assessment,
+            "cell_statuses",
+            HostileDict({"crypto::bull": "PASS"}),
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "cell_statuses must remain an exact",
+        ):
+            evidence(
+                strategy,
+                "bull",
+                "0.03",
+                protocol=protocol,
+                assessment=assessment,
+            )
+        self.assertEqual(touched["count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

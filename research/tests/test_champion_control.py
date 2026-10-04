@@ -204,6 +204,11 @@ def approval(
     record_trial=True,
 ):
     registered = science.register_protocol(protocol())
+    identity = holdout_identity(candidate)
+    science.preregister_locked_holdout(
+        registered.protocol_id,
+        holdout_identity=identity,
+    )
     valid_until = BASE + timedelta(days=valid_days)
     if record_trial:
         science.record_trial(
@@ -231,7 +236,6 @@ def approval(
         "trial_budget": trial_state["trial_budget"],
         "trial_log_hash": trial_state["trial_log_hash"],
     }
-    identity = holdout_identity(candidate)
     if contaminate:
         science.record_holdout_access(
             registered.protocol_id,
@@ -375,6 +379,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(protocol())
             original_candidate = "candidate-original"
             promoted_candidate = "candidate-forged"
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-forged-trial-binding"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -499,6 +507,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-early-stop"
             artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-early-stop"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -549,6 +561,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-legacy-early-stop"
             artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-legacy-early-stop"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -624,6 +640,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-log-bound"
             artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-log-bound"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -973,6 +993,10 @@ class ChampionRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-a"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

@@ -535,11 +535,25 @@ def _read_runtime_regular_file(
     return bytes(chunks)
 
 
-def _load_or_create_authority_key(root: str | Path) -> bytes:
-    """Load product-owned signing state without trusting caller key material."""
+def _canonical_key_identity(value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint authority key identity is invalid"
+        )
+    return value
+
+
+def _issue_autonomous_runtime_authority_key(root: str | Path) -> str:
+    """Issue new product-owned signing state; pre-existing state is rejected."""
 
     path = _authority_key_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    key = os.urandom(32)
 
     if os.name == "nt":
         from autotrade_foundation.windows_namespace import (
@@ -554,104 +568,94 @@ def _load_or_create_authority_key(root: str | Path) -> bytes:
                     authority,
                     lock_name=".autonomous-runtime-authority.lock",
                 ):
-                    try:
-                        key = _read_runtime_regular_file(
-                            path,
-                            subject="runtime checkpoint authority key",
-                            maximum_bytes=32,
-                        )
-                    except AutonomousRuntimeCheckpointError:
-                        generated = os.urandom(32)
-                        try:
-                            publish_windows_regular_bytes(
-                                authority,
-                                target_name=path.name,
-                                data=generated,
-                                replace=False,
-                            )
-                        except FileExistsError:
-                            pass
-                        key = _read_runtime_regular_file(
-                            path,
-                            subject="runtime checkpoint authority key",
-                            maximum_bytes=32,
-                        )
+                    publish_windows_regular_bytes(
+                        authority,
+                        target_name=path.name,
+                        data=key,
+                        replace=False,
+                    )
+        except FileExistsError as error:
+            raise AutonomousRuntimeCheckpointError(
+                "runtime checkpoint authority key pre-exists an unowned session"
+            ) from error
         except (OSError, RuntimeError) as error:
             raise AutonomousRuntimeCheckpointError(
-                "runtime checkpoint authority key could not be established"
+                "runtime checkpoint authority key could not be issued"
             ) from error
-        if len(key) != 32:
-            raise AutonomousRuntimeCheckpointError(
-                "runtime checkpoint authority key has invalid length"
-            )
-        return key
+        return sha256(key).hexdigest()
 
-    flags = os.O_RDONLY
+    create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
+        create_flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if not path.exists():
-        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_CLOEXEC"):
-            create_flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            create_flags |= os.O_NOFOLLOW
-        descriptor = None
-        try:
-            descriptor = os.open(path, create_flags, 0o600)
-            key = os.urandom(32)
-            view = memoryview(key)
-            written = 0
-            while written < len(view):
-                count = os.write(descriptor, view[written:])
-                if count <= 0:
-                    raise OSError("runtime authority key write made no progress")
-                written += count
-            os.fsync(descriptor)
-        except FileExistsError:
-            pass
-        except OSError as error:
-            raise AutonomousRuntimeCheckpointError(
-                "runtime checkpoint authority key could not be created"
-            ) from error
-        finally:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-        try:
-            directory_fd = os.open(
-                path.parent,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            )
-        except OSError:
-            directory_fd = None
-        if directory_fd is not None:
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-
+        create_flags |= os.O_NOFOLLOW
+    descriptor = None
     try:
-        observed = os.lstat(path)
+        descriptor = os.open(path, create_flags, 0o600)
+        view = memoryview(key)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("runtime authority key write made no progress")
+            written += count
+        os.fsync(descriptor)
+    except FileExistsError as error:
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint authority key pre-exists an unowned session"
+        ) from error
     except OSError as error:
         raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint authority key is unavailable"
+            "runtime checkpoint authority key could not be issued"
         ) from error
-    if (
-        stat.S_ISLNK(observed.st_mode)
-        or not stat.S_ISREG(observed.st_mode)
-        or int(observed.st_nlink) != 1
-    ):
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint authority key must have one ordinary pathname"
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    try:
+        directory_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
         )
-    if stat.S_IMODE(observed.st_mode) & 0o077:
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint authority key permissions are too broad"
-        )
+    except OSError:
+        directory_fd = None
+    if directory_fd is not None:
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return sha256(key).hexdigest()
+
+
+def _require_autonomous_runtime_authority_key(
+    root: str | Path,
+    expected_identity: object,
+) -> bytes:
+    expected = _canonical_key_identity(expected_identity)
+    path = _authority_key_path(root)
+
+    if os.name != "nt":
+        try:
+            observed = os.lstat(path)
+        except OSError as error:
+            raise AutonomousRuntimeCheckpointError(
+                "runtime checkpoint authority key is unavailable"
+            ) from error
+        if (
+            stat.S_ISLNK(observed.st_mode)
+            or not stat.S_ISREG(observed.st_mode)
+            or int(observed.st_nlink) != 1
+        ):
+            raise AutonomousRuntimeCheckpointError(
+                "runtime checkpoint authority key must have one ordinary pathname"
+            )
+        if stat.S_IMODE(observed.st_mode) & 0o077:
+            raise AutonomousRuntimeCheckpointError(
+                "runtime checkpoint authority key permissions are too broad"
+            )
+
     key = _read_runtime_regular_file(
         path,
         subject="runtime checkpoint authority key",
@@ -661,7 +665,12 @@ def _load_or_create_authority_key(root: str | Path) -> bytes:
         raise AutonomousRuntimeCheckpointError(
             "runtime checkpoint authority key has invalid length"
         )
+    if not hmac.compare_digest(sha256(key).hexdigest(), expected):
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint authority key does not match durable session authority"
+        )
     return key
+
 
 def _verifier(authority_id: str, key: bytes) -> RuntimeStateVerifier:
     if type(key) is not bytes or len(key) != 32:
@@ -699,8 +708,10 @@ def _authority(
     replay: CausalReplay,
 ) -> tuple[RuntimeStateAuthority, RuntimeStateVerifier]:
     run_id, _build_sha, protocol_digest = _protocol_identity(protocol)
-    key = _load_or_create_authority_key(root)
-    key_identity = sha256(key).hexdigest()
+    key_identity = _canonical_key_identity(
+        protocol.get("runtime_authority_key_sha256")
+    )
+    key = _require_autonomous_runtime_authority_key(root, key_identity)
     authority_id = (
         f"{_AUTHORITY_PREFIX}:{run_id}:{protocol_digest}:key-sha256:{key_identity}"
     )

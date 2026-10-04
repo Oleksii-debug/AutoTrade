@@ -177,6 +177,17 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
                 payload=self._payload(transaction_time="01672128000000")
             )
 
+    def test_unvalidated_semantic_query_filters_fail_closed(self):
+        for filter_name, value in (
+            ("baseCoin", "BTC"),
+            ("transSubType", "movePosition"),
+        ):
+            with self.subTest(filter_name=filter_name), self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                f"filter {filter_name} is not supported",
+            ):
+                self._parse(query=self._query(**{filter_name: value}))
+
     def test_qualified_currency_scope_mismatch_fails_closed(self):
         with self.assertRaisesRegex(
             ProviderFundingIncomeError,
@@ -302,6 +313,21 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             "duplicated",
         ):
             self._parse(payload=self._payload(duplicate=True))
+
+    def test_duplicate_id_hidden_by_empty_funding_row_fails_closed(self):
+        payload = self._payload(include_trade=False)
+        funded = payload["result"]["list"][0]
+        empty = dict(funded)
+        empty["funding"] = ""
+        empty["fee"] = "0"
+        empty["cashFlow"] = "0"
+        empty["change"] = "0"
+        payload["result"]["list"] = [empty, funded]
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "duplicated",
+        ):
+            self._parse(payload=payload)
 
     def test_funding_row_before_qualified_start_time_fails_closed(self):
         with self.assertRaisesRegex(

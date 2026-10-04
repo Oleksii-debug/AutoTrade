@@ -291,6 +291,50 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 1)
         self.assertEqual(result.ret_code, 10003)
         self.assertFalse(result.api_key_echo_confirmed)
+        self.assertFalse(result.provider_transport_confirmed)
+
+    def test_transport_proof_controls_negative_classification(self):
+        untrusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+        )
+        trusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+        )
+        self.assertFalse(untrusted.provider_transport_confirmed)
+        self.assertTrue(trusted.provider_transport_confirmed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def untrusted_wire(**kwargs):
+                del kwargs
+                return untrusted
+
+            evidence = _probe(
+                vault=vault,
+                handle=handle,
+                wire_query=untrusted_wire,
+            )
+            self.assertFalse(evidence.provider_transport_confirmed)
+            self.assertEqual(evidence.classification.value, "INCONCLUSIVE")
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def trusted_wire(**kwargs):
+                del kwargs
+                return trusted
+
+            evidence = _probe(
+                vault=vault,
+                handle=handle,
+                wire_query=trusted_wire,
+            )
+            self.assertTrue(evidence.provider_transport_confirmed)
+            self.assertEqual(evidence.classification.value, "REJECTED_EXACT_DOMAIN")
 
     def test_polymorphic_header_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileHeaders(_headers())

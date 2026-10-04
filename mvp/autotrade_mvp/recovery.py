@@ -309,7 +309,8 @@ class RecoveryController:
         )
 
     def _require_current_durable_owner(self) -> None:
-        if self._owner_store is None or self.owner is None:
+        store = self._canonical_owner_store()
+        if store is None or self.owner is None:
             return
         durable = self._latest_durable_owner()
         if durable != self.owner:
@@ -359,7 +360,8 @@ class RecoveryController:
         journal after process restart, before READY can be established.
         """
 
-        if self._owner_store is None or ":" not in self._owner_scope:
+        store = self._canonical_owner_store()
+        if store is None or ":" not in self._owner_scope:
             return
         environment, account_id = self._owner_scope.split(":", 1)
         if environment.strip().upper() not in {
@@ -874,7 +876,7 @@ class RecoveryController:
         if self.owner is None:
             raise RuntimeError("No active owner")
         self._require_current_durable_owner()
-        if self._owner_store is not None:
+        if self._canonical_owner_store() is not None:
             raise PermissionError(
                 "Durable recovery requires a journal-issued reconciliation checkpoint"
             )
@@ -1012,7 +1014,7 @@ class RecoveryController:
             raise TypeError("reconciled must be a boolean")
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
-        if self._owner_store is not None:
+        if self._canonical_owner_store() is not None:
             raise PermissionError(
                 "Durable owner transfer requires independently issued takeover evidence"
             )

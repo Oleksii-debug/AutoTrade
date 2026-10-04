@@ -128,7 +128,7 @@ def forward_paper_protocol_hash(
 def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
     if type(value) not in {Decimal, str, int}:
         raise ForwardPaperError(
-            f"{name} must use exact Decimal, string or integer input"
+            f"{name} must use exact decimal input (Decimal, string or integer)"
         )
     try:
         result = value if type(value) is Decimal else Decimal(value)

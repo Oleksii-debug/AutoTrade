@@ -392,6 +392,27 @@ class CrossMarketGeneralizationTests(unittest.TestCase):
             )
         )
 
+    def test_mutated_population_manifest_is_revalidated_before_use(self):
+        rows = list(complete_evidence())
+        object.__setattr__(
+            rows[0].population,
+            "included_regime_counts",
+            (("bull", 999),),
+        )
+        with self.assertRaises(ValueError):
+            assess_cross_market_generalization(protocol(), rows)
+
+    def test_duplicate_evidence_cell_is_rejected(self):
+        rows = complete_evidence()
+        with self.assertRaisesRegex(
+            CrossMarketGeneralizationError,
+            "duplicate evidence cell",
+        ):
+            assess_cross_market_generalization(
+                protocol(),
+                rows + (rows[0],),
+            )
+
     def test_same_population_manifest_cannot_substitute_for_two_cells(self):
         rows = list(complete_evidence())
         shared = rows[0].population

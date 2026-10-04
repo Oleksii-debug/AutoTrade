@@ -7,13 +7,14 @@ import argparse
 import io
 from hashlib import sha256
 import json
+import os
 from pathlib import Path, PurePosixPath
 import stat
 import zipfile
 
 from tools.stage_windows_foundation import (_SourceControlledComponent, _git, _stage_source_controlled_components)
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
-from research.autotrade_research.artifacts.durable_publish import atomic_write_bytes, atomic_write_json
+from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
@@ -21,6 +22,35 @@ SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'src/AutoTrade.Desktop/packages.lock.json',
           'packaging/windows/provider-free-inputs.json', 'provenance/release-dependency-manifest.json')
+
+
+def _write_new_payload_bytes(path, payload):
+    """Write one builder-owned transient payload leaf without lock sidecars.
+
+    Durable publication locks are persistent coordination metadata and therefore
+    must stay outside shipped payload. The final canonical bundle collector still
+    revalidates every path and byte before composition.
+    """
+    if type(payload) is not bytes:
+        raise TypeError('payload bytes must be exact bytes')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open('xb') as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as error:
+        raise ValueError('candidate payload leaf already exists: ' + str(path)) from error
+
+
+def _write_new_payload_json(path, value):
+    if type(value) is not dict:
+        raise TypeError('candidate payload JSON must be an exact dict')
+    payload = (
+        json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        + '\n'
+    ).encode('utf-8')
+    _write_new_payload_bytes(path, payload)
 
 
 def stage_source(source_root, source_sha, destination, composition_path):
@@ -46,15 +76,22 @@ def stage_source(source_root, source_sha, destination, composition_path):
         'runtime-source', p) for p in selected)
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
         source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
-    atomic_write_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
+    _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
     return selected
 
 
-def extract_pinned(archive_path, destination, expected_digest):
+def extract_pinned(archive_path, destination, expected_digest, *, overrides=None):
     archive_bytes = archive_path.read_bytes()
     if sha256(archive_bytes).hexdigest() != expected_digest:
         raise ValueError('external runtime archive differs from frozen input')
     destination.mkdir(parents=True, exist_ok=False)
+    if overrides is None:
+        overrides = {}
+    if (
+        type(overrides) is not dict
+        or any(type(key) is not str or type(value) is not bytes for key, value in overrides.items())
+    ):
+        raise TypeError('archive overrides must be an exact str-to-bytes dict')
     # Extract from the exact bytes that were authenticated above. Reopening the
     # pathname after hashing would let a concurrent replacement substitute an
     # unverified archive between digest admission and extraction.
@@ -74,8 +111,15 @@ def extract_pinned(archive_path, destination, expected_digest):
             if entry.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
             else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_bytes(target, archive.read(entry))
+                content = overrides.get(entry.filename)
+                if content is None:
+                    content = archive.read(entry)
+                _write_new_payload_bytes(target, content)
+        missing_overrides = set(overrides) - seen
+        if missing_overrides:
+            raise ValueError(
+                'archive override path is absent: ' + ','.join(sorted(missing_overrides))
+            )
 
 
 def build_candidate(*, source_root, source_sha, desktop, python_archive, webview_archive, work, output):
@@ -93,23 +137,28 @@ def build_candidate(*, source_root, source_sha, desktop, python_archive, webview
         raise ValueError('Desktop publish evidence differs from the exact product source')
     # Reuse the canonical bundle collector's namespace/sensitive-file checks.
     for relative, _, content in _collect(desktop):
-        target = payload / relative; target.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(target, content)
-    extract_pinned(python_archive, payload / 'runtime/python', inputs['python']['sha256'])
+        target = payload / relative
+        _write_new_payload_bytes(target, content)
+    isolated_python_path = b'python312.zip\n.\n../../product\n../../product/research\n'
+    extract_pinned(
+        python_archive,
+        payload / 'runtime/python',
+        inputs['python']['sha256'],
+        overrides={'python312._pth': isolated_python_path},
+    )
     extract_pinned(webview_archive, payload / 'notices/webview2-sdk-package', inputs['webview2_sdk']['sha256'])
     for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):
         if not (payload / 'runtime/python' / required).is_file():
             raise ValueError('embedded Python input is incomplete: ' + required)
-    # Embedded isolated Python ignores PYTHONPATH. Admit only frozen product
-    # packages and the standard-library archive; never developer site-packages.
-    atomic_write_bytes(payload / 'runtime/python/python312._pth',
-        b'python312.zip\n.\n../../product\n../../product/research\n')
+    # Embedded isolated Python ignores PYTHONPATH. The pinned archive's ._pth
+    # was replaced during one-time extraction above, so no shipped staging leaf
+    # needs an in-place rewrite or durable-publication lock sidecar.
     dependencies = {'source_sha': source_sha, 'inputs': inputs,
         'nuget_lock': json.loads((payload / 'product/src/AutoTrade.Desktop/packages.lock.json').read_text()),
         'qualification': 'UNQUALIFIED', 'real_order_submission': 'UNAVAILABLE'}
-    atomic_write_json(payload / 'dependency-lock.json', dependencies)
+    _write_new_payload_json(payload / 'dependency-lock.json', dependencies)
     inventory = [{'path': p, 'sha256': 'sha256:' + sha256(b).hexdigest()} for p, _, b in _collect(payload)]
-    atomic_write_json(payload / 'sbom.json', {'source_sha': source_sha, 'files': inventory,
+    _write_new_payload_json(payload / 'sbom.json', {'source_sha': source_sha, 'files': inventory,
         'rights_review': 'PENDING', 'advisory_review': 'PENDING'})
     files = _collect(payload)
     components = [{'component_id': 'candidate-' + sha256(p.encode()).hexdigest()[:32],

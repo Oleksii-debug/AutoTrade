@@ -615,6 +615,71 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             )
         self.assertEqual(replay.cursor, 1)
 
+    def test_dead_unselected_authority_state_releases_callbacks_on_next_registration(self):
+        replay = self._checkpoint_value()
+
+        def ephemeral_signer(material):
+            return _signer(_TRUSTED_SECRET)(material)
+
+        def ephemeral_cut():
+            return "cut:ephemeral", replay, _components()
+
+        signer_ref = weakref.ref(ephemeral_signer)
+        cut_ref = weakref.ref(ephemeral_cut)
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:ephemeral-authority",
+            signer=ephemeral_signer,
+            cut_resolver=ephemeral_cut,
+        )
+        del ephemeral_signer
+        del ephemeral_cut
+        del authority
+        gc.collect()
+
+        self.assertIsNotNone(signer_ref())
+        self.assertIsNotNone(cut_ref())
+
+        survivor = RuntimeStateAuthority(
+            authority_id="runtime:authority-registry-survivor",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=lambda: ("cut:survivor", replay, _components()),
+        )
+        gc.collect()
+
+        self.assertIsNone(signer_ref())
+        self.assertIsNone(cut_ref())
+        self.assertEqual(
+            survivor.authority_id,
+            "runtime:authority-registry-survivor",
+        )
+
+    def test_dead_unselected_verifier_state_releases_callback_on_next_registration(self):
+        verify = _signature_verifier(_ATTACKER_SECRET)
+        verify_ref = weakref.ref(verify)
+        verifier = RuntimeStateVerifier(
+            authority_id="runtime:ephemeral-verifier",
+            verifier_id="verifier:ephemeral",
+            verify_signature=verify,
+        )
+        del verify
+        del verifier
+        gc.collect()
+
+        self.assertIsNotNone(verify_ref())
+
+        survivor = RuntimeStateVerifier(
+            authority_id="runtime:verifier-registry-survivor",
+            verifier_id="verifier:survivor",
+            verify_signature=_signature_verifier(_TRUSTED_SECRET),
+        )
+        gc.collect()
+
+        self.assertIsNone(verify_ref())
+        self.assertEqual(
+            survivor.verifier_id,
+            "verifier:survivor",
+        )
+
     def test_runtime_trust_registries_expose_no_removal_callbacks(self):
         replay = CausalReplay(
             [_event(1, "2026-09-24T10:00:00Z", 1)],

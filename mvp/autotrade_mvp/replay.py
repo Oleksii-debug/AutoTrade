@@ -242,6 +242,15 @@ def _runtime_authority_state_operations():
     ] = {}
     state_lock = threading.RLock()
 
+    def purge_dead_object_states(states: dict[int, tuple]) -> None:
+        # Callback-free weakrefs deliberately avoid caller-invocable removal
+        # callbacks. Reclaim dead wrapper state opportunistically on the next
+        # registration so signer/resolver/verifier callables do not accumulate
+        # for the lifetime of a busy process.
+        for object_id, state in tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
     def authority_state(
         authority: "RuntimeStateAuthority",
     ) -> tuple[str, RuntimeStateSigner, RuntimeStateCutResolver]:
@@ -261,6 +270,7 @@ def _runtime_authority_state_operations():
     ) -> None:
         object_id = id(authority)
         with state_lock:
+            purge_dead_object_states(authority_states)
             current = authority_states.get(object_id)
             if current is not None:
                 current_authority = current[0]()
@@ -319,6 +329,7 @@ def _runtime_authority_state_operations():
     ) -> None:
         object_id = id(verifier)
         with state_lock:
+            purge_dead_object_states(verifier_states)
             current = verifier_states.get(object_id)
             if current is not None:
                 current_verifier = current[0]()

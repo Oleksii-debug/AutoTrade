@@ -20,6 +20,7 @@ if __package__:
         dotnet_lock_content_blockers,
         dotnet_project_package_references,
         dotnet_restore_command_tokens,
+        dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
     )
 else:
@@ -252,7 +253,10 @@ def _dotnet_dependency_lock_blockers(
 
     for project in projects:
         relative = project.relative_to(root).as_posix()
-        if not any(relative in tokens for tokens in restore_tokens):
+        if not any(
+            dotnet_restore_targets_project(tokens, relative)
+            for tokens in restore_tokens
+        ):
             blockers.append(
                 f"DOTNET_LOCKED_RESTORE_PROJECT_MISSING:{relative}"
             )

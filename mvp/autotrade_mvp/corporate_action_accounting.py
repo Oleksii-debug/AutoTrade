@@ -531,7 +531,8 @@ def commit_authoritative_corporate_action(
         raise TypeError(
             "accepted must be exact AuthoritativeCorporateAction from sealed provider evidence"
         )
-    accepted = require_authoritative_corporate_action(accepted)
+    issued_accepted = accepted
+    accepted = require_authoritative_corporate_action(issued_accepted)
     (
         evidence_journal,
         _,
@@ -572,7 +573,7 @@ def commit_authoritative_corporate_action(
         # causal provider truth without making a future-effective posting visible.
         retained = DurableCorporateActionEvidenceStore.record(
             evidence_store,
-            accepted,
+            issued_accepted,
         )
         return CorporateActionFinancialResult(
             inserted=retained.inserted,
@@ -586,7 +587,7 @@ def commit_authoritative_corporate_action(
 
     evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
         evidence_store,
-        accepted,
+        issued_accepted,
     )
     candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
@@ -643,7 +644,7 @@ def commit_authoritative_corporate_action(
     # the same attempted journal state.  Any later advance is rejected by CAS.
     evidence_plan = DurableCorporateActionEvidenceStore.prepare_record_mutation(
         evidence_store,
-        accepted,
+        issued_accepted,
     )
     candidate, transition = _candidate_book(corporate_book, accepted)
     transactions = _economic_transactions(

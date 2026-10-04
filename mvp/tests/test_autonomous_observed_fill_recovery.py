@@ -15,7 +15,9 @@ from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     book_external_cash_flow,
 )
-from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
+from mvp.autotrade_mvp.durable_order_projection import (
+    DurableOrderBookProjection,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -114,6 +116,149 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 self.assertEqual(
                     store.current_journal_sequence(), replay_cut
                 )
+
+    def test_zero_wire_episode_recovers_across_started_and_reconciled_crashes(self):
+        with TemporaryDirectory() as reference_dir:
+            reference = run(reference_dir)
+        self.assertIn(
+            reference["decisions"][3]["decision"],
+            {"HOLD", "NO_TRADE"},
+        )
+
+        for phase in ("after_started", "before_completed"):
+            with self.subTest(phase=phase), TemporaryDirectory() as directory:
+                original_event = session._loop_event
+
+                def event(store, run_id, kind, key, payload, now):
+                    if (
+                        phase == "before_completed"
+                        and kind == "AutonomousEpisodeCompleted"
+                        and payload["episode"] == 4
+                    ):
+                        raise RuntimeError("zero-wire completion response lost")
+                    value = original_event(
+                        store, run_id, kind, key, payload, now
+                    )
+                    if (
+                        phase == "after_started"
+                        and kind == "AutonomousEpisodeStarted"
+                        and payload["episode"] == 4
+                    ):
+                        self.assertIn(
+                            payload["decision"], {"HOLD", "NO_TRADE"}
+                        )
+                        raise RuntimeError("zero-wire started response lost")
+                    return value
+
+                with patch.object(session, "_loop_event", event):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "zero-wire .* response lost"
+                    ):
+                        run(directory)
+
+                store = JournalStore(
+                    Path(directory) / "journal.sqlite3"
+                )
+                before = store.current_journal_sequence()
+                with patch.object(
+                    SimulatedProvider,
+                    "transport_send",
+                    side_effect=AssertionError(
+                        "zero-wire recovery cannot send"
+                    ),
+                ), patch.object(
+                    session.AuthorityService,
+                    "admit",
+                    side_effect=AssertionError(
+                        "zero-wire recovery cannot perform risk admission"
+                    ),
+                ):
+                    recovered = run(
+                        directory,
+                        stop_after_episodes=4,
+                    )
+
+                self.assertEqual(recovered["status"], "PAUSED")
+                self.assertEqual(recovered["completed_episodes"], 4)
+                self.assertEqual(recovered["new_outbound_requests"], 0)
+                self.assertEqual(
+                    recovered["decisions"],
+                    reference["decisions"][:4],
+                )
+                self.assertGreater(
+                    store.current_journal_sequence(), before
+                )
+
+                completed = run(directory)
+                self.assertEqual(completed["status"], "COMPLETED")
+                self.assertEqual(
+                    completed["decisions"], reference["decisions"]
+                )
+                self.assertEqual(completed["cash"], reference["cash"])
+                self.assertEqual(
+                    completed["position"], reference["position"]
+                )
+
+    def test_zero_wire_recovery_rejects_offsetting_post_start_economics(self):
+        original_event = session._loop_event
+
+        def crash_after_started(store, run_id, kind, key, payload, now):
+            value = original_event(
+                store, run_id, kind, key, payload, now
+            )
+            if (
+                kind == "AutonomousEpisodeStarted"
+                and payload["episode"] == 4
+            ):
+                self.assertIn(
+                    payload["decision"], {"HOLD", "NO_TRADE"}
+                )
+                raise RuntimeError("zero-wire crash")
+            return value
+
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                session, "_loop_event", crash_after_started
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "zero-wire crash"
+                ):
+                    run(directory)
+
+            store = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            economics.append(
+                book_external_cash_flow(
+                    transaction_id="zero-wire-foreign-plus",
+                    cause_event_id="zero-wire-foreign-plus",
+                    currency="USD",
+                    amount="1",
+                )
+            )
+            economics.append(
+                book_external_cash_flow(
+                    transaction_id="zero-wire-foreign-minus",
+                    cause_event_id="zero-wire-foreign-minus",
+                    currency="USD",
+                    amount="-1",
+                )
+            )
+            cut = store.current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError, "cut changed after start"
+            ):
+                run(directory)
+            self.assertEqual(
+                store.current_journal_sequence(), cut
+            )
 
     def test_reduce_commit_response_loss_recovers_then_continues_once(self):
         with TemporaryDirectory() as reference_dir:

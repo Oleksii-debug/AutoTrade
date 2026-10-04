@@ -80,6 +80,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _registered_utc(value: Any, name: str) -> datetime:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProtocolViolation(f"{name} must be exact timezone-aware ISO text")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ProtocolViolation(
+            f"{name} must be exact timezone-aware ISO text"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProtocolViolation(f"{name} must include timezone authority")
+    return parsed.astimezone(timezone.utc)
+
+
 def _id(value: str | None = None) -> str:
     return str(UUID(value)) if value is not None else str(uuid4())
 
@@ -608,15 +622,24 @@ class ScientificRegistry:
             raise ProtocolViolation(
                 "preregistered locked holdout does not match protocol forward authority"
             )
+        registered_at = _registered_utc(
+            row["created_at"],
+            "preregistered locked holdout created_at",
+        )
         first_trial = con.execute(
             "SELECT created_at FROM trials WHERE protocol_id=? "
             "ORDER BY created_at,trial_id LIMIT 1",
             (protocol_id,),
         ).fetchone()
-        if first_trial is not None and row["created_at"] > first_trial["created_at"]:
-            raise ProtocolViolation(
-                "locked holdout must be preregistered before the first trial"
+        if first_trial is not None:
+            first_trial_at = _registered_utc(
+                first_trial["created_at"],
+                "registered trial created_at",
             )
+            if registered_at > first_trial_at:
+                raise ProtocolViolation(
+                    "locked holdout must be preregistered before the first trial"
+                )
         return LockedHoldoutRegistration(
             protocol_id=protocol_id,
             dataset_id=dataset_id,

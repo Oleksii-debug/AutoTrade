@@ -32,6 +32,7 @@ from autotrade_numeric.exact_decimal import (
 )
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.io.strict_json import strict_json_loads
+from autotrade_research.learning.population_coverage import build_population_coverage
 from autotrade_research.memory.episodes import ExperienceMemory
 from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
@@ -1183,6 +1184,7 @@ class RegisteredAblationPopulation:
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
     complete: bool = True
+    coverage_digest: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -1215,7 +1217,52 @@ class RegisteredAblationPopulation:
         object.__setattr__(self, "population_unit_ids", normalized)
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if self.coverage_digest is not None:
+            object.__setattr__(
+                self,
+                "coverage_digest",
+                _digest(self.coverage_digest, "coverage_digest"),
+            )
 
+
+def _ablation_population_candidate_hash(
+    target_component: str,
+    pairs: tuple[AblationPair, ...],
+    *,
+    source_revision: str,
+) -> str:
+    """Bind one selected ablation population without trusting outcome economics."""
+
+    target = target_component.strip()
+    material = {
+        "schema_version": "ablation-population-candidate.v1",
+        "source_revision": source_revision,
+        "target_component": target,
+        "pairs": [
+            {
+                "case_id": pair.full.case_id,
+                "input_cutoff_utc": _canonical_utc_text(pair.full.input_cutoff_utc),
+                "input_fingerprint": pair.full.input_fingerprint,
+                "population_unit_id": pair.full.population_unit_id,
+            }
+            for pair in sorted(
+                pairs,
+                key=lambda item: (
+                    item.full.population_unit_id,
+                    item.full.case_id,
+                    item.full.input_fingerprint,
+                ),
+            )
+        ],
+    }
+    raw = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
 
 
 def _make_ablation_authority_policy_binding():
@@ -1446,22 +1493,25 @@ class AblationQualificationAuthority:
             superseded_at_utc=superseded,
         )
 
-    def resolve(
+    def resolve_population(
         self,
         pairs: Iterable[AblationPair],
-        *,
-        outcome_refs: Iterable[AblationOutcomeArtifactRef],
-    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+    ) -> RegisteredAblationPopulation:
+        """Resolve only canonical frozen population evidence, never outcome economics."""
+
         selected = tuple(pairs)
-        if selected:
-            _validate_pairs(selected[0].target_component, selected)
-            if any(
-                pair.full.outcome_available_utc > self.causal_cutoff
-                for pair in selected
-            ):
-                raise ValueError(
-                    "selected ablation outcome was not available by causal cutoff"
-                )
+        if not selected:
+            raise ValueError("qualified ablation requires a non-empty matched population")
+        target = selected[0].target_component
+        _validate_pairs(target, selected)
+        if any(
+            pair.full.outcome_available_utc > self.causal_cutoff
+            for pair in selected
+        ):
+            raise ValueError(
+                "selected ablation outcome was not available by causal cutoff"
+            )
+
         registration = self.scientific_registry.protocol_registration(self.protocol_id)
         if registration.protocol_hash != self.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
@@ -1472,6 +1522,7 @@ class AblationQualificationAuthority:
         registered_at = _utc(registered_raw, "protocol registered_at")
         if registered_at.isoformat() != registration.created_at:
             raise ValueError("protocol registered_at is not canonical")
+
         snapshot = self.experience_memory.coverage_population_snapshot(
             causal_cutoff=self.causal_cutoff,
             granted_permissions=set(self.granted_permissions),
@@ -1479,19 +1530,68 @@ class AblationQualificationAuthority:
             instrument_family=self.instrument_family,
         )
         snapshot.verify_integrity()
+        selected_units = tuple(
+            sorted(pair.full.population_unit_id for pair in selected)
+        )
+        eligible_units = tuple(
+            sorted(row["episode_id"] for row in snapshot.rows)
+        )
+        selected_set = set(selected_units)
+        exclusions = {
+            episode_id: "not_selected_by_registered_ablation_population"
+            for episode_id in eligible_units
+            if episode_id not in selected_set
+        }
+        coverage = build_population_coverage(
+            snapshot,
+            candidate_hash=_ablation_population_candidate_hash(
+                target,
+                selected,
+                source_revision=self.source_revision,
+            ),
+            frozen_protocol_hash=self.protocol_hash,
+            input_snapshot_hash=snapshot.root_hash,
+            causal_cutoff=self.causal_cutoff,
+            permission_classes=tuple(sorted(self.granted_permissions)),
+            included_episode_ids=selected_units,
+            exclusions=exclusions,
+            task=self.task,
+            instrument_family=self.instrument_family,
+        )
+        labels_complete = all(
+            complete
+            for _regime, complete in coverage.included_labels_complete_by_regime
+        )
         completeness = self.scientific_registry.completeness(self.protocol_id)
-        population = RegisteredAblationPopulation(
+        return RegisteredAblationPopulation(
             protocol_digest=self.protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
             source_revision=self.source_revision,
             registered_at_utc=registered_at,
             evaluation_cutoff_utc=self.causal_cutoff,
-            population_unit_ids=tuple(
-                sorted(row["episode_id"] for row in snapshot.rows)
-            ),
-            complete=True,
+            population_unit_ids=coverage.included_episode_ids,
+            complete=coverage.complete and labels_complete,
+            coverage_digest=coverage.digest,
         )
+
+    def resolve(
+        self,
+        pairs: Iterable[AblationPair],
+        *,
+        outcome_refs: Iterable[AblationOutcomeArtifactRef],
+    ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        selected = tuple(pairs)
+        population = self.resolve_population(selected)
+        snapshot = self.experience_memory.coverage_population_snapshot(
+            causal_cutoff=self.causal_cutoff,
+            granted_permissions=set(self.granted_permissions),
+            task=self.task,
+            instrument_family=self.instrument_family,
+        )
+        snapshot.verify_integrity()
+        if snapshot.root_hash != population.population_digest:
+            raise ValueError("ablation population changed during authority resolution")
         outcomes = tuple(
             self._load_outcome(reference, population_root=snapshot.root_hash)
             for reference in outcome_refs
@@ -1503,36 +1603,21 @@ class AblationQualificationAuthority:
             raise ValueError(
                 "ablation outcome artifact became available after causal cutoff"
             )
-        if selected:
-            expected_outcomes = {
-                (item.case_id, item.variant)
-                for pair in selected
-                for item in (pair.full, pair.ablated)
-            }
-            observed_outcomes = [
-                (evidence.case_id, evidence.variant)
-                for evidence in outcomes
-            ]
-            if len(observed_outcomes) != len(set(observed_outcomes)):
-                raise ValueError("duplicate canonical ablation outcome artifact identity")
-            if set(observed_outcomes) != expected_outcomes:
-                raise ValueError(
-                    "canonical ablation outcomes do not exactly match selected pairs"
-                )
-        if selected:
-            earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
-            if registered_at > earliest_cutoff:
-                # Keep the normal evaluator's fail-closed reason deterministic.
-                population = RegisteredAblationPopulation(
-                    protocol_digest=population.protocol_digest,
-                    population_digest=population.population_digest,
-                    stopping_rule_digest=population.stopping_rule_digest,
-                    source_revision=population.source_revision,
-                    registered_at_utc=registered_at,
-                    evaluation_cutoff_utc=population.evaluation_cutoff_utc,
-                    population_unit_ids=population.population_unit_ids,
-                    complete=True,
-                )
+        expected_outcomes = {
+            (item.case_id, item.variant)
+            for pair in selected
+            for item in (pair.full, pair.ablated)
+        }
+        observed_outcomes = [
+            (evidence.case_id, evidence.variant)
+            for evidence in outcomes
+        ]
+        if len(observed_outcomes) != len(set(observed_outcomes)):
+            raise ValueError("duplicate canonical ablation outcome artifact identity")
+        if set(observed_outcomes) != expected_outcomes:
+            raise ValueError(
+                "canonical ablation outcomes do not exactly match selected pairs"
+            )
         return population, outcomes
 
 
@@ -1762,11 +1847,50 @@ def evaluate_qualified_incremental_value(
                 reason="registered_ablation_value_policy_unavailable",
             )
 
-        # #718/#1097: policy selection is now preregistered, but the project still
-        # lacks an independent authenticated utility scorer/projection issuer and
-        # a terminal resolver that composes it with the canonical historical
-        # economic cut. Never read candidate outcomes merely because their digest
-        # strings are well formed, and never reopen PASS/FAIL from these policies.
+        # Population completeness is independently safe to resolve before the
+        # utility/cost operand owners exist. This preflight reads only the frozen
+        # ExperienceMemory population and registered scientific protocol; it does
+        # not load candidate-authored outcome utility/cost artifacts.
+        try:
+            trusted_population = authority.resolve_population(selected_input)
+        except (ProtocolViolation, KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="canonical_population_evidence_unavailable",
+            )
+        if not trusted_population.complete:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="incomplete_registered_population",
+            )
+        if trusted_population.coverage_digest is None:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="canonical_population_evidence_unavailable",
+            )
+        if selected_input:
+            earliest_cutoff = min(
+                pair.full.input_cutoff_utc for pair in selected_input
+            )
+            if trusted_population.registered_at_utc > earliest_cutoff:
+                return _qualified_inconclusive(
+                    target_component=target,
+                    required_lower_bound=required,
+                    uncertainty_multiplier=multiplier,
+                    reason="post_hoc_population_or_protocol_registration",
+                )
+
+        # #718/#1097: protocol and complete mature population are now preflighted,
+        # but the project still lacks an independent authenticated utility
+        # scorer/projection issuer and terminal composition with the canonical
+        # historical economic cut. Never read candidate utility/cost artifacts
+        # merely because their digest strings are well formed.
         return _qualified_inconclusive(
             target_component=target,
             required_lower_bound=required,

@@ -1494,9 +1494,17 @@ class AblationTests(unittest.TestCase):
                     permission_class="RESEARCH",
                     payload={
                         "evidence_refs": ["artifact:source"],
-                        "intended_action": {"case_id": matched.full.case_id},
+                        "intended_action": {
+                            "case_id": matched.full.case_id,
+                            "side": "BUY",
+                        },
                         "actual_execution": {"fills": []},
-                        "outcome": {"status": "observed"},
+                        "outcome": {
+                            "class": "POSITIVE",
+                            "label": "observed",
+                            "label_mature": True,
+                            "reconciliation_state": "RECONCILED",
+                        },
                         "costs": {"USD": "0"},
                     },
                 )
@@ -1562,6 +1570,13 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            population_preflight = authority.resolve_population(cases)
+            self.assertTrue(population_preflight.complete)
+            self.assertEqual(
+                population_preflight.population_unit_ids,
+                tuple(sorted(units)),
+            )
+            self.assertIsNotNone(population_preflight.coverage_digest)
 
             for field, forged_value in (
                 ("scientific_registry", attacker_science),
@@ -1673,6 +1688,73 @@ class AblationTests(unittest.TestCase):
                 diagnostic.reason,
                 "untrusted_caller_authored_qualification_evidence",
             )
+
+            extra_unit = "66666666-6666-4666-8666-666666666666"
+            extra_case = pair(
+                "qualified-authority-c",
+                "2",
+                population_unit=extra_unit,
+                cutoff=cutoff,
+            )
+            memory.append_episode(
+                episode_id=extra_unit,
+                decision_time=extra_case.full.decision_utc,
+                information_cutoff=extra_case.full.input_cutoff_utc,
+                task="ablation-qualification",
+                regime="test",
+                instrument_family="EQUITY",
+                permission_class="RESEARCH",
+                payload={
+                    "evidence_refs": ["artifact:pending-label"],
+                    "intended_action": {
+                        "case_id": extra_case.full.case_id,
+                        "side": "BUY",
+                    },
+                    "actual_execution": {"fills": []},
+                    "outcome": {
+                        "class": "PENDING",
+                        "label": "pending",
+                        "label_mature": False,
+                        "reconciliation_state": "PENDING",
+                    },
+                    "costs": {"USD": "0"},
+                },
+            )
+            incomplete_authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            omitted = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=incomplete_authority,
+                outcome_refs=refs,
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(omitted.status, "INCONCLUSIVE")
+            self.assertEqual(omitted.reason, "incomplete_registered_population")
+
+            immature = evaluate_qualified_incremental_value(
+                "agent",
+                cases + [extra_case],
+                authority=incomplete_authority,
+                outcome_refs=refs,
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(immature.status, "INCONCLUSIVE")
+            self.assertEqual(immature.reason, "incomplete_registered_population")
 
 
 if __name__ == "__main__":

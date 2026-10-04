@@ -191,6 +191,14 @@ class LearningWavePauseTests(unittest.TestCase):
         second = evaluate_pause(policy(), snapshot(trades_since_pause=20))
         self.assertEqual(first.decision_hash, second.decision_hash)
 
+    def test_same_policy_id_with_changed_threshold_has_different_authority_hash(self):
+        first = policy(max_trades=20)
+        second = policy(max_trades=21)
+        self.assertNotEqual(first.policy_hash, second.policy_hash)
+        first_decision = evaluate_pause(first, snapshot(trades_since_pause=25))
+        second_decision = evaluate_pause(second, snapshot(trades_since_pause=25))
+        self.assertNotEqual(first_decision.decision_hash, second_decision.decision_hash)
+
     def test_no_hidden_universal_pause_threshold_is_allowed(self):
         with self.assertRaisesRegex(ValueError, "at least one"):
             LearningWavePolicy(policy_id="empty")
@@ -233,6 +241,35 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 validation_population=validation,
                 validation_opened_at=BASE + timedelta(minutes=1),
             )
+
+    def test_pause_policy_cannot_be_swapped_before_candidate_handoff(self):
+        p, snap, decision = paused_decision(promotion_mode="CONFIRMATION")
+        swapped = policy(promotion_mode="AUTO")
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+        )
+        with self.assertRaisesRegex(ValueError, "exact pause decision"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=swapped,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=1),
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=1),
+            )
+        self.assertEqual(p.promotion_mode, "CONFIRMATION")
 
     def test_training_population_must_bind_paused_causal_cut(self):
         p, snap, decision = paused_decision()

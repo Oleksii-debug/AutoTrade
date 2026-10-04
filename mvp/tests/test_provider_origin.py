@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -8,7 +9,7 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_core import Surface
+from mvp.autotrade_mvp.provider_core import Surface, observe_authenticated_json_response
 from mvp.autotrade_mvp.provider_origin import (
     AuthenticatedReadResponseBinding,
     ProviderOriginError,
@@ -16,7 +17,16 @@ from mvp.autotrade_mvp.provider_origin import (
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
     observe_provider_origin_json_response,
 )
-from mvp.autotrade_mvp.provider_route_reads import prepare_qualified_provider_read
+from mvp.autotrade_mvp.provider_transport import (
+    BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5AuthenticatedReadSigner,
+    UrllibJsonWireClient,
+    direct_authenticated_read_execution_receipt,
+)
+from mvp.autotrade_mvp.provider_route_reads import (
+    issue_terminal_qualified_provider_read_authority,
+    prepare_qualified_provider_read,
+)
 from mvp.tests.test_provider_route_reads import ProviderRouteReadTests
 from mvp.tests.test_provider_selection import NOW
 
@@ -84,22 +94,112 @@ class ProviderOriginJournalTests(unittest.TestCase):
             restarted = self._origin(JournalStore(journal.path), directory)
             recovered = restarted.load_response_binding(attempt_id, binding)
             self.assertEqual(recovered, recorded)
+            self.assertEqual(recovered.execution_class, "TEST_INJECTED")
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "DIRECT_PROVIDER_WIRE",
+            ):
+                observe_provider_origin_json_response(
+                    response_binding=recovered,
+                    query_binding=binding,
+                )
+
+    def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare_direct(
+                binding,
+                recorded_at=NOW,
+            )
+            terminal = issue_terminal_qualified_provider_read_authority(
+                route,
+                capabilities,
+                qualifications,
+                binding,
+                at=NOW,
+            )
+            request = BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                query_binding=binding.query_binding,
+                credential_plaintext=(
+                    '{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}'
+                ),
+                timestamp_ms=1700000000000,
+            )
+            object.__setattr__(
+                request,
+                "_terminal_qualified_read_authority",
+                terminal,
+            )
+            object.__setattr__(
+                request,
+                "_terminal_authenticated_read_query_binding",
+                binding.query_binding,
+            )
+            object.__setattr__(
+                request,
+                "_terminal_authenticated_read_provider_environment",
+                "TESTNET",
+            )
+
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"10.25"}]}}'
+            class Stream(BytesIO):
+                status = 200
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            canonical_opener = client._opener
+            canonical_opener.open = lambda *_args, **_kwargs: Stream(body)
+            wire_response = client.send(request)
+            receipt = direct_authenticated_read_execution_receipt(wire_response)
+
+            neutral = observe_authenticated_json_response(
+                query_binding=binding.query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=NOW,
+            )
+            object.__setattr__(
+                neutral,
+                "_direct_authenticated_read_execution_receipt",
+                receipt,
+            )
+            object.__setattr__(
+                neutral,
+                "_direct_authenticated_read_response_bytes",
+                wire_response.body,
+            )
+            recorded = origin.record_direct_provider_origin_observation(
+                attempt_id,
+                binding,
+                provider_observation=neutral,
+            )
+            self.assertEqual(recorded.execution_class, "DIRECT_PROVIDER_WIRE")
+            self.assertEqual(recorded.qualification_id, q1.qualification_id)
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            recovered = restarted.load_response_binding(attempt_id, binding)
             observation = observe_provider_origin_json_response(
                 response_binding=recovered,
                 query_binding=binding,
             )
-            self.assertEqual(observation.origin_ref, recorded.origin_ref)
-            self.assertNotEqual(
-                observation.origin_ref,
-                observation.qualified_evidence_ref,
-            )
-            self.assertEqual(
-                observation.qualified_observation.qualification_id,
-                q1.qualification_id,
-            )
+            self.assertEqual(observation.origin_ref, recovered.origin_ref)
             self.assertEqual(
                 observation.payload["result"]["list"][0]["equity"],
                 "10.25",
+            )
+            self.assertNotEqual(
+                observation.origin_ref,
+                observation.qualified_evidence_ref,
             )
 
     def test_journal_never_embeds_provider_response_bytes(self):
@@ -351,6 +451,11 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 response_bytes=b"{}",
                 origin_ref="provider-origin:sha256:" + "0" * 64,
                 journal_sequence=3,
+                execution_class="TEST_INJECTED",
+                wire_request_sha256="sha256:" + "1" * 64,
+                wire_request_semantics_sha256="sha256:" + "2" * 64,
+                terminal_authority_journal_sequence_cut=1,
+                terminal_authority_verified_at="2026-10-04T08:00:00Z",
             )
 
 

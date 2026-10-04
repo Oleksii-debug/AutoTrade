@@ -129,6 +129,7 @@
       "additionalProperties": false,
       "required": [
         "event_id",
+        "adapter_version",
         "instrument_version",
         "kind",
         "source_event_at",
@@ -143,6 +144,12 @@
       "properties": {
         "event_id": {
           "$ref": "common.schema.json#/$defs/Id"
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,127}$(?![\\s\\S])"
         },
         "instrument_version": {
           "type": "string",

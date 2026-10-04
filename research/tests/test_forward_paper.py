@@ -35,7 +35,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_provider_capabilities=("KRAKEN:SPOT:LIMIT", "IBKR:EQUITY:LIMIT"),
             required_operational_cases=("RECONNECT", "MANUAL_ACTIVITY"),
             required_regimes=("TREND", "RANGE"),
-            minimum_independent_decisions_per_regime=1,
+            minimum_decision_units_per_regime=1,
             required_simulation_limitations=(
                 "OFFICIAL_TEST_FILL_MODEL",
                 "QUEUE_PRIORITY_UNOBSERVED",
@@ -65,7 +65,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 outcome_horizon_end_at="2026-09-24T20:30:00Z",
                 decision_latency_ms=400,
                 regime="TREND",
-                independence_key="wave-1",
+                dependence_unit_id="wave-1",
             ),
             SealedPrediction.create(
                 prediction_id="pred-2",
@@ -78,7 +78,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 outcome_horizon_end_at="2026-09-24T20:40:00Z",
                 decision_latency_ms=500,
                 regime="RANGE",
-                independence_key="wave-2",
+                dependence_unit_id="wave-2",
             ),
         )
 
@@ -207,8 +207,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 reversed(frozen.required_operational_cases)
             ),
             required_regimes=tuple(reversed(frozen.required_regimes)),
-            minimum_independent_decisions_per_regime=(
-                frozen.minimum_independent_decisions_per_regime
+            minimum_decision_units_per_regime=(
+                frozen.minimum_decision_units_per_regime
             ),
             required_simulation_limitations=tuple(
                 reversed(frozen.required_simulation_limitations)
@@ -295,7 +295,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             outcome_horizon_end_at="2026-09-24T20:30:00Z",
             decision_latency_ms=1200,
             regime="TREND",
-            independence_key="wave-1",
+            dependence_unit_id="wave-1",
         )
         result = assess_forward_paper(
             self.protocol(),
@@ -457,7 +457,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_provider_capabilities=frozen.required_provider_capabilities,
             required_operational_cases=frozen.required_operational_cases,
             required_regimes=frozen.required_regimes,
-            minimum_independent_decisions_per_regime=2,
+            minimum_decision_units_per_regime=2,
             required_simulation_limitations=frozen.required_simulation_limitations,
             reporting_currency=frozen.reporting_currency,
             maximum_drawdown=frozen.maximum_drawdown,
@@ -491,13 +491,13 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertIn("simulation_limitations_not_registered", result.reasons)
         self.assertIn("maximum_drawdown_not_registered", result.reasons)
 
-    def test_independent_decisions_are_required_per_registered_regime(self):
-        protocol = self.protocol(minimum_independent_decisions_per_regime=2)
+    def test_distinct_decision_units_are_required_per_registered_regime(self):
+        protocol = self.protocol(minimum_decision_units_per_regime=2)
         evidence = self.evidence(protocol_hash=protocol.protocol_hash)
         result = assess_forward_paper(protocol, evidence)
         self.assertEqual(result.evidence_status, "INCONCLUSIVE")
-        self.assertIn("minimum_independent_decisions_not_reached:TREND", result.reasons)
-        self.assertIn("minimum_independent_decisions_not_reached:RANGE", result.reasons)
+        self.assertIn("minimum_decision_units_not_reached:TREND", result.reasons)
+        self.assertIn("minimum_decision_units_not_reached:RANGE", result.reasons)
 
     def test_undeclared_regime_invalidates_forward_evidence(self):
         predictions = list(self.predictions())
@@ -512,7 +512,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             outcome_horizon_end_at="2026-09-24T20:30:00Z",
             decision_latency_ms=400,
             regime="CRISIS",
-            independence_key="wave-1",
+            dependence_unit_id="wave-1",
         )
         result = assess_forward_paper(
             self.protocol(),
@@ -521,7 +521,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertEqual(result.evidence_status, "INVALID")
         self.assertIn("undeclared_regime", result.reasons)
 
-    def test_one_independence_unit_cannot_count_in_two_regimes(self):
+    def test_one_dependence_unit_cannot_count_in_two_regimes(self):
         predictions = list(self.predictions())
         second = predictions[1]
         predictions[1] = SealedPrediction.create(
@@ -535,14 +535,14 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             outcome_horizon_end_at=second.outcome_horizon_end_at,
             decision_latency_ms=second.decision_latency_ms,
             regime=second.regime,
-            independence_key="wave-1",
+            dependence_unit_id="wave-1",
         )
         result = assess_forward_paper(
             self.protocol(),
             self.evidence(predictions=predictions),
         )
         self.assertEqual(result.evidence_status, "INVALID")
-        self.assertIn("independence_key_regime_conflict", result.reasons)
+        self.assertIn("dependence_unit_id_regime_conflict", result.reasons)
 
     def test_every_prediction_requires_exact_execution_economics(self):
         result = assess_forward_paper(
@@ -724,9 +724,9 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             self.protocol(maximum_drawdown="-0.01")
         with self.assertRaisesRegex(
             ForwardPaperError,
-            "minimum_independent_decisions_per_regime must be >= 1",
+            "minimum_decision_units_per_regime must be >= 1",
         ):
-            self.protocol(minimum_independent_decisions_per_regime=0)
+            self.protocol(minimum_decision_units_per_regime=0)
 
     def test_item22_protocol_codes_are_case_insensitively_unique(self):
         with self.assertRaisesRegex(ForwardPaperError, "case-insensitive duplicates"):
@@ -825,8 +825,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_provider_capabilities=frozen.required_provider_capabilities,
             required_operational_cases=frozen.required_operational_cases,
             required_regimes=frozen.required_regimes,
-            minimum_independent_decisions_per_regime=(
-                frozen.minimum_independent_decisions_per_regime
+            minimum_decision_units_per_regime=(
+                frozen.minimum_decision_units_per_regime
             ),
             required_simulation_limitations=frozen.required_simulation_limitations,
             reporting_currency=frozen.reporting_currency,
@@ -847,7 +847,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ForwardPaperError, "UNSPECIFIED"):
             self.protocol(required_simulation_limitations=("UNSPECIFIED",))
 
-    def test_unspecified_independence_key_is_invalid_for_registered_regime(self):
+    def test_unspecified_dependence_unit_is_invalid_for_registered_regime(self):
         predictions = list(self.predictions())
         first = predictions[0]
         predictions[0] = SealedPrediction.create(
@@ -867,7 +867,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             self.evidence(predictions=predictions),
         )
         self.assertEqual(result.evidence_status, "INVALID")
-        self.assertIn("independence_key_unspecified", result.reasons)
+        self.assertIn("dependence_unit_id_unspecified", result.reasons)
 
     def test_economics_sequence_cannot_move_backwards_in_time(self):
         rows = list(self.economics())

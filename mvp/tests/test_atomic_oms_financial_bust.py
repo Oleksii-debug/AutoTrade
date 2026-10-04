@@ -902,6 +902,53 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 [],
             )
 
+    def test_fill_bust_rejects_hostile_command_text_before_callback_or_mutation(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            with self.assertRaisesRegex(ValueError, "command_id is required"):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id=HostileText("atomic-bust"),
+                    idempotency_key="atomic-bust",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-1",
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
+
     def test_stale_provider_evidence_cannot_bust_newer_oms_revision(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

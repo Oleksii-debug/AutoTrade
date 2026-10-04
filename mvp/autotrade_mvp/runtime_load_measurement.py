@@ -631,6 +631,10 @@ def measure_declared_financial_operation(
                         f"measurement {label} executable authority changed during financial "
                         f"operation: {name}"
                     )
+        if type_for(plan) is not plan_type:
+            raise error_type(
+                "measurement durable plan exact class changed during financial operation"
+            )
         current_plan_state = object_getattribute(plan, "__dict__")
         if type_for(current_plan_state) is not dict_type:
             raise error_type(
@@ -666,7 +670,7 @@ def measure_declared_financial_operation(
                         "measurement durable plan event instance state changed during financial "
                         f"operation: {name}"
                     )
-        if plan_state_snapshot[4][1][expected_index] is not expected:
+        if declared_expected_events[expected_index] is not expected:
             raise error_type(
                 "measurement selected durable plan event identity changed during financial operation"
             )
@@ -898,8 +902,9 @@ def measure_declared_financial_operation(
             raise error_type("loaded durable plan instance state must be canonical")
         plan_state_names = tuple_for(plan_state)
         plan_state_snapshot = tuple_for(plan_state.items())
+        declared_expected_events = plan.expected_events
         expected_event_state_entries = []
-        for planned_event in plan.expected_events:
+        for planned_event in declared_expected_events:
             if type_for(planned_event) is not expected_type:
                 raise error_type("loaded durable plan event must use the exact canonical class")
             planned_event_state = object_getattribute(planned_event, "__dict__")

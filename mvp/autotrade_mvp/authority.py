@@ -5189,7 +5189,20 @@ class AuthorityService:
                 # Historical evidence above is intentionally regenerated at the
                 # admission instant so restart/replay remains deterministic.
                 # Sending is a distinct authority boundary: the exact persisted
-                # checkpoint/resources must still be current *now*.
+                # checkpoint/resources must still be current *now*. When local
+                # settlement capital participates, freeze one outer journal cut
+                # around both the provider checkpoint read and the local-capital
+                # projection. Otherwise a newer reconciliation checkpoint could
+                # land between those reads and leave stale provider CASH paired
+                # with a newer local projection.
+                raw_capital_adjustment = availability_evidence.get(
+                    "settlement_capital_adjustment"
+                )
+                capital_validation_sequence = (
+                    _authority_store_call(self, "current_journal_sequence")
+                    if raw_capital_adjustment is not None
+                    else None
+                )
                 current_provider_evidence = (
                     load_account_resource_availability_evidence(
                         _authority_service_store(self, required=True),
@@ -5211,9 +5224,6 @@ class AuthorityService:
                         evidence_artifact_store=self.evidence_artifact_store,
                         require_latest_scope=True,
                     )
-                )
-                raw_capital_adjustment = availability_evidence.get(
-                    "settlement_capital_adjustment"
                 )
                 if raw_capital_adjustment is not None:
                     current_provider_available = current_provider_evidence.get(
@@ -5282,6 +5292,13 @@ class AuthorityService:
                             raise AuthorityConflict(
                                 "current settlement capital no longer covers reservation"
                             )
+                    if (
+                        _authority_store_call(self, "current_journal_sequence")
+                        != capital_validation_sequence
+                    ):
+                        raise AuthorityConflict(
+                            "provider/local capital authority changed during dispatch validation"
+                        )
 
                 borrow_resources = tuple(
                     resource

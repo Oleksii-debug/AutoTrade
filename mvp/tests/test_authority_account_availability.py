@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.authority as authority_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
@@ -376,6 +377,61 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 _dispatch(authority, admitted),
                 (False, "financial_evidence_invalid"),
             )
+
+    def test_dispatch_rejects_reconciliation_advance_during_local_capital_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            original_resolve = authority_module._resolve_authority_service_capital
+            injected = False
+
+            def resolve_after_provider_read(*args, **kwargs):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    _checkpoint(
+                        store,
+                        available_cash="0",
+                        observed_at="2026-09-24T18:00:40Z",
+                        reconciliation_id="availability-authority-newer",
+                        snapshot_id="availability-snapshot-newer",
+                    )
+                return original_resolve(*args, **kwargs)
+
+            with patch.object(
+                authority_module,
+                "_resolve_authority_service_capital",
+                side_effect=resolve_after_provider_read,
+            ):
+                self.assertEqual(
+                    _dispatch(authority, admitted),
+                    (False, "financial_evidence_invalid"),
+                )
+            self.assertTrue(injected)
 
     def test_bybit_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
         with TemporaryDirectory() as directory:

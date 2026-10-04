@@ -382,10 +382,14 @@ class HostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
-        try:
+        if isinstance(after, str):
+            if not is_valid_common_scalar("Sequence", after):
+                raise ValueError("Cursor must be a canonical Sequence")
             cursor = int(after)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Cursor must be an integer sequence") from error
+        elif type(after) is int:
+            cursor = after
+        else:
+            raise ValueError("Cursor must be a canonical Sequence")
         if cursor < 0:
             raise ValueError("Cursor must be non-negative")
         if cursor > self.cursor:

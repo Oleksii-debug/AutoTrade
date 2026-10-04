@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.backup import (
     _fsync_directory,
     _fsync_directory_tree,
     _fsync_file,
+    _read_restore_marker,
     _safe_relative_path,
     complete_restore_reconciliation,
     create_backup,
@@ -356,6 +357,52 @@ class BackupRestoreTests(unittest.TestCase):
                 marker["runtime_checkpoint_evidence_sha256"],
                 evidence_entry["sha256"],
             )
+
+    def test_restore_marker_cannot_rebind_quarantined_runtime_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            (root / "autonomous-runtime-checkpoint.json").write_bytes(
+                b'{"checkpoint":"source-generation"}'
+            )
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            marker_path = restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+            evidence_path = (
+                restored
+                / "restore-evidence"
+                / "autonomous-runtime-checkpoint.json"
+            )
+            original_marker = marker_path.read_bytes()
+
+            marker = json.loads(original_marker)
+            marker["runtime_checkpoint_evidence_sha256"] = (
+                "sha256:" + "0" * 64
+            )
+            marker_path.write_text(
+                json.dumps(
+                    marker,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "evidence digest mismatch",
+            ):
+                _read_restore_marker(restored)
+
+            marker_path.write_bytes(original_marker)
+            evidence_path.write_bytes(b"tampered-after-restore")
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "evidence digest mismatch",
+            ):
+                _read_restore_marker(restored)
 
     def test_runtime_checkpoint_evidence_claim_must_match_inventory(self):
         with TemporaryDirectory() as directory:

@@ -2810,16 +2810,46 @@ def commit_economic_batch_with_reservation_consumption(
         cid,
     )
     if _order_fill_plan is not None and _order_fill_plan.snapshot.state == "FILLED":
+        if _order_fill_plan.snapshot.open_quantity != 0:
+            raise AccountingConflict(
+                "FILLED OMS snapshot must have zero open quantity before reservation release"
+            )
+        order_fill_envelope = _order_fill_plan.envelope
+        if type(order_fill_envelope) is not dict:
+            raise AccountingConflict(
+                "FILLED OMS reservation release requires exact durable fill envelope"
+            )
+        order_fill_request = _order_fill_plan.request
+        order_fill_client_order_id = _text(
+            order_fill_request.get("client_order_id"),
+            name="client_order_id",
+        )
+        order_fill_fill_id = _text(
+            order_fill_request.get("fill_id"),
+            name="fill_id",
+        )
+        order_fill_provider_execution_id = _text(
+            order_fill_request.get("provider_execution_id"),
+            name="provider_execution_id",
+        )
         reservation_plan = reservation_book.prepare_consume_and_mark_filled_mutation(
             event_key=reservation_event_key,
             idempotency_key=reservation_component_key,
             reservation_id=rid,
             usage=usage,
             order_fill_event_id=_order_fill_plan.event_id,
+            order_fill_payload_hash=_text(
+                order_fill_envelope.get("payload_hash"),
+                name="order_fill_payload_hash",
+            ),
             order_fill_snapshot_digest=payload_digest(
                 _order_fill_plan.snapshot_payload
             ),
             order_fill_mutation_hash=_order_fill_plan.mutation_hash,
+            order_fill_provider_id=economic_book.provider_id,
+            order_fill_client_order_id=order_fill_client_order_id,
+            order_fill_fill_id=order_fill_fill_id,
+            order_fill_provider_execution_id=order_fill_provider_execution_id,
             committed_at=when,
             expected_snapshot_digest=reservation_expected_snapshot_digest,
         )

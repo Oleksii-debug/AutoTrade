@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.alpaca import (
     AlpacaOrderIntent,
     guarded_order_projection as alpaca_guarded_order_projection,
@@ -268,12 +269,12 @@ def verified_alpaca_capability():
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=ALPACA_SNAPSHOT_ID,
         claims=claims,
         observed_at=ALPACA_NOW,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def alpaca_prepared_request(client_order_id="at-alpaca-1"):
@@ -424,12 +425,12 @@ def verified_read_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=snapshot_id,
         claims=claims,
         observed_at=snapshot_observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 class RecordingCapabilityRegistry(CapabilityRegistry):
@@ -520,12 +521,12 @@ def verified_kraken_read_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=snapshot_id,
         claims=claims,
         observed_at=snapshot_observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def kraken_authenticated_read_binding(
@@ -3446,7 +3447,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         transport, resolver = self.make_read_transport(events=events, wire=wire)
         other_binding = prepare_authenticated_read_query(
-            capability=derive_capability_snapshot(
+            capability=fresh_test_admission(derive_capability_snapshot(
                 snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 claims=tuple(
                     CapabilityClaim(
@@ -3477,7 +3478,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 ),
                 observed_at=READ_NOW,
                 evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-            ),
+            )),
             surface=Surface.AUTHENTICATED_READ,
             endpoint="/api/v3/account",
             query=None,

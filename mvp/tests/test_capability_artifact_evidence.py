@@ -383,7 +383,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             self.assertEqual(current.status, "VERIFIED")
             self.assertEqual(current.sources, frozenset(SOURCES))
             self.assertEqual(len(current.evidence), 4)
-            self.assertTrue(
+            self.assertFalse(
                 current.admits(
                     at=NOW,
                     order_type="LIMIT",

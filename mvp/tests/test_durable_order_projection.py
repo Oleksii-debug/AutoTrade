@@ -101,12 +101,11 @@ class DurableOrderProjectionTests(unittest.TestCase):
             oms_ref = weakref.ref(oms)
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
-            projection_refs = weakref.getweakrefs(oms)
-            registry_refs = [
-                ref for ref in projection_refs if ref.__callback__ is not None
-            ]
-            self.assertEqual(len(registry_refs), 1)
-            registry_ref = registry_refs[0]
+            # Binding weakrefs must remain callback-free: a caller can
+            # enumerate weakrefs and invoke exposed callbacks manually.
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(oms))
+            )
             self.assertTrue(
                 all(ref.__callback__ is None for ref in weakref.getweakrefs(store))
             )
@@ -117,8 +116,6 @@ class DurableOrderProjectionTests(unittest.TestCase):
             del oms
             gc.collect()
             self.assertIsNone(oms_ref())
-            self.assertIsNone(registry_ref())
-            self.assertIsNone(registry_ref.__callback__)
 
             del store
             del artifacts

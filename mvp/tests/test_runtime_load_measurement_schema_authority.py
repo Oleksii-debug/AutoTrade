@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.runtime_load_measurement as measurement_module
@@ -129,6 +130,40 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
                 JournalStore.SCHEMA_VERSION = original
 
             self.assertEqual(hostile.comparisons, 0)
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_rejects_module_subclass_before_attribute_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            touched = []
+
+            class HostileModule(ModuleType):
+                def __getattribute__(self, name):
+                    if name not in {"__class__"}:
+                        touched.append(name)
+                        raise AssertionError(
+                            "hostile module attribute callback executed during verification"
+                        )
+                    return ModuleType.__getattribute__(self, name)
+
+            def attack() -> None:
+                _append(store, expected)
+                json_module.__class__ = HostileModule
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"transitive module dependency class changed",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                json_module.__class__ = ModuleType
+
+            self.assertEqual(touched, [])
             self.assertIsNone(
                 store.get_event(self._measurement_id(plan_id, expected.event_id))
             )

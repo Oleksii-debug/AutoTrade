@@ -22,6 +22,11 @@ from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
+# Retain the installed JournalStore CAS primitive once. Durable owner transfer
+# must not be redirected through a later mutable public class attribute.
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
+
+
 class HostState(str, Enum):
     STOPPED = "STOPPED"
     RECOVERING = "RECOVERING"
@@ -310,7 +315,7 @@ class RecoveryController:
                 f"{owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        JournalStore.append_event(
+        _CANONICAL_JOURNAL_APPEND_EVENT(
             store,
             {
                 "event_id": event_id,

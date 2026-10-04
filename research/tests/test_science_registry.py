@@ -355,6 +355,9 @@ class ScientificRegistryTests(unittest.TestCase):
                 payload={"trial": 1},
             )
             with store._connect() as con:
+                # Exercise corrupted storage below the append-only API.
+                # Normal UPDATE remains forbidden by this trigger.
+                con.execute("DROP TRIGGER trials_no_update")
                 con.execute(
                     "UPDATE trials SET status=? WHERE trial_id=?",
                     ("FORGED", trial_id),

@@ -83,6 +83,7 @@ class ProductionFoundationPackagingTests(unittest.TestCase):
                 staging / "autotrade_numeric",
             )
             self.assertFalse((staging / "research").exists())
+            shutil.copytree(ROOT / "autotrade_runtime", staging / "autotrade_runtime")
             self.assertFalse((staging / "autotrade_local_filesystem.py").exists())
 
             database = root / "journal.sqlite3"

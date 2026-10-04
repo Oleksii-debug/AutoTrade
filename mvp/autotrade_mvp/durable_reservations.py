@@ -12,20 +12,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
+from weakref import WeakKeyDictionary
 
-from research.autotrade_research.artifacts import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
-from .persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -74,21 +86,20 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be an exact finite decimal within the resource envelope"
+        ) from error
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "reservation decimal exceeds exact decimal authority"
+        ) from error
 
 
 def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
@@ -177,6 +188,201 @@ class PreparedReservationMutation:
     already_committed: bool = False
 
 
+@dataclass(frozen=True)
+class _DurableReservationStoreBinding:
+    store: JournalStore
+    store_identity: object
+    environment: str
+    account_id: str
+    scope_id: str
+    resolution_artifact_store: ArtifactStore | None
+    resolution_artifact_reader: object | None
+
+
+def _build_reservation_store_binding_accessors():
+    bindings: WeakKeyDictionary[object, _DurableReservationStoreBinding] = (
+        WeakKeyDictionary()
+    )
+
+    def is_registered(value: object) -> bool:
+        return value in bindings
+
+    def initialize(
+        value: object,
+        store: JournalStore,
+        *,
+        environment: str,
+        account_id: str,
+        resolution_artifact_store: ArtifactStore | None = None,
+        resolution_artifact_root: str | Path | None = None,
+    ) -> None:
+        if type(value) is not DurableReservationBook:
+            raise TypeError("reservation book must be exact DurableReservationBook")
+        if value in bindings:
+            raise ReservationConflict(
+                "reservation store authority is already established"
+            )
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
+        try:
+            identity = require_exact_journal_store_authority(
+                store,
+                subject="durable reservation JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise ReservationConflict(
+                "durable reservation JournalStore authority is invalid"
+            ) from error
+
+        normalized_environment = _environment(environment)
+        normalized_account = _text(account_id, name="account_id")
+        if (
+            resolution_artifact_store is not None
+            and type(resolution_artifact_store) is not ArtifactStore
+        ):
+            raise TypeError(
+                "resolution_artifact_store must be the canonical ArtifactStore or None"
+            )
+        if resolution_artifact_store is not None and resolution_artifact_root is None:
+            raise TypeError(
+                "resolution_artifact_root is required when a publication store is supplied"
+            )
+        reader = (
+            None
+            if resolution_artifact_root is None
+            else trusted_authenticated_reader(
+                resolution_artifact_root,
+                publication_store=resolution_artifact_store,
+            )
+        )
+        scope_id = _journal_identity(
+            normalized_environment,
+            normalized_account,
+            "scope",
+            "reservation-book",
+        )
+
+        object.__setattr__(value, "store", store)
+        object.__setattr__(value, "environment", normalized_environment)
+        object.__setattr__(value, "account_id", normalized_account)
+        object.__setattr__(
+            value,
+            "resolution_artifact_store",
+            resolution_artifact_store,
+        )
+        object.__setattr__(value, "_resolution_artifact_reader", reader)
+        object.__setattr__(value, "scope_id", scope_id)
+        object.__setattr__(value, "_book", ReservationBook())
+        object.__setattr__(value, "_idempotency", {})
+
+        bindings[value] = _DurableReservationStoreBinding(
+            store=store,
+            store_identity=identity,
+            environment=normalized_environment,
+            account_id=normalized_account,
+            scope_id=scope_id,
+            resolution_artifact_store=resolution_artifact_store,
+            resolution_artifact_reader=reader,
+        )
+        try:
+            DurableReservationBook._reload(value)
+        except Exception:
+            bindings.pop(value, None)
+            raise
+
+    def require(value: object) -> tuple[JournalStore, object, str]:
+        if type(value) is not DurableReservationBook:
+            raise TypeError("reservation book must be exact DurableReservationBook")
+        binding = bindings.get(value)
+        if binding is None:
+            raise ReservationConflict(
+                "durable reservation store authority is not established"
+            )
+        state = object.__getattribute__(value, "__dict__")
+        state_keys = tuple(state)
+        if any(type(name) is not str for name in state_keys):
+            raise ReservationConflict(
+                "durable reservation instance state keys must be exact str"
+            )
+        class_owned_names = {
+            name for base in DurableReservationBook.__mro__ for name in base.__dict__
+        }
+        if class_owned_names.intersection(state_keys):
+            raise ReservationConflict(
+                "durable reservation instance state is shadowed"
+            )
+        if state.get("store") is not binding.store:
+            raise ReservationConflict(
+                "durable reservation JournalStore changed after construction"
+            )
+        if (
+            state.get("environment") != binding.environment
+            or state.get("account_id") != binding.account_id
+            or state.get("scope_id") != binding.scope_id
+        ):
+            raise ReservationConflict(
+                "durable reservation scope changed after construction"
+            )
+        if (
+            state.get("resolution_artifact_store")
+            is not binding.resolution_artifact_store
+            or state.get("_resolution_artifact_reader")
+            is not binding.resolution_artifact_reader
+        ):
+            raise ReservationConflict(
+                "durable reservation evidence authority changed after construction"
+            )
+        try:
+            current = require_exact_journal_store_authority(
+                binding.store,
+                subject="durable reservation JournalStore",
+            )
+        except (TypeError, RuntimeError) as error:
+            raise ReservationConflict(
+                "durable reservation JournalStore authority changed"
+            ) from error
+        if current != binding.store_identity:
+            raise ReservationConflict(
+                "durable reservation JournalStore generation changed"
+            )
+        return binding.store, binding.store_identity, binding.scope_id
+
+    return is_registered, initialize, require
+
+
+(
+    _reservation_store_binding_registered,
+    _initialize_reservation_store_binding,
+    _require_reservation_store_binding,
+) = _build_reservation_store_binding_accessors()
+del _build_reservation_store_binding_accessors
+
+
+def _reservation_store_load_events(
+    value: object,
+    aggregate_type: str,
+    aggregate_id: str,
+) -> list[dict[str, object]]:
+    store, identity, _ = _require_reservation_store_binding(value)
+    with journal_store_authority_scope(store, identity):
+        return JournalStore.load_events(store, aggregate_type, aggregate_id)
+
+
+def _reservation_store_get_event(
+    value: object,
+    event_id: str,
+) -> dict[str, object] | None:
+    store, identity, _ = _require_reservation_store_binding(value)
+    with journal_store_authority_scope(store, identity):
+        return JournalStore.get_event(store, event_id)
+
+
+def _reservation_store_commit_command(value: object, **kwargs):
+    store, identity, _ = _require_reservation_store_binding(value)
+    with journal_store_authority_scope(store, identity):
+        return JournalStore.commit_command(store, **kwargs)
+
+
 class DurableReservationBook:
     """ReservationBook projection with crash/restart and dedupe semantics."""
 
@@ -189,43 +395,49 @@ class DurableReservationBook:
         resolution_artifact_store: ArtifactStore | None = None,
         resolution_artifact_root: str | Path | None = None,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        self.store = store
-        self.environment = _environment(environment)
-        self.account_id = _text(account_id, name="account_id")
+        _initialize_reservation_store_binding(
+            self,
+            store,
+            environment=environment,
+            account_id=account_id,
+            resolution_artifact_store=resolution_artifact_store,
+            resolution_artifact_root=resolution_artifact_root,
+        )
+
+    _BOUND_AUTHORITY_STATE = frozenset(
+        {
+            "store",
+            "environment",
+            "account_id",
+            "scope_id",
+            "resolution_artifact_store",
+            "_resolution_artifact_reader",
+        }
+    )
+
+    def __getattribute__(self, name: str):
         if (
-            resolution_artifact_store is not None
-            and type(resolution_artifact_store) is not ArtifactStore
+            type(name) is str
+            and name != "__dict__"
+            and _reservation_store_binding_registered(self)
         ):
-            raise TypeError(
-                "resolution_artifact_store must be the canonical ArtifactStore or None"
+            _require_reservation_store_binding(self)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if _reservation_store_binding_registered(self):
+            class_owned = any(
+                name in base.__dict__ for base in DurableReservationBook.__mro__
             )
-        if resolution_artifact_store is not None and resolution_artifact_root is None:
-            raise TypeError(
-                "resolution_artifact_root is required when a publication store is supplied"
-            )
-        self.resolution_artifact_store = resolution_artifact_store
-        self._resolution_artifact_reader = (
-            None
-            if resolution_artifact_root is None
-            else trusted_authenticated_reader(
-                resolution_artifact_root,
-                publication_store=resolution_artifact_store,
-            )
-        )
-        self.scope_id = _journal_identity(
-            self.environment,
-            self.account_id,
-            "scope",
-            "reservation-book",
-        )
-        self._book = ReservationBook()
-        self._idempotency: dict[str, tuple[str, dict[str, object]]] = {}
-        self._reload()
+            if name in DurableReservationBook._BOUND_AUTHORITY_STATE or class_owned:
+                raise ReservationConflict(
+                    "durable reservation authority state is immutable"
+                )
+        object.__setattr__(self, name, value)
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.scope_id)
+        _, _, scope_id = _require_reservation_store_binding(self)
+        return _reservation_store_load_events(self, _AGGREGATE_TYPE, scope_id)
 
     def _replay(
         self,
@@ -291,6 +503,16 @@ class DurableReservationBook:
                         attempt_id=request.get("attempt_id"),
                         resolution_evidence=request.get("resolution_evidence"),
                     )
+                elif operation == "MARK_ZERO_WIRE_TERMINAL":
+                    current = book.get(request.get("reservation_id"))
+                    self._verify_zero_wire_blocked(
+                        reservation_id=request.get("reservation_id"),
+                        intent_id=current.intent_id,
+                        provider=request.get("provider"),
+                        attempt_id=request.get("attempt_id"),
+                        client_order_id=request.get("client_order_id"),
+                        resolution_evidence=request.get("resolution_evidence"),
+                    )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -326,7 +548,7 @@ class DurableReservationBook:
             )
         if operation == "MARK_UNKNOWN":
             return book.mark_unknown(request["reservation_id"])
-        if operation == "MARK_TERMINAL":
+        if operation in {"MARK_TERMINAL", "MARK_ZERO_WIRE_TERMINAL"}:
             return book.mark_terminal(
                 request["reservation_id"],
                 outcome=request["outcome"],
@@ -624,7 +846,8 @@ class DurableReservationBook:
         # commit_command is the single durable transaction: command dedupe and
         # reservation event either both commit or neither does.
         try:
-            self.store.commit_command(
+            _reservation_store_commit_command(
+                self,
                 command_id=journal_command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -750,6 +973,202 @@ class DurableReservationBook:
             request=request,
         )
 
+    def _verify_zero_wire_blocked(
+        self,
+        *,
+        reservation_id: object,
+        intent_id: object,
+        provider: object,
+        attempt_id: object,
+        client_order_id: object,
+        resolution_evidence: object | None = None,
+    ) -> str:
+        """Prove a reservation never crossed the irreversible send boundary."""
+
+        _text(reservation_id, name="reservation_id")
+        intent = _text(intent_id, name="intent_id")
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        client = _text(client_order_id, name="client_order_id")
+        aggregate_id = submission_attempt_aggregate_id(
+            environment=self.environment,
+            account_id=self.account_id,
+            attempt_id=attempt,
+        )
+        attempt_events = self.store.load_events(
+            "submission_attempt",
+            aggregate_id,
+        )
+        if (
+            len(attempt_events) != 2
+            or [event.get("event_type") for event in attempt_events]
+            != ["SubmissionPrepared", "SubmissionBlocked"]
+            or [event.get("aggregate_version") for event in attempt_events]
+            != [1, 2]
+        ):
+            raise ReservationConflict(
+                "zero-wire terminal release requires exact Prepared -> Blocked chronology"
+            )
+        prepared, blocked = attempt_events
+        prepared_payload = prepared.get("payload")
+        blocked_payload = blocked.get("payload")
+        if type(prepared_payload) is not dict or type(blocked_payload) is not dict:
+            raise ReservationConflict(
+                "zero-wire submission evidence payload is invalid"
+            )
+        if (
+            prepared_payload.get("attempt_id") != attempt
+            or prepared_payload.get("intent_id") != intent
+            or prepared_payload.get("environment") != self.environment
+            or prepared_payload.get("account_id") != self.account_id
+            or _text(
+                prepared_payload.get("provider"),
+                name="submission provider",
+            ).upper()
+            != provider_name
+            or prepared_payload.get("client_order_id") != client
+            or blocked_payload.get("client_order_id") != client
+            or not isinstance(blocked_payload.get("reason"), str)
+            or not blocked_payload["reason"].strip()
+        ):
+            raise ReservationConflict(
+                "zero-wire submission evidence does not match reservation scope"
+            )
+        blocked_event_id = _text(
+            blocked.get("event_id"),
+            name="blocked event_id",
+        )
+        blocked_payload_hash = _text(
+            blocked.get("payload_hash"),
+            name="blocked payload_hash",
+        )
+        evidence = (
+            f"journal:submission-blocked:{blocked_event_id}"
+            f"@{blocked_payload_hash}"
+        )
+        if (
+            resolution_evidence is not None
+            and _text(
+                resolution_evidence,
+                name="resolution_evidence",
+            )
+            != evidence
+        ):
+            raise ReservationConflict(
+                "zero-wire resolution evidence does not match durable blocked event"
+            )
+        return evidence
+
+    def prepare_zero_wire_blocked_terminal_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        provider: str,
+        attempt_id: str,
+        client_order_id: str,
+        committed_at: str,
+    ) -> PreparedReservationMutation:
+        """Prepare a REJECTED release proven by exact pre-send durable chronology."""
+
+        key = _text(idempotency_key, name="idempotency_key")
+        rid = _text(reservation_id, name="reservation_id")
+        provider_name = _text(provider, name="provider").upper()
+        attempt = _text(attempt_id, name="attempt_id")
+        client = _text(client_order_id, name="client_order_id")
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        current = candidate.get(rid)
+        evidence = self._verify_zero_wire_blocked(
+            reservation_id=rid,
+            intent_id=current.intent_id,
+            provider=provider_name,
+            attempt_id=attempt,
+            client_order_id=client,
+        )
+        request = {
+            "reservation_id": rid,
+            "outcome": "REJECTED",
+            "provider": provider_name,
+            "attempt_id": attempt,
+            "client_order_id": client,
+            "resolution_evidence": evidence,
+        }
+        existing = idempotency.get(key)
+        if existing is not None:
+            if existing[0] != payload_digest(request):
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            snapshot = candidate.get(rid)
+            snapshot_value = _snapshot_payload(snapshot)
+            if snapshot_value != existing[1]:
+                raise ReservationConflict(
+                    "committed zero-wire terminal snapshot does not match replayed state"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=request,
+                aggregate_version=(
+                    0 if not events else int(events[-1]["aggregate_version"])
+                ),
+                already_committed=True,
+            )
+
+        if current.state != "WORKING":
+            raise ReservationConflict(
+                "zero-wire blocked release requires a WORKING reservation"
+            )
+        if any(amount != 0 for amount in current.consumed.values()):
+            raise ReservationConflict(
+                "zero-wire blocked release cannot erase consumed exposure"
+            )
+        snapshot = candidate.mark_terminal(
+            rid,
+            outcome="REJECTED",
+            resolution_evidence=evidence,
+        )
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = (
+            1 if not events else int(events[-1]["aggregate_version"]) + 1
+        )
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "MARK_ZERO_WIRE_TERMINAL",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "zero-wire-terminal-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
     def _verify_resolution_evidence(
         self,
         *,
@@ -863,7 +1282,8 @@ class DurableReservationBook:
             account_id=self.account_id,
             attempt_id=attempt,
         )
-        attempt_events = self.store.load_events(
+        attempt_events = _reservation_store_load_events(
+            self,
             "submission_attempt",
             aggregate_id,
         )
@@ -909,7 +1329,10 @@ class DurableReservationBook:
                 "PROVEN_ABSENT requires a durable UNKNOWN submission state"
             )
 
-        reconciliation_event = self.store.get_event(reconciliation_event_id)
+        reconciliation_event = _reservation_store_get_event(
+            self,
+            reconciliation_event_id,
+        )
         if (
             reconciliation_event is None
             or reconciliation_event.get("event_type") != "AccountReconciled"

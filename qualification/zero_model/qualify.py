@@ -13,9 +13,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
+import sqlite3
 import tempfile
 
 from mvp.autotrade_mvp.economics import build_economic_report
@@ -28,10 +30,14 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
+_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+_QUALIFIER_SOURCE_PATH = "qualification/zero_model/qualify.py"
 
 
 class UnavailableModelInventory:
@@ -60,19 +66,113 @@ def _require_source_sha(value: str) -> str:
     return value
 
 
-def _observed_source_sha() -> str:
-    """Read source identity from the actual Git checkout, not caller metadata."""
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
 
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable() -> str:
+    """Resolve Git independently of caller PATH and source-checkout content."""
+
+    source_root = _SOURCE_ROOT.resolve(strict=True)
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise RuntimeError("trusted Git executable must not originate from source checkout")
+    raise RuntimeError("trusted Git executable is unavailable at an OS-managed location")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Drop caller-selected Git repository/config/PATH authority."""
+
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    executable = _trusted_git_executable()
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+        return subprocess.run(
+            [executable, *args],
+            cwd=_SOURCE_ROOT,
             check=True,
             capture_output=True,
             text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
         )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("cannot resolve observed Git source identity") from error
-    return _require_source_sha(result.stdout.strip())
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot inspect qualification Git checkout") from error
+
+
+def _git_bytes(*args: str) -> subprocess.CompletedProcess[bytes]:
+    executable = _trusted_git_executable()
+    try:
+        return subprocess.run(
+            [executable, *args],
+            cwd=_SOURCE_ROOT,
+            check=True,
+            capture_output=True,
+            text=False,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot read exact qualification Git object") from error
+
+
+def _observed_source_sha() -> str:
+    """Read source identity from the exact checkout that owns this qualifier."""
+
+    try:
+        top_level = Path(
+            _git("rev-parse", "--show-toplevel").stdout.strip()
+        ).resolve(strict=True)
+        source_root = _SOURCE_ROOT.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("cannot verify qualification Git source root") from error
+    if top_level != source_root:
+        raise RuntimeError("qualification source root is not the exact Git top-level")
+    return _require_source_sha(_git("rev-parse", "HEAD").stdout.strip())
+
+
+def _require_clean_checkout() -> None:
+    status = _git(
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ).stdout
+    if status:
+        raise RuntimeError(
+            "qualification Git checkout has tracked or untracked source changes"
+        )
 
 
 def _require_exact_checkout(expected_source_sha: str) -> str:
@@ -82,11 +182,18 @@ def _require_exact_checkout(expected_source_sha: str) -> str:
         raise RuntimeError(
             "qualification source identity does not match actual Git checkout"
         )
+    _require_clean_checkout()
     return observed
 
 
-def _qualifier_sha256() -> str:
-    return "sha256:" + sha256(Path(__file__).read_bytes()).hexdigest()
+def _qualifier_sha256(source_sha: str) -> str:
+    source_sha = _require_source_sha(source_sha)
+    raw = _git_bytes(
+        "cat-file",
+        "blob",
+        f"{source_sha}:{_QUALIFIER_SOURCE_PATH}",
+    ).stdout
+    return "sha256:" + sha256(raw).hexdigest()
 
 
 def _outage_routes() -> dict[str, object]:
@@ -154,7 +261,7 @@ def _outage_routes() -> dict[str, object]:
 
 def qualify(source_sha: str) -> dict[str, object]:
     source_sha = _require_exact_checkout(source_sha)
-    qualifier_sha256 = _qualifier_sha256()
+    qualifier_sha256 = _qualifier_sha256(source_sha)
 
     request = ModelRequest(
         request_id="zero-model-qualification",
@@ -193,6 +300,8 @@ def qualify(source_sha: str) -> dict[str, object]:
     )
     if model_cost_total != Decimal("0"):
         raise RuntimeError("zero-model outage qualification reserved model spend")
+
+    autonomous = _qualify_autonomous_loop()
 
     with tempfile.TemporaryDirectory(prefix="autotrade-zero-model-") as directory:
         first = run_vertical_slice(PRICES, directory)
@@ -260,6 +369,7 @@ def qualify(source_sha: str) -> dict[str, object]:
             if first_report.economic_edge_claim != "UNPROVEN_SIMULATION_ONLY":
                 raise RuntimeError("zero-model campaign manufactured an economic-edge claim")
 
+        observed_source_sha = _require_exact_checkout(source_sha)
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "execution_platform": {
@@ -269,7 +379,8 @@ def qualify(source_sha: str) -> dict[str, object]:
             },
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
-            "observed_source_sha": source_sha,
+            "observed_source_sha": observed_source_sha,
+            "source_checkout_clean": True,
             "qualifier_sha256": qualifier_sha256,
             "model_route": {
                 "status": route.status.value,
@@ -290,6 +401,7 @@ def qualify(source_sha: str) -> dict[str, object]:
                 for name, decision in outage_routes.items()
             },
             "model_cost_total": str(model_cost_total),
+            "autonomous_zero_loop": autonomous,
             "deterministic_financial_slice": {
                 "first_status": first.status,
                 "restart_status": second.status,
@@ -324,6 +436,56 @@ def qualify(source_sha: str) -> dict[str, object]:
                 "all_wp62_workflows_qualified": False,
                 "network_or_model_call_performed": False,
             },
+        }
+
+
+def _qualify_autonomous_loop() -> dict[str, object]:
+    """Execute canonical allocation/risk/OMS/finance, then reproduce every event."""
+    prices = ["100", "101", "103", "102", "100", "100", "101", "103"]
+    with tempfile.TemporaryDirectory(prefix="autotrade-autonomous-zero-") as directory:
+        root = Path(directory)
+        full_root = resumed_root = root / "simulation"
+        full_root.mkdir()
+        journal = full_root / "journal.sqlite3"
+        JournalStore(journal)
+        # A physical JournalStore identity is part of authentic valuation
+        # evidence. Replay the same empty snapshot into this disposable fixture
+        # while retaining that identity; distinct databases correctly have
+        # distinct provenance and must not be reported as byte-identical.
+        seed = root / "empty.sqlite3"
+        with sqlite3.connect(journal) as source, sqlite3.connect(seed) as target:
+            source.backup(target)
+        arguments = {"run_id": "zero-qualification", "now": "2026-10-03T00:00:00Z"}
+        full = run_autonomous_simulation(prices, full_root, **arguments)
+        events = JournalStore(journal).load_events_after_journal_sequence(0)
+        with sqlite3.connect(seed) as source, sqlite3.connect(journal) as target:
+            source.backup(target)
+        partial = run_autonomous_simulation(prices, resumed_root, stop_after_episodes=4, **arguments)
+        resumed = run_autonomous_simulation(prices, resumed_root, **arguments)
+        again = run_autonomous_simulation(prices, resumed_root, **arguments)
+        if full["status"] != "COMPLETED" or partial["status"] != "PAUSED" or resumed["status"] != "COMPLETED":
+            raise RuntimeError("autonomous ZERO loop did not complete/restart")
+        if full["decisions"] != resumed["decisions"] or again["new_outbound_requests"] != 0:
+            raise RuntimeError("autonomous ZERO decisions or exactly-once restart differ")
+        restored_events = JournalStore(resumed_root / "journal.sqlite3").load_events_after_journal_sequence(0)
+        if events != restored_events:
+            raise RuntimeError("autonomous ZERO durable event population differs after restart")
+        if full["economic_edge_status"] != "INCONCLUSIVE":
+            raise RuntimeError("simulation cannot establish economic edge")
+        return {
+            "status": full["status"], "mode": full["mode"],
+            "protocol_digest": full["protocol_digest"],
+            "episodes": full["completed_episodes"],
+            "simulated_requests": full["new_outbound_requests"],
+            "repeat_requests": again["new_outbound_requests"],
+            "cash": full["cash"], "position": full["position"],
+            "reconciled": full["reconciled"],
+            "journal_event_count": len(events),
+            "journal_population_digest": payload_digest(events),
+            "restart_event_population_equal": True,
+            "reproduction_scope": "SAME_PHYSICAL_STORE_FROM_IDENTICAL_EMPTY_SNAPSHOT",
+            "economic_edge_status": "INCONCLUSIVE",
+            "m1_complete": False,
         }
 
 

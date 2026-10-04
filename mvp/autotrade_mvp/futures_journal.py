@@ -13,11 +13,11 @@ from fractions import Fraction
 from typing import Any, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from .accounting import (
     EconomicBook,

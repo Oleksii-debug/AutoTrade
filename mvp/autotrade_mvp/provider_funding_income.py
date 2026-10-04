@@ -95,13 +95,6 @@ def _datetime_from_epoch_millis(millis: int, *, name: str) -> datetime:
         ) from error
 
 
-def _transaction_time(value: object) -> datetime:
-    return _datetime_from_epoch_millis(
-        _epoch_millis(value, name="transactionTime"),
-        name="transactionTime",
-    )
-
-
 def _uppercase_ascii_text(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     if not text.isascii() or text != text.upper():
@@ -497,10 +490,12 @@ def _bybit_funding_income_observations_impl(
     source: ProviderOriginObservation,
     *,
     _issue_income,
+    _validated_origin_fn,
+    _parse_rows_fn,
 ) -> tuple[ProviderFundingIncomeObservation, ...]:
-    binding, neutral, qualified, qualified_ref = _validated_origin(source)
+    binding, neutral, qualified, qualified_ref = _validated_origin_fn(source)
     base = qualified.query_binding.query_binding
-    rows = _parse_bybit_funding_income_rows(neutral.payload, dict(base.query))
+    rows = _parse_rows_fn(neutral.payload, dict(base.query))
 
     observations: list[ProviderFundingIncomeObservation] = []
     for row in rows:
@@ -549,13 +544,23 @@ def _bybit_funding_income_observations_impl(
         )
     return tuple(observations)
 
-def _bind_bybit_funding_income_observations(impl, issue_income):
+def _bind_bybit_funding_income_observations(
+    impl,
+    issue_income,
+    validated_origin,
+    parse_rows,
+):
     def bybit_funding_income_observations(
         source: ProviderOriginObservation,
     ) -> tuple[ProviderFundingIncomeObservation, ...]:
         """Project provider funding cash; grant no rate/price/position authority."""
 
-        return impl(source, _issue_income=issue_income)
+        return impl(
+            source,
+            _issue_income=issue_income,
+            _validated_origin_fn=validated_origin,
+            _parse_rows_fn=parse_rows,
+        )
 
     return bybit_funding_income_observations
 
@@ -563,10 +568,13 @@ def _bind_bybit_funding_income_observations(impl, issue_income):
 bybit_funding_income_observations = _bind_bybit_funding_income_observations(
     _bybit_funding_income_observations_impl,
     _issue_provider_funding_income,
+    _validated_origin,
+    _parse_bybit_funding_income_rows,
 )
 del _bind_bybit_funding_income_observations
 del _bybit_funding_income_observations_impl
 del _issue_provider_funding_income
+del _validated_origin
 
 
 __all__ = [

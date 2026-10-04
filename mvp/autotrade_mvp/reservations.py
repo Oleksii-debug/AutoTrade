@@ -35,6 +35,8 @@ class InsufficientAvailable(ValueError):
 
 TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"}
 ACTIVE_STATES = {"WORKING", "UNKNOWN"}
+POST_BUST_HOLD_STATE = "BUSTED_PENDING_RECONCILIATION"
+HELD_STATES = ACTIVE_STATES | {POST_BUST_HOLD_STATE}
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -87,7 +89,7 @@ class ReservationSnapshot:
 
 
 class ReservationBook:
-    """Holds working/UNKNOWN exposure until a proven terminal outcome releases it."""
+    """Holds working, ambiguous and post-bust unresolved exposure."""
 
     def __init__(self) -> None:
         self._records: dict[str, ReservationSnapshot] = {}
@@ -122,7 +124,7 @@ class ReservationBook:
             return exact_sum(
                 record.remaining.get(key, Decimal("0"))
                 for record in self._records.values()
-                if record.state in ACTIVE_STATES
+                if record.state in HELD_STATES
             )
         except ExactDecimalError as error:
             raise ReservationConflict(
@@ -220,7 +222,7 @@ class ReservationBook:
         usage: Mapping[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         current = self._get_record(reservation_id)
-        if current.state not in ACTIVE_STATES:
+        if current.state not in HELD_STATES:
             raise ReservationConflict("Cannot consume a terminal reservation")
         amounts = _amounts(usage)
         remaining = dict(current.remaining)
@@ -260,14 +262,20 @@ class ReservationBook:
     ) -> ReservationSnapshot:
         """Return reversed fill usage to held capacity without releasing it.
 
-        This is deliberately the inverse of consume only inside the same
-        active reservation. It moves exact amounts from consumed back to
-        remaining; it never changes terminal state and never makes the
-        reservation disappear from total_reserved.
+        For an unresolved reservation this is the exact inverse of ``consume``.
+        A provider bust may also invalidate a previously terminal FILLED cut.
+        In that case the prior terminal result is not relabelled WORKING or
+        UNKNOWN: the reservation enters a dedicated post-bust hold state and
+        reconstitutes every resource to ``original - still_consumed``. This is
+        important because terminalization released both consumed fill capacity
+        and any unused safety buffer. The durable caller binds this projection
+        to the matching OMS bust and economic reversal in one JournalStore
+        command; this projection alone never releases capital.
         """
 
         current = self._get_record(reservation_id)
-        if current.state not in ACTIVE_STATES:
+        terminal_filled_bust = current.state == "FILLED"
+        if current.state not in HELD_STATES and not terminal_filled_bust:
             raise ReservationConflict(
                 "Cannot restore consumption on a terminal reservation"
             )
@@ -294,14 +302,46 @@ class ReservationBook:
                 )
             remaining[resource] = next_remaining
             consumed[resource] = next_consumed
+
+        state = current.state
+        resolution_evidence = current.resolution_evidence
+        if terminal_filled_bust:
+            # FILLED terminalization zeros all remaining capacity. A later
+            # provider bust reopens risk, so restoring only the busted fill's
+            # usage would lose the previously released unused buffer. Rebuild
+            # the held cut from the immutable original minus still-consumed
+            # exposure for every resource.
+            rebuilt_remaining: dict[str, Decimal] = {}
+            for resource, original in current.original.items():
+                if resource not in consumed:
+                    raise ReservationConflict(
+                        f"Consumed authority is missing reserved resource {resource}"
+                    )
+                try:
+                    rebuilt = exact_subtract(original, consumed[resource])
+                except ExactDecimalError as error:
+                    raise ReservationConflict(
+                        "post-bust reservation rebuild exceeds exact decimal authority"
+                    ) from error
+                if rebuilt < 0:
+                    raise ReservationConflict(
+                        f"Consumed reservation exceeds original for {resource}"
+                    )
+                rebuilt_remaining[resource] = rebuilt
+            remaining = rebuilt_remaining
+            state = POST_BUST_HOLD_STATE
+            # The old terminal evidence remains immutable in journal history,
+            # but it no longer describes the current unresolved reservation cut.
+            resolution_evidence = None
+
         updated = ReservationSnapshot(
             reservation_id=current.reservation_id,
             intent_id=current.intent_id,
             original=current.original,
             remaining=MappingProxyType(remaining),
             consumed=MappingProxyType(consumed),
-            state=current.state,
-            resolution_evidence=current.resolution_evidence,
+            state=state,
+            resolution_evidence=resolution_evidence,
         )
         self._records[current.reservation_id] = updated
         return self._detached_snapshot(updated)
@@ -310,6 +350,10 @@ class ReservationBook:
         current = self._get_record(reservation_id)
         if current.state in TERMINAL_STATES:
             raise ReservationConflict("A terminal reservation cannot become UNKNOWN")
+        if current.state == POST_BUST_HOLD_STATE:
+            raise ReservationConflict(
+                "A post-bust reservation requires canonical reconciliation before UNKNOWN"
+            )
         if current.state == "UNKNOWN":
             return self._detached_snapshot(current)
         updated = ReservationSnapshot(
@@ -364,5 +408,5 @@ class ReservationBook:
         return tuple(
             self._detached_snapshot(record)
             for record in self._records.values()
-            if record.state in ACTIVE_STATES
+            if record.state in HELD_STATES
         )

@@ -80,6 +80,19 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertTrue(autonomous["same_economics_after_resume"])
         self.assertEqual(autonomous["economic_edge_status"], "INCONCLUSIVE")
 
+        unknown = evidence["canonical_unknown_no_resend"]
+        self.assertEqual(unknown["initial_status"], "UNKNOWN")
+        self.assertEqual(unknown["reentry_status"], "UNKNOWN")
+        self.assertEqual(unknown["initial_outbound_requests"], 1)
+        self.assertEqual(unknown["reentry_outbound_requests"], 0)
+
+        emergency = evidence["canonical_emergency_zero_loop"]
+        self.assertEqual(emergency["status"], "COMPLETED")
+        self.assertEqual(emergency["episodes"], 8)
+        self.assertEqual(emergency["outbound_requests"], 1)
+        self.assertEqual(emergency["replay_outbound_requests"], 0)
+        self.assertEqual(emergency["economic_edge_status"], "INCONCLUSIVE")
+
         partial = evidence["canonical_partial_fill_zero_loop"]
         self.assertEqual(partial["status"], "COMPLETED")
         self.assertEqual(partial["mode"], "ZERO")

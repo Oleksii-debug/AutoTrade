@@ -736,15 +736,19 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         mean_latency_fraction = (
             _mean_fraction(latency_fractions) or Fraction(0, 1)
         )
-        mean_utility_report = (
+        mean_utility_candidate = (
             None
             if mean_utility_fraction is None
             else _report_fraction(mean_utility_fraction)
         )
-        mean_cost_report = _report_fraction(mean_cost_fraction)
-        mean_latency_report = _report_fraction(mean_latency_fraction)
+        mean_cost_candidate = _report_fraction(mean_cost_fraction)
+        mean_latency_candidate = _report_fraction(mean_latency_fraction)
     except (DecimalException, ExactDecimalError):
         reporting_status = _REPORTING_UNAVAILABLE
+    else:
+        mean_utility_report = mean_utility_candidate
+        mean_cost_report = mean_cost_candidate
+        mean_latency_report = mean_latency_candidate
 
     return AblationSummary(
         target_component=target_component,

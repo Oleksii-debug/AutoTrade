@@ -1370,6 +1370,7 @@ def _durable_risk_intent_payload(value: object) -> dict[str, object]:
 def _validate_confirmation_financial_binding(
     *,
     confirmation: Confirmation,
+    record: AdmissionRecord,
     authority_policy_version: int,
     durable_risk_intent: object,
     authoritative_risk_snapshot: Mapping[str, object],
@@ -1380,6 +1381,29 @@ def _validate_confirmation_financial_binding(
     if confirmation.financial_binding_hash is None:
         raise AuthorityConflict(
             "durable confirmed admission lacks financial binding"
+        )
+    if (
+        record.confirmation_id != confirmation.confirmation_id
+        or confirmation.policy_id != record.policy_id
+        or confirmation.intent_hash != record.intent_hash
+        or confirmation.account_id != record.account_id
+        or confirmation.environment != record.environment
+        or confirmation.instrument_version != record.instrument_version
+        or confirmation.action != record.action
+        or confirmation.notional != record.notional
+    ):
+        raise AuthorityConflict(
+            "durable confirmed admission confirmation scope is inconsistent"
+        )
+    if _instant(
+        record.admitted_at,
+        name="admitted_at",
+    ) >= _instant(
+        confirmation.expires_at,
+        name="confirmation.expires_at",
+    ):
+        raise AuthorityConflict(
+            "durable confirmed admission used expired confirmation"
         )
     risk_intent_payload = _durable_risk_intent_payload(
         durable_risk_intent
@@ -2667,6 +2691,7 @@ class AuthorityService:
                 )
             _validate_confirmation_financial_binding(
                 confirmation=confirmation,
+                record=record,
                 authority_policy_version=policy.version,
                 durable_risk_intent=durable_risk_intent,
                 authoritative_risk_snapshot=authoritative_snapshot,
@@ -3076,6 +3101,7 @@ class AuthorityService:
                 )
             _validate_confirmation_financial_binding(
                 confirmation=confirmation,
+                record=record,
                 authority_policy_version=policy.version,
                 durable_risk_intent=durable_risk_intent,
                 authoritative_risk_snapshot=authoritative_snapshot,

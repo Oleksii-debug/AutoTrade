@@ -608,12 +608,21 @@ class ScientificRegistry:
             raise ProtocolViolation(
                 "protocol lacks preregistered physical locked holdout"
             )
+        raw_dataset_id = row["dataset_id"]
+        if type(raw_dataset_id) is not str:
+            raise ProtocolViolation(
+                "preregistered locked holdout dataset identity is corrupt"
+            )
         try:
-            dataset_id = _id(row["dataset_id"])
+            dataset_id = str(UUID(raw_dataset_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise ProtocolViolation(
                 "preregistered locked holdout dataset identity is corrupt"
             ) from error
+        if dataset_id != raw_dataset_id:
+            raise ProtocolViolation(
+                "preregistered locked holdout dataset identity is noncanonical"
+            )
         dataset_version = row["dataset_version"]
         if type(dataset_version) is not int or dataset_version < 1:
             raise ProtocolViolation(
@@ -736,7 +745,20 @@ class ScientificRegistry:
             raise TypeError(
                 "vintage_registry has unexpected mutable instance state"
             )
-        canonical_dataset_id = _id(dataset_id)
+        if type(dataset_id) is not str:
+            raise ProtocolViolation(
+                "locked holdout dataset_id must be a canonical UUID"
+            )
+        try:
+            canonical_dataset_id = str(UUID(dataset_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ProtocolViolation(
+                "locked holdout dataset_id must be a canonical UUID"
+            ) from error
+        if canonical_dataset_id != dataset_id:
+            raise ProtocolViolation(
+                "locked holdout dataset_id must be a canonical UUID"
+            )
         if type(dataset_version) is not int or dataset_version < 1:
             raise ProtocolViolation(
                 "locked holdout dataset_version must be a positive integer"

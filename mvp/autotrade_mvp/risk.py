@@ -1376,17 +1376,47 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     if any(value is not None for value in binding_values):
         if any(value is None for value in binding_values):
             raise ValueError("risk decision binding must be complete")
+        intent_hash = _risk_binding_text(
+            decision.intent_hash,
+            name="intent_hash",
+        )
+        capability_snapshot_id = _risk_binding_text(
+            decision.capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if decision.state_version < 0:
+            raise ValueError("state_version must be a non-negative integer")
+        if decision.policy_version < 1:
+            raise ValueError("policy_version must be a positive integer")
+        if decision.reservation_version < 0:
+            raise ValueError("reservation_version must be a non-negative integer")
+        evaluated_at = _risk_binding_text(
+            decision.evaluated_at,
+            name="evaluated_at",
+        )
+        valid_until = _risk_binding_text(
+            decision.valid_until,
+            name="valid_until",
+        )
+        if _risk_binding_instant(
+            evaluated_at,
+            name="evaluated_at",
+        ) >= _risk_binding_instant(
+            valid_until,
+            name="valid_until",
+        ):
+            raise ValueError("evaluated_at must precede valid_until")
         payload["binding"] = {
-            "intent_hash": decision.intent_hash,
+            "intent_hash": intent_hash,
             "state_version": decision.state_version,
             "policy_version": decision.policy_version,
             "reservation_version": decision.reservation_version,
             "reservation_requirements": reservation_requirements_payload(
                 decision.reservation_requirements
             ),
-            "capability_snapshot_id": decision.capability_snapshot_id,
-            "evaluated_at": decision.evaluated_at,
-            "valid_until": decision.valid_until,
+            "capability_snapshot_id": capability_snapshot_id,
+            "evaluated_at": evaluated_at,
+            "valid_until": valid_until,
         }
     if decision.authoritative_risk_snapshot_id is not None:
         if "binding" not in payload:

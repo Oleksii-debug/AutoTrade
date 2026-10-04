@@ -336,6 +336,11 @@ class RiskExactArithmeticTests(unittest.TestCase):
         class HostileScope(LiquidationScope):
             reads = 0
 
+            def __post_init__(self):
+                # Construct the hostile subclass without invoking the parent's
+                # normalizer before RiskContext can reject its exact type.
+                pass
+
             def __getattribute__(self, name):
                 if name in {
                     "provider_id",
@@ -651,6 +656,65 @@ class RiskExactArithmeticTests(unittest.TestCase):
             risk_decision_fingerprint(hostile)
         self.assertEqual(touched, [])
 
+    def test_fingerprint_rejects_noncanonical_complete_binding_values(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+        base_binding = {
+            **vars(raw),
+            "intent_hash": "intent",
+            "state_version": 7,
+            "policy_version": 1,
+            "reservation_version": 0,
+            "reservation_requirements": (("CASH:USD", Decimal("1")),),
+            "capability_snapshot_id": "capability",
+            "evaluated_at": "2026-10-03T20:00:00+00:00",
+            "valid_until": "2026-10-03T20:01:00+00:00",
+        }
+        invalid_cases = (
+            (
+                {"state_version": -1},
+                "state_version must be a non-negative integer",
+            ),
+            (
+                {"policy_version": 0},
+                "policy_version must be a positive integer",
+            ),
+            (
+                {"reservation_version": -1},
+                "reservation_version must be a non-negative integer",
+            ),
+            (
+                {"intent_hash": ""},
+                "intent_hash is required",
+            ),
+            (
+                {"capability_snapshot_id": ""},
+                "capability_snapshot_id is required",
+            ),
+            (
+                {
+                    "evaluated_at": "2026-10-03T20:01:00+00:00",
+                    "valid_until": "2026-10-03T20:01:00+00:00",
+                },
+                "evaluated_at must precede valid_until",
+            ),
+        )
+
+        for overrides, message in invalid_cases:
+            with self.subTest(overrides=overrides):
+                forged = type(raw)(**{**base_binding, **overrides})
+                with self.assertRaisesRegex(ValueError, message):
+                    risk_decision_fingerprint(forged)
+
     def test_input_fingerprint_binds_arithmetic_policy_identity(self):
         intent = RiskIntent.create(
             symbol="ABC",
@@ -721,7 +785,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
 
     def test_exact_resource_overflow_fails_before_risk_authority(self):
-        oversized = "9" * 129
+        oversized = "9" * 257
         with self.assertRaisesRegex(
             ValueError,
             "bounded finite decimal",
@@ -763,8 +827,8 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(HostileDecimal.finite_reads, 0)
 
     def test_intermediate_notional_overflow_fails_closed(self):
-        large = "1" + "0" * 64
-        wide_limit = "9" * 128
+        large = "1" + "0" * 255
+        wide_limit = "9" * 256
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",
@@ -780,7 +844,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             ValueError,
-            "risk product exceeds the exact arithmetic resource envelope",
+            "decimal exceeds maximum significant digits",
         ):
             evaluate_risk(
                 intent,

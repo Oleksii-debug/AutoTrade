@@ -247,6 +247,59 @@ class ReservationBook:
         self._records[current.reservation_id] = updated
         return self._detached_snapshot(updated)
 
+    def restore_consumption(
+        self,
+        reservation_id: str,
+        usage: Mapping[str, Decimal | str | int],
+    ) -> ReservationSnapshot:
+        """Return reversed fill usage to held capacity without releasing it.
+
+        This is deliberately the inverse of consume only inside the same
+        active reservation. It moves exact amounts from consumed back to
+        remaining; it never changes terminal state and never makes the
+        reservation disappear from total_reserved.
+        """
+
+        current = self._get_record(reservation_id)
+        if current.state not in ACTIVE_STATES:
+            raise ReservationConflict(
+                "Cannot restore consumption on a terminal reservation"
+            )
+        amounts = _amounts(usage)
+        remaining = dict(current.remaining)
+        consumed = dict(current.consumed)
+        for resource, amount in amounts.items():
+            if resource not in consumed or resource not in current.original:
+                raise ReservationConflict(f"Resource {resource} was not reserved")
+            if amount > consumed[resource]:
+                raise ReservationConflict(
+                    f"Restoration exceeds consumed reservation for {resource}"
+                )
+            try:
+                next_consumed = exact_subtract(consumed[resource], amount)
+                next_remaining = exact_add(remaining[resource], amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation restoration exceeds exact decimal authority"
+                ) from error
+            if next_remaining > current.original[resource]:
+                raise ReservationConflict(
+                    f"Restoration exceeds original reservation for {resource}"
+                )
+            remaining[resource] = next_remaining
+            consumed[resource] = next_consumed
+        updated = ReservationSnapshot(
+            reservation_id=current.reservation_id,
+            intent_id=current.intent_id,
+            original=current.original,
+            remaining=MappingProxyType(remaining),
+            consumed=MappingProxyType(consumed),
+            state=current.state,
+            resolution_evidence=current.resolution_evidence,
+        )
+        self._records[current.reservation_id] = updated
+        return self._detached_snapshot(updated)
+
     def mark_unknown(self, reservation_id: str) -> ReservationSnapshot:
         current = self._get_record(reservation_id)
         if current.state in TERMINAL_STATES:

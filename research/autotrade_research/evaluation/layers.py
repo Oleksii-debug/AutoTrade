@@ -105,7 +105,7 @@ def _instant(value: str, *, name: str) -> str:
 def _canonical(value: object, *, path: str = "value") -> object:
     if value is None or type(value) in {str, bool, int}:
         return value
-    if isinstance(value, Mapping):
+    if type(value) in {dict, MappingProxyType}:
         result: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             if type(raw_key) is not str or not raw_key:
@@ -114,7 +114,7 @@ def _canonical(value: object, *, path: str = "value") -> object:
                 raise EvaluationLayersError(f"{path} contains duplicate keys")
             result[raw_key] = _canonical(raw_value, path=f"{path}.{raw_key}")
         return {key: result[key] for key in sorted(result)}
-    if isinstance(value, (tuple, list)):
+    if type(value) in {tuple, list}:
         return [
             _canonical(item, path=f"{path}[]")
             for item in value
@@ -138,6 +138,13 @@ def _digest(value: object) -> str:
 def _gate_payload(decision: GateDecision) -> dict[str, object]:
     if type(decision) is not GateDecision:
         raise TypeError("historical layer requires exact GateDecision")
+    if (
+        type(decision.status) is not str
+        or type(decision.reasons) is not tuple
+        or type(decision.checks) is not MappingProxyType
+        or type(decision.provenance) is not MappingProxyType
+    ):
+        raise TypeError("historical GateDecision has noncanonical retained fields")
     clean = GateDecision(
         status=decision.status,
         reasons=tuple(decision.reasons),
@@ -167,6 +174,16 @@ def _detached_forward_inputs(
         raise TypeError("forward layer requires exact ForwardPaperEvidence")
     if type(assessment) is not ForwardPaperAssessment:
         raise TypeError("forward layer requires exact ForwardPaperAssessment")
+    if (
+        type(protocol.required_provider_capabilities) is not tuple
+        or type(protocol.required_operational_cases) is not tuple
+        or type(evidence.predictions) is not tuple
+        or type(evidence.outcomes) is not tuple
+        or type(evidence.operational_observations) is not tuple
+        or type(evidence.costs_by_currency) is not MappingProxyType
+        or type(assessment.reasons) is not tuple
+    ):
+        raise TypeError("forward layer has noncanonical retained containers")
 
     clean_protocol = ForwardPaperProtocol(
         campaign_id=protocol.campaign_id,

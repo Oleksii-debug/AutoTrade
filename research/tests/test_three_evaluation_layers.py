@@ -563,6 +563,59 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_mutated_historical_gate_mapping_is_rejected_before_iteration(self):
+        callbacks = []
+
+        class HostileChecks(dict):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile GateDecision checks iterated")
+
+        decision = gate("PASS", "market")
+        object.__setattr__(decision, "checks", HostileChecks({"market_core": "PASS"}))
+        with self.assertRaisesRegex(TypeError, "noncanonical retained fields"):
+            EvaluationLayerReceipt.from_historical_gate(
+                layer=BLINDED_MARKET_REPLAY,
+                candidate_id="candidate-1",
+                exact_build_sha=BUILD,
+                candidate_selected_at=SELECTED,
+                protocol_sha256=h("2"),
+                evidence_sha256=h("1"),
+                decision=decision,
+                model_training_cutoff_uncertainty="unknown",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_mutated_forward_containers_are_rejected_before_callbacks(self):
+        callbacks = []
+
+        class HostilePredictions(tuple):
+            def __iter__(self):
+                callbacks.append("predictions")
+                raise AssertionError("hostile predictions iterated")
+
+        class HostileCosts(dict):
+            def items(self):
+                callbacks.append("costs")
+                raise AssertionError("hostile costs read")
+
+        for field, hostile in (
+            ("predictions", HostilePredictions(())),
+            ("costs_by_currency", HostileCosts({"USD": "1"})),
+        ):
+            with self.subTest(field=field):
+                protocol, evidence, assessment = forward_fixture()
+                object.__setattr__(evidence, field, hostile)
+                with self.assertRaisesRegex(TypeError, "noncanonical retained containers"):
+                    EvaluationLayerReceipt.from_forward_paper(
+                        candidate_id="candidate-1",
+                        candidate_selected_at=SELECTED,
+                        protocol=protocol,
+                        evidence=evidence,
+                        assessment=assessment,
+                    )
+        self.assertEqual(callbacks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

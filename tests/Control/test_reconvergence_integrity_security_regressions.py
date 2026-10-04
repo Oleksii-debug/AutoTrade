@@ -238,6 +238,7 @@ class ReconvergenceSecurityRegressionTests(unittest.TestCase):
         approved = assess_reconvergence(
             base_paths=[path, "README.md"],
             changes=[Change(status="M", path=path)],
+            allowed_scopes=(path,),
             trusted_root_approvals=(path,),
         )
         self.assertTrue(approved.allowed)

@@ -1,6 +1,7 @@
 import os
 from hashlib import sha256
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -55,6 +56,25 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 any(path.name.endswith('.lock') for path in destination.rglob('*')),
                 'transient payload must not ship durable-publication lock metadata',
             )
+
+    def test_real_exact_source_staging_has_import_contracts_and_passes_content_gate(self):
+        source_sha = subprocess.check_output(
+            ['git', '-C', str(candidate.ROOT), 'rev-parse', 'HEAD'],
+            text=True,
+        ).strip()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = candidate.stage_source(
+                candidate.ROOT,
+                source_sha,
+                root / 'product',
+                root / 'composition.json',
+            )
+            self.assertIn('contracts/bindings/python/common_scalars.py', selected)
+            files = candidate._collect(root / 'product')
+            collected = {path for path, _absolute, _content in files}
+            self.assertIn('mvp/autotrade_mvp/diagnostics.py', collected)
+            self.assertIn('mvp/autotrade_mvp/decision_trace.py', collected)
 
     def test_archive_replacement_after_digest_check_cannot_change_extracted_bytes(self):
         with TemporaryDirectory() as directory:

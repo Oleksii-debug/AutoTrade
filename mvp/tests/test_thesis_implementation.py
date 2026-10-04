@@ -4,6 +4,7 @@ import unittest
 
 from mvp.autotrade_mvp.thesis_implementation import (
     ImplementationCandidate,
+    ImplementationDecision,
     ImplementationPolicy,
     MarketThesis,
     ThesisImplementationError,
@@ -46,7 +47,7 @@ class ThesisImplementationTests(unittest.TestCase):
         values = dict(
             candidate_id=candidate_id,
             thesis_id="gold-down-1",
-            instrument_version=f"instrument-{candidate_id}@1",
+            instrument_version="11111111-1111-4111-8111-111111111111@1",
             provider_id="SIMULATED",
             asset_class="FUTURE",
             exposure_direction="SHORT",
@@ -305,6 +306,113 @@ class ThesisImplementationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             decision.rejected_reasons["bad"] = ("FORGED",)
 
+
+    def test_instrument_version_identity_must_be_canonical(self):
+        invalid = (
+            "not-a-uuid@1",
+            "11111111-1111-4111-8111-111111111111@0",
+            "11111111-1111-4111-8111-111111111111@01",
+            " 11111111-1111-4111-8111-111111111111@1",
+            "11111111-1111-4111-8111-11111111111A@1",
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ThesisImplementationError,
+                "canonical instrument_id@version",
+            ):
+                self.candidate("bad-ref", instrument_version=value)
+
+    def test_provider_identity_is_not_case_normalized(self):
+        candidate = self.candidate("provider-case", provider_id="Provider-X")
+        self.assertEqual(candidate.provider_id, "Provider-X")
+
+    def test_zero_leverage_is_not_a_valid_screening_quantity(self):
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "max_leverage_ratio must be positive",
+        ):
+            self.policy(max_leverage_ratio="0")
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "leverage_ratio must be positive",
+        ):
+            self.candidate("zero-leverage", leverage_ratio="0")
+
+    def test_terminal_cut_must_be_strictly_after_horizon(self):
+        decision = select_implementation(
+            thesis=self.thesis(),
+            policy=self.policy(),
+            candidates=(self.candidate("at-cut", tradable_until=HORIZON),),
+        )
+        self.assertEqual(decision.status, "NO_TRADE")
+        self.assertEqual(
+            decision.rejected_reasons["at-cut"],
+            ("HORIZON_NOT_COVERED",),
+        )
+
+    def test_decision_constructor_rejects_internally_inconsistent_states(self):
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "SELECTED requires one selected feasible Pareto candidate",
+        ):
+            ImplementationDecision(
+                thesis_id="gold-down-1",
+                status="SELECTED",
+                selected_candidate_id=None,
+                feasible_candidate_ids=("a",),
+                pareto_frontier_ids=("a",),
+                rejected_reasons={},
+            )
+
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "AMBIGUOUS requires at least two Pareto candidates",
+        ):
+            ImplementationDecision(
+                thesis_id="gold-down-1",
+                status="AMBIGUOUS",
+                selected_candidate_id=None,
+                feasible_candidate_ids=("a",),
+                pareto_frontier_ids=("a",),
+                rejected_reasons={},
+            )
+
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "NO_TRADE cannot contain selected, feasible, or Pareto candidates",
+        ):
+            ImplementationDecision(
+                thesis_id="gold-down-1",
+                status="NO_TRADE",
+                selected_candidate_id=None,
+                feasible_candidate_ids=("a",),
+                pareto_frontier_ids=(),
+                rejected_reasons={},
+            )
+
+        with self.assertRaisesRegex(
+            ThesisImplementationError,
+            "a candidate cannot be both feasible and rejected",
+        ):
+            ImplementationDecision(
+                thesis_id="gold-down-1",
+                status="SELECTED",
+                selected_candidate_id="a",
+                feasible_candidate_ids=("a",),
+                pareto_frontier_ids=("a",),
+                rejected_reasons={"a": ("LEGAL_RESTRICTION",)},
+            )
+
+    def test_decision_collections_require_exact_immutable_shapes(self):
+        with self.assertRaisesRegex(TypeError, "feasible_candidate_ids"):
+            ImplementationDecision(
+                thesis_id="gold-down-1",
+                status="NO_TRADE",
+                selected_candidate_id=None,
+                feasible_candidate_ids=[],
+                pareto_frontier_ids=(),
+                rejected_reasons={},
+            )
 
 if __name__ == "__main__":
     unittest.main()

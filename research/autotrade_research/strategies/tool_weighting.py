@@ -520,6 +520,57 @@ class StrategyToolPolicy:
         )
 
 
+def strategy_cell_metrics_digest(
+    *,
+    cell: StrategyToolCell,
+    strategy_fingerprint: str,
+    after_cost_net_advantage: object | None,
+    dependence_aware_lower_bound: object | None,
+    costs_complete: bool,
+) -> str:
+    """Digest the exact score-bearing values that scientific review must bind."""
+
+    if type(cell) is not StrategyToolCell:
+        raise TypeError("cell must be exact StrategyToolCell")
+    clean_cell = StrategyToolCell(
+        cell.asset_class,
+        cell.regime,
+        cell.horizon_seconds,
+    )
+    fingerprint = _sha(
+        strategy_fingerprint,
+        name="strategy_fingerprint",
+    )
+    net = (
+        None
+        if after_cost_net_advantage is None
+        else _decimal(
+            after_cost_net_advantage,
+            name="after_cost_net_advantage",
+        )
+    )
+    lower = (
+        None
+        if dependence_aware_lower_bound is None
+        else _decimal(
+            dependence_aware_lower_bound,
+            name="dependence_aware_lower_bound",
+        )
+    )
+    if type(costs_complete) is not bool:
+        raise TypeError("costs_complete must be boolean")
+    return _digest(
+        {
+            "schema_version": 1,
+            "cell": clean_cell.key,
+            "strategy_fingerprint": fingerprint,
+            "after_cost_net_advantage": net,
+            "dependence_aware_lower_bound": lower,
+            "costs_complete": costs_complete,
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyCellEvidence:
     """Evidence for one registered strategy in one comparison cell."""
@@ -589,10 +640,25 @@ class StrategyCellEvidence:
             )
         if type(self.costs_complete) is not bool:
             raise TypeError("costs_complete must be boolean")
+        supplied_metrics_sha256 = _sha(
+            self.metrics_sha256,
+            name="metrics_sha256",
+        )
+        expected_metrics_sha256 = strategy_cell_metrics_digest(
+            cell=self.cell,
+            strategy_fingerprint=self.strategy_fingerprint,
+            after_cost_net_advantage=self.after_cost_net_advantage,
+            dependence_aware_lower_bound=self.dependence_aware_lower_bound,
+            costs_complete=self.costs_complete,
+        )
+        if supplied_metrics_sha256 != expected_metrics_sha256:
+            raise StrategyToolWeightingError(
+                "metrics_sha256 does not bind the exact score-bearing values"
+            )
         object.__setattr__(
             self,
             "metrics_sha256",
-            _sha(self.metrics_sha256, name="metrics_sha256"),
+            supplied_metrics_sha256,
         )
 
     @property
@@ -1013,14 +1079,18 @@ def assess_strategy_tools(
                 graph_digest = gate.provenance.get("evidence_graph_digest")
                 review_source_sha = gate.provenance.get("review_source_sha")
                 evidence_bundle_id = gate.provenance.get("evidence_bundle_id")
+                reviewed_metrics_sha256 = gate.provenance.get(
+                    "strategy_comparison_metrics_sha256"
+                )
                 if (
                     graph_digest is None
                     or evidence_bundle_id is None
                     or review_source_sha is None
+                    or reviewed_metrics_sha256 is None
                 ):
                     candidate_incomplete.append(
                         "terminal scientific result lacks immutable "
-                        "reviewed provenance"
+                        "reviewed provenance or score-metric binding"
                     )
                 else:
                     try:
@@ -1036,6 +1106,21 @@ def assess_strategy_tools(
                         candidate_failures.append(
                             "scientific review source differs from scorecard build"
                         )
+                    try:
+                        reviewed_metrics_sha256 = _sha(
+                            reviewed_metrics_sha256,
+                            name="strategy comparison reviewed metrics digest",
+                        )
+                    except (TypeError, StrategyToolWeightingError):
+                        candidate_failures.append(
+                            "scientific reviewed metrics digest is malformed"
+                        )
+                    else:
+                        if reviewed_metrics_sha256 != item.metrics_sha256:
+                            candidate_failures.append(
+                                "scientific review is bound to different "
+                                "score-bearing metrics"
+                            )
                     try:
                         _text(
                             evidence_bundle_id,

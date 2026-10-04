@@ -49,37 +49,19 @@ The canonical Section 10 candidate now also:
 
 This is still provider-neutral safety only. It does not prove that a provider-origin InstrumentVersion was issued, does not enable physical delivery, and does not grant PAPER/LIVE authority.
 
-
 ## Follow-up source review: registry selection authority
 
-Exact Python type and a construction snapshot are integrity checks, not proof that
-the lifecycle version was selected by the product's canonical instrument
-authority. A caller-authored exact `InstrumentVersion` could previously still
-be passed through `FuturesContract.from_instrument_version()` and authorize
-`OPEN`.
+Exact Python type, construction snapshots and the merged `InstrumentRegistry` publication authority prove integrity of one registry's retained contents. They do **not** prove that a particular publicly constructible registry was selected by AutoTrade product composition. A caller can construct an exact `InstrumentVersion`, construct `InstrumentRegistry(versions=(version,))`, resolve that version, and therefore satisfy an integrity-only lifecycle check.
 
-The candidate now reuses the existing `InstrumentRegistry` rather than adding a
-parallel lifecycle authority:
-- lifecycle admission requires an exact canonical `InstrumentRegistry`;
-- the contract's canonical `instrument_id@version` is re-resolved through
-  class-owned `InstrumentRegistry.exact()` on every lifecycle gate;
-- the retained registry-selected lifecycle cut must match the bound version and
-  the contract before any OPEN result can be returned;
-- an absent/wrong registry or registry subclass fails closed;
-- positive coverage proves a registry-selected version still follows the normal
-  OPEN path.
+The candidate now makes the boundary explicit instead of manufacturing a second caller-mintable token:
+- `lifecycle_gate(...)` remains a provider-neutral diagnostic resolver for an exact registry/version cut and still reports `OPEN`, `TRADING_ENDED`, `EXPIRED`, `DELIVERY_BLOCKED`, or instrument status;
+- `require_open_for_new_exposure(...)` preserves those hard negative lifecycle reasons, but an `OPEN` diagnostic result fails closed until a real product/composition-owned registry authority is supplied by the actual order-admission boundary;
+- a caller-constructed exact registry can no longer authorize new futures exposure;
+- wrong registry, stale version, forged economics, inactive instruments, subclasses and hostile nested time values remain fail-closed;
+- the existing canonical `InstrumentRegistry` continues to be reused for content integrity; no parallel registry or caller-mintable authority object is introduced.
 
-The registry returns detached versions from closure-owned retained state, so
-post-construction mutation of a caller-held `InstrumentVersion` does not mutate
-the selected registry cut. This closes the demonstrated selection/provenance
-gap at the provider-neutral lifecycle boundary. It does not by itself qualify a
-provider's metadata issuance or grant PAPER/LIVE authority.
+This deliberately demotes the provider-neutral helper from financial authorization where provenance cannot currently be proven. It is a safety closure, not a claim that the product already has a complete positive new-exposure composition path. Section 10 therefore remains not-DONE until the real admission composition owns/re-resolves the selected instrument authority and exact-head qualification is terminal green.
 
 Exact-head CI remains required. Queued or pending workflow state is not PASS.
 
-
-Nested time authority is also fail-closed on this lineage. Lifecycle datetimes on
-both the contract and its bound version must retain exact UTC `datetime`
-values with `timezone.utc`; an exact `datetime` carrying caller-controlled
-`tzinfo` is rejected before equality/conversion can dispatch a timezone
-callback. Dedicated regressions cover both contract and bound-version mutation.
+Nested time authority is also fail-closed on this lineage. Lifecycle datetimes on both the contract and its bound version must retain exact UTC `datetime` values with `timezone.utc`; an exact `datetime` carrying caller-controlled `tzinfo` is rejected before equality/conversion can dispatch a timezone callback. Dedicated regressions cover both contract and bound-version mutation.

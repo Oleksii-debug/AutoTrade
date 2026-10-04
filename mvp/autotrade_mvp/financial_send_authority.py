@@ -27,7 +27,10 @@ from .financial_request_binding import FinancialRequestBindingMaterial
 from .persistence import JournalStore, payload_digest
 from .production_bybit import ProductionBybitOrderSender
 from .production_financial_host import FinancialProductionHostRuntime
-from .provider_route_dispatch import compose_selected_provider_route_authority
+from .provider_route_dispatch import (
+    bind_selected_provider_route_submission_scope,
+    compose_selected_provider_route_authority,
+)
 from .provider_route_financial_binding import (
     require_financial_binding_matches_selected_route,
 )
@@ -376,6 +379,8 @@ class FinancialSendAuthorityIssuer:
         "__qualification_registry",
         "__route_authority_function",
         "__route_authority_code",
+        "__route_scope_function",
+        "__route_scope_code",
         "__financial_route_binding_function",
         "__financial_route_binding_code",
     )
@@ -447,6 +452,7 @@ class FinancialSendAuthorityIssuer:
         dispatch_guard_function = AuthorityService.dispatch_guard
         historical_function = AuthorityService.historical_admission
         route_authority_function = compose_selected_provider_route_authority
+        route_scope_function = bind_selected_provider_route_submission_scope
         financial_route_binding_function = require_financial_binding_matches_selected_route
         capability_issuer_function = FinancialSendAuthority.__dict__.get("_require_issuer")
         capability_issuer_code = getattr(capability_issuer_function, "__code__", None)
@@ -476,6 +482,8 @@ class FinancialSendAuthorityIssuer:
         self.__qualification_registry = qualification_registry
         self.__route_authority_function = route_authority_function
         self.__route_authority_code = route_authority_function.__code__
+        self.__route_scope_function = route_scope_function
+        self.__route_scope_code = route_scope_function.__code__
         self.__financial_route_binding_function = financial_route_binding_function
         self.__financial_route_binding_code = financial_route_binding_function.__code__
 
@@ -530,6 +538,12 @@ class FinancialSendAuthorityIssuer:
             raise FinancialSendAuthorityError("provider route authority composer changed")
         if self.__route_authority_function.__code__ is not self.__route_authority_code:
             raise FinancialSendAuthorityError("provider route authority composer code changed")
+        if bind_selected_provider_route_submission_scope is not self.__route_scope_function:
+            raise FinancialSendAuthorityError("provider route submission scope authority changed")
+        if self.__route_scope_function.__code__ is not self.__route_scope_code:
+            raise FinancialSendAuthorityError(
+                "provider route submission scope authority code changed"
+            )
         if (
             require_financial_binding_matches_selected_route
             is not self.__financial_route_binding_function
@@ -695,6 +709,20 @@ class FinancialSendAuthorityIssuer:
             )
         financial_route_binding = self.__financial_route_binding_function
         financial_route_binding(binding, selected_route)
+        route_scope = self.__route_scope_function(
+            selected_route,
+            {
+                "provider_id": binding.provider_id,
+                "account_id": binding.account_id,
+                "environment": binding.runtime_environment,
+                "provider_environment": binding.provider_environment,
+                "capability_snapshot_id": binding.capability_snapshot_id,
+            },
+        )
+        if payload_digest(route_scope) != binding.submission_scope_digest:
+            raise FinancialSendAuthorityError(
+                "financial binding submission scope does not retain selected provider route authority"
+            )
         route_authority = self.__route_authority_function(
             store=self.__journal,
             environment=binding.runtime_environment,

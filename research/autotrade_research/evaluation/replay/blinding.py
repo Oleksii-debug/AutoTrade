@@ -428,8 +428,9 @@ class BlindedEvent:
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
         object.__setattr__(self, "kind", _text(self.kind, name="kind").upper())
+        if type(self.event_time_us) is not int:
+            raise BlindingError("event_time_us must be an exact integer")
         for name in (
-            "event_time_us",
             "available_at_us",
             "ingested_at_us",
             "session_index",
@@ -716,9 +717,10 @@ def blind_dataset(
         sha256,
     ).hexdigest()
 
-    # The relative clock origin must not depend on calendar values carried only
-    # by future events.  Those values are masked when their event becomes causal.
-    anchor = min(event.event_time for event in snapshot.events)
+    # The relative clock origin is derived only from the first causally
+    # available event.  A later-published correction may refer to an older
+    # event_time; it must not retroactively change an already-visible prefix.
+    anchor = snapshot.events[0].event_time
     sessions = {
         day: index
         for index, day in enumerate(
@@ -826,9 +828,9 @@ def _source_anchor(dataset: CausalDataset, profile: BlindingProfile) -> datetime
         raise BlindingError("source dataset content no longer matches its committed digest")
     if not snapshot.events:
         raise BlindingError("blinded replay requires at least one causal event")
-    # Feeder time is anchored only to the causal event timeline.  Future
-    # payload calendar fields must never influence the clock visible now.
-    return min(event.event_time for event in snapshot.events)
+    # Use only the first causally available event.  Later-published corrections
+    # may carry older event times and must not rewrite the visible clock origin.
+    return snapshot.events[0].event_time
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,11 +860,15 @@ class BlindedDataView:
 
 @dataclass(frozen=True, slots=True)
 class BlindedInputEvidence:
-    """Content-addressed evidence for one blinded causal strategy cutoff."""
+    """Content-addressed evidence for exactly the visible causal prefix.
+
+    Full-dataset identity is intentionally excluded: strategy-visible evidence
+    must not change merely because privileged storage contains additional
+    unseen future events.
+    """
 
     schema_version: int
     simulation_time_us: int
-    blinded_dataset_sha256: str
     published_prefix_sha256: str
 
     def __post_init__(self) -> None:
@@ -871,10 +877,6 @@ class BlindedInputEvidence:
         object.__setattr__(
             self, "simulation_time_us",
             _signed_int(self.simulation_time_us, name="simulation_time_us"),
-        )
-        object.__setattr__(
-            self, "blinded_dataset_sha256",
-            _digest(self.blinded_dataset_sha256, name="blinded_dataset_sha256"),
         )
         object.__setattr__(
             self, "published_prefix_sha256",
@@ -888,7 +890,6 @@ class BlindedInputEvidence:
                 {
                     "schema_version": self.schema_version,
                     "simulation_time_us": self.simulation_time_us,
-                    "blinded_dataset_sha256": self.blinded_dataset_sha256,
                     "published_prefix_sha256": self.published_prefix_sha256,
                 }
             )
@@ -1041,7 +1042,6 @@ class BlindedCausalFeeder:
         return BlindedInputEvidence(
             schema_version=_VIEW_SCHEMA_VERSION,
             simulation_time_us=self.simulation_time_us,
-            blinded_dataset_sha256=self._blinded.blinded_dataset_sha256,
             published_prefix_sha256=_blinded_prefix_digest(
                 self._blinded.events, cursor
             ),

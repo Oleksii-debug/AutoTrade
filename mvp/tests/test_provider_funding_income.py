@@ -160,6 +160,8 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         *,
         parser: str = PARSER,
         query_currency: str | None = None,
+        query_start_time: str | None = None,
+        query_end_time: str | None = None,
     ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
@@ -229,6 +231,10 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         }
         if query_currency is not None:
             query["currency"] = query_currency
+        if query_start_time is not None:
+            query["startTime"] = query_start_time
+        if query_end_time is not None:
+            query["endTime"] = query_end_time
         binding = prepare_qualified_provider_read(
             route,
             capabilities,
@@ -294,6 +300,7 @@ class ProviderFundingIncomeTests(unittest.TestCase):
         ret_code=0,
         transaction_time="1672128000000",
         currency="USDT",
+        category="linear",
         change="-0.003676",
     ):
         settlement = {
@@ -315,7 +322,7 @@ class ProviderFundingIncomeTests(unittest.TestCase):
             "qty": "100",
             "cashBalance": "5086.55825002",
             "currency": currency,
-            "category": "linear",
+            "category": category,
             "tradePrice": "0.3676",
             "tradeId": "534c0003-4bf7-486f-aa02-78cee36825e4",
             "extraFees": "",
@@ -438,6 +445,56 @@ class ProviderFundingIncomeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ProviderFundingIncomeError,
                 "cashFlow \+ funding - fee",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_boolean_ret_code_cannot_masquerade_as_success(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(ret_code=False),
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "not successful",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_settlement_row_wrong_category_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(category="inverse"),
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified derivative category",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_funding_row_before_qualified_start_time_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(transaction_time="1672128000000"),
+                query_start_time="1672128000001",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified startTime",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_funding_row_after_qualified_end_time_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(transaction_time="1672128000001"),
+                query_end_time="1672128000000",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified endTime",
             ):
                 bybit_funding_income_observations(origin)
 

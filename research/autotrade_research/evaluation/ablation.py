@@ -1139,6 +1139,19 @@ _ABLATION_PROJECTION_OWNER = {
     "COST": "CANONICAL_ABLATION_COST_COMPOSITE",
 }
 
+_REQUIRED_ABLATION_COST_COMPONENTS = (
+    "commission",
+    "spread",
+    "slippage",
+    "financing",
+    "funding",
+    "borrow",
+    "market_data",
+    "model_compute",
+    "infrastructure",
+    "tax_estimate",
+)
+
 
 @dataclass(frozen=True)
 class RegisteredAblationProjectionDescriptor:
@@ -1150,6 +1163,7 @@ class RegisteredAblationProjectionDescriptor:
     value_unit: str
     owner_authority: str
     rule_id: str
+    cost_components: tuple[str, ...]
 
 
 def _registered_projection_reference(reference: object, field: str) -> tuple[str, str]:
@@ -1215,6 +1229,7 @@ def _load_registered_projection_descriptor(
         "value_unit",
         "owner_authority",
         "rule_id",
+        "cost_components",
     }
     if type(payload) is not dict or set(payload) != required:
         raise ValueError("registered ablation projection schema is not canonical")
@@ -1236,6 +1251,21 @@ def _load_registered_projection_descriptor(
     if payload.get("owner_authority") != expected_owner:
         raise ValueError("registered ablation projection owner authority mismatch")
     rule_id = _canonical_identity_text(payload.get("rule_id"), "projection rule_id")
+    raw_components = payload.get("cost_components")
+    if type(raw_components) is not list or any(
+        type(item) is not str for item in raw_components
+    ):
+        raise ValueError("registered ablation projection cost_components are invalid")
+    components = tuple(raw_components)
+    expected_components = (
+        _REQUIRED_ABLATION_COST_COMPONENTS
+        if projection_kind == "COST"
+        else ()
+    )
+    if components != expected_components:
+        raise ValueError(
+            "registered ablation projection cost component coverage is incomplete"
+        )
     return RegisteredAblationProjectionDescriptor(
         artifact_id=artifact_id,
         sha256=digest,
@@ -1243,6 +1273,7 @@ def _load_registered_projection_descriptor(
         value_unit=unit,
         owner_authority=expected_owner,
         rule_id=rule_id,
+        cost_components=components,
     )
 
 

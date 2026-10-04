@@ -1644,6 +1644,7 @@ class AblationTests(unittest.TestCase):
                 "value_unit": "USD",
                 "owner_authority": "CANONICAL_RECONCILED_OUTCOME",
                 "rule_id": "reconciled-outcome-net-value-v1",
+                "cost_components": [],
             }
             reference = publish(
                 "77777777-7777-4777-8777-777777777771",
@@ -1711,6 +1712,24 @@ class AblationTests(unittest.TestCase):
                     value_unit="USD",
                 )
 
+            incomplete_cost = publish(
+                "77777777-7777-4777-8777-777777777777",
+                {
+                    **base,
+                    "projection_kind": "COST",
+                    "owner_authority": "CANONICAL_ABLATION_COST_COMPOSITE",
+                    "rule_id": "complete-after-cost-attribution-v1",
+                    "cost_components": ["commission", "spread", "slippage"],
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "component coverage is incomplete"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    incomplete_cost,
+                    projection_kind="COST",
+                    value_unit="USD",
+                )
+
             wrong_media = publish(
                 "77777777-7777-4777-8777-777777777776",
                 base,
@@ -1747,6 +1766,7 @@ class AblationTests(unittest.TestCase):
                 projection_kind: str,
                 owner_authority: str,
                 rule_id: str,
+                cost_components: list[str],
             ) -> str:
                 payload = {
                     "schema_version": 1,
@@ -1754,6 +1774,7 @@ class AblationTests(unittest.TestCase):
                     "value_unit": "USD",
                     "owner_authority": owner_authority,
                     "rule_id": rule_id,
+                    "cost_components": cost_components,
                 }
                 raw = json.dumps(
                     payload,
@@ -1777,12 +1798,25 @@ class AblationTests(unittest.TestCase):
                 projection_kind="UTILITY",
                 owner_authority="CANONICAL_RECONCILED_OUTCOME",
                 rule_id="reconciled-outcome-net-value-v1",
+                cost_components=[],
             )
             cost_projection_ref = projection_ref(
                 "44444444-4444-4444-8444-444444444444",
                 projection_kind="COST",
                 owner_authority="CANONICAL_ABLATION_COST_COMPOSITE",
                 rule_id="complete-after-cost-attribution-v1",
+                cost_components=[
+                    "commission",
+                    "spread",
+                    "slippage",
+                    "financing",
+                    "funding",
+                    "borrow",
+                    "market_data",
+                    "model_compute",
+                    "infrastructure",
+                    "tax_estimate",
+                ],
             )
             protocol_payload = {
                 "hypothesis": "agent adds after-cost value",

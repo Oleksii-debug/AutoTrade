@@ -48,8 +48,8 @@ _SCIENTIFIC_DECIMAL_CONTEXT = Context(
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be non-empty text")
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be non-empty exact text")
     result = value.strip()
     if result != value:
         raise ValueError(f"{name} must use canonical text")
@@ -57,9 +57,11 @@ def _text(value: object, *, name: str) -> str:
 
 
 def _instant(value: object, *, name: str) -> datetime:
-    if isinstance(value, datetime):
+    if type(value) is datetime:
         if value.tzinfo is None:
             raise ValueError(f"{name} must be timezone-aware")
+        if type(value.tzinfo) is not timezone:
+            raise ValueError(f"{name} must use built-in timezone authority")
         return value.astimezone(timezone.utc)
     text = _text(value, name=name)
     if not text.endswith("Z"):
@@ -144,18 +146,16 @@ class HistoricalFeatureInputSpec:
             "payload_value_field",
             _text(self.payload_value_field, name="payload_value_field"),
         )
-        if (
-            isinstance(self.window_count, bool)
-            or not isinstance(self.window_count, int)
-            or self.window_count < 2
-        ):
+        if type(self.window_count) is not int or self.window_count < 2:
             raise ValueError("window_count must be an integer >= 2")
         kinds = tuple(_text(kind, name="event_kind") for kind in self.event_kinds)
         if not kinds or len(set(kinds)) != len(kinds):
             raise ValueError("event_kinds must be non-empty and unique")
         object.__setattr__(self, "event_kinds", kinds)
-        if self.schema_version != "1.0.0":
+        schema_version = _text(self.schema_version, name="schema_version")
+        if schema_version != "1.0.0":
             raise ValueError("unsupported historical feature input spec schema")
+        object.__setattr__(self, "schema_version", schema_version)
 
     @property
     def feature_name(self) -> str:
@@ -403,11 +403,7 @@ class AuthoritativeFoldNormalizer:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_id", _text(self.dataset_id, name="dataset_id"))
-        if (
-            isinstance(self.dataset_version, bool)
-            or not isinstance(self.dataset_version, int)
-            or self.dataset_version < 1
-        ):
+        if type(self.dataset_version) is not int or self.dataset_version < 1:
             raise ValueError("dataset_version must be a positive integer")
         object.__setattr__(
             self,
@@ -437,8 +433,10 @@ class AuthoritativeFoldNormalizer:
         )
         if type(self.fold_normalizer) is not FoldNormalizer:
             raise TypeError("fold_normalizer must be FoldNormalizer")
-        if self.schema_version != "1.0.0":
+        schema_version = _text(self.schema_version, name="schema_version")
+        if schema_version != "1.0.0":
             raise ValueError("unsupported authoritative fold-normalizer schema")
+        object.__setattr__(self, "schema_version", schema_version)
 
     @property
     def fingerprint(self) -> str:

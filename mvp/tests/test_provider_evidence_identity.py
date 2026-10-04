@@ -114,7 +114,7 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
                 touched.append("strip")
                 raise AssertionError("hostile OMS text normalization")
 
-        with self.assertRaisesRegex(TypeError, "provider_id must be exact text"):
+        with self.assertRaisesRegex(ValueError, "provider_id is required"):
             _text(HostileText("PROVIDER-A"), name="provider_id")
         self.assertEqual(touched, [])
 

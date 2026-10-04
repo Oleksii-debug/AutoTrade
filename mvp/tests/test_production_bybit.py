@@ -196,6 +196,15 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         self.assertIn("financial_issuer", public_arguments)
         self.assertNotIn("authority_check", public_arguments)
 
+        bound_arguments = FinanciallyBoundBybitOrderSender.dispatch.__code__.co_varnames[
+            : (
+                FinanciallyBoundBybitOrderSender.dispatch.__code__.co_argcount
+                + FinanciallyBoundBybitOrderSender.dispatch.__code__.co_kwonlyargcount
+            )
+        ]
+        self.assertIn("authority", bound_arguments)
+        self.assertNotIn("authority_check", bound_arguments)
+
     def test_builder_uses_exact_host_security_boundary_and_financial_scope(self) -> None:
         with TemporaryDirectory() as root:
             runtime, _host, boundary = self._runtime(root)

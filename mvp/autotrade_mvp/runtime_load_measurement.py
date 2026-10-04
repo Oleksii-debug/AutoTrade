@@ -979,6 +979,7 @@ def evaluate_monotonic_declared_runtime_budget(
     plan_id: str,
     financial_staleness_us: Sequence[int],
     research_interference_us: Sequence[int],
+    financial_staleness_event_ids: Sequence[str] = (),
     reconnect_backlog_remaining: int | None = None,
     declared_duration_us: int | None = None,
     observed_duration_us: int | None = None,
@@ -994,9 +995,10 @@ def evaluate_monotonic_declared_runtime_budget(
     When supplied it must equal the canonical JournalStore pending-outbox count;
     the caller cannot turn a non-zero durable backlog into zero.
 
-    Staleness/interference remain explicit inputs until their own raw target-host
-    collectors are implemented; this function therefore does not represent
-    terminal WP-65 qualification.
+    Latency identity is reconstructed from the durable samples themselves.
+    Staleness remains explicit and anonymous unless the caller supplies its own
+    exact event IDs; interference remains a separate evidence dimension. This
+    function therefore does not represent terminal WP-65 qualification.
     """
 
     store_identity = require_exact_journal_store_authority(
@@ -1028,6 +1030,8 @@ def evaluate_monotonic_declared_runtime_budget(
             financial_staleness_us=financial_staleness_us,
             research_interference_us=research_interference_us,
             reconnect_backlog_remaining=durable_backlog,
+            financial_latency_event_ids=tuple(sample.event_id for sample in samples),
+            financial_staleness_event_ids=financial_staleness_event_ids,
             declared_duration_us=declared_duration_us,
             observed_duration_us=observed_duration_us,
         )

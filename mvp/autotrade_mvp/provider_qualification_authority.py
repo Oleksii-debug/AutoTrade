@@ -1,15 +1,15 @@
-"""Authority boundary for provider qualification campaign evidence.
+"""Canonical provider-qualification issuance boundary.
 
-This module closes the caller-authored ``QualificationEvidence`` shape gap without
-claiming that any real provider campaign is currently trusted.  An authoritative
-``AcceptedProviderQualification`` can only be created by this module after the
-canonical signed-attestation verifier accepts the exact source/policy/evidence
-and the authenticated campaign payload satisfies the source-owned protocol.
+A legacy ``QualificationEvidence`` value or a caller-constructed
+``AcceptedQualificationAttestation`` is never authority here.  The only public
+issuance path first resolves a source-owned protocol, then executes the canonical
+signed-attestation verifier against one exact ArtifactStore generation, then
+parses the authenticated provider campaign payload and derives a content identity
+from all accepted material.
 
-The source-controlled protocol registry is intentionally empty until a reviewed
-provider-qualification trust-policy scope exists.  Consequently production
-issuance is fail-closed today; the durable authority can still be implemented,
-replayed and falsified without inventing provider truth.
+No provider-qualification protocol is source-enabled yet because the canonical
+qualification trust policy is not present on this lineage.  Public issuance is
+therefore intentionally unavailable rather than silently trusting test material.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping
+from uuid import UUID
 
 from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
@@ -35,6 +36,7 @@ from .provider_qualification_identity import ProviderQualificationIdentity
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
+    QualificationAttestation,
     QualificationTrustError,
     SignedQualificationAttestation,
     parse_signed_qualification_attestation,
@@ -52,11 +54,11 @@ _ACCEPTED_TOKEN = object()
 
 
 class ProviderQualificationError(ValueError):
-    """Raised when provider qualification authority is malformed or mismatched."""
+    """Provider qualification could not be established or replayed safely."""
 
 
 class ProviderQualificationUnavailable(ProviderQualificationError):
-    """Raised when the source-controlled authority needed to issue Q is absent."""
+    """The source-controlled authority needed to issue provider Q is absent."""
 
 
 def _text(value: object, *, name: str, upper: bool = False) -> str:
@@ -83,8 +85,35 @@ def _digest(value: object, *, name: str) -> str:
 
 def _git_sha(value: object, *, name: str) -> str:
     if type(value) is not str or _GIT_SHA_RE.fullmatch(value) is None:
-        raise ProviderQualificationError(f"{name} must be canonical lowercase 40-hex Git SHA")
+        raise ProviderQualificationError(
+            f"{name} must be canonical lowercase 40-hex Git SHA"
+        )
     return value
+
+
+def _qid(value: object, *, name: str) -> str:
+    if type(value) is not str or _QID_RE.fullmatch(value) is None:
+        raise ProviderQualificationError(
+            f"{name} must be a canonical provider qualification id"
+        )
+    return value
+
+
+def _uuid(value: object, *, name: str) -> str:
+    value = _text(value, name=name)
+    try:
+        canonical = str(UUID(value))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ProviderQualificationError(f"{name} must be a canonical UUID") from error
+    if canonical != value:
+        raise ProviderQualificationError(f"{name} must be a canonical UUID")
+    return value
+
+
+def _optional_uuid(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    return _uuid(value, name=name)
 
 
 def _positive_int(value: object, *, name: str) -> int:
@@ -96,26 +125,48 @@ def _positive_int(value: object, *, name: str) -> int:
 def _instant(value: object, *, name: str) -> str:
     value = _text(value, name=name)
     try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
     except ValueError as error:
         raise ProviderQualificationError(
             f"{name} must use canonical UTC second precision"
         ) from error
     if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
-        raise ProviderQualificationError(f"{name} must use canonical UTC second precision")
+        raise ProviderQualificationError(
+            f"{name} must use canonical UTC second precision"
+        )
     return value
 
 
 def _instant_value(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
 
 
-def _unique_text_list(value: object, *, name: str, upper: bool = False) -> tuple[str, ...]:
+def _strict_object(
+    value: object,
+    *,
+    name: str,
+    keys: frozenset[str],
+) -> dict[str, object]:
+    if type(value) is not dict:
+        raise ProviderQualificationError(f"{name} must be an exact JSON object")
+    actual = frozenset(value)
+    if actual != keys:
+        raise ProviderQualificationError(
+            f"{name} fields mismatch: missing={sorted(keys-actual)} extra={sorted(actual-keys)}"
+        )
+    return value
+
+
+def _unique_text_list(value: object, *, name: str) -> tuple[str, ...]:
     if type(value) is not list:
         raise ProviderQualificationError(f"{name} must be an exact JSON array")
-    items = tuple(_text(item, name=f"{name} item", upper=upper) for item in value)
+    items = tuple(_text(item, name=f"{name} item") for item in value)
     if len(set(items)) != len(items):
-        raise ProviderQualificationError(f"{name} must be unique")
+        raise ProviderQualificationError(f"{name} must contain unique values")
     canonical = tuple(sorted(items))
     if list(canonical) != value:
         raise ProviderQualificationError(f"{name} must be sorted canonically")
@@ -126,18 +177,6 @@ def _canonical_digest(value: object) -> str:
     return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _strict_object(value: object, *, name: str, keys: frozenset[str]) -> dict[str, object]:
-    if type(value) is not dict:
-        raise ProviderQualificationError(f"{name} must be an exact JSON object")
-    if frozenset(value) != keys:
-        missing = sorted(keys - frozenset(value))
-        extra = sorted(frozenset(value) - keys)
-        raise ProviderQualificationError(
-            f"{name} fields mismatch: missing={missing} extra={extra}"
-        )
-    return value
-
-
 def _decode_campaign_json(raw: bytes) -> dict[str, object]:
     if type(raw) is not bytes or not raw:
         raise ProviderQualificationError("provider qualification campaign bytes are required")
@@ -146,19 +185,25 @@ def _decode_campaign_json(raw: bytes) -> dict[str, object]:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
-        raise ProviderQualificationError("provider qualification campaign must be UTF-8 JSON") from error
+        raise ProviderQualificationError(
+            "provider qualification campaign must be exact UTF-8 JSON"
+        ) from error
 
     def no_duplicates(pairs):
         result: dict[str, object] = {}
         for key, item in pairs:
             if key in result:
-                raise ProviderQualificationError("provider qualification campaign contains duplicate JSON keys")
+                raise ProviderQualificationError(
+                    "provider qualification campaign contains duplicate JSON keys"
+                )
             result[key] = item
         return result
 
     def bounded_int(token: str) -> int:
         if len(token) > 18:
-            raise ProviderQualificationError("provider qualification integer exceeds bound")
+            raise ProviderQualificationError(
+                "provider qualification campaign integer exceeds bound"
+            )
         return int(token)
 
     try:
@@ -167,20 +212,30 @@ def _decode_campaign_json(raw: bytes) -> dict[str, object]:
             object_pairs_hook=no_duplicates,
             parse_int=bounded_int,
             parse_float=lambda _value: (_ for _ in ()).throw(
-                ProviderQualificationError("provider qualification campaign forbids JSON floats")
+                ProviderQualificationError(
+                    "provider qualification campaign forbids JSON floats"
+                )
             ),
             parse_constant=lambda _value: (_ for _ in ()).throw(
-                ProviderQualificationError("provider qualification campaign forbids non-finite JSON")
+                ProviderQualificationError(
+                    "provider qualification campaign forbids non-finite JSON"
+                )
             ),
         )
     except ProviderQualificationError:
         raise
     except (json.JSONDecodeError, ValueError, RecursionError) as error:
-        raise ProviderQualificationError("provider qualification campaign is malformed JSON") from error
+        raise ProviderQualificationError(
+            "provider qualification campaign is malformed JSON"
+        ) from error
     if type(value) is not dict:
-        raise ProviderQualificationError("provider qualification campaign must be a JSON object")
+        raise ProviderQualificationError(
+            "provider qualification campaign must be a JSON object"
+        )
     if canonical_json(value).encode("utf-8") != raw:
-        raise ProviderQualificationError("provider qualification campaign bytes are not canonical JSON")
+        raise ProviderQualificationError(
+            "provider qualification campaign bytes are not canonical JSON"
+        )
     return value
 
 
@@ -188,7 +243,9 @@ def _parse_evidence_ref(value: object, *, name: str) -> EvidenceArtifactRef:
     payload = _strict_object(
         value,
         name=name,
-        keys=frozenset({"artifact_id", "sha256", "media_type", "evidence_kind", "source_sha"}),
+        keys=frozenset(
+            {"artifact_id", "sha256", "media_type", "evidence_kind", "source_sha"}
+        ),
     )
     try:
         ref = EvidenceArtifactRef(
@@ -219,17 +276,28 @@ class ProviderQualificationProtocol:
     def __post_init__(self) -> None:
         object.__setattr__(self, "key", _token(self.key, name="protocol key"))
         for name in ("domain", "gate", "package_id", "campaign_evidence_kind"):
-            object.__setattr__(self, name, _token(getattr(self, name), name=name, upper=True))
+            object.__setattr__(
+                self,
+                name,
+                _token(getattr(self, name), name=name, upper=True),
+            )
         for name in ("protocol_id", "protocol_version", "requirement_id"):
-            object.__setattr__(self, name, _token(getattr(self, name), name=name))
+            object.__setattr__(
+                self,
+                name,
+                _token(getattr(self, name), name=name),
+            )
 
 
-# No arbitrary runtime registration is provided.  Adding a protocol here is a
-# source-reviewed authority change and must converge with the canonical trust policy.
+# Runtime registration would reintroduce caller-selected trust semantics.  A real
+# provider protocol must be added here together with a reviewed canonical trust
+# policy.  The empty mapping keeps today's lineage fail-closed.
 _SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType({})
 
 
-def source_provider_qualification_protocol(key: str) -> ProviderQualificationProtocol:
+def source_provider_qualification_protocol(
+    key: str,
+) -> ProviderQualificationProtocol:
     key = _token(key, name="protocol key")
     try:
         protocol = _SOURCE_PROTOCOLS[key]
@@ -238,7 +306,9 @@ def source_provider_qualification_protocol(key: str) -> ProviderQualificationPro
             "no source-controlled provider qualification protocol is configured"
         ) from error
     if type(protocol) is not ProviderQualificationProtocol:
-        raise ProviderQualificationUnavailable("provider qualification protocol authority is invalid")
+        raise ProviderQualificationUnavailable(
+            "provider qualification protocol authority is invalid"
+        )
     return protocol
 
 
@@ -255,14 +325,44 @@ class ProviderQualificationScope:
 
     def __post_init__(self) -> None:
         if type(self.provider_scope) is not ProviderFinancialScope:
-            raise ProviderQualificationError("provider_scope must be exact ProviderFinancialScope")
-        object.__setattr__(self, "product_family", _token(self.product_family, name="product_family", upper=True))
-        object.__setattr__(self, "adapter_source_git_sha", _git_sha(self.adapter_source_git_sha, name="adapter_source_git_sha"))
-        object.__setattr__(self, "packaged_artifact_digest", _digest(self.packaged_artifact_digest, name="packaged_artifact_digest"))
-        object.__setattr__(self, "campaign_id", _token(self.campaign_id, name="campaign_id"))
-        object.__setattr__(self, "campaign_version", _positive_int(self.campaign_version, name="campaign_version"))
-        object.__setattr__(self, "protocol_id", _token(self.protocol_id, name="protocol_id"))
-        object.__setattr__(self, "protocol_version", _token(self.protocol_version, name="protocol_version"))
+            raise ProviderQualificationError(
+                "provider_scope must be exact ProviderFinancialScope"
+            )
+        object.__setattr__(
+            self,
+            "product_family",
+            _token(self.product_family, name="product_family", upper=True),
+        )
+        object.__setattr__(
+            self,
+            "adapter_source_git_sha",
+            _git_sha(self.adapter_source_git_sha, name="adapter_source_git_sha"),
+        )
+        object.__setattr__(
+            self,
+            "packaged_artifact_digest",
+            _digest(self.packaged_artifact_digest, name="packaged_artifact_digest"),
+        )
+        object.__setattr__(
+            self,
+            "campaign_id",
+            _token(self.campaign_id, name="campaign_id"),
+        )
+        object.__setattr__(
+            self,
+            "campaign_version",
+            _positive_int(self.campaign_version, name="campaign_version"),
+        )
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _token(self.protocol_id, name="protocol_id"),
+        )
+        object.__setattr__(
+            self,
+            "protocol_version",
+            _token(self.protocol_version, name="protocol_version"),
+        )
 
     def payload(self) -> dict[str, object]:
         return {
@@ -299,7 +399,9 @@ class ProviderQualificationCampaign:
     supersedes_qualification_id: str | None
 
 
-def parse_provider_qualification_campaign(raw: bytes) -> ProviderQualificationCampaign:
+def parse_provider_qualification_campaign(
+    raw: bytes,
+) -> ProviderQualificationCampaign:
     value = _strict_object(
         _decode_campaign_json(raw),
         name="provider qualification campaign",
@@ -331,7 +433,9 @@ def parse_provider_qualification_campaign(raw: bytes) -> ProviderQualificationCa
         ),
     )
     if value["schema_version"] != _SCHEMA_VERSION:
-        raise ProviderQualificationError("unsupported provider qualification campaign schema")
+        raise ProviderQualificationError(
+            "unsupported provider qualification campaign schema"
+        )
     try:
         provider_scope = ProviderFinancialScope(
             provider_id=value["provider_id"],
@@ -340,7 +444,9 @@ def parse_provider_qualification_campaign(raw: bytes) -> ProviderQualificationCa
             entity_policy_id=value["entity_policy_id"],
         )
     except (TypeError, ValueError) as error:
-        raise ProviderQualificationError("provider qualification financial scope is invalid") from error
+        raise ProviderQualificationError(
+            "provider qualification financial scope is invalid"
+        ) from error
     scope = ProviderQualificationScope(
         provider_scope=provider_scope,
         product_family=value["product_family"],
@@ -351,70 +457,100 @@ def parse_provider_qualification_campaign(raw: bytes) -> ProviderQualificationCa
         protocol_id=value["protocol_id"],
         protocol_version=value["protocol_version"],
     )
-    required_cases = _unique_text_list(value["required_cases"], name="required_cases")
+
+    required_cases = _unique_text_list(
+        value["required_cases"], name="required_cases"
+    )
     source_required = tuple(sorted(REQUIRED_QUALIFICATION_CASES))
     if required_cases != source_required:
-        raise ProviderQualificationError("required_cases do not equal the source-owned provider case universe")
+        raise ProviderQualificationError(
+            "required_cases do not equal the source-owned provider case universe"
+        )
     passed_cases = _unique_text_list(value["passed_cases"], name="passed_cases")
     failed_cases = _unique_text_list(value["failed_cases"], name="failed_cases")
     if set(passed_cases) & set(failed_cases):
-        raise ProviderQualificationError("passed_cases and failed_cases overlap")
+        raise ProviderQualificationError(
+            "passed_cases and failed_cases overlap"
+        )
     if set(passed_cases) | set(failed_cases) != set(required_cases):
-        raise ProviderQualificationError("passed_cases and failed_cases must partition required_cases")
+        raise ProviderQualificationError(
+            "passed_cases and failed_cases must partition required_cases"
+        )
     if failed_cases or passed_cases != required_cases:
-        raise ProviderQualificationError("accepted provider qualification campaign must pass every required case")
-    unsupported_features = _unique_text_list(value["unsupported_features"], name="unsupported_features")
+        raise ProviderQualificationError(
+            "accepted provider qualification campaign must pass every required case"
+        )
+    unsupported = _unique_text_list(
+        value["unsupported_features"], name="unsupported_features"
+    )
 
-    route_semantics = value["route_semantics"]
-    if type(route_semantics) is not dict or not route_semantics:
-        raise ProviderQualificationError("route_semantics must be a non-empty exact JSON object")
+    semantics = value["route_semantics"]
+    if type(semantics) is not dict or not semantics:
+        raise ProviderQualificationError(
+            "route_semantics must be a non-empty exact JSON object"
+        )
     normalized_semantics: dict[str, str] = {}
-    for raw_key, raw_value in route_semantics.items():
+    for raw_key, raw_value in semantics.items():
         key = _token(raw_key, name="route semantic key")
-        semantic = _text(raw_value, name=f"route semantic {key}")
+        item = _text(raw_value, name=f"route semantic {key}")
         if key in normalized_semantics:
-            raise ProviderQualificationError("route_semantics keys are not unique")
-        normalized_semantics[key] = semantic
-    if list(route_semantics) != sorted(route_semantics):
-        raise ProviderQualificationError("route_semantics keys must be sorted canonically")
+            raise ProviderQualificationError(
+                "route_semantics keys are not unique"
+            )
+        normalized_semantics[key] = item
+    if list(semantics) != sorted(semantics):
+        raise ProviderQualificationError(
+            "route_semantics keys must be sorted canonically"
+        )
     route_semantics_json = canonical_json(normalized_semantics)
-    if route_semantics_json != canonical_json(route_semantics):
+    if route_semantics_json != canonical_json(semantics):
         raise ProviderQualificationError("route_semantics are not canonical")
 
-    documentation_revisions = _unique_text_list(
+    docs = _unique_text_list(
         value["documentation_revisions"], name="documentation_revisions"
     )
-    if not documentation_revisions:
-        raise ProviderQualificationError("documentation_revisions must not be empty")
+    if not docs:
+        raise ProviderQualificationError(
+            "documentation_revisions must not be empty"
+        )
     completed_at = _instant(value["completed_at"], name="completed_at")
     valid_until = _instant(value["valid_until"], name="valid_until")
     if _instant_value(valid_until) <= _instant_value(completed_at):
-        raise ProviderQualificationError("valid_until must be after completed_at")
+        raise ProviderQualificationError(
+            "valid_until must be after completed_at"
+        )
 
-    raw_refs_value = value["raw_evidence_refs"]
-    if type(raw_refs_value) is not list:
-        raise ProviderQualificationError("raw_evidence_refs must be an exact JSON array")
+    raw_ref_values = value["raw_evidence_refs"]
+    if type(raw_ref_values) is not list:
+        raise ProviderQualificationError(
+            "raw_evidence_refs must be an exact JSON array"
+        )
     raw_refs = tuple(
         _parse_evidence_ref(item, name=f"raw_evidence_refs[{index}]")
-        for index, item in enumerate(raw_refs_value)
+        for index, item in enumerate(raw_ref_values)
     )
     canonical_refs = tuple(sorted(raw_refs, key=lambda item: item.artifact_id))
-    if raw_refs != canonical_refs or len({item.artifact_id for item in raw_refs}) != len(raw_refs):
-        raise ProviderQualificationError("raw_evidence_refs must be unique and sorted by artifact_id")
+    if raw_refs != canonical_refs or len(
+        {item.artifact_id for item in raw_refs}
+    ) != len(raw_refs):
+        raise ProviderQualificationError(
+            "raw_evidence_refs must be unique and sorted by artifact_id"
+        )
 
     supersedes = value["supersedes_qualification_id"]
     if supersedes is not None:
-        if type(supersedes) is not str or _QID_RE.fullmatch(supersedes) is None:
-            raise ProviderQualificationError("supersedes_qualification_id is not canonical")
-
+        supersedes = _qid(
+            supersedes,
+            name="supersedes_qualification_id",
+        )
     return ProviderQualificationCampaign(
         scope=scope,
         required_cases=required_cases,
         passed_cases=passed_cases,
         failed_cases=failed_cases,
-        unsupported_features=unsupported_features,
+        unsupported_features=unsupported,
         route_semantics_json=route_semantics_json,
-        documentation_revisions=documentation_revisions,
+        documentation_revisions=docs,
         completed_at=completed_at,
         valid_until=valid_until,
         raw_evidence_refs=raw_refs,
@@ -424,6 +560,8 @@ def parse_provider_qualification_campaign(raw: bytes) -> ProviderQualificationCa
 
 @dataclass(frozen=True, slots=True, init=False)
 class AcceptedProviderQualification:
+    """Sealed Q value.  Normal construction is rejected."""
+
     identity: ProviderQualificationIdentity
     scope: ProviderQualificationScope
     qualification_id: str
@@ -475,22 +613,30 @@ class AcceptedProviderQualification:
             raise ProviderQualificationError(
                 "AcceptedProviderQualification must come from canonical provider qualification authority"
             )
-        if type(identity) is not ProviderQualificationIdentity or type(scope) is not ProviderQualificationScope:
-            raise ProviderQualificationError("accepted provider qualification identity/scope is invalid")
-        if identity.content_digest != identity.content_digest:
-            raise ProviderQualificationError("provider qualification identity is unstable")
+        if type(identity) is not ProviderQualificationIdentity:
+            raise ProviderQualificationError(
+                "accepted provider qualification identity is invalid"
+            )
+        if type(scope) is not ProviderQualificationScope:
+            raise ProviderQualificationError(
+                "accepted provider qualification scope is invalid"
+            )
         object.__setattr__(self, "identity", identity)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "qualification_id", identity.content_digest)
         object.__setattr__(self, "required_cases", tuple(required_cases))
         object.__setattr__(self, "unsupported_features", tuple(unsupported_features))
         object.__setattr__(self, "route_semantics_json", route_semantics_json)
-        object.__setattr__(self, "documentation_revisions", tuple(documentation_revisions))
+        object.__setattr__(
+            self, "documentation_revisions", tuple(documentation_revisions)
+        )
         object.__setattr__(self, "completed_at", completed_at)
         object.__setattr__(self, "valid_until", valid_until)
         object.__setattr__(self, "campaign_artifact_ref", campaign_artifact_ref)
         object.__setattr__(self, "raw_evidence_refs", tuple(raw_evidence_refs))
-        object.__setattr__(self, "supersedes_qualification_id", supersedes_qualification_id)
+        object.__setattr__(
+            self, "supersedes_qualification_id", supersedes_qualification_id
+        )
         object.__setattr__(self, "attestation_id", attestation_id)
         object.__setattr__(self, "attestation_digest", attestation_digest)
         object.__setattr__(self, "policy_id", policy_id)
@@ -514,7 +660,9 @@ class AcceptedProviderQualification:
             "completed_at": self.completed_at,
             "valid_until": self.valid_until,
             "campaign_artifact_ref": self.campaign_artifact_ref.canonical(),
-            "raw_evidence_refs": [item.canonical() for item in self.raw_evidence_refs],
+            "raw_evidence_refs": [
+                item.canonical() for item in self.raw_evidence_refs
+            ],
             "supersedes_qualification_id": self.supersedes_qualification_id,
             "attestation_id": self.attestation_id,
             "attestation_digest": self.attestation_digest,
@@ -528,6 +676,89 @@ class AcceptedProviderQualification:
         }
 
 
+def _identity_from_material(
+    *,
+    campaign: ProviderQualificationCampaign,
+    campaign_artifact_ref: EvidenceArtifactRef,
+    attestation_id: str,
+    attestation_digest: str,
+    policy_id: str,
+    policy_version: str,
+    trust_root_id: str,
+    producer_id: str,
+    verifier_id: str,
+    signed_at: str,
+    release_artifact_id: str | None,
+) -> ProviderQualificationIdentity:
+    all_refs = tuple(
+        sorted(
+            (campaign_artifact_ref, *campaign.raw_evidence_refs),
+            key=lambda item: item.artifact_id,
+        )
+    )
+    acceptance_metadata = {
+        "attestation_id": attestation_id,
+        "attestation_digest": attestation_digest,
+        "policy_id": policy_id,
+        "policy_version": policy_version,
+        "trust_root_id": trust_root_id,
+        "producer_id": producer_id,
+        "verifier_id": verifier_id,
+        "signed_at": signed_at,
+        "release_artifact_id": release_artifact_id,
+    }
+    return ProviderQualificationIdentity(
+        provider_scope=campaign.scope.provider_scope,
+        product_family=campaign.scope.product_family,
+        adapter_source_git_sha=campaign.scope.adapter_source_git_sha,
+        packaged_artifact_id=release_artifact_id,
+        packaged_artifact_digest=campaign.scope.packaged_artifact_digest,
+        campaign_id=campaign.scope.campaign_id,
+        campaign_version=campaign.scope.campaign_version,
+        protocol_id=campaign.scope.protocol_id,
+        protocol_version=campaign.scope.protocol_version,
+        required_case_policy_digest=_canonical_digest(
+            list(campaign.required_cases)
+        ),
+        result_set_digest=_canonical_digest(
+            {
+                "passed_cases": list(campaign.passed_cases),
+                "failed_cases": list(campaign.failed_cases),
+                "unsupported_features": list(campaign.unsupported_features),
+            }
+        ),
+        route_semantics_digest=_canonical_digest(
+            json.loads(campaign.route_semantics_json)
+        ),
+        documentation_revision_digest=_canonical_digest(
+            list(campaign.documentation_revisions)
+        ),
+        evidence_set_digest=_canonical_digest(
+            [item.canonical() for item in all_refs]
+        ),
+        chronology_digest=_canonical_digest(
+            {
+                "completed_at": campaign.completed_at,
+                "valid_until": campaign.valid_until,
+            }
+        ),
+        lineage_digest=_canonical_digest(
+            {
+                "supersedes_qualification_id": campaign.supersedes_qualification_id
+            }
+        ),
+        acceptance_metadata_digest=_canonical_digest(acceptance_metadata),
+        attestation_digest=attestation_digest,
+        trust_policy_digest=policy_id,
+        issuer_identity_digest=_canonical_digest(
+            {"producer_id": producer_id, "trust_root_id": trust_root_id}
+        ),
+        verifier_identity_digest=_canonical_digest(
+            {"verifier_id": verifier_id}
+        ),
+    )
+
+
 def _derive_accepted_provider_qualification(
     *,
     protocol: ProviderQualificationProtocol,
@@ -537,18 +768,32 @@ def _derive_accepted_provider_qualification(
     receipt: SignedQualificationAttestation,
 ) -> AcceptedProviderQualification:
     if type(protocol) is not ProviderQualificationProtocol:
-        raise ProviderQualificationError("provider qualification protocol must be source-owned")
+        raise ProviderQualificationError(
+            "provider qualification protocol must be source-owned"
+        )
     if type(campaign) is not ProviderQualificationCampaign:
-        raise ProviderQualificationError("campaign must be canonical ProviderQualificationCampaign")
+        raise ProviderQualificationError(
+            "campaign must be canonical ProviderQualificationCampaign"
+        )
     if type(campaign_artifact_ref) is not EvidenceArtifactRef:
-        raise ProviderQualificationError("campaign artifact ref must be exact EvidenceArtifactRef")
+        raise ProviderQualificationError(
+            "campaign artifact ref must be exact EvidenceArtifactRef"
+        )
     if type(accepted_attestation) is not AcceptedQualificationAttestation:
-        raise ProviderQualificationError("accepted attestation must be canonical verifier output")
-    if type(receipt) is not SignedQualificationAttestation:
-        raise ProviderQualificationError("receipt must be exact SignedQualificationAttestation")
+        raise ProviderQualificationError(
+            "accepted attestation must be canonical verifier output"
+        )
+    if type(receipt) is not SignedQualificationAttestation or type(
+        receipt.attestation
+    ) is not QualificationAttestation:
+        raise ProviderQualificationError(
+            "receipt must be exact canonical qualification receipt"
+        )
     attestation = receipt.attestation
     if accepted_attestation.result != "PASS" or attestation.result != "PASS":
-        raise ProviderQualificationError("provider qualification requires canonical PASS attestation")
+        raise ProviderQualificationError(
+            "provider qualification requires canonical PASS attestation"
+        )
     if (
         accepted_attestation.domain != protocol.domain
         or accepted_attestation.gate != protocol.gate
@@ -557,52 +802,76 @@ def _derive_accepted_provider_qualification(
         or accepted_attestation.protocol_version != protocol.protocol_version
         or accepted_attestation.requirement_id != protocol.requirement_id
     ):
-        raise ProviderQualificationError("accepted attestation does not match provider qualification protocol")
-    if campaign.scope.protocol_id != protocol.protocol_id or campaign.scope.protocol_version != protocol.protocol_version:
-        raise ProviderQualificationError("campaign protocol does not match accepted attestation protocol")
-    if campaign.scope.adapter_source_git_sha != accepted_attestation.source_sha:
-        raise ProviderQualificationError("campaign adapter source does not match accepted source SHA")
-    if campaign.completed_at != attestation.completed_at:
-        raise ProviderQualificationError("campaign completion does not match attested completion")
-    if accepted_attestation.release_artifact_sha256 is not None and (
-        campaign.scope.packaged_artifact_digest != accepted_attestation.release_artifact_sha256
+        raise ProviderQualificationError(
+            "accepted attestation does not match provider qualification protocol"
+        )
+    if (
+        campaign.scope.protocol_id != protocol.protocol_id
+        or campaign.scope.protocol_version != protocol.protocol_version
     ):
-        raise ProviderQualificationError("campaign packaged artifact does not match accepted release artifact")
+        raise ProviderQualificationError(
+            "campaign protocol does not match accepted attestation protocol"
+        )
+    if campaign.scope.adapter_source_git_sha != accepted_attestation.source_sha:
+        raise ProviderQualificationError(
+            "campaign adapter source does not match accepted source SHA"
+        )
+    if campaign.completed_at != attestation.completed_at:
+        raise ProviderQualificationError(
+            "campaign completion does not match attested completion"
+        )
+    if accepted_attestation.attestation_id != attestation.attestation_id:
+        raise ProviderQualificationError(
+            "canonical verifier returned different attestation identity"
+        )
+    if accepted_attestation.attestation_digest != attestation.content_digest:
+        raise ProviderQualificationError(
+            "canonical verifier returned different attestation digest"
+        )
+    if accepted_attestation.release_artifact_sha256 is not None and (
+        campaign.scope.packaged_artifact_digest
+        != accepted_attestation.release_artifact_sha256
+    ):
+        raise ProviderQualificationError(
+            "campaign packaged artifact does not match accepted release artifact"
+        )
 
     campaign_refs = [
-        item for item in attestation.evidence_refs
+        item
+        for item in attestation.evidence_refs
         if item.evidence_kind == protocol.campaign_evidence_kind
     ]
     if len(campaign_refs) != 1 or campaign_refs[0] != campaign_artifact_ref:
-        raise ProviderQualificationError("attestation must bind exactly one canonical campaign artifact")
-    remaining = tuple(item for item in attestation.evidence_refs if item != campaign_artifact_ref)
-    if tuple(sorted(remaining, key=lambda item: item.artifact_id)) != campaign.raw_evidence_refs:
-        raise ProviderQualificationError("campaign raw evidence refs do not exactly match accepted attestation evidence")
+        raise ProviderQualificationError(
+            "attestation must bind exactly one canonical campaign artifact"
+        )
+    remaining = tuple(
+        sorted(
+            (
+                item
+                for item in attestation.evidence_refs
+                if item != campaign_artifact_ref
+            ),
+            key=lambda item: item.artifact_id,
+        )
+    )
+    if remaining != campaign.raw_evidence_refs:
+        raise ProviderQualificationError(
+            "campaign raw evidence refs do not exactly match accepted attestation evidence"
+        )
 
-    identity = ProviderQualificationIdentity(
-        provider_scope=campaign.scope.provider_scope,
-        product_family=campaign.scope.product_family,
-        adapter_source_git_sha=campaign.scope.adapter_source_git_sha,
-        packaged_artifact_digest=campaign.scope.packaged_artifact_digest,
-        campaign_id=campaign.scope.campaign_id,
-        campaign_version=campaign.scope.campaign_version,
-        required_case_policy_digest=_canonical_digest(list(campaign.required_cases)),
-        result_set_digest=_canonical_digest(
-            {
-                "passed_cases": list(campaign.passed_cases),
-                "failed_cases": list(campaign.failed_cases),
-                "unsupported_features": list(campaign.unsupported_features),
-            }
-        ),
-        route_semantics_digest=_canonical_digest(json.loads(campaign.route_semantics_json)),
-        documentation_revision_digest=_canonical_digest(list(campaign.documentation_revisions)),
-        evidence_set_digest=_canonical_digest([item.canonical() for item in campaign.raw_evidence_refs]),
+    identity = _identity_from_material(
+        campaign=campaign,
+        campaign_artifact_ref=campaign_artifact_ref,
+        attestation_id=accepted_attestation.attestation_id,
         attestation_digest=accepted_attestation.attestation_digest,
-        trust_policy_digest=accepted_attestation.policy_id,
-        issuer_identity_digest=_canonical_digest(
-            {"producer_id": attestation.producer_id, "trust_root_id": accepted_attestation.trust_root_id}
-        ),
-        verifier_identity_digest=_canonical_digest({"verifier_id": attestation.verifier_id}),
+        policy_id=accepted_attestation.policy_id,
+        policy_version=accepted_attestation.policy_version,
+        trust_root_id=accepted_attestation.trust_root_id,
+        producer_id=attestation.producer_id,
+        verifier_id=attestation.verifier_id,
+        signed_at=attestation.signed_at,
+        release_artifact_id=accepted_attestation.release_artifact_id,
     )
     return AcceptedProviderQualification(
         identity=identity,
@@ -629,16 +898,29 @@ def _derive_accepted_provider_qualification(
     )
 
 
-def _detach_receipt(receipt: SignedQualificationAttestation) -> SignedQualificationAttestation:
-    if type(receipt) is not SignedQualificationAttestation or type(receipt.attestation).__name__ != "QualificationAttestation":
-        raise TypeError("receipt must be exact SignedQualificationAttestation")
-    payload = {
-        "attestation": receipt.attestation.canonical_payload(),
-        "signature_b64": receipt.signature_b64,
-    }
-    detached = parse_signed_qualification_attestation(payload)
-    if type(detached) is not SignedQualificationAttestation:
-        raise ProviderQualificationError("qualification receipt parser returned non-canonical type")
+def _detach_receipt(
+    receipt: SignedQualificationAttestation,
+) -> SignedQualificationAttestation:
+    if type(receipt) is not SignedQualificationAttestation or type(
+        receipt.attestation
+    ) is not QualificationAttestation:
+        raise TypeError(
+            "receipt must be exact SignedQualificationAttestation"
+        )
+    if type(receipt.signature_b64) is not str:
+        raise TypeError("qualification receipt signature must be exact text")
+    detached = parse_signed_qualification_attestation(
+        {
+            "attestation": receipt.attestation.canonical_payload(),
+            "signature_b64": receipt.signature_b64,
+        }
+    )
+    if type(detached) is not SignedQualificationAttestation or type(
+        detached.attestation
+    ) is not QualificationAttestation:
+        raise ProviderQualificationError(
+            "qualification receipt parser returned non-canonical type"
+        )
     return detached
 
 
@@ -651,30 +933,39 @@ def verify_provider_qualification_campaign(
     expected_scope: ProviderQualificationScope,
     expected_release_artifact_id: str | None = None,
 ) -> AcceptedProviderQualification:
-    """Issue one Q only from canonical signed trust plus authenticated campaign bytes.
-
-    The protocol key resolves source-owned policy expectations; callers cannot
-    supply domain/gate/package/requirement authority.  With no configured source
-    protocol this function intentionally raises ``ProviderQualificationUnavailable``.
-    """
+    """Issue Q only from source-owned protocol + canonical signed campaign proof."""
 
     protocol = source_provider_qualification_protocol(protocol_key)
     if type(expected_scope) is not ProviderQualificationScope:
-        raise TypeError("expected_scope must be exact ProviderQualificationScope")
+        raise TypeError(
+            "expected_scope must be exact ProviderQualificationScope"
+        )
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be the canonical ArtifactStore")
+    if expected_release_artifact_id is not None:
+        expected_release_artifact_id = _uuid(
+            expected_release_artifact_id,
+            name="expected_release_artifact_id",
+        )
     detached = _detach_receipt(receipt)
     campaign_refs = [
-        item for item in detached.attestation.evidence_refs
+        item
+        for item in detached.attestation.evidence_refs
         if item.evidence_kind == protocol.campaign_evidence_kind
     ]
     if len(campaign_refs) != 1:
-        raise ProviderQualificationError("attestation must contain exactly one provider campaign artifact")
+        raise ProviderQualificationError(
+            "attestation must contain exactly one provider campaign artifact"
+        )
     campaign_ref = campaign_refs[0]
     if campaign_ref.media_type != "application/json":
-        raise ProviderQualificationError("provider qualification campaign must use application/json")
+        raise ProviderQualificationError(
+            "provider qualification campaign must use application/json"
+        )
     if campaign_ref.source_sha != expected_scope.adapter_source_git_sha:
-        raise ProviderQualificationError("campaign evidence source SHA does not match expected scope")
+        raise ProviderQualificationError(
+            "campaign evidence source SHA does not match expected scope"
+        )
 
     try:
         accepted = verify_canonical_qualification_attestation(
@@ -700,14 +991,24 @@ def verify_provider_qualification_campaign(
             publication_store=evidence_store,
         )
         manifest, raw = reader(campaign_ref.artifact_id)
-    except (QualificationTrustError, ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
-        raise ProviderQualificationError("provider qualification evidence could not cross canonical trust boundary") from error
+    except (
+        QualificationTrustError,
+        ArtifactIntegrityError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ProviderQualificationError(
+            "provider qualification evidence could not cross canonical trust boundary"
+        ) from error
     if (
         manifest.get("sha256") != campaign_ref.sha256
         or manifest.get("media_type") != campaign_ref.media_type
         or "sha256:" + sha256(raw).hexdigest() != campaign_ref.sha256
     ):
-        raise ProviderQualificationError("provider qualification campaign artifact changed or mismatched")
+        raise ProviderQualificationError(
+            "provider qualification campaign artifact changed or mismatched"
+        )
     metadata = manifest.get("metadata")
     source_refs = manifest.get("source_refs")
     if (
@@ -716,11 +1017,15 @@ def verify_provider_qualification_campaign(
         or type(source_refs) is not list
         or f"git:{campaign_ref.source_sha}" not in source_refs
     ):
-        raise ProviderQualificationError("provider qualification campaign manifest provenance mismatched")
+        raise ProviderQualificationError(
+            "provider qualification campaign manifest provenance mismatched"
+        )
 
     campaign = parse_provider_qualification_campaign(raw)
     if campaign.scope != expected_scope:
-        raise ProviderQualificationError("provider qualification campaign scope does not match requested scope")
+        raise ProviderQualificationError(
+            "provider qualification campaign scope does not match requested scope"
+        )
     return _derive_accepted_provider_qualification(
         protocol=protocol,
         campaign=campaign,
@@ -730,161 +1035,227 @@ def verify_provider_qualification_campaign(
     )
 
 
-def _rehydrate_accepted_provider_qualification(payload: object) -> AcceptedProviderQualification:
-    """Strictly rehydrate an already-issued durable Q; never verify a new campaign."""
+def _scope_from_payload(value: object) -> ProviderQualificationScope:
+    payload = _strict_object(
+        value,
+        name="accepted provider qualification scope",
+        keys=frozenset(
+            {
+                "schema_version",
+                "provider_scope",
+                "product_family",
+                "adapter_source_git_sha",
+                "packaged_artifact_digest",
+                "campaign_id",
+                "campaign_version",
+                "protocol_id",
+                "protocol_version",
+            }
+        ),
+    )
+    provider_payload = _strict_object(
+        payload["provider_scope"],
+        name="accepted provider financial scope",
+        keys=frozenset(
+            {
+                "schema_version",
+                "provider_id",
+                "runtime_environment",
+                "provider_environment",
+                "entity_policy_id",
+            }
+        ),
+    )
+    if (
+        payload["schema_version"] != _SCHEMA_VERSION
+        or provider_payload["schema_version"] != _SCHEMA_VERSION
+    ):
+        raise ProviderQualificationError(
+            "accepted provider qualification scope schema mismatch"
+        )
+    scope = ProviderQualificationScope(
+        provider_scope=ProviderFinancialScope(
+            provider_id=provider_payload["provider_id"],
+            runtime_environment=provider_payload["runtime_environment"],
+            provider_environment=provider_payload["provider_environment"],
+            entity_policy_id=provider_payload["entity_policy_id"],
+        ),
+        product_family=payload["product_family"],
+        adapter_source_git_sha=payload["adapter_source_git_sha"],
+        packaged_artifact_digest=payload["packaged_artifact_digest"],
+        campaign_id=payload["campaign_id"],
+        campaign_version=payload["campaign_version"],
+        protocol_id=payload["protocol_id"],
+        protocol_version=payload["protocol_version"],
+    )
+    if scope.payload() != payload:
+        raise ProviderQualificationError(
+            "accepted provider qualification scope is not canonical"
+        )
+    return scope
+
+
+def _rehydrate_accepted_provider_qualification(
+    payload: object,
+) -> AcceptedProviderQualification:
+    """Replay a durable Q and recompute its full content identity."""
 
     record = _strict_object(
         payload,
         name="accepted provider qualification",
         keys=frozenset(
             {
-                "schema_version", "qualification_id", "identity", "scope",
-                "required_cases", "unsupported_features", "route_semantics",
-                "documentation_revisions", "completed_at", "valid_until",
-                "campaign_artifact_ref", "raw_evidence_refs",
-                "supersedes_qualification_id", "attestation_id", "attestation_digest",
-                "policy_id", "policy_version", "trust_root_id", "producer_id",
-                "verifier_id", "signed_at", "release_artifact_id",
+                "schema_version",
+                "qualification_id",
+                "identity",
+                "scope",
+                "required_cases",
+                "unsupported_features",
+                "route_semantics",
+                "documentation_revisions",
+                "completed_at",
+                "valid_until",
+                "campaign_artifact_ref",
+                "raw_evidence_refs",
+                "supersedes_qualification_id",
+                "attestation_id",
+                "attestation_digest",
+                "policy_id",
+                "policy_version",
+                "trust_root_id",
+                "producer_id",
+                "verifier_id",
+                "signed_at",
+                "release_artifact_id",
             }
         ),
     )
     if record["schema_version"] != _SCHEMA_VERSION:
-        raise ProviderQualificationError("unsupported accepted provider qualification schema")
-    scope_payload = _strict_object(
-        record["scope"],
-        name="accepted provider qualification scope",
-        keys=frozenset(
-            {
-                "schema_version", "provider_scope", "product_family",
-                "adapter_source_git_sha", "packaged_artifact_digest", "campaign_id",
-                "campaign_version", "protocol_id", "protocol_version",
-            }
-        ),
+        raise ProviderQualificationError(
+            "unsupported accepted provider qualification schema"
+        )
+    scope = _scope_from_payload(record["scope"])
+    required = _unique_text_list(record["required_cases"], name="required_cases")
+    if required != tuple(sorted(REQUIRED_QUALIFICATION_CASES)):
+        raise ProviderQualificationError(
+            "durable required_cases no longer match source-owned case universe"
+        )
+    unsupported = _unique_text_list(
+        record["unsupported_features"], name="unsupported_features"
     )
-    provider_payload = _strict_object(
-        scope_payload["provider_scope"],
-        name="accepted provider financial scope",
-        keys=frozenset(
-            {"schema_version", "provider_id", "runtime_environment", "provider_environment", "entity_policy_id"}
-        ),
+    semantics = record["route_semantics"]
+    if type(semantics) is not dict or not semantics:
+        raise ProviderQualificationError(
+            "durable route_semantics are invalid"
+        )
+    semantics_json = canonical_json(semantics)
+    docs = _unique_text_list(
+        record["documentation_revisions"], name="documentation_revisions"
     )
-    if scope_payload["schema_version"] != _SCHEMA_VERSION or provider_payload["schema_version"] != _SCHEMA_VERSION:
-        raise ProviderQualificationError("accepted provider qualification scope schema mismatch")
-    provider_scope = ProviderFinancialScope(
-        provider_id=provider_payload["provider_id"],
-        runtime_environment=provider_payload["runtime_environment"],
-        provider_environment=provider_payload["provider_environment"],
-        entity_policy_id=provider_payload["entity_policy_id"],
-    )
-    scope = ProviderQualificationScope(
-        provider_scope=provider_scope,
-        product_family=scope_payload["product_family"],
-        adapter_source_git_sha=scope_payload["adapter_source_git_sha"],
-        packaged_artifact_digest=scope_payload["packaged_artifact_digest"],
-        campaign_id=scope_payload["campaign_id"],
-        campaign_version=scope_payload["campaign_version"],
-        protocol_id=scope_payload["protocol_id"],
-        protocol_version=scope_payload["protocol_version"],
-    )
-    if scope.payload() != scope_payload:
-        raise ProviderQualificationError("accepted provider qualification scope is not canonical")
-
-    identity_payload = _strict_object(
-        record["identity"],
-        name="provider qualification identity",
-        keys=frozenset(
-            {
-                "schema_version", "provider_scope", "provider_scope_digest", "product_family",
-                "adapter_source_git_sha", "packaged_artifact_digest", "campaign_id",
-                "campaign_version", "required_case_policy_digest", "result_set_digest",
-                "route_semantics_digest", "documentation_revision_digest", "evidence_set_digest",
-                "attestation_digest", "trust_policy_digest", "issuer_identity_digest",
-                "verifier_identity_digest",
-            }
-        ),
-    )
-    identity = ProviderQualificationIdentity(
-        provider_scope=provider_scope,
-        product_family=identity_payload["product_family"],
-        adapter_source_git_sha=identity_payload["adapter_source_git_sha"],
-        packaged_artifact_digest=identity_payload["packaged_artifact_digest"],
-        campaign_id=identity_payload["campaign_id"],
-        campaign_version=identity_payload["campaign_version"],
-        required_case_policy_digest=identity_payload["required_case_policy_digest"],
-        result_set_digest=identity_payload["result_set_digest"],
-        route_semantics_digest=identity_payload["route_semantics_digest"],
-        documentation_revision_digest=identity_payload["documentation_revision_digest"],
-        evidence_set_digest=identity_payload["evidence_set_digest"],
-        attestation_digest=identity_payload["attestation_digest"],
-        trust_policy_digest=identity_payload["trust_policy_digest"],
-        issuer_identity_digest=identity_payload["issuer_identity_digest"],
-        verifier_identity_digest=identity_payload["verifier_identity_digest"],
-    )
-    if identity.payload() != identity_payload or identity.content_digest != record["qualification_id"]:
-        raise ProviderQualificationError("accepted provider qualification identity mismatch")
-    if (
-        identity.provider_scope != scope.provider_scope
-        or identity.product_family != scope.product_family
-        or identity.adapter_source_git_sha != scope.adapter_source_git_sha
-        or identity.packaged_artifact_digest != scope.packaged_artifact_digest
-        or identity.campaign_id != scope.campaign_id
-        or identity.campaign_version != scope.campaign_version
-    ):
-        raise ProviderQualificationError("accepted provider qualification identity/scope mismatch")
-
-    required_cases = _unique_text_list(record["required_cases"], name="required_cases")
-    if required_cases != tuple(sorted(REQUIRED_QUALIFICATION_CASES)):
-        raise ProviderQualificationError("durable required_cases no longer match source-owned case universe")
-    unsupported = _unique_text_list(record["unsupported_features"], name="unsupported_features")
-    route_semantics = record["route_semantics"]
-    if type(route_semantics) is not dict or not route_semantics:
-        raise ProviderQualificationError("durable route_semantics are invalid")
-    route_semantics_json = canonical_json(route_semantics)
-    docs = _unique_text_list(record["documentation_revisions"], name="documentation_revisions")
     completed_at = _instant(record["completed_at"], name="completed_at")
     valid_until = _instant(record["valid_until"], name="valid_until")
     if _instant_value(valid_until) <= _instant_value(completed_at):
-        raise ProviderQualificationError("durable provider qualification validity interval is invalid")
-    campaign_ref = _parse_evidence_ref(record["campaign_artifact_ref"], name="campaign_artifact_ref")
-    raw_refs_value = record["raw_evidence_refs"]
-    if type(raw_refs_value) is not list:
-        raise ProviderQualificationError("raw_evidence_refs must be an exact JSON array")
+        raise ProviderQualificationError(
+            "durable provider qualification validity interval is invalid"
+        )
+    campaign_ref = _parse_evidence_ref(
+        record["campaign_artifact_ref"], name="campaign_artifact_ref"
+    )
+    raw_ref_values = record["raw_evidence_refs"]
+    if type(raw_ref_values) is not list:
+        raise ProviderQualificationError(
+            "raw_evidence_refs must be an exact JSON array"
+        )
     raw_refs = tuple(
         _parse_evidence_ref(item, name=f"raw_evidence_refs[{index}]")
-        for index, item in enumerate(raw_refs_value)
+        for index, item in enumerate(raw_ref_values)
     )
     if raw_refs != tuple(sorted(raw_refs, key=lambda item: item.artifact_id)):
-        raise ProviderQualificationError("raw_evidence_refs are not canonical")
+        raise ProviderQualificationError(
+            "raw_evidence_refs are not canonical"
+        )
     supersedes = record["supersedes_qualification_id"]
-    if supersedes is not None and (type(supersedes) is not str or _QID_RE.fullmatch(supersedes) is None):
-        raise ProviderQualificationError("supersedes_qualification_id is invalid")
+    if supersedes is not None:
+        supersedes = _qid(
+            supersedes,
+            name="supersedes_qualification_id",
+        )
+    attestation_id = _uuid(record["attestation_id"], name="attestation_id")
+    attestation_digest = _digest(
+        record["attestation_digest"], name="attestation_digest"
+    )
+    policy_id = _digest(record["policy_id"], name="policy_id")
+    policy_version = _token(record["policy_version"], name="policy_version")
+    trust_root_id = _digest(record["trust_root_id"], name="trust_root_id")
+    producer_id = _token(record["producer_id"], name="producer_id")
+    verifier_id = _token(record["verifier_id"], name="verifier_id")
+    signed_at = _instant(record["signed_at"], name="signed_at")
+    release_artifact_id = _optional_uuid(
+        record["release_artifact_id"], name="release_artifact_id"
+    )
 
-    accepted = AcceptedProviderQualification(
-        identity=identity,
+    campaign = ProviderQualificationCampaign(
         scope=scope,
-        required_cases=required_cases,
+        required_cases=required,
+        passed_cases=required,
+        failed_cases=(),
         unsupported_features=unsupported,
-        route_semantics_json=route_semantics_json,
+        route_semantics_json=semantics_json,
+        documentation_revisions=docs,
+        completed_at=completed_at,
+        valid_until=valid_until,
+        raw_evidence_refs=raw_refs,
+        supersedes_qualification_id=supersedes,
+    )
+    expected_identity = _identity_from_material(
+        campaign=campaign,
+        campaign_artifact_ref=campaign_ref,
+        attestation_id=attestation_id,
+        attestation_digest=attestation_digest,
+        policy_id=policy_id,
+        policy_version=policy_version,
+        trust_root_id=trust_root_id,
+        producer_id=producer_id,
+        verifier_id=verifier_id,
+        signed_at=signed_at,
+        release_artifact_id=release_artifact_id,
+    )
+    identity_payload = record["identity"]
+    if type(identity_payload) is not dict or expected_identity.payload() != identity_payload:
+        raise ProviderQualificationError(
+            "accepted provider qualification identity content mismatch"
+        )
+    if expected_identity.content_digest != _qid(
+        record["qualification_id"], name="qualification_id"
+    ):
+        raise ProviderQualificationError(
+            "accepted provider qualification id mismatch"
+        )
+    accepted = AcceptedProviderQualification(
+        identity=expected_identity,
+        scope=scope,
+        required_cases=required,
+        unsupported_features=unsupported,
+        route_semantics_json=semantics_json,
         documentation_revisions=docs,
         completed_at=completed_at,
         valid_until=valid_until,
         campaign_artifact_ref=campaign_ref,
         raw_evidence_refs=raw_refs,
         supersedes_qualification_id=supersedes,
-        attestation_id=_text(record["attestation_id"], name="attestation_id"),
-        attestation_digest=_digest(record["attestation_digest"], name="attestation_digest"),
-        policy_id=_digest(record["policy_id"], name="policy_id"),
-        policy_version=_token(record["policy_version"], name="policy_version"),
-        trust_root_id=_digest(record["trust_root_id"], name="trust_root_id"),
-        producer_id=_token(record["producer_id"], name="producer_id"),
-        verifier_id=_token(record["verifier_id"], name="verifier_id"),
-        signed_at=_instant(record["signed_at"], name="signed_at"),
-        release_artifact_id=(
-            None if record["release_artifact_id"] is None
-            else _text(record["release_artifact_id"], name="release_artifact_id")
-        ),
+        attestation_id=attestation_id,
+        attestation_digest=attestation_digest,
+        policy_id=policy_id,
+        policy_version=policy_version,
+        trust_root_id=trust_root_id,
+        producer_id=producer_id,
+        verifier_id=verifier_id,
+        signed_at=signed_at,
+        release_artifact_id=release_artifact_id,
         _issuance_token=_ACCEPTED_TOKEN,
     )
     if accepted.payload() != record:
-        raise ProviderQualificationError("accepted provider qualification durable payload is not canonical")
+        raise ProviderQualificationError(
+            "accepted provider qualification durable payload is not canonical"
+        )
     return accepted

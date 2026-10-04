@@ -113,6 +113,51 @@ class AccessibleStatusTests(unittest.TestCase):
         )
         self.assertIn("Economic edge: unproven", text)
 
+    def test_malformed_canonical_report_suppresses_plausible_financial_details(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "7",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "CASH_ONLY",
+                "final_equity": "987654321",
+                "net_pnl": "876543210",
+                "total_fees": "not-a-decimal",
+                "turnover": "765432109",
+                "max_drawdown": "654321098",
+                "reconciled": True,
+            },
+        )
+
+        for label in (
+            "Final equity: Unavailable",
+            "Net profit or loss: Unavailable",
+            "Total fees: Unavailable",
+            "Turnover: Unavailable",
+            "Maximum drawdown: Unavailable",
+        ):
+            self.assertIn(label, text)
+        for untrusted_value in (
+            "987654321",
+            "876543210",
+            "765432109",
+            "654321098",
+        ):
+            self.assertNotIn(untrusted_value, text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn(
+            "Economic report validation: unavailable; malformed or incomplete canonical state",
+            text,
+        )
+
     def test_valid_canonical_cash_only_report_can_confirm_reconciliation(self):
         text = format_accessible_status(
             {

@@ -273,11 +273,14 @@ def format_accessible_status(
                 if state_format == "canonical_journal"
                 else True
             )
-            report_value = (
-                _canonical_decimal_value
-                if state_format == "canonical_journal"
-                else _value
-            )
+            if state_format == "canonical_journal":
+                report_value = (
+                    _canonical_decimal_value
+                    if canonical_report_readable
+                    else lambda _mapping, _key: "Unavailable"
+                )
+            else:
+                report_value = _value
             reconciliation_passed = (
                 economic_report.get("reconciled") is True
                 and canonical_report_readable
@@ -300,7 +303,7 @@ def format_accessible_status(
                 economic_report.get("valuation_status"),
                 "",
             )
-            if valuation_status == "MARK_UNAVAILABLE":
+            if canonical_report_readable and valuation_status == "MARK_UNAVAILABLE":
                 lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
 
     lines.append("Economic edge: unproven")

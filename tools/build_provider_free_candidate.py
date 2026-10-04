@@ -96,7 +96,8 @@ def extract_pinned(archive_path, destination, expected_digest, *, overrides=None
     # pathname after hashing would let a concurrent replacement substitute an
     # unverified archive between digest admission and extraction.
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-        seen = set()
+        seen_windows_keys = set()
+        seen_paths = set()
         for entry in archive.infolist():
             relative = PurePosixPath(entry.filename)
             if (relative.is_absolute() or '..' in relative.parts or '\\' in entry.filename
@@ -104,9 +105,11 @@ def extract_pinned(archive_path, destination, expected_digest, *, overrides=None
                 or stat.S_ISLNK(entry.external_attr >> 16)):
                 raise ValueError('external archive contains unsafe paths')
             key = _windows_path_key(relative.as_posix())
-            if key in seen:
+            if key in seen_windows_keys:
                 raise ValueError('external archive contains colliding paths')
-            seen.add(key)
+            seen_windows_keys.add(key)
+            exact_path = relative.as_posix()
+            seen_paths.add(exact_path)
             target = destination.joinpath(*relative.parts)
             if entry.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
@@ -115,7 +118,7 @@ def extract_pinned(archive_path, destination, expected_digest, *, overrides=None
                 if content is None:
                     content = archive.read(entry)
                 _write_new_payload_bytes(target, content)
-        missing_overrides = set(overrides) - seen
+        missing_overrides = set(overrides) - seen_paths
         if missing_overrides:
             raise ValueError(
                 'archive override path is absent: ' + ','.join(sorted(missing_overrides))

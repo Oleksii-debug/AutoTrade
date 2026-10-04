@@ -493,7 +493,46 @@ class DurableModelBudget:
         now_utc: datetime | None = None,
         reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
+        if type(policy) is not RoutingPolicy:
+            raise TypeError("policy must be exact RoutingPolicy")
+        if type(request) is not ModelRequest:
+            raise TypeError("request must be exact ModelRequest")
         materialized = tuple(descriptors)
+        if any(type(item) is not ModelDescriptor for item in materialized):
+            raise TypeError("descriptors must contain exact ModelDescriptor values")
+
+        # Caller-owned frozen dataclasses remain mutable through object.__setattr__
+        # and may be changed by another thread while journal reads occur below.
+        # Detach the complete routing graph once, then use only these copies for
+        # both durable routing identity and the actual admission decision.
+        policy = RoutingPolicy(
+            mode=policy.mode,
+            allowed_model_ids=policy.allowed_model_ids,
+            fixed_model_id=policy.fixed_model_id,
+            allow_remote=policy.allow_remote,
+            maximum_cost=policy.maximum_cost,
+            maximum_latency_ms=policy.maximum_latency_ms,
+        )
+        request = ModelRequest(
+            request_id=request.request_id,
+            allowed_model_ids=request.allowed_model_ids,
+            privacy_remote_allowed=request.privacy_remote_allowed,
+            budget_remaining=request.budget_remaining,
+            deadline_utc=request.deadline_utc,
+            cancelled=request.cancelled,
+        )
+        materialized = tuple(
+            ModelDescriptor(
+                model_id=item.model_id,
+                provider_id=item.provider_id,
+                revision=item.revision,
+                remote=item.remote,
+                estimated_cost=item.estimated_cost,
+                latency_ms=item.latency_ms,
+                quality_score=item.quality_score,
+            )
+            for item in materialized
+        )
         routing_input = self._routing_input(
             policy,
             request,

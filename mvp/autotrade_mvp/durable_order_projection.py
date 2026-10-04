@@ -31,13 +31,34 @@ _CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE = (
     ArtifactStore.read_authenticated_snapshot.__code__
 )
 
+# Durable order state is financial authority. Retain the exact installed
+# JournalStore ingress and I/O primitives so a caller cannot redirect journal
+# truth through subclassing, instance shadowing, or later public class rebinding.
+_CANONICAL_REQUIRE_JOURNAL_AUTHORITY = require_exact_journal_store_authority
+_CANONICAL_REQUIRE_JOURNAL_AUTHORITY_CODE = (
+    require_exact_journal_store_authority.__code__
+)
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_LOAD_EVENTS_CODE = JournalStore.load_events.__code__
+_CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION = JournalStore.next_aggregate_version
+_CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION_CODE = (
+    JournalStore.next_aggregate_version.__code__
+)
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
+_CANONICAL_JOURNAL_APPEND_EVENT_CODE = JournalStore.append_event.__code__
+
 
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 
 
 _AGGREGATE_TYPE = "order_projection_book"
@@ -231,6 +252,25 @@ def _scope_id(provider_id: str, account_id: str, environment: str) -> str:
     )
 
 
+def _establish_journal_authority(
+    store: JournalStore,
+    *,
+    _expected_require=_CANONICAL_REQUIRE_JOURNAL_AUTHORITY,
+    _expected_require_code=_CANONICAL_REQUIRE_JOURNAL_AUTHORITY_CODE,
+):
+    if type(store) is not JournalStore:
+        raise TypeError("store must be the exact canonical JournalStore")
+    if (
+        _CANONICAL_REQUIRE_JOURNAL_AUTHORITY is not _expected_require
+        or _expected_require.__code__ is not _expected_require_code
+    ):
+        raise RuntimeError("durable order JournalStore authority helper changed")
+    return _expected_require(
+        store,
+        subject="durable order projection journal",
+    )
+
+
 @dataclass(frozen=True)
 class DurableOrderMutationResult:
     event_id: str
@@ -252,8 +292,7 @@ class DurableOrderBookProjection:
         owner_epoch: str,
         evidence_artifact_store: ArtifactStore | None = None,
     ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        self._journal_store_identity = _establish_journal_authority(store)
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -305,8 +344,52 @@ class DurableOrderBookProjection:
             environment=self.environment,
         )
 
+    def _journal_store_authority(
+        self,
+        *,
+        _expected_require=_CANONICAL_REQUIRE_JOURNAL_AUTHORITY,
+        _expected_require_code=_CANONICAL_REQUIRE_JOURNAL_AUTHORITY_CODE,
+        _expected_load=_CANONICAL_JOURNAL_LOAD_EVENTS,
+        _expected_load_code=_CANONICAL_JOURNAL_LOAD_EVENTS_CODE,
+        _expected_next=_CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION,
+        _expected_next_code=_CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION_CODE,
+        _expected_append=_CANONICAL_JOURNAL_APPEND_EVENT,
+        _expected_append_code=_CANONICAL_JOURNAL_APPEND_EVENT_CODE,
+    ):
+        if (
+            _CANONICAL_REQUIRE_JOURNAL_AUTHORITY is not _expected_require
+            or _expected_require.__code__ is not _expected_require_code
+            or _CANONICAL_JOURNAL_LOAD_EVENTS is not _expected_load
+            or _expected_load.__code__ is not _expected_load_code
+            or _CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION is not _expected_next
+            or _expected_next.__code__ is not _expected_next_code
+            or _CANONICAL_JOURNAL_APPEND_EVENT is not _expected_append
+            or _expected_append.__code__ is not _expected_append_code
+        ):
+            raise OrderProjectionConflict(
+                "durable order JournalStore authority changed"
+            )
+        store = self.store
+        try:
+            identity = _expected_require(
+                store,
+                subject="durable order projection journal",
+            )
+        except (TypeError, RuntimeError, PermissionError) as error:
+            raise OrderProjectionConflict(
+                "durable order JournalStore authority is invalid"
+            ) from error
+        if identity != self._journal_store_identity:
+            raise OrderProjectionConflict(
+                "durable order JournalStore generation changed"
+            )
+        return store, _expected_load, _expected_next, _expected_append
+
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        store, load_events, _next_version, _append_event = (
+            self._journal_store_authority()
+        )
+        return load_events(store, _AGGREGATE_TYPE, self.aggregate_id)
 
     @staticmethod
     def _requires_provider_evidence(
@@ -680,7 +763,11 @@ class DurableOrderBookProjection:
             "request_hash": request_hash,
             "snapshot": _snapshot_payload(snapshot),
         }
-        version = self.store.next_aggregate_version(
+        store, _load_events, next_aggregate_version, append_event = (
+            self._journal_store_authority()
+        )
+        version = next_aggregate_version(
+            store,
             _AGGREGATE_TYPE,
             self.aggregate_id,
         )
@@ -713,7 +800,8 @@ class DurableOrderBookProjection:
             "evidence_refs": [dict(ref) for ref in verified_evidence],
         }
         try:
-            append_result = self.store.append_event(
+            append_result = append_event(
+                store,
                 envelope,
                 outbox_topic=_OUTBOX_TOPIC,
             )
@@ -839,7 +927,10 @@ class DurableOrderBookProjection:
             account_id=self.account_id,
             attempt_id=attempt,
         )
-        events = self.store.load_events("submission_attempt", aggregate_id)
+        store, load_events, _next_version, _append_event = (
+            self._journal_store_authority()
+        )
+        events = load_events(store, "submission_attempt", aggregate_id)
         if not events:
             raise KeyError(attempt)
 

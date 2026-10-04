@@ -255,6 +255,61 @@ class ReservationBook:
         self._records[current.reservation_id] = updated
         return self._detached_snapshot(updated)
 
+    def consume_and_mark_filled(
+        self,
+        reservation_id: str,
+        usage: Mapping[str, Decimal | str | int],
+        *,
+        resolution_evidence: str,
+    ) -> ReservationSnapshot:
+        """Atomically consume one fill cut and release a proven terminal remainder.
+
+        This projection primitive deliberately does not decide whether an order
+        is fully filled. Its caller must already possess canonical terminal OMS
+        evidence. The method only guarantees that the local financial state
+        cannot expose an intermediate consumed-but-not-terminal cut: validation,
+        exact consumption and FILLED terminalization either all succeed or the
+        reservation remains unchanged.
+        """
+
+        current = self._get_record(reservation_id)
+        if current.state not in HELD_STATES:
+            raise ReservationConflict(
+                "Cannot consume and terminalize a terminal reservation"
+            )
+        evidence = _text(resolution_evidence, name="resolution_evidence")
+        amounts = _amounts(usage)
+        remaining = dict(current.remaining)
+        consumed = dict(current.consumed)
+        for resource, amount in amounts.items():
+            if resource not in remaining:
+                raise ReservationConflict(f"Resource {resource} was not reserved")
+            if amount > remaining[resource]:
+                raise ReservationConflict(
+                    f"Consumption exceeds remaining reservation for {resource}"
+                )
+            try:
+                remaining[resource] = exact_subtract(remaining[resource], amount)
+                consumed[resource] = exact_add(consumed[resource], amount)
+            except ExactDecimalError as error:
+                raise ReservationConflict(
+                    "reservation consumption exceeds exact decimal authority"
+                ) from error
+
+        updated = ReservationSnapshot(
+            reservation_id=current.reservation_id,
+            intent_id=current.intent_id,
+            original=current.original,
+            remaining=MappingProxyType(
+                {resource: Decimal("0") for resource in current.remaining}
+            ),
+            consumed=MappingProxyType(consumed),
+            state="FILLED",
+            resolution_evidence=evidence,
+        )
+        self._records[current.reservation_id] = updated
+        return self._detached_snapshot(updated)
+
     def restore_consumption(
         self,
         reservation_id: str,

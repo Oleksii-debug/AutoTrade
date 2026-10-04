@@ -1504,6 +1504,156 @@ class ProviderOriginJournal:
             ),
             observed_at=retained_payload.get("observed_at"),
         )
+        expected_subject_digest = _exact_text(
+            prepared.get("payload_hash"),
+            name="prepared_subject_digest",
+        )
+        if retained_payload.get("prepared_subject_digest") != expected_subject_digest:
+            raise ProviderOriginError(
+                "Retained response lost Prepared subject binding"
+            )
+        expected_scope = {
+            "qualified_query_digest": snapshot["qualified_query_digest"],
+            "qualification_id": snapshot["qualification_id"],
+            "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+            "qualified_route_rule_digest": snapshot[
+                "qualified_route_rule_digest"
+            ],
+            "data_entitlement": snapshot["data_entitlement"],
+            "parser_identity": snapshot["parser_identity"],
+            "transport_identity": prepared_payload["transport_identity"],
+            "network_policy_identity": prepared_payload[
+                "network_policy_identity"
+            ],
+        }
+        if any(
+            retained_payload.get(name) != value
+            for name, value in expected_scope.items()
+        ):
+            raise ProviderOriginError(
+                "retained provider response scope differs from Prepared authority"
+            )
+        status = retained_payload.get("http_status")
+        if (
+            type(status) is not int
+            or status not in query_binding.accepted_success_statuses
+        ):
+            raise ProviderOriginError(
+                "durable provider response status is outside qualified contract"
+            )
+        response_digest = retained_payload.get("response_sha256")
+        if (
+            type(response_digest) is not str
+            or _SHA256_RE.fullmatch(response_digest) is None
+        ):
+            raise ProviderOriginError(
+                "durable provider response digest is invalid"
+            )
+        artifact_id = _exact_text(
+            retained_payload.get("response_artifact_id"),
+            name="response_artifact_id",
+        )
+        execution_class = _exact_text(
+            retained_payload.get("execution_class"),
+            name="execution_class",
+        )
+        if execution_class not in {
+            _DIRECT_EXECUTION_CLASS,
+            _TEST_EXECUTION_CLASS,
+        }:
+            raise ProviderOriginError(
+                "durable provider response execution class is invalid"
+            )
+        wire_request_sha256 = _exact_text(
+            retained_payload.get("wire_request_sha256"),
+            name="wire_request_sha256",
+        )
+        wire_request_semantics_sha256 = _exact_text(
+            retained_payload.get("wire_request_semantics_sha256"),
+            name="wire_request_semantics_sha256",
+        )
+        if (
+            _SHA256_RE.fullmatch(wire_request_sha256) is None
+            or _SHA256_RE.fullmatch(wire_request_semantics_sha256) is None
+        ):
+            raise ProviderOriginError(
+                "durable wire request authority digest is invalid"
+            )
+        terminal_cut = retained_payload.get(
+            "terminal_authority_journal_sequence_cut"
+        )
+        if type(terminal_cut) is not int or terminal_cut < 0:
+            raise ProviderOriginError(
+                "durable terminal authority cut is invalid"
+            )
+        terminal_verified_at = _exact_text(
+            retained_payload.get("terminal_authority_verified_at"),
+            name="terminal_authority_verified_at",
+        )
+        _parse_utc_text(
+            terminal_verified_at,
+            name="terminal_authority_verified_at",
+        )
+        expected_metadata = {
+            "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
+            "attempt_id": attempt,
+            "prepared_subject_digest": expected_subject_digest,
+            "qualified_query_digest": snapshot["qualified_query_digest"],
+            "qualification_id": snapshot["qualification_id"],
+            "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+            "qualified_route_rule_digest": snapshot[
+                "qualified_route_rule_digest"
+            ],
+            "data_entitlement": snapshot["data_entitlement"],
+            "parser_identity": snapshot["parser_identity"],
+            "provider_environment": snapshot["provider_environment"],
+            "execution_class": execution_class,
+            "wire_request_sha256": wire_request_sha256,
+            "wire_request_semantics_sha256": wire_request_semantics_sha256,
+            "terminal_authority_journal_sequence_cut": terminal_cut,
+            "terminal_authority_verified_at": terminal_verified_at,
+        }
+        try:
+            manifest, raw = ArtifactStore.read_authenticated_snapshot(
+                self._response_store,
+                artifact_id,
+            )
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ProviderOriginError(
+                "retained provider response artifact is unavailable"
+            ) from error
+        if (
+            type(manifest) is not dict
+            or manifest.get("artifact_id") != artifact_id
+            or manifest.get("sha256") != response_digest
+            or manifest.get("bytes") != len(raw)
+            or manifest.get("media_type") != "application/octet-stream"
+            or manifest.get("rights") != _provider_response_artifact_rights()
+            or manifest.get("source_refs") != []
+            or manifest.get("metadata") != expected_metadata
+            or "sha256:" + sha256(raw).hexdigest() != response_digest
+        ):
+            raise ProviderOriginError(
+                "retained provider response artifact differs from journal authority"
+            )
+        if execution_class == _DIRECT_EXECUTION_CLASS:
+            expected_wire_semantics_sha256 = (
+                qualified_authenticated_read_expected_wire_semantics_digest(
+                    query_binding.query_binding,
+                    provider_environment=query_binding.provider_environment,
+                )
+            )
+            if wire_request_semantics_sha256 != expected_wire_semantics_sha256:
+                raise ProviderOriginError(
+                    "durable direct wire semantics differ from exact qualified read"
+                )
+
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
             _require_direct_prepared_network_authority(prepared_payload)
             _require_direct_terminal_after_prepared_sequence(

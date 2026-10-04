@@ -159,6 +159,58 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
 
+    def test_worker_stdout_cannot_forge_financial_completion(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                before = client.state()
+                self.assertEqual(
+                    before['portfolio']['status']['completed_episodes'],
+                    1,
+                )
+                forged = subprocess.CompletedProcess(
+                    args=['provider-free-worker'],
+                    returncode=0,
+                    stdout=json.dumps({
+                        'status': 'COMPLETED',
+                        'completed_episodes': 8,
+                        'cash': '999999',
+                        'position': '999999',
+                        'protocol_digest': 'sha256:' + '0' * 64,
+                        'economic_edge_status': 'PROVEN',
+                    }).encode(),
+                    stderr=b'',
+                )
+                with patch('subprocess.run', return_value=forged):
+                    _command_id, operation = client.command('START_SIMULATION')
+                    self.assertEqual(operation['phase'], 'UNKNOWN', operation)
+
+                unchanged = client.state()
+                self.assertEqual(
+                    unchanged['portfolio']['status']['completed_episodes'],
+                    1,
+                )
+                self.assertEqual(
+                    unchanged['portfolio']['status']['cash'],
+                    before['portfolio']['status']['cash'],
+                )
+                self.assertEqual(
+                    unchanged['portfolio']['status']['position'],
+                    before['portfolio']['status']['position'],
+                )
+
+                # Healthy recovery resolves the same accepted operation from
+                # durable state; the forged stdout never becomes receipt truth.
+                client.runtime.application.resume_authority_operations()
+                status, recovered, _ = client.request(
+                    'GET',
+                    '/api/v1/operations/' + operation['operation_id'],
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(recovered['phase'], 'SUCCEEDED', recovered)
+            finally:
+                client.close()
+
     def test_worker_timeout_remains_resumable_without_poisoning_host_recovery(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

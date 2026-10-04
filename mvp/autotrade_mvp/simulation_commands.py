@@ -93,7 +93,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import subprocess
         import os
         import sys
-        import json
+        from .simulation_status import inspect_canonical_simulation
         command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
@@ -107,11 +107,42 @@ def execute_simulation_action(journal, action, payload, accepted_at):
             raise ValueError('simulation worker stopped; recovery required') from error
         if completed.returncode != 0 or len(completed.stdout) > 65536:
             raise ValueError('simulation worker stopped; recovery required')
-        result = json.loads(completed.stdout)
-        if result['status'] == 'UNKNOWN':
-            raise ValueError('unfinished simulation requires retained evidence; resend forbidden')
-        result = {k: result[k] for k in ('status', 'completed_episodes', 'cash', 'position',
-                                       'protocol_digest', 'economic_edge_status')}
+
+        # Child stdout is not financial authority. Re-read the canonical journal
+        # after the worker exits and derive the operator receipt only from the
+        # validated durable projection. This prevents a stale/forged success
+        # payload from certifying cash, position, protocol identity or edge.
+        inspected = inspect_canonical_simulation(root)
+        if type(inspected) is not dict:
+            raise ValueError('simulation worker produced no canonical durable state')
+        status = inspected.get('status')
+        report = inspected.get('economic_report')
+        if type(status) is not dict or type(report) is not dict:
+            raise ValueError('simulation worker durable state is incomplete')
+        target_episodes = (
+            len(protocol['prices'])
+            if payload['stop_after_episodes'] is None
+            else payload['stop_after_episodes']
+        )
+        completed_episodes = status.get('completed_episodes')
+        if (
+            type(completed_episodes) is not int
+            or completed_episodes < target_episodes
+            or completed_episodes > len(protocol['prices'])
+            or status.get('session_status') == 'UNKNOWN'
+            or status.get('replay_verified') is not True
+            or report.get('reconciled') is not True
+            or report.get('economic_edge_status') != 'INCONCLUSIVE'
+        ):
+            raise ValueError('simulation worker durable completion is not verified')
+        result = {
+            'status': 'COMPLETED' if completed_episodes == len(protocol['prices']) else 'PAUSED',
+            'completed_episodes': completed_episodes,
+            'cash': status['cash'],
+            'position': status['position'],
+            'protocol_digest': payload['protocol_digest'],
+            'economic_edge_status': 'INCONCLUSIVE',
+        }
     data = {'action': action, 'command_payload_hash': payload_digest(payload), 'result': result}
     event_id = str(uuid5(NAMESPACE_URL, 'autotrade:simulation-receipt:' + payload['command_id']))
     event = {'event_id': event_id, 'event_type': 'SimulationOperatorCompleted', 'schema_version': '1.0.0',

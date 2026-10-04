@@ -296,6 +296,69 @@ class ExecutionQualificationTests(unittest.TestCase):
                 purpose="REPLAY",
             )
 
+    def test_qualified_order_cannot_precede_instrument_effective_interval(self):
+        future_instrument = replace(
+            instrument(),
+            effective_from=datetime(2026, 9, 25, tzinfo=timezone.utc),
+        )
+        exec_model = model(
+            price_projection=ExecutionPriceProjectionPolicy.from_instrument(
+                future_instrument
+            )
+        )
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_effective_at_order",
+        ):
+            simulate_qualified_execution(
+                order=order(),
+                observation=observation(),
+                model=exec_model,
+                qualification=qualification(exec_model),
+                instrument=future_instrument,
+                asset_class="CASH_EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+                purpose="REPLAY",
+            )
+
+    def test_qualified_market_observation_cannot_outlive_instrument_version(self):
+        ended_instrument = replace(
+            instrument(),
+            effective_to=datetime(
+                2026,
+                9,
+                24,
+                10,
+                0,
+                0,
+                100000,
+                tzinfo=timezone.utc,
+            ),
+        )
+        exec_model = model(
+            price_projection=ExecutionPriceProjectionPolicy.from_instrument(
+                ended_instrument
+            )
+        )
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_effective_at_market",
+        ):
+            simulate_qualified_execution(
+                order=order(),
+                observation=observation(),
+                model=exec_model,
+                qualification=qualification(exec_model),
+                instrument=ended_instrument,
+                asset_class="CASH_EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+                purpose="REPLAY",
+            )
+
     def test_cost_assumption_change_invalidates_qualification(self):
         qualified = model(slippage_bps="5")
         changed = model(slippage_bps="6")

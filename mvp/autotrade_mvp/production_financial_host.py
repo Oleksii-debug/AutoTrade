@@ -37,11 +37,26 @@ class HostLifetimeProviderSecretResolver:
     host can release its process-lifetime instance fence.
     """
 
-    def __init__(self, security_boundary: SecurityBoundary) -> None:
+    def __init__(
+        self,
+        security_boundary: SecurityBoundary,
+        *,
+        account_id: str,
+        environment: str,
+    ) -> None:
         lease = getattr(security_boundary, "lease_for_execution", None)
         if not callable(lease):
             raise TypeError("security_boundary must provide lease_for_execution")
+        if type(account_id) is not str or not account_id or account_id != account_id.strip():
+            raise ValueError("provider credential account_id must be canonical text")
+        if (
+            type(environment) is not str
+            or environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}
+        ):
+            raise ValueError("provider credential environment is not canonical")
         self._security_boundary = security_boundary
+        self._account_id = account_id
+        self._environment = environment
         self._condition = Condition()
         self._accepting = True
         self._active = 0
@@ -64,10 +79,7 @@ class HostLifetimeProviderSecretResolver:
         origin: str,
         handle,
         execution_identity: str,
-        account_id: str,
         provider: str,
-        environment: str,
-        purpose: str,
         provider_environment: str | None = None,
     ):
         with self._condition:
@@ -81,10 +93,10 @@ class HostLifetimeProviderSecretResolver:
                 origin=origin,
                 handle=handle,
                 execution_identity=execution_identity,
-                account_id=account_id,
+                account_id=self._account_id,
                 provider=provider,
-                environment=environment,
-                purpose=purpose,
+                environment=self._environment,
+                purpose="TRADE",
                 provider_environment=provider_environment,
             ) as plaintext:
                 yield plaintext
@@ -158,52 +170,9 @@ class ProductionFinancialHostRuntime:
         self.host.serve_forever(poll_interval=poll_interval)
 
     def close(self) -> None:
-        """Drain commands and financial authorities before releasing host fence.
+        """Run the host terminal path; its bound finalizer owns financial teardown."""
 
-        Command admission closes first while provider leases and recovery ownership
-        are still available, allowing already-admitted commands to finish their
-        canonical provider work.  Once no command is active, provider lease
-        admission closes and any background/provider lease is drained.  Recovery
-        ownership is then dropped before the underlying host performs listener
-        teardown and releases the process-lifetime instance fence.
-        """
-
-        command_error: BaseException | None = None
-        try:
-            self.host._admission_gate.stop_and_drain()
-        except BaseException as error:
-            command_error = error
-
-        provider_error: BaseException | None = None
-        try:
-            self.provider_secret_resolver.stop_and_drain()
-        except BaseException as error:
-            provider_error = error
-
-        recovery_error: BaseException | None = None
-        try:
-            self.recovery_controller.stop()
-        except BaseException as error:
-            recovery_error = error
-
-        host_error: BaseException | None = None
-        try:
-            self.host.close()
-        except BaseException as error:
-            host_error = error
-
-        terminal_error = command_error or provider_error or recovery_error or host_error
-        if terminal_error is None:
-            return
-        for label, error in (
-            ("command admission drain", command_error),
-            ("provider lease drain", provider_error),
-            ("recovery stop", recovery_error),
-            ("production host teardown", host_error),
-        ):
-            if error is not None and error is not terminal_error:
-                terminal_error.add_note(f"{label} also failed: {error!r}")
-        raise terminal_error
+        self.host.close()
 
     def __enter__(self) -> "ProductionFinancialHostRuntime":
         self.host.__enter__()
@@ -240,12 +209,25 @@ def build_production_financial_host(
         now=now,
     )
     try:
+        provider_secret_resolver = HostLifetimeProviderSecretResolver(
+            security_boundary,
+            account_id=config.account_id,
+            environment=config.environment,
+        )
         recovery = RecoveryController(
             owner_store=host.journal,
             owner_scope=f"{config.environment}:{config.account_id}",
         )
+
+        def finalize_financial_authority() -> None:
+            provider_secret_resolver.stop_and_drain()
+            recovery.stop()
+
+        # Bind cleanup before any durable owner is minted. Every host teardown
+        # path, including an unexpected serve failure, must run this finalizer
+        # successfully before listener/fence release.
+        host.bind_terminal_finalizer(finalize_financial_authority)
         owner = recovery.start(config.host_id)
-        provider_secret_resolver = HostLifetimeProviderSecretResolver(security_boundary)
         return ProductionFinancialHostRuntime(
             host=host,
             recovery_controller=recovery,

@@ -2,7 +2,6 @@
 
 Date: 2026-10-04
 Current-main source base: `cc0b7fa5cee4597dc8039f0b0a5fd622e8b12a29`
-Current candidate head before this finding refresh: `0621956b5f6178fe4e16ff5c9d481308fe0c34e1`
 
 Current main already contains the canonical reservation authority, exact restart binding and atomic provider-free fill/financial consumption. This candidate carries the current-main reservation-bust lineage into the Section 12 closure lane without claiming provider/PAPER/LIVE qualification.
 
@@ -21,13 +20,15 @@ The selected lineage preserves:
 - current-main recovery sequence fencing;
 - polymorphic text/snapshot/fill/plan/prepared-binding ingress fails before financial mutation.
 
-## Terminal FILLED bust continuation implemented in this candidate
+## Terminal fill-bust conservation implemented in this candidate
 
-The former terminal-correction blocker was narrowed and a conservative projection contract is now implemented.
+Terminal `FILLED` and `CANCELED` cuts deliberately have different post-bust economics.
+
+### FILLED
 
 A late provider bust must not simply relabel a terminal `FILLED` reservation as ordinary `WORKING` or `UNKNOWN`. Terminalization has already set every `remaining` resource to zero, which releases both fill-consumed capacity and any unused worst-case safety buffer. Restoring only the busted fill usage would therefore under-hold capital.
 
-The candidate now uses a dedicated `BUSTED_PENDING_RECONCILIATION` reservation state. For a `FILLED` cut, fill-bust restoration:
+The candidate uses a dedicated `BUSTED_PENDING_RECONCILIATION` reservation state. For a `FILLED` cut, fill-bust restoration:
 - subtracts only the provider-binding-derived busted usage from `consumed`;
 - rebuilds every resource's held balance as `original - still_consumed`;
 - clears the old terminal evidence from the current snapshot while retaining that evidence in immutable journal history;
@@ -35,7 +36,13 @@ The candidate now uses a dedicated `BUSTED_PENDING_RECONCILIATION` reservation s
 - permits later evidence-derived consumption without converting the hold into ordinary order authority;
 - rejects local `mark_unknown()` from the post-bust hold, so canonical reconciliation is still required for lifecycle resolution.
 
-This is not an independent capital mutation. The existing atomic fill-bust integration already binds the reservation restoration plan to the same durable command as:
+### CANCELED
+
+A provider-confirmed cancellation remains terminal after a later fill bust. The busted fill is removed from historical `consumed`, but the canceled remainder cannot execute, so `remaining` stays zero and no capacity is re-held. The `CANCELED` state and its terminal evidence remain current.
+
+`REJECTED` and `PROVEN_ABSENT` do not acquire fill-bust restoration authority.
+
+These are not independent capital mutations. The existing atomic fill-bust integration binds reservation correction to the same durable command as:
 - the exact OMS `BUST_FILL` event and its post-bust snapshot digest;
 - the exact economic reversal;
 - the initial provider-fill financial binding and reservation cut;
@@ -43,23 +50,35 @@ This is not an independent capital mutation. The existing atomic fill-bust integ
 
 The existing settlement guard continues to reject a bust after settlement completion until a separate provider settlement-compensation authority exists. Therefore the new state does not manufacture settled cash or provider authority.
 
-Focused pure-projection falsifiers now prove:
-- terminal FILLED bust restoration reconstitutes the full released worst-case buffer, not merely the busted fill amount;
-- partial bust restoration holds exactly `original - still_consumed`;
-- the post-bust hold remains reserved and consumable by later evidence-derived fills;
-- it cannot be locally downgraded to `UNKNOWN`.
+Falsifiers now cover:
+- full and partial terminal-FILLED restoration;
+- unused safety-buffer reconstruction;
+- post-bust held capacity remaining admission-visible;
+- refusal to locally downgrade the post-bust hold to `UNKNOWN`;
+- durable prepared restoration having no side effect before the shared atomic commit;
+- atomic terminal-FILLED OMS/economic/reservation bust, restart and exact retry;
+- late-CANCELED OMS/economic/reservation bust, restart and no-rehold semantics;
+- rejection of restoration authority for REJECTED/PROVEN_ABSENT.
 
-## Remaining closure requirements
+## Remaining production closure seam
 
-Section 12 is not yet DONE. Before merge, exact-head qualification must still prove the durable cross-owner path, including legacy/terminal replay construction rather than only pure projection semantics:
-1. terminal FILLED -> post-bust hold is committed in the same OMS/economic/reservation command;
-2. restart reconstructs the same hold and exact reservation totals;
-3. acknowledgement-loss retry is exactly-once;
-4. unrelated concurrent reservation/OMS mutation trips the existing journal-sequence fence;
-5. settled-source bust remains blocked without settlement compensation;
-6. the existing late-terminal regression is replaced by a positive atomic conservation regression without weakening durable terminal-evidence verification;
-7. baseline and Verify AutoTrade are terminal green on the exact final head;
-8. review state is clean;
-9. merge and post-merge readback confirm accepted source identity.
+Section 12 is not yet DONE.
+
+The production provider-fill path currently prepares an OMS `RECORD_FILL` and atomically commits that fill with reservation `CONSUME`, economics, optional settlement and provider-fill binding. When the prepared OMS post-fill snapshot is `FILLED`, the durable reservation path still does **not** derive a journal-native terminal `FILLED` transition from that same OMS event. `DurableReservationBook.mark_terminal()` intentionally accepts reconciliation semantics only for `PROVEN_ABSENT`; its source explicitly keeps capacity held until a canonical terminal order/fill projection proves `FILLED`.
+
+Therefore the late-terminal `FILLED` regressions in this candidate use bounded test-only legacy fixtures. They prove the bust-side repair, but they do not prove that a normal production full provider fill creates the terminal reservation cut that the repaired bust path can later reverse.
+
+The correct continuation is not to weaken reconciliation verification. It is to add one journal-native full-fill reservation transition whose replay is bound to the exact atomic OMS `RECORD_FILL` event and its `FILLED` post-snapshot, while preserving exact retry of historical commands that committed only `CONSUME`. A fresh full fill must not release unused worst-case reservation capacity unless that canonical OMS evidence is committed in the same command. Legacy retry must not rewrite old journal history.
+
+Before Section 12 can be marked DONE:
+1. a normal fresh full provider fill must atomically commit OMS `FILLED`, economic effects, provider binding and the terminal reservation cut from one durable command;
+2. partial fills must continue to consume without terminal release;
+3. historical full-fill commands containing only reservation `CONSUME` must remain replayable/idempotent and conservatively held;
+4. a late bust after a production-created terminal `FILLED` cut must reconstruct `original - still_consumed` in the same OMS/economic/reservation bust command;
+5. restart, acknowledgement-loss retry and unrelated concurrent mutation fencing must remain exact;
+6. settled-source bust must remain blocked without settlement compensation;
+7. baseline and Verify AutoTrade must be terminal green on the exact final head;
+8. review state must be clean;
+9. merge and post-merge readback must confirm accepted source identity.
 
 Until those gates are complete, keep Section 12 DRAFT and do not claim complete reservation conservation, provider qualification, economic edge, profitability, release readiness, or Windows/NVDA readiness.

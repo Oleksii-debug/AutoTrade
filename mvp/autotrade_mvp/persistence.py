@@ -115,6 +115,11 @@ class JournalStore(_JournalStoreImpl):
         )
         if type(envelope) is not dict:
             raise TypeError("envelope must be an exact object")
+        envelope_json = _impl.canonical_json(envelope)
+        frozen_envelope = json.loads(envelope_json)
+        if type(frozen_envelope) is not dict:
+            raise TypeError("envelope must serialize to an exact object")
+        envelope = frozen_envelope
 
         event_id = JournalStore._require_text(
             envelope.get("event_id"), "event_id"
@@ -147,7 +152,6 @@ class JournalStore(_JournalStoreImpl):
         if envelope.get("payload_hash") != expected_payload_hash:
             raise ValueError("payload_hash does not match payload")
         payload_json = _impl.canonical_json(payload)
-        envelope_json = _impl.canonical_json(envelope)
         envelope_hash = _impl._event_envelope_digest(envelope_json)
         committed_at = JournalStore._require_text(
             envelope.get("committed_at"), "committed_at"

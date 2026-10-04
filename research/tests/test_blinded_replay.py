@@ -172,6 +172,152 @@ class Section17BlindedReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(BlindingError, "undeclared absolute date"):
             self.blind(source)
 
+    def test_identity_aliases_share_one_pseudonym(self):
+        source = dataset(
+            event(
+                "one",
+                payload_extra={
+                    "instrument_name": "Bitcoin",
+                    "ticker": "BTC",
+                },
+            )
+        )
+        alias_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(
+                    ("instrument_id",),
+                    "INSTRUMENT",
+                    required=True,
+                    alias_paths=(("instrument_name",), ("ticker",)),
+                ),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        result = self.blind(source, profile=alias_profile)
+        item = result.events[0]
+        self.assertEqual(item.payload["instrument_id"], "Instrument 001")
+        self.assertEqual(item.payload["instrument_name"], "Instrument 001")
+        self.assertEqual(item.payload["ticker"], "Instrument 001")
+
+    def test_identity_alias_is_included_in_leak_scan(self):
+        source = dataset(
+            event(
+                "one",
+                payload_extra={
+                    "instrument_name": "Bitcoin",
+                    "description": "Bitcoin rallied sharply",
+                },
+            )
+        )
+        alias_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(
+                    ("instrument_id",),
+                    "INSTRUMENT",
+                    required=True,
+                    alias_paths=(("instrument_name",),),
+                ),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "repeats a declared raw identity"):
+            self.blind(source, profile=alias_profile)
+
+    def test_alias_without_canonical_identity_fails_closed(self):
+        source = CausalDataset.create(
+            manifest_sha256=MANIFEST,
+            events=[
+                CausalEvent.create(
+                    event_id="one",
+                    kind="TRADE",
+                    event_time="2024-03-12T10:00:00Z",
+                    available_at="2024-03-12T10:00:00Z",
+                    ingested_at="2024-03-12T10:00:00Z",
+                    source_priority=1,
+                    source_sequence=1,
+                    payload={
+                        "instrument_name": "Bitcoin",
+                        "provider_id": "Kraken",
+                        "price": "1",
+                    },
+                )
+            ],
+        )
+        alias_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(
+                    ("instrument_id",),
+                    "INSTRUMENT",
+                    alias_paths=(("instrument_name",),),
+                ),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "without canonical identity"):
+            self.blind(source, profile=alias_profile)
+
+    def test_same_alias_cannot_name_two_canonical_identities(self):
+        source = dataset(
+            event(
+                "one",
+                instrument="ASSET-A",
+                payload_extra={"instrument_name": "Shared Name"},
+                sequence=1,
+            ),
+            event(
+                "two",
+                instrument="ASSET-B",
+                provider="Coinbase",
+                available_at="2024-03-12T10:01:00Z",
+                payload_extra={"instrument_name": "Shared Name"},
+                sequence=2,
+            ),
+        )
+        alias_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(
+                    ("instrument_id",),
+                    "INSTRUMENT",
+                    required=True,
+                    alias_paths=(("instrument_name",),),
+                ),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "multiple canonical identities"):
+            self.blind(source, profile=alias_profile)
+
+    def test_alias_cannot_collide_with_other_canonical_identity(self):
+        source = dataset(
+            event(
+                "one",
+                instrument="ASSET-A",
+                payload_extra={"instrument_name": "ASSET-B"},
+                sequence=1,
+            ),
+            event(
+                "two",
+                instrument="ASSET-B",
+                provider="Coinbase",
+                available_at="2024-03-12T10:01:00Z",
+                payload_extra={"instrument_name": "Second Name"},
+                sequence=2,
+            ),
+        )
+        alias_profile = BlindingProfile(
+            identity_fields=(
+                IdentityField(
+                    ("instrument_id",),
+                    "INSTRUMENT",
+                    required=True,
+                    alias_paths=(("instrument_name",),),
+                ),
+                IdentityField(("provider_id",), "PROVIDER", required=True),
+            )
+        )
+        with self.assertRaisesRegex(BlindingError, "collides with another canonical"):
+            self.blind(source, profile=alias_profile)
+
     def test_rejects_multiple_absolute_calendar_spellings(self):
         leaking_dates = (
             "2024-03-12",
@@ -255,6 +401,20 @@ class Section17BlindedReplayTests(unittest.TestCase):
                 profile=profile(
                     calendars=(CalendarField(("expiry",), required=True),)
                 ),
+            )
+
+    def test_identity_alias_paths_must_be_unique(self):
+        with self.assertRaisesRegex(BlindingError, "alias paths"):
+            IdentityField(
+                ("instrument_id",),
+                "INSTRUMENT",
+                alias_paths=(("instrument_name",), ("instrument_name",)),
+            )
+        with self.assertRaisesRegex(BlindingError, "alias paths"):
+            IdentityField(
+                ("instrument_id",),
+                "INSTRUMENT",
+                alias_paths=(("instrument_id",),),
             )
 
     def test_identity_and_calendar_paths_must_not_overlap(self):

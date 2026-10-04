@@ -293,6 +293,37 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         self.assertFalse(result.api_key_echo_confirmed)
         self.assertFalse(result.provider_transport_confirmed)
 
+    def test_malformed_transport_proof_fails_closed_without_container_dispatch(self):
+        malformed = {}
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeWireResponse(
+                http_status=200,
+                response={"retCode": 10003},
+                _provider_transport_attestation=malformed,
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeEvidence(
+                credential_handle=_handle(),
+                provider_environment="MAINNET",
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                response_surface="V5_UTA_REST",
+                product_family="SPOT",
+                request_timestamp_ms=1791064800123,
+                recv_window_ms=5000,
+                http_status=200,
+                ret_code=10003,
+                response_sha256="sha256:" + "0" * 64,
+                observed_at="2030-01-01T00:00:00Z",
+                _provider_transport_attestation=malformed,
+            )
+
     def test_transport_proof_controls_negative_classification(self):
         untrusted = BybitCredentialProbeWireResponse(
             http_status=200,

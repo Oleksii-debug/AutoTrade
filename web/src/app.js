@@ -1192,6 +1192,7 @@
 
   async function refreshStateFromUser() {
     const button = byId("refresh-state");
+    const restoreKeyboardFocus = button !== null && document.activeElement === button;
     if (button) button.disabled = true;
     try {
       await refreshSnapshot();
@@ -1205,7 +1206,16 @@
       text("freshness", "Host unavailable; displayed values may be stale.");
       announce("Host state refresh failed. Displayed values may be stale.", true);
     } finally {
-      if (button) button.disabled = false;
+      if (button) {
+        button.disabled = false;
+        const active = document.activeElement;
+        if (restoreKeyboardFocus && (
+            active === button ||
+            active === document.body ||
+            active === document.documentElement)) {
+          button.focus();
+        }
+      }
     }
   }
 

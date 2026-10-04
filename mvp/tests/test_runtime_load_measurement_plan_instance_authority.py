@@ -200,6 +200,47 @@ class RuntimeLoadMeasurementPlanInstanceAuthorityTests(unittest.TestCase):
 
             self._assert_no_latency_measurement(store)
 
+    def test_callback_cannot_swap_loaded_plan_to_compatible_subclass(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-plan-class", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="plan-class-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+
+            def operation():
+                loaded_plan = _measurement_frame().f_locals["plan"]
+                forged_plan_type = type(
+                    "ForgedDeclaredRuntimeEventPlan",
+                    (type(loaded_plan),),
+                    {"__slots__": ()},
+                )
+                object.__setattr__(loaded_plan, "__class__", forged_plan_type)
+                _append(store, expected)
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                    side_effect=(700, 800),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    "durable plan exact class changed during financial operation",
+                ),
+            ):
+                measure_declared_financial_operation(
+                    store,
+                    _spec(),
+                    plan_id=plan.plan_id,
+                    event_id=expected.event_id,
+                    operation=operation,
+                )
+
+            self._assert_no_latency_measurement(store)
+
 
 if __name__ == "__main__":
     unittest.main()

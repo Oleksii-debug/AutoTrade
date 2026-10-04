@@ -688,22 +688,18 @@ def blind_dataset(
 
     identity_map: dict[tuple[str, str], str] = {}
     for namespace in sorted(raw_by_namespace):
-        ordered = sorted(
-            raw_by_namespace[namespace],
-            key=lambda raw: (
-                _sort_key(
-                    shuffle_key=shuffle_key,
-                    experiment_id=experiment,
-                    namespace=namespace,
-                    raw=raw,
-                ),
-                raw,
-            ),
-        )
-        width = max(3, len(str(len(ordered))))
         prefix = _label_prefix(namespace)
-        for index, raw in enumerate(ordered, start=1):
-            identity_map[(namespace, raw)] = f"{prefix} {index:0{width}d}"
+        for raw in sorted(raw_by_namespace[namespace]):
+            # The visible pseudonym is a keyed function of this identity alone.
+            # Appending unseen future identities therefore cannot change an
+            # already-visible strategy prefix or reveal future universe size.
+            token = _sort_key(
+                shuffle_key=shuffle_key,
+                experiment_id=experiment,
+                namespace=namespace,
+                raw=raw,
+            ).hex().upper()
+            identity_map[(namespace, raw)] = f"{prefix} {token}"
 
     mapping_commitment = [
         {
@@ -720,9 +716,9 @@ def blind_dataset(
         sha256,
     ).hexdigest()
 
-    anchor = min(
-        [event.event_time for event in snapshot.events] + calendar_values
-    )
+    # The relative clock origin must not depend on calendar values carried only
+    # by future events.  Those values are masked when their event becomes causal.
+    anchor = min(event.event_time for event in snapshot.events)
     sessions = {
         day: index
         for index, day in enumerate(
@@ -830,20 +826,9 @@ def _source_anchor(dataset: CausalDataset, profile: BlindingProfile) -> datetime
         raise BlindingError("source dataset content no longer matches its committed digest")
     if not snapshot.events:
         raise BlindingError("blinded replay requires at least one causal event")
-    calendar_values: list[datetime] = []
-    for event in snapshot.events:
-        for field in profile.calendar_fields:
-            present, value = _lookup(event.payload, field.path)
-            if not present:
-                if field.required:
-                    raise BlindingError(
-                        f"required calendar path {'.'.join(field.path)} is missing"
-                    )
-                continue
-            calendar_values.append(
-                _calendar_value(value, path=".".join(field.path))
-            )
-    return min([event.event_time for event in snapshot.events] + calendar_values)
+    # Feeder time is anchored only to the causal event timeline.  Future
+    # payload calendar fields must never influence the clock visible now.
+    return min(event.event_time for event in snapshot.events)
 
 
 @dataclass(frozen=True, slots=True)

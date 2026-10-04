@@ -697,7 +697,7 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                 BybitCredentialNonAcceptance.REJECTED_EXACT_DOMAIN,
             )
 
-    def test_shared_wire_success_is_bound_to_exact_echoed_api_key(self):
+    def test_injected_shared_wire_success_cannot_mint_provider_attestation(self):
         with tempfile.TemporaryDirectory() as directory:
             vault, handle = _register_probe_credential(directory)
             client = _FakeProbeWireClient(
@@ -706,27 +706,22 @@ class BybitCredentialProbeEvidenceTests(unittest.TestCase):
                     body=_successful_query_api_body(),
                 )
             )
-            evidence = probe_bybit_credential_with_shared_wire(
-                vault=vault,
-                credential_handle=handle,
-                execution_identity="operator-1",
-                product_family="SPOT",
-                clock_millis=lambda: 1791064800123,
-                clock_utc=lambda: datetime(
-                    2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
-                ),
-                wire_client=client,
-            )
-            metadata = bybit_credential_probe_receipt_metadata(evidence)
-            self.assertIs(
-                evidence.classification,
-                BybitCredentialNonAcceptance.STILL_ACCEPTED,
-            )
-            self.assertTrue(evidence.api_key_echo_confirmed)
-            self.assertTrue(metadata["api_key_echo_confirmed"])
-            serialized = repr(evidence) + repr(metadata)
-            self.assertNotIn("probe-key", serialized)
-            self.assertNotIn("permissions", serialized)
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "direct production transport",
+            ):
+                probe_bybit_credential_with_shared_wire(
+                    vault=vault,
+                    credential_handle=handle,
+                    execution_identity="operator-1",
+                    product_family="SPOT",
+                    clock_millis=lambda: 1791064800123,
+                    clock_utc=lambda: datetime(
+                        2026, 10, 3, 22, 1, 2, tzinfo=timezone.utc
+                    ),
+                    wire_client=client,
+                )
+            self.assertEqual(len(client.requests), 1)
 
     def test_shared_wire_success_rejects_mismatched_missing_or_secret_echo(self):
         bodies = (

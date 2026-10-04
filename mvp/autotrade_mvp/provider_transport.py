@@ -4689,7 +4689,7 @@ def _install_authenticated_read_execution_receipt_authority():
     direct_client_send = UrllibJsonWireClient.send
     direct_request_type = AuthenticatedReadHttpRequest
     direct_response_type = AuthenticatedReadWireResponse
-    direct_observe = observe_authenticated_json_response
+    canonical_observe = observe_authenticated_json_response
     direct_request_factory = Request
     direct_build_opener = build_opener
     direct_proxy_handler = ProxyHandler
@@ -4708,7 +4708,7 @@ def _install_authenticated_read_execution_receipt_authority():
             or UrllibJsonWireClient.send is not direct_client_send
             or AuthenticatedReadHttpRequest is not direct_request_type
             or AuthenticatedReadWireResponse is not direct_response_type
-            or observe_authenticated_json_response is not direct_observe
+            or observe_authenticated_json_response is not canonical_observe
             or Request is not direct_request_factory
             or build_opener is not direct_build_opener
             or ProxyHandler is not direct_proxy_handler
@@ -4827,7 +4827,7 @@ def _install_authenticated_read_execution_receipt_authority():
             }
         )
 
-    def direct_observe(
+    def direct_execute_observe(
         *,
         request: AuthenticatedReadHttpRequest,
         query_binding: AuthenticatedReadQueryBinding,
@@ -4888,7 +4888,7 @@ def _install_authenticated_read_execution_receipt_authority():
                 "direct authenticated-read clock must return timezone-aware datetime"
             )
         observed_at = observed_at.astimezone(timezone.utc)
-        observation = direct_observe(
+        observation = canonical_observe(
             query_binding=query_binding,
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
@@ -4957,7 +4957,7 @@ def _install_authenticated_read_execution_receipt_authority():
             finally:
                 credential_plaintext = None
             self._require_current_capability(query_binding, rule)
-            return direct_observe(
+            return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
                 success_statuses=rule.success_statuses,
@@ -5019,7 +5019,7 @@ def _install_authenticated_read_execution_receipt_authority():
             finally:
                 credential_plaintext = None
             self._require_current_capability(query_binding, rule)
-            return direct_observe(
+            return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
                 success_statuses=rule.success_statuses,
@@ -5082,7 +5082,7 @@ def _install_authenticated_read_execution_receipt_authority():
                         nonce=nonce,
                     )
                     self._require_current_capability(query_binding, rule)
-                    return direct_observe(
+                    return direct_execute_observe(
                         request=signed,
                         query_binding=query_binding,
                         success_statuses=rule.success_statuses,

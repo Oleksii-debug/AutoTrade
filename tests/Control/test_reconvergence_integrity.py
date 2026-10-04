@@ -1,22 +1,154 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control.tools.reconvergence_integrity import (
     Change,
+    IntegrityAssessment,
     PROTECTED_SENTINELS,
     SELF_PROTECTING_TRUST_ROOTS,
+    TRUSTED_SCOPE_APPROVAL_MARKER,
     assess_git_revisions,
     assess_reconvergence,
+    main,
     parse_name_status,
+    parse_trusted_scope_approval,
+    reconvergence_evidence,
 )
 
 
 class ReconvergenceIntegrityTests(unittest.TestCase):
+    def test_exact_revision_evidence_is_canonical_secret_free_and_trust_root_aware(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        trust_root = "control/tools/reconvergence_integrity.py"
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=False,
+            trusted_root_approvals=(trust_root,),
+        )
+
+        self.assertEqual(evidence["schema_version"], "1.1.0")
+        self.assertEqual(evidence["source_sha"], "b" * 40)
+        self.assertEqual(evidence["trusted_guard_source_sha"], "a" * 40)
+        self.assertEqual(evidence["base_sha"], "a" * 40)
+        self.assertEqual(evidence["head_sha"], "b" * 40)
+        self.assertEqual(evidence["result"], "PASS")
+        self.assertEqual(evidence["policy"]["max_deletions"], 50)
+        self.assertEqual(evidence["policy"]["max_deleted_fraction"], 0.35)
+        self.assertFalse(evidence["policy"]["scope_enforced"])
+        self.assertEqual(evidence["policy"]["trusted_root_approval_count"], 1)
+        self.assertEqual(evidence["approved_trust_roots"], [trust_root])
+        self.assertIn("protected-trust-root-authorization", evidence["checks_run"])
+        self.assertEqual(
+            evidence["unresolved_limits"],
+            ["mutation_scope_not_enforced_without_trusted_external_scope"],
+        )
+        self.assertNotIn("trusted-mutation-scope", evidence["checks_run"])
+        self.assertFalse(evidence["contains_secrets"])
+
+        with self.assertRaisesRegex(ValueError, "exact lowercase Git object id"):
+            reconvergence_evidence(
+                base_sha="A" * 40,
+                head_sha="b" * 40,
+                assessment=assessment,
+                max_deletions=50,
+                max_deleted_fraction=0.35,
+                scope_enforced=False,
+            )
+
+    def test_evidence_records_full_mutation_scope_without_conflating_root_approval(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=10,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=True,
+        )
+
+        self.assertTrue(evidence["policy"]["scope_enforced"])
+        self.assertEqual(evidence["policy"]["trusted_root_approval_count"], 0)
+        self.assertEqual(evidence["approved_trust_roots"], [])
+        self.assertEqual(evidence["unresolved_limits"], [])
+        self.assertIn("trusted-mutation-scope", evidence["checks_run"])
+
+    def test_cli_writes_fail_evidence_before_returning_blocked(self):
+        blocked = IntegrityAssessment(
+            allowed=False,
+            base_is_ancestor=False,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=("head is not descended from exact base revision",),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "reconvergence.json"
+            with patch(
+                "control.tools.reconvergence_integrity._git_commit_id",
+                side_effect=["a" * 40, "b" * 40],
+            ), patch(
+                "control.tools.reconvergence_integrity.assess_git_revisions",
+                return_value=blocked,
+            ):
+                status = main(
+                    [
+                        "--base",
+                        "trusted-base",
+                        "--head",
+                        "candidate-head",
+                        "--evidence-output",
+                        str(output),
+                    ]
+                )
+
+            self.assertEqual(status, 2)
+            evidence = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["base_sha"], "a" * 40)
+            self.assertEqual(evidence["head_sha"], "b" * 40)
+            self.assertEqual(evidence["result"], "FAIL")
+            self.assertEqual(
+                evidence["reasons"],
+                ["head is not descended from exact base revision"],
+            )
+            self.assertEqual(
+                evidence["unresolved_limits"],
+                ["mutation_scope_not_enforced_without_trusted_external_scope"],
+            )
+
     def test_mass_base_tree_deletion_fails_closed(self):
         base = [f"path-{index}.txt" for index in range(100)]
         changes = [Change(status="D", path=path) for path in base[:60]]
@@ -167,15 +299,11 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             if path.is_file()
         )
         self.assertGreaterEqual(len(workflows), 10)
-        for workflow in workflows:
-            with self.subTest(workflow=workflow):
-                result = assess_reconvergence(
-                    base_paths=[workflow, "README.md"],
-                    changes=[Change(status="D", path=workflow)],
-                )
-                self.assertFalse(result.allowed)
-                self.assertEqual(result.protected_deletions, (workflow,))
-                self.assertIn(workflow, result.protected_violations)
+        self.assertEqual(
+            sorted(set(workflows) - PROTECTED_SENTINELS),
+            [],
+            "every checked-in workflow authority must be a protected sentinel",
+        )
 
     def test_protected_sentinel_rename_away_fails_closed(self):
         sentinel = "control/INDEX.json"
@@ -339,16 +467,120 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             (f"{path} (unauthorized trust-root modification)",),
         )
 
-    def test_exact_trusted_scope_can_authorize_guard_root_modification(self):
+    def test_exact_mutation_scope_cannot_authorize_guard_root_modification(self):
         path = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[path, "README.md"],
             changes=[Change(status="M", path=path)],
             allowed_scopes=(path,),
         )
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.protected_violations, ())
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{path} (unauthorized trust-root modification)",),
+        )
         self.assertEqual(result.scope_violations, ())
+
+    def test_optional_full_changed_path_scope_must_be_exact_when_supplied(self):
+        guard_path = "control/tools/reconvergence_integrity.py"
+        ordinary_path = "owned/change.py"
+        changes = [
+            Change(status="M", path=guard_path),
+            Change(status="M", path=ordinary_path),
+        ]
+
+        root_only = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=changes,
+            trusted_root_approvals=(guard_path,),
+        )
+        self.assertTrue(root_only.allowed)
+        self.assertEqual(root_only.protected_violations, ())
+        self.assertEqual(root_only.scope_violations, ())
+
+        broad_scope = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=changes,
+            allowed_scopes=("control", ordinary_path),
+            trusted_root_approvals=(guard_path,),
+        )
+        self.assertFalse(broad_scope.allowed)
+        self.assertTrue(
+            any(
+                "trust-root evolution requires exact changed-path scope when "
+                "mutation scope is supplied" in reason
+                for reason in broad_scope.reasons
+            )
+        )
+
+        exact_scope = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=changes,
+            allowed_scopes=(guard_path, ordinary_path),
+            trusted_root_approvals=(guard_path,),
+        )
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+        self.assertEqual(exact_scope.scope_violations, ())
+
+    def test_trust_root_approval_is_exact_path_not_directory_authority(self):
+        guard_path = "control/tools/reconvergence_integrity.py"
+        with self.assertRaisesRegex(
+            ValueError,
+            "trusted root approval must name one exact executable trust root",
+        ):
+            assess_reconvergence(
+                base_paths=[guard_path, "owned/change.py"],
+                changes=[Change(status="M", path=guard_path)],
+                trusted_root_approvals=("control/tools",),
+            )
+
+    def test_change_and_path_authority_inputs_require_exact_builtin_types(self):
+        class HostileStr(str):
+            def split(self, *args, **kwargs):
+                raise AssertionError("virtual split must not run")
+
+        class HostileChange(Change):
+            pass
+
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=[HostileStr("README.md")],
+                changes=[],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(TypeError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[HostileChange(status="M", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(TypeError):
+            parse_name_status([HostileStr("M\tREADME.md")])
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                HostileStr(
+                    "\n".join(
+                        (
+                            TRUSTED_SCOPE_APPROVAL_MARKER,
+                            f"head: {'a' * 40}",
+                            "path: tools/verify.py",
+                        )
+                    )
+                ),
+                expected_head_sha="a" * 40,
+            )
+        )
+
+    def test_base_tree_paths_fail_closed_when_noncanonical(self):
+        for path in ("../README.md", "/README.md", "dir//file.py", "dir\\file.py"):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=[path],
+                        changes=[],
+                        protected_sentinels=frozenset(),
+                    )
 
     def test_parser_rejects_unsupported_and_malformed_git_statuses(self):
         bad = (
@@ -438,7 +670,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn('"OWNER"', workflow)
         self.assertIn("expected_head_sha=head_sha", workflow)
         self.assertIn("APPROVED_SCOPE_FILE", workflow)
-        self.assertIn('args+=(--allowed-scope "${scope}")', workflow)
+        self.assertIn('args+=(--trusted-root-approval "${scope}")', workflow)
+        self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("github.event.pull_request.body", workflow)
         self.assertNotIn("github.event.pull_request.title", workflow)
         self.assertNotIn("edited", workflow)

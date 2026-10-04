@@ -80,6 +80,77 @@ class ReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.status, "FAIL")
         self.assertEqual(decision.checks["PROVIDER_QUALIFICATION"], "FAIL")
 
+    def test_provider_qualification_alone_cannot_substitute_for_financial_composition(self):
+        checks = tuple(
+            row
+            for row in all_checks()
+            if row.name != "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"
+        )
+        self.assertEqual(
+            next(row for row in checks if row.name == "PROVIDER_QUALIFICATION").status,
+            "PASS",
+        )
+        decision = evaluate_release(candidate(), checks)
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(
+            decision.checks["FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"],
+            "INCONCLUSIVE",
+        )
+        self.assertTrue(
+            any(
+                "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION: evidence missing" in reason
+                for reason in decision.reasons
+            )
+        )
+
+    def test_failed_financial_authority_dispatch_composition_blocks_release(self):
+        decision = evaluate_release(
+            candidate(),
+            all_checks(
+                override={"FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION": "FAIL"}
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(
+            decision.checks["FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"],
+            "FAIL",
+        )
+
+    def test_mutated_invalid_release_check_status_fails_closed(self):
+        checks = list(all_checks())
+        index = REQUIRED_RELEASE_CHECKS.index(
+            "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"
+        )
+        object.__setattr__(checks[index], "status", "GREEN")
+
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "status must be PASS, FAIL or INCONCLUSIVE",
+        ):
+            evaluate_release(candidate(), checks)
+
+    def test_mutated_candidate_signature_type_is_revalidated(self):
+        release_candidate = candidate()
+        object.__setattr__(release_candidate, "signatures_verified", "true")
+
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "signatures_verified must be boolean",
+        ):
+            evaluate_release(release_candidate, all_checks())
+
+    def test_release_check_subclass_is_rejected_before_attribute_dispatch(self):
+        class HostileReleaseCheck(ReleaseCheck):
+            def __getattribute__(self, name):
+                raise AssertionError("release-check subclass callback must not run")
+
+        forged = object.__new__(HostileReleaseCheck)
+        with self.assertRaisesRegex(
+            ReleaseQualificationError,
+            "release check must be exact ReleaseCheck",
+        ):
+            evaluate_release(candidate(), (forged,))
+
     def test_unsigned_artifacts_cannot_pass_even_with_green_checks(self):
         decision = evaluate_release(candidate(signatures=False), all_checks())
         self.assertEqual(decision.status, "FAIL")
@@ -119,7 +190,6 @@ class ReleaseQualificationTests(unittest.TestCase):
                 evidence_ref="evidence:ci",
                 evidence_sha256="mutable-reference-only",
             )
-
 
     def test_malformed_hashes_and_unknown_checks_fail_closed(self):
         with self.assertRaisesRegex(ReleaseQualificationError, "canonical SHA-256"):

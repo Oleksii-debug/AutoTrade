@@ -101,7 +101,11 @@ class RuntimeLoadPlanTests(unittest.TestCase):
                 observed_duration_us=1_000_000,
             )
 
-            self.assertEqual(decision.status, "PASS")
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(
+                decision.reasons,
+                ("unverified_runtime_measurement_provenance",),
+            )
             self.assertEqual(evidence.missing_event_ids, ())
             self.assertEqual(
                 evidence.start_journal_sequence,

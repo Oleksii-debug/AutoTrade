@@ -81,6 +81,22 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ['DOTNET_PROJECT_LOCK_INVALID_JSON:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
             )
 
+    def test_non_finite_lock_json_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            (project.parent / 'packages.lock.json').write_text(
+                '{"version":1,"dependencies":{"net10.0-windows7.0":{}},'
+                '"unexpected":NaN}',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_lock_content_blockers(root, project),
+                ['DOTNET_PROJECT_LOCK_INVALID_JSON:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
+            )
+            with self.assertRaisesRegex(ValueError, 'does not match project'):
+                dotnet_locked_dependency_graph(root, [project])
+
     def test_unsupported_lock_schema_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

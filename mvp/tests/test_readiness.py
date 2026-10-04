@@ -245,6 +245,45 @@ class RuntimeReadinessTests(unittest.TestCase):
             result.warnings,
         )
 
+    def test_mutated_financial_composition_signal_cannot_bypass_readiness_gate(self):
+        signals = healthy(
+            financial_authority_dispatch_composition_qualified=False
+        )
+        object.__setattr__(
+            signals,
+            "financial_authority_dispatch_composition_qualified",
+            "true",
+        )
+
+        with self.assertRaisesRegex(
+            ReadinessError,
+            "financial_authority_dispatch_composition_qualified must be boolean",
+        ):
+            evaluate_readiness(signals)
+
+    def test_mutated_runtime_numeric_state_is_revalidated(self):
+        signals = healthy()
+        object.__setattr__(signals, "unknown_send_count", False)
+        with self.assertRaisesRegex(ReadinessError, "non-negative integer"):
+            evaluate_readiness(signals)
+
+        signals = healthy()
+        object.__setattr__(signals, "clock_skew_seconds", "0")
+        with self.assertRaisesRegex(ReadinessError, "retain exact Decimal state"):
+            evaluate_readiness(signals)
+
+    def test_runtime_signal_subclass_is_rejected_before_field_dispatch(self):
+        class HostileRuntimeSafetySignals(RuntimeSafetySignals):
+            def __getattribute__(self, name):
+                raise AssertionError("runtime signal subclass callback must not run")
+
+        forged = object.__new__(HostileRuntimeSafetySignals)
+        with self.assertRaisesRegex(
+            ReadinessError,
+            "signals must be exact RuntimeSafetySignals",
+        ):
+            evaluate_readiness(forged)
+
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):
             healthy(journal_writable=1)

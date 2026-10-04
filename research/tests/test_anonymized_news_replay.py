@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 import unittest
 
 from autotrade_research.evaluation.replay.blinding import BlindedCausalFeeder
@@ -536,6 +536,62 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
                 source_records_sha256=source.source_records_sha256,
                 contamination_notes_sha256=source.contamination_notes_sha256,
             )
+
+    def test_datetime_with_hostile_tzinfo_is_rejected_before_callback(self):
+        calls = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                calls.append("utcoffset")
+                raise AssertionError("hostile timezone callback executed")
+
+            def dst(self, _dt):
+                calls.append("dst")
+                raise AssertionError("hostile timezone callback executed")
+
+            def tzname(self, _dt):
+                calls.append("tzname")
+                raise AssertionError("hostile timezone callback executed")
+
+        hostile = datetime(
+            2024,
+            3,
+            12,
+            10,
+            0,
+            0,
+            tzinfo=HostileTimezone(),
+        )
+        with self.assertRaisesRegex(NewsReplayError, "built-in datetime.timezone"):
+            revision(published_at=hostile)
+        self.assertEqual(calls, [])
+
+    def test_render_rejects_hostile_payload_mapping_before_virtual_dispatch(self):
+        bundle = self.bundle(revision())
+        feeder = self.feeder(bundle)
+        (item,) = feeder.advance_to("2024-03-12T10:00:05Z")
+        calls = []
+
+        class HostileDict(dict):
+            def get(self, *_args, **_kwargs):
+                calls.append("get")
+                raise AssertionError("hostile mapping callback executed")
+
+            def items(self):
+                calls.append("items")
+                raise AssertionError("hostile mapping callback executed")
+
+            def keys(self):
+                calls.append("keys")
+                raise AssertionError("hostile mapping callback executed")
+
+        hostile_payload = HostileDict(dict(item.payload))
+        object.__setattr__(item, "payload", hostile_payload)
+        with self.assertRaisesRegex(
+            NewsReplayError, "must remain an exact frozen mapping"
+        ):
+            render_blinded_news(item)
+        self.assertEqual(calls, [])
 
     def test_binary_float_and_noncanonical_decimal_are_not_admitted(self):
         with self.assertRaisesRegex(NewsReplayError, "canonical decimal"):

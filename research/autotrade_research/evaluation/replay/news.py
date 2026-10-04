@@ -20,7 +20,7 @@ import json
 import re
 from string import Formatter
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Mapping
 
 from .blinding import (
     BlindedEvent,
@@ -43,6 +43,7 @@ _ENGLISH_MONTH = re.compile(
 )
 _SCHEMA_VERSION = 1
 _REVISION_KINDS = frozenset({"ORIGINAL", "UPDATE", "CORRECTION", "RETRACTION"})
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 _SUPPORTED_TEMPLATE_LANGUAGES = frozenset({"en"})
 
 
@@ -79,8 +80,13 @@ def _utc(value: datetime | str, *, name: str) -> datetime:
         parsed = value
     else:
         raise TypeError(f"{name} must be an exact datetime or ISO string")
-    if parsed.tzinfo is None:
+    parsed_tzinfo = object.__getattribute__(parsed, "tzinfo")
+    if parsed_tzinfo is None:
         raise NewsReplayError(f"{name} must include a timezone")
+    if type(parsed_tzinfo) is not timezone:
+        raise NewsReplayError(
+            f"{name} timezone must use built-in datetime.timezone"
+        )
     return parsed.astimezone(timezone.utc)
 
 
@@ -89,11 +95,20 @@ def _timestamp(value: datetime) -> str:
 
 
 def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _plain(value[key]) for key in sorted(value)}
-    if isinstance(value, tuple):
+    if type(value) in {dict, _MAPPING_PROXY_TYPE}:
+        result: dict[str, object] = {}
+        for key in sorted(value):
+            if type(key) is not str:
+                raise TypeError("canonical news mappings must use exact str keys")
+            result[key] = _plain(value[key])
+        return result
+    if type(value) in {tuple, list}:
         return [_plain(item) for item in value]
-    return value
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    raise TypeError(
+        f"canonical news content contains unsupported type {type(value).__name__}"
+    )
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -106,11 +121,11 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 def _freeze(value: object, *, path: str = "value") -> object:
-    if value is None or type(value) in (str, bool, int):
+    if value is None or type(value) in {str, bool, int}:
         return value
-    if isinstance(value, float):
+    if type(value) is float:
         raise TypeError(f"{path} must not contain binary floating-point values")
-    if isinstance(value, Mapping):
+    if type(value) in {dict, _MAPPING_PROXY_TYPE}:
         result: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             key = _text(raw_key, name=f"{path} key")
@@ -118,7 +133,7 @@ def _freeze(value: object, *, path: str = "value") -> object:
                 raise NewsReplayError(f"{path} contains duplicate keys")
             result[key] = _freeze(raw_value, path=f"{path}.{key}")
         return MappingProxyType(result)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if type(value) is tuple:
         return tuple(_freeze(item, path=f"{path}[]") for item in value)
     raise TypeError(f"{path} contains unsupported type {type(value).__name__}")
 
@@ -749,14 +764,19 @@ def render_blinded_news(event: BlindedEvent) -> str:
 
     if type(event) is not BlindedEvent:
         raise TypeError("event must be exact BlindedEvent")
-    if event.kind != "NEWS":
+    kind = object.__getattribute__(event, "kind")
+    if type(kind) is not str or kind != "NEWS":
         raise NewsReplayError("event is not a NEWS replay event")
-    payload = event.payload
+    payload = object.__getattribute__(event, "payload")
+    if type(payload) is not _MAPPING_PROXY_TYPE:
+        raise NewsReplayError(
+            "blinded news payload must remain an exact frozen mapping"
+        )
     if payload.get("record_kind") != "ANONYMIZED_HISTORICAL_NEWS":
         raise NewsReplayError("NEWS event does not carry the Section 18 payload")
     template = payload.get("summary_template")
     identities = payload.get("identity_slots")
-    if type(template) is not str or not isinstance(identities, Mapping):
+    if type(template) is not str or type(identities) is not _MAPPING_PROXY_TYPE:
         raise NewsReplayError("blinded news payload is malformed")
     fields = _template_fields(template, name="summary_template")
     keys = frozenset(identities.keys())

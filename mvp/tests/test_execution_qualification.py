@@ -181,6 +181,41 @@ class ExecutionQualificationTests(unittest.TestCase):
                 **self.validation_kwargs(aliased_model)
             )
 
+    def test_qualification_text_ingress_rejects_hostile_subclasses_without_callbacks(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile qualification text callback executed")
+
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "asset_class is required",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    asset_class=HostileText("EQUITY"),
+                )
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        mutated = qualification(exec_model)
+        object.__setattr__(mutated, "purpose", HostileText("REPLAY"))
+        with self.assertRaisesRegex(
+            TypeError,
+            "qualification.purpose must be exact str",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    qualification=mutated,
+                )
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
     def test_exact_qualified_model_can_execute_simulation(self):
         exec_model = model()
         result = simulate_qualified_execution(

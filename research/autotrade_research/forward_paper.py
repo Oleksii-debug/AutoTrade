@@ -113,6 +113,8 @@ def forward_paper_protocol_hash(
     regimes = tuple(sorted(value.upper() for value in raw_regimes))
     if len(set(regimes)) != len(regimes):
         raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+    if "UNSPECIFIED" in regimes:
+        raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
     independent_minimum = _positive_int(
         minimum_independent_decisions_per_regime,
         name="minimum_independent_decisions_per_regime",
@@ -125,6 +127,10 @@ def forward_paper_protocol_hash(
     if len(set(limitations)) != len(limitations):
         raise ForwardPaperError(
             "required_simulation_limitations contains case-insensitive duplicates"
+        )
+    if "UNSPECIFIED" in limitations:
+        raise ForwardPaperError(
+            "UNSPECIFIED cannot be a required simulation limitation"
         )
     currency = _text(reporting_currency, name="reporting_currency").upper()
     drawdown = (

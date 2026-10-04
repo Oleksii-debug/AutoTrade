@@ -169,6 +169,132 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             Decimal("120"),
         )
 
+    def test_reservation_bound_bust_cannot_omit_reservation_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "reservation-bound fill bust requires reservation authority",
+            ):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id="provider-bust-without-reservation",
+                    idempotency_key="provider-bust-without-reservation",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-without-reservation",
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            reservation = reservations.get("reservation-1")
+            self.assertEqual(
+                reservation.consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservation.remaining["CASH:USD"],
+                Decimal("20"),
+            )
+
+    def test_fill_bust_rejects_polymorphic_fill_evidence_before_field_access(self):
+        class HostileProjectedFill(ProjectedFillEvidence):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile projected-fill field access")
+                return super().__getattribute__(name)
+
+        class HostileProviderFill(ProviderFillEvidence):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile provider-fill field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            hostile_projected = object.__new__(HostileProjectedFill)
+            with self.assertRaisesRegex(
+                TypeError,
+                "projected_fill must be ProjectedFillEvidence",
+            ):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id="provider-bust-hostile-projected",
+                    idempotency_key="provider-bust-hostile-projected",
+                    projected_fill=hostile_projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-hostile-projected",
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    committed_at=WHEN,
+                )
+            self.assertEqual(HostileProjectedFill.field_reads, 0)
+
+            hostile_provider = object.__new__(HostileProviderFill)
+            with self.assertRaisesRegex(
+                TypeError,
+                "provider_fill must be ProviderFillEvidence",
+            ):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id="provider-bust-hostile-provider",
+                    idempotency_key="provider-bust-hostile-provider",
+                    projected_fill=projected,
+                    provider_fill=hostile_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-hostile-provider",
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    committed_at=WHEN,
+                )
+            self.assertEqual(HostileProviderFill.field_reads, 0)
+
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            self.assertEqual(len(economics.transactions), 1)
+            reservation = reservations.get("reservation-1")
+            self.assertEqual(
+                reservation.consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservation.remaining["CASH:USD"],
+                Decimal("20"),
+            )
+
     def test_fresh_bust_is_atomic_restart_safe_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -860,6 +986,53 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(
                 store.load_events("order_projection_book", orders.aggregate_id),
                 [],
+            )
+
+    def test_fill_bust_rejects_hostile_command_text_before_callback_or_mutation(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            with self.assertRaisesRegex(ValueError, "command_id is required"):
+                commit_provider_fill_bust_with_economic_reversal(
+                    economics,
+                    orders,
+                    command_id=HostileText("atomic-bust"),
+                    idempotency_key="atomic-bust",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    bust_provider_revision=BUST_REVISION,
+                    bust_observed_at=WHEN,
+                    order_event_key="bust-1",
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    committed_at=WHEN,
+                )
+
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("1"))
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
             )
 
     def test_stale_provider_evidence_cannot_bust_newer_oms_revision(self):

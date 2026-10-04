@@ -82,7 +82,10 @@ _ALLOWED_EXTERNAL_ORIGINS = frozenset({"MANUAL", "EXTERNAL"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Trust-sensitive financial identities must be exact built-in text before
+    # normalization. A str subclass can override strip() and execute caller
+    # code while this bridge is establishing durable financial authority.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -559,9 +562,9 @@ def _prepare_provider_fill_binding(
     _require_durable_provider_economic_book_authority(economic_book)
     if not isinstance(plan, ProviderFillFinancialPlan):
         raise TypeError("plan must be ProviderFillFinancialPlan")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
+    if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
+    if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
     if projected_fill.correction_of is not None:
         raise AccountingConflict(
@@ -3782,9 +3785,9 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
     if type(order_book) is not DurableOrderBookProjection:
         raise TypeError("order_book must be exact DurableOrderBookProjection")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
+    if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
+    if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(
@@ -3839,9 +3842,25 @@ def commit_provider_fill_bust_with_economic_reversal(
     initial_source_transaction_id: str | None = None
     rid: str | None = None
 
+    binding_aggregate_id = _provider_fill_binding_aggregate_id(
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_execution_id=projected_fill.provider_execution_id,
+    )
+    binding_events = _economic_store_load_events(
+        economic_book,
+        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        binding_aggregate_id,
+    )
+
     if reservation_book is None:
         if reservation_id is not None:
             raise ValueError("reservation_id requires reservation_book")
+        if binding_events:
+            raise AccountingConflict(
+                "reservation-bound fill bust requires reservation authority"
+            )
     else:
         if type(reservation_book) is not DurableReservationBook:
             raise TypeError(
@@ -3868,17 +3887,6 @@ def commit_provider_fill_bust_with_economic_reversal(
             )
 
         rid = _text(reservation_id, name="reservation_id")
-        binding_aggregate_id = _provider_fill_binding_aggregate_id(
-            provider_id=economic_book.provider_id,
-            account_id=economic_book.account_id,
-            environment=economic_book.environment,
-            provider_execution_id=projected_fill.provider_execution_id,
-        )
-        binding_events = _economic_store_load_events(
-            economic_book,
-            _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
-            binding_aggregate_id,
-        )
         if len(binding_events) != 1:
             raise AccountingConflict(
                 "reservation-aware fill bust requires exactly one initial financial binding"

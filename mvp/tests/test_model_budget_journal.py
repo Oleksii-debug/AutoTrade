@@ -295,6 +295,40 @@ class DurableModelBudgetTests(unittest.TestCase):
                 )
             self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_route_rejects_datetime_subclass_before_truth_or_comparison(self):
+        class HostileDatetime(datetime):
+            truth_calls = 0
+            compare_calls = 0
+
+            def __bool__(self):
+                type(self).truth_calls += 1
+                raise AssertionError("hostile datetime truthiness executed")
+
+            def __ge__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile datetime comparison executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            24,
+            21,
+            45,
+            tzinfo=timezone.utc,
+        )
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            with self.assertRaisesRegex(ValueError, "exact timezone-aware datetime"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-now"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=hostile,
+                )
+            self.assertEqual(HostileDatetime.truth_calls, 0)
+            self.assertEqual(HostileDatetime.compare_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

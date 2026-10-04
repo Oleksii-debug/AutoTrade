@@ -18,6 +18,7 @@ from autotrade_numeric import (
     MAX_INTEGER_DIGITS, MAX_SCALE,
 )
 
+from .authority import AuthorityService
 from .durable_reservations import DurableReservationBook
 from .accounting import book_external_cash_flow, canonical_transaction
 from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
@@ -25,7 +26,7 @@ from .persistence import JournalStore
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation_journal import load_latest_reconciliation_checkpoint
 from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
-from research.autotrade_research.artifacts.resource_lock import ResourceLock, ResourceLockBusyError
+from autotrade_runtime.resource_lock import ResourceLock, ResourceLockBusyError
 
 
 _ECONOMIC_UNITS = frozenset({
@@ -112,7 +113,8 @@ def _require_complete_reconciliation(event: dict, *, cash, position, fill_id) ->
         if (type(amounts) is not dict or set(amounts) - permitted
                 or any(_decimal(value) != 0 for value in amounts.values())):
             raise ValueError("simulation reconciliation differences remain")
-    if evidence.get("matched_execution_ids") != ([] if fill_id is None else [fill_id]):
+    expected_ids = list(fill_id) if type(fill_id) is tuple else ([] if fill_id is None else [fill_id])
+    if evidence.get("matched_execution_ids") != expected_ids:
         raise ValueError("simulation reconciled executions differ")
     provider_cash = evidence.get("provider_cash")
     provider_positions = evidence.get("provider_positions")
@@ -156,6 +158,83 @@ def _require_completed_send(events: list[dict], *, episode_id: str, order_id: st
             or type(response) is not dict or response.get("outcome") != "ACKNOWLEDGED"
             or response.get("attempt_id") != attempt_id or response.get("client_order_id") != client_id):
         raise ValueError("simulation fill submission identity differs")
+
+
+def _require_zero_wire_blocked(
+    events: list[dict],
+    reservations: DurableReservationBook,
+    *,
+    episode_id: str,
+    result: dict,
+) -> str:
+    """Re-derive completed BLOCKED and return its admitted intent hash."""
+
+    intent_id = _uuid("intent", episode_id)
+    attempt_id = _uuid("attempt", episode_id)
+    client_id = stable_client_order_id(
+        "simulated",
+        intent_id,
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+    )
+    aggregate_id = submission_attempt_aggregate_id(
+        environment=ENVIRONMENT,
+        account_id=ACCOUNT,
+        attempt_id=attempt_id,
+    )
+    submissions = [
+        event for event in events
+        if event["aggregate_type"] == "submission_attempt"
+    ]
+    if (
+        len(submissions) != 2
+        or [event["event_type"] for event in submissions]
+        != ["SubmissionPrepared", "SubmissionBlocked"]
+        or any(
+            event["aggregate_id"] != aggregate_id
+            or event["aggregate_version"] != index
+            or event.get("environment") != ENVIRONMENT
+            or event.get("host_id") != "local-mvp"
+            or event.get("owner_epoch") != "1"
+            or type(event.get("payload")) is not dict
+            for index, event in enumerate(submissions, 1)
+        )
+    ):
+        raise ValueError("completed BLOCKED submission chronology differs")
+    prepared = submissions[0]["payload"]
+    blocked = submissions[1]["payload"]
+    reason = blocked.get("reason")
+    if (
+        prepared.get("attempt_id") != attempt_id
+        or prepared.get("intent_id") != intent_id
+        or prepared.get("provider") != "simulated"
+        or prepared.get("environment") != ENVIRONMENT
+        or prepared.get("account_id") != ACCOUNT
+        or prepared.get("client_order_id") != client_id
+        or prepared.get("owner_token") != "canonical-simulation-owner"
+        or prepared.get("owner_epoch") != 1
+        or type(prepared.get("intent_hash")) is not str
+        or blocked.get("client_order_id") != client_id
+        or type(reason) is not str
+        or not reason.strip()
+        or result.get("order_id") != client_id
+        or result.get("reason") != reason.strip()
+        or result.get("fill_id") is not None
+        or result.get("new_outbound_requests") != 0
+    ):
+        raise ValueError("completed BLOCKED submission identity differs")
+    reservation = reservations.get(_uuid("reservation", episode_id))
+    if (
+        reservation.state != "REJECTED"
+        or any(value != 0 for value in reservation.remaining.values())
+        or any(value != 0 for value in reservation.consumed.values())
+        or type(reservation.resolution_evidence) is not str
+        or not reservation.resolution_evidence.startswith(
+            "journal:submission-blocked:"
+        )
+    ):
+        raise ValueError("completed BLOCKED reservation evidence differs")
+    return prepared["intent_hash"]
 
 
 def _require_recorded_admission(events: list[dict], *, episode_id: str, outcome: str) -> dict:
@@ -238,6 +317,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         if store.current_journal_sequence() != cut:
             raise SimulationStateChanging("journal changed during operator read")
         return None
+    if any(event["aggregate_type"] == "canonical_autonomous_simulation" for event in events):
+        return _inspect_autonomous_loop(store, events, cut, history_limit)
     for event in events:
         if event["aggregate_type"] == "reservation_book":
             payload = event["payload"]
@@ -279,6 +360,9 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 _decimal(posting.get("signed_amount"))
                 if (posting.get("ledger_account"), posting.get("asset_or_currency")) not in _ECONOMIC_UNITS:
                     raise ValueError("single-episode simulation economic units differ")
+    if any(event.get("event_type") == "AccountReconciled" and
+           event.get("aggregate_type") != "account_reconciliation" for event in events):
+        raise ValueError("simulation reconciliation has an invalid aggregate owner")
     sessions = [event for event in events
                 if event["aggregate_type"] == "canonical_simulation_session"]
     if sessions:
@@ -303,6 +387,15 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
     else:
         episode_id = None
         started = {}
+
+    recorded = [event for event in events if event.get("event_type") == "AuthorityAdmissionRecorded"]
+    if recorded and recorded[0].get("payload", {}).get("outcome") == "REJECTED":
+        _require_recorded_admission(events, episode_id=episode_id, outcome="REJECTED")
+        authority = AuthorityService(store)
+        AuthorityService.historical_admission(authority, _uuid("admission", episode_id))
+    elif recorded and len(sessions) == 1:
+        # Incomplete chronology is not permission to display a forged admission.
+        _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
 
     book = DurableProviderEconomicBook(
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
@@ -360,7 +453,7 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 or _decimal(result.get("position")) != position):
             raise ValueError("completed simulation differs from durable economics")
         session_status = result.get("status")
-        if session_status not in {"HOLD", "RISK_REJECTED", "FILL_RECONCILED_ORDER_UNCONFIRMED"}:
+        if session_status not in {"HOLD", "RISK_REJECTED", "BLOCKED", "FILL_RECONCILED_ORDER_UNCONFIRMED"}:
             raise ValueError("unsupported completed simulation outcome")
         fill_id = result.get("fill_id")
         is_fill = session_status == "FILL_RECONCILED_ORDER_UNCONFIRMED"
@@ -410,6 +503,32 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 raise ValueError("completed simulation reservation differs")
             status["fills"] = {fill_id: {"instrument": INSTRUMENT,
                                         "quantity": canonical_decimal_text(position)}}
+        elif session_status == "BLOCKED":
+            if (
+                result["decision"] != "BUY"
+                or fill_id is not None
+                or position != 0
+                or active
+            ):
+                raise ValueError("completed BLOCKED contains unexpected exposure")
+            submission_intent_hash = _require_zero_wire_blocked(
+                events,
+                reservations,
+                episode_id=episode_id,
+                result=result,
+            )
+            admission = _require_recorded_admission(
+                events,
+                episode_id=episode_id,
+                outcome="ADMITTED",
+            )
+            if (
+                admission["payload"].get("intent_hash")
+                != submission_intent_hash
+            ):
+                raise ValueError(
+                    "completed BLOCKED submission does not belong to admitted intent"
+                )
         elif (fill_id is not None or result.get("order_id") is not None or position != 0 or active
               or any(event["aggregate_type"] == "submission_attempt" for event in events)
               or (session_status == "HOLD" and result["decision"] != "HOLD")
@@ -423,7 +542,13 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         status.update(
             status="awaiting_order_reconciliation" if is_fill or active else "completed",
             session_status=session_status, reconciled=True,
-            reason="order_terminal_state_unconfirmed" if is_fill or active else None,
+            reason=(
+                result.get("reason")
+                if session_status == "BLOCKED"
+                else "order_terminal_state_unconfirmed"
+                if is_fill or active
+                else None
+            ),
             reconciliation_event_id=reconciliation["event_id"],
         )
         fees = _balance(book, "FEE_EXPENSE:USD", "USD")
@@ -462,4 +587,80 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         ]
     if store.current_journal_sequence() != cut:
         raise SimulationStateChanging("journal changed during operator read")
+    return {"status": status, "economic_report": report}
+
+
+def _inspect_autonomous_loop(store, events, cut, history_limit):
+    from .persistence import payload_digest
+    from .simulation_session import _LOOP_PROTOCOL
+    from .simulated_provider import SimulatedProvider
+    from .durable_order_projection import DurableOrderBookProjection
+    from .exact_decimal import exact_multiply
+
+    loops = [event for event in events if event["aggregate_type"] == "canonical_autonomous_simulation"]
+    first = loops[0]
+    if first["event_type"] != "AutonomousSimulationStarted":
+        raise ValueError("autonomous protocol owner is missing")
+    run_id = first["aggregate_id"]
+    if any(event["aggregate_id"] != run_id or event.get("environment") != ENVIRONMENT for event in loops):
+        raise ValueError("autonomous simulation scope conflicts")
+    protocol = first["payload"]["protocol"]
+    if protocol["protocol"] != _LOOP_PROTOCOL or payload_digest(protocol) != first["payload"]["protocol_digest"]:
+        raise ValueError("autonomous frozen protocol identity differs")
+    completed = []
+    active = None
+    for event in loops[1:]:
+        payload = event["payload"]
+        if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
+            raise ValueError("autonomous episode protocol identity differs")
+        if event["event_type"] == "AutonomousEpisodeStarted" and active is None and payload["episode"] == len(completed) + 1:
+            active = payload
+        elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
+            completed.append(payload)
+            active = None
+        else:
+            raise ValueError("autonomous episode chronology conflicts")
+    economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
+    cash, position = economic.cash("USD"), economic.position(INSTRUMENT)
+    reservations = DurableReservationBook(store, account_id=ACCOUNT, environment=ENVIRONMENT)
+    oms = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
+        environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    status = {"status": "needs_recovery" if active is not None else "running",
+        "session_status": "UNKNOWN" if active is not None else "COMPLETED" if len(completed) == len(protocol["prices"]) else "PAUSED",
+        "state_format": "canonical_journal", "environment": ENVIRONMENT, "mode": "ZERO", "episode_id": run_id,
+        "completed_episodes": len(completed), "total_episodes": len(protocol["prices"]),
+        "cash": canonical_decimal_text(cash), "position": canonical_decimal_text(position),
+        "initial_cash": protocol["initial_cash"], "symbol": INSTRUMENT, "journal_sequence": cut,
+        "replay_verified": active is None, "evidence_count": len(completed),
+        "active_reservations": [{"state": item.state, "remaining": {k: canonical_decimal_text(v) for k,v in item.remaining.items()}}
+                                for item in reservations.active()],
+        "history": [{k: event[k] for k in ("event_id", "event_type", "aggregate_type", "journal_sequence")}
+                    for event in events[-history_limit:]] if history_limit else []}
+    report = None
+    if active is None and completed:
+        latest = completed[-1]
+        provider = SimulatedProvider.from_state(latest["provider_state"])
+        if cash != provider.cash or position != provider.positions.get(INSTRUMENT, Decimal("0")):
+            raise ValueError("autonomous provider/economic cut differs")
+        if _decimal(latest["cash"]) != cash or _decimal(latest["position"]) != position:
+            raise ValueError("autonomous result differs from canonical economics")
+        if any(order.state != "FILLED" for order in oms.snapshots):
+            raise ValueError("autonomous OMS obligations remain unresolved")
+        checkpoint = next((e for e in events if e["event_id"] == latest["reconciliation_event_id"]), None)
+        if checkpoint is None:
+            raise ValueError("autonomous reconciliation is missing")
+        _require_complete_reconciliation(checkpoint, cash=cash, position=position,
+            fill_id=tuple(sorted(f["provider_execution_id"] for f in provider.activity_fills())))
+        price = _decimal(protocol["prices"][len(completed)-1])
+        equity = exact_sum((cash, exact_multiply(position, price)))
+        if _decimal(latest["equity"]) != equity:
+            raise ValueError("autonomous portfolio valuation differs")
+        report = {"evidence_class": "SIMULATION", "final_equity": canonical_decimal_text(equity),
+            "net_pnl": canonical_decimal_text(exact_subtract(equity, _decimal(protocol["initial_cash"]))),
+            "total_fees": canonical_decimal_text(economic.fee_expense("USD")),
+            "turnover": canonical_decimal_text(exact_sum(exact_multiply(_decimal(f["last_quantity"]["value"]), _decimal(f["last_price"]))
+                                                       for f in provider.activity_fills())),
+            "reconciled": True, "economic_edge_status": "INCONCLUSIVE"}
+    if store.current_journal_sequence() != cut:
+        raise SimulationStateChanging("autonomous journal changed during operator read")
     return {"status": status, "economic_report": report}

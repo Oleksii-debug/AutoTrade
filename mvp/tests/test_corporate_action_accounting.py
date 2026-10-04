@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.corporate_action_accounting import (
@@ -221,11 +222,10 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             accepted = resolve_action(sealed_action())
             original = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected atomic corporate action failure")
 
-            store.commit_command = fail
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     commit_authoritative_corporate_action(
                         store=store,
@@ -234,8 +234,6 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                         corporate_book=pure_book(),
                         accepted=accepted,
                     )
-            finally:
-                store.commit_command = original
 
             reopened = JournalStore(path)
             self.assertEqual(

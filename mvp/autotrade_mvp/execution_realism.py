@@ -656,15 +656,10 @@ def _bounded_rational(value: Fraction, *, name: str) -> Fraction:
         ) from error
 
 
-def _market_projected_price(
-    *,
+def _require_market_projection_authority(
     order: SimulatedOrder,
-    observation: LiquidityObservation,
     model: ExecutionModel,
-    capacity: Decimal,
-    base_price: Decimal,
-    additional_spread_bps: Decimal,
-) -> Decimal:
+) -> ExecutionPriceProjectionPolicy:
     projection = model.price_projection
     if projection is None:
         raise ExecutionRealismError(
@@ -674,6 +669,19 @@ def _market_projected_price(
         raise ExecutionRealismError(
             "price projection instrument_version must match order instrument_version"
         )
+    return projection
+
+
+def _market_projected_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    projection = _require_market_projection_authority(order, model)
     try:
         reference_is_on_grid = is_exact_decimal_multiple(
             base_price,
@@ -868,6 +876,8 @@ def simulate_execution(
         raise ExecutionRealismError(
             "liquidity instrument_version must exactly match order instrument_version"
         )
+    if order.order_type == "MARKET":
+        _require_market_projection_authority(order, model)
 
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)

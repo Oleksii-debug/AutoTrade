@@ -742,6 +742,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 "attempt_id": "provider-read:" + "a" * 32,
                 "qualified_query_digest": "sha256:" + "1" * 64,
                 "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+                "http_status": 200,
                 "response_sha256": "sha256:" + "3" * 64,
                 "observed_at": NOW.isoformat().replace("+00:00", "Z"),
                 "wire_request_sha256": "sha256:" + "4" * 64,

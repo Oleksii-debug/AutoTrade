@@ -76,6 +76,16 @@ class RuntimeLoadResearchFrameAuthorityTests(unittest.TestCase):
         )
         return store, research
 
+    def _assert_no_research_measurement(self, store: JournalStore) -> None:
+        event_types = tuple(
+            event["event_type"]
+            for event in store.load_events_after_journal_sequence(0)
+        )
+        self.assertNotIn(
+            "RuntimeQualificationResearchInterferenceMeasured",
+            event_types,
+        )
+
     def test_python313_frame_locals_cannot_hide_research_journal_mutation(self):
         with tempfile.TemporaryDirectory() as root:
             store, research = self._plans(root)
@@ -126,10 +136,7 @@ class RuntimeLoadResearchFrameAuthorityTests(unittest.TestCase):
                 for event in store.load_events_after_journal_sequence(0)
             )
             self.assertIn("HostControlObserved", event_types)
-            self.assertNotIn(
-                "RuntimeQualificationResearchInterferenceMeasured",
-                event_types,
-            )
+            self._assert_no_research_measurement(store)
 
     def test_python313_frame_locals_cannot_replace_terminal_research_clock(self):
         with tempfile.TemporaryDirectory() as root:
@@ -156,6 +163,42 @@ class RuntimeLoadResearchFrameAuthorityTests(unittest.TestCase):
             self.assertEqual(sample.monotonic_start_ns, 1_000)
             self.assertEqual(sample.monotonic_end_ns, 1_001_000)
             self.assertEqual(sample.interference_us, 1_000)
+
+    def test_nested_research_plan_mutation_is_rejected_before_evidence_commit(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, research = self._plans(root)
+
+            def operation() -> None:
+                measurement_frame = _measurement_frame()
+                loaded_plan = measurement_frame.f_locals["plan"]
+                object.__setattr__(
+                    loaded_plan.expected_samples[0],
+                    "phase",
+                    "callback-forged-phase",
+                )
+                measurement_frame.f_locals["require_post_callback_authority"] = (
+                    lambda: None
+                )
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                    side_effect=(2_000, 3_000),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeLoadResearchMeasurementError,
+                    "plan digest changed during callback",
+                ),
+            ):
+                measure_declared_research_interference(
+                    store,
+                    _spec(),
+                    plan_id=research.plan_id,
+                    sample_id="research-frame-sample",
+                    operation=operation,
+                )
+
+            self._assert_no_research_measurement(store)
 
 
 if __name__ == "__main__":

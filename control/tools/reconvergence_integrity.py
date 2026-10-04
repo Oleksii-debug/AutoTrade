@@ -3,10 +3,12 @@
 The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
 binds every changed path to those scopes. A candidate must descend from the exact
-base revision supplied by the pull-request event. Protected canonical sentinels
-cannot be deleted, renamed away or changed to another Git object type. A PR that
-deletes both a material absolute number and a material fraction of the base tree
-is blocked.
+base revision supplied by the pull-request event. Protected canonical sentinels cannot be deleted, renamed away or changed to
+another Git object type. Ordinary content modification of a protected trust root
+is also blocked unless the caller supplies that exact repository-relative path
+through the independently trusted mutation scope. Directory-wide scope never
+authorizes a trust-root edit. A PR that deletes both a material absolute number
+and a material fraction of the base tree is blocked.
 
 This directly protects against commits accidentally built from a stale or partial
 tree and against small unrelated changes hidden inside otherwise valid work.
@@ -70,25 +72,96 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
+_SUPPORTED_SIMPLE_STATUSES = frozenset({"A", "D", "M", "T"})
+_SUPPORTED_SCORED_STATUS_KINDS = frozenset({"R", "C"})
+
+
+def _canonical_repo_path(value: object, *, name: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be non-empty exact text")
+    if value != value.strip():
+        raise ValueError(f"{name} must be canonical repository-relative text")
+    if (
+        value.startswith("/")
+        or "\\" in value
+        or ":" in value
+        or any(char in value for char in "*?[]\x00\n\r\t")
+    ):
+        raise ValueError(f"{name} must be a literal repository-relative path")
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError(f"{name} must not contain empty/dot path segments")
+    return value
+
+
+def _status_kind(value: object) -> str:
+    if type(value) is not str or not value:
+        raise ValueError("Git name-status must be non-empty exact text")
+    if value in _SUPPORTED_SIMPLE_STATUSES:
+        return value
+    kind = value[:1]
+    if kind in _SUPPORTED_SCORED_STATUS_KINDS:
+        score = value[1:]
+        if (
+            not score
+            or not score.isascii()
+            or not score.isdigit()
+            or len(score) > 3
+            or int(score) > 100
+        ):
+            raise ValueError(f"Malformed scored Git name-status: {value!r}")
+        return kind
+    raise ValueError(f"Unsupported Git name-status: {value!r}")
+
+
+def _canonical_change(value: object) -> Change:
+    if type(value) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    kind = _status_kind(value.status)
+    path = _canonical_repo_path(value.path, name="changed path")
+    previous = value.previous_path
+    if kind in _SUPPORTED_SCORED_STATUS_KINDS:
+        if previous is None:
+            raise ValueError(f"{kind} status requires a source path")
+        previous = _canonical_repo_path(previous, name="changed source path")
+    elif previous is not None:
+        raise ValueError(f"{kind} status must not carry a source path")
+    return Change(status=value.status, path=path, previous_path=previous)
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
-        line = raw.rstrip("\n")
+        if type(raw) is not str:
+            raise TypeError("Git name-status records must be exact text")
+        if "\x00" in raw:
+            raise ValueError("Git name-status record must not contain NUL")
+        line = raw[:-1] if raw.endswith("\n") else raw
+        if "\n" in line or "\r" in line:
+            raise ValueError("Git name-status record contains embedded newline")
         if not line:
             continue
         parts = line.split("\t")
         status = parts[0]
-        kind = status[:1]
-        if kind in {"R", "C"}:
+        kind = _status_kind(status)
+        if kind in _SUPPORTED_SCORED_STATUS_KINDS:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(
-                Change(status=status, previous_path=parts[1], path=parts[2])
+            change = Change(
+                status=status,
+                previous_path=_canonical_repo_path(
+                    parts[1],
+                    name="changed source path",
+                ),
+                path=_canonical_repo_path(parts[2], name="changed path"),
             )
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
+            change = Change(
+                status=status,
+                path=_canonical_repo_path(parts[1], name="changed path"),
+            )
+        changes.append(_canonical_change(change))
     return tuple(changes)
 
 
@@ -107,38 +180,89 @@ def assess_reconvergence(
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _canonical_repo_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
+    normalized_changes = tuple(_canonical_change(change) for change in changes)
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
 
-    deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
-    protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
-    fraction = len(deleted) / base_count
-
-    protected_damage: set[str] = set(protected)
-    for change in changes:
-        kind = change.status[:1]
-        if (
-            kind == "R"
-            and change.previous_path in protected_sentinels
-            and change.path != change.previous_path
-        ):
-            protected_damage.add(
-                f"{change.previous_path} -> {change.path} (rename)"
-            )
-        if kind == "T" and change.path in protected_sentinels:
-            protected_damage.add(f"{change.path} (type change)")
-    protected_violations = tuple(sorted(protected_damage))
-
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:
         normalized_scopes = _normalized_scopes(allowed_scopes)
+    exact_scope_authority = frozenset(
+        scope.casefold() for scope in (normalized_scopes or ())
+    )
+
+    protected_by_casefold: dict[str, str] = {}
+    for sentinel in protected_sentinels:
+        canonical = _canonical_repo_path(
+            sentinel,
+            name="protected sentinel",
+        )
+        folded = canonical.casefold()
+        existing = protected_by_casefold.get(folded)
+        if existing is not None and existing != canonical:
+            raise ValueError("protected sentinels collide case-insensitively")
+        protected_by_casefold[folded] = canonical
+
+    deleted = tuple(
+        sorted(
+            {
+                change.path
+                for change in normalized_changes
+                if _status_kind(change.status) == "D"
+            }
+        )
+    )
+    protected = tuple(
+        sorted(
+            protected_by_casefold[path.casefold()]
+            for path in deleted
+            if path.casefold() in protected_by_casefold
+        )
+    )
+    fraction = len(deleted) / base_count
+
+    protected_damage: set[str] = set(protected)
+    for change in normalized_changes:
+        kind = _status_kind(change.status)
+        path_key = change.path.casefold()
+        destination_sentinel = protected_by_casefold.get(path_key)
+        source_sentinel = (
+            None
+            if change.previous_path is None
+            else protected_by_casefold.get(change.previous_path.casefold())
+        )
+        if (
+            kind == "R"
+            and source_sentinel is not None
+            and change.path.casefold() != change.previous_path.casefold()
+        ):
+            protected_damage.add(
+                f"{source_sentinel} -> {change.path} (rename)"
+            )
+        if kind == "T" and destination_sentinel is not None:
+            protected_damage.add(f"{destination_sentinel} (type change)")
+        if (
+            kind in {"A", "M", "C"}
+            and destination_sentinel is not None
+            and destination_sentinel.casefold() not in exact_scope_authority
+        ):
+            protected_damage.add(
+                f"{destination_sentinel} "
+                "(content change without exact-path authorization)"
+            )
+    protected_violations = tuple(sorted(protected_damage))
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in changes:
-            kind = change.status[:1]
+        for change in normalized_changes:
+            kind = _status_kind(change.status)
             if kind == "R":
                 touched = (change.previous_path, change.path)
             elif kind == "C":
@@ -258,7 +382,7 @@ def assess_git_revisions(
     )
     return assess_reconvergence(
         base_paths=base_paths,
-        changes=changes,
+        changes=normalized_changes,
         max_deletions=max_deletions,
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,

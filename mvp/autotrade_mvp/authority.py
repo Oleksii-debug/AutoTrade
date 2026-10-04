@@ -4433,7 +4433,8 @@ class AuthorityService:
                 != (rid if existing.outcome == "ADMITTED" else None)
                 or existing.capability_snapshot_id != capability
                 or existing.policy_version != policy.version
-                or existing.confirmation_id != current_confirmation_id
+                or existing.requested_confirmation_id
+                != current_confirmation_id
                 or existing.risk_reducing != risk_reducing
             ):
                 raise AuthorityConflict(

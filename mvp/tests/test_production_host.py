@@ -325,5 +325,60 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     )
 
 
+class ProductionHostTerminalFinalizerTests(unittest.TestCase):
+    @staticmethod
+    def _runtime(*, server=None, gate=None, fence=None):
+        return production_host.ProductionHostRuntime(
+            config=Mock(),
+            journal=Mock(),
+            application=Mock(),
+            server=server or Mock(),
+            instance_fence=fence or Mock(),
+            admission_gate=gate or Mock(),
+        )
+
+    def test_terminal_finalizer_runs_after_command_drain_before_listener_and_fence(self):
+        order = []
+        gate = Mock()
+        server = Mock()
+        fence = Mock()
+        gate.stop_and_drain.side_effect = lambda: order.append("commands")
+        server.server_close.side_effect = lambda: order.append("listener")
+        fence.release.side_effect = lambda: order.append("fence")
+        runtime = self._runtime(server=server, gate=gate, fence=fence)
+        runtime.bind_terminal_finalizer(lambda: order.append("financial"))
+
+        runtime.close()
+
+        self.assertEqual(order, ["commands", "financial", "listener", "fence"])
+        self.assertTrue(runtime.closed)
+
+    def test_terminal_finalizer_failure_fails_closed_before_listener_or_fence_release(self):
+        gate = Mock()
+        server = Mock()
+        fence = Mock()
+        runtime = self._runtime(server=server, gate=gate, fence=fence)
+        failure = RuntimeError("financial authority teardown failed")
+        runtime.bind_terminal_finalizer(Mock(side_effect=failure))
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.close()
+
+        self.assertIs(raised.exception, failure)
+        server.server_close.assert_not_called()
+        fence.release.assert_not_called()
+        with self.assertRaises(RuntimeError) as repeated:
+            runtime.close()
+        self.assertIs(repeated.exception, failure)
+
+    def test_terminal_finalizer_is_single_assignment_before_lifecycle_start(self):
+        runtime = self._runtime()
+        runtime.bind_terminal_finalizer(lambda: None)
+        with self.assertRaisesRegex(RuntimeError, "already bound"):
+            runtime.bind_terminal_finalizer(lambda: None)
+        runtime.close()
+
+
+
 if __name__ == "__main__":
     unittest.main()

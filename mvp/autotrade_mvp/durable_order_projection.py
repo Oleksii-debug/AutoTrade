@@ -24,6 +24,11 @@ from .dispatch import (
     _has_exact_response_markers,
     submission_attempt_aggregate_id,
 )
+# Retain the installed authenticated reader once so later mutation of the public
+# ArtifactStore class attribute cannot redirect provider-evidence authority.
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
+
+
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
@@ -321,7 +326,7 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest, artifact_bytes = ArtifactStore.read_authenticated_snapshot(
+                manifest, artifact_bytes = _CANONICAL_AUTHENTICATED_SNAPSHOT_READ(
                     self.evidence_artifact_store,
                     ref["artifact_id"],
                 )

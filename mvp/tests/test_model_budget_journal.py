@@ -222,6 +222,79 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(HostileText.strip_calls, 0)
             self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_route_rejects_policy_subclass_before_financial_identity_read(self):
+        class DerivedRoutingPolicy(RoutingPolicy):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_policy()
+            derived = DerivedRoutingPolicy(
+                base.mode,
+                allowed_model_ids=base.allowed_model_ids,
+                fixed_model_id=base.fixed_model_id,
+                allow_remote=base.allow_remote,
+                maximum_cost=base.maximum_cost,
+                maximum_latency_ms=base.maximum_latency_ms,
+            )
+            with self.assertRaisesRegex(TypeError, "exact RoutingPolicy"):
+                budget.admit_route(
+                    derived,
+                    route_request("route-derived-policy"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_rejects_request_subclass_before_financial_identity_read(self):
+        class DerivedModelRequest(ModelRequest):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_request("route-derived-request")
+            derived = DerivedModelRequest(
+                request_id=base.request_id,
+                allowed_model_ids=base.allowed_model_ids,
+                privacy_remote_allowed=base.privacy_remote_allowed,
+                budget_remaining=base.budget_remaining,
+                deadline_utc=base.deadline_utc,
+                cancelled=base.cancelled,
+            )
+            with self.assertRaisesRegex(TypeError, "exact ModelRequest"):
+                budget.admit_route(
+                    route_policy(),
+                    derived,
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_rejects_descriptor_subclass_before_financial_identity_read(self):
+        class DerivedModelDescriptor(ModelDescriptor):
+            pass
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            base = route_model_descriptor(cost="0.1")
+            derived = DerivedModelDescriptor(
+                model_id=base.model_id,
+                provider_id=base.provider_id,
+                revision=base.revision,
+                remote=base.remote,
+                estimated_cost=base.estimated_cost,
+                latency_ms=base.latency_ms,
+                quality_score=base.quality_score,
+            )
+            with self.assertRaisesRegex(TypeError, "exact ModelDescriptor"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-derived-descriptor"),
+                    [derived],
+                    now_utc=ROUTE_NOW,
+                )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

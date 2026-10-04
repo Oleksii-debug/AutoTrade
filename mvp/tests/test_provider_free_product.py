@@ -138,6 +138,66 @@ class ProviderFreeProductAcceptance(unittest.TestCase):
             ))
         persist.assert_not_called()
 
+    def test_state_http_retries_transient_journal_race_and_bounds_persistent_churn(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            writer = JournalStore(data / 'state' / 'journal.sqlite3')
+            original_snapshot = client.runtime.application._snapshot_provider
+            try:
+                calls = {'count': 0}
+
+                def one_race(durable, principal):
+                    calls['count'] += 1
+                    value = original_snapshot(durable, principal)
+                    if calls['count'] == 1:
+                        payload = {'reason': 'product-state-transient-race'}
+                        writer.append_event({
+                            'event_id': 'product-state-transient-race',
+                            'event_type': 'ProductStateRaceInjected',
+                            'aggregate_type': 'product_state_race_test',
+                            'aggregate_id': 'transient',
+                            'aggregate_version': '1',
+                            'payload': payload,
+                            'payload_hash': payload_digest(payload),
+                            'committed_at': '2026-10-04T00:00:00Z',
+                        })
+                    return value
+
+                with patch.object(client.runtime.application, '_snapshot_provider', one_race):
+                    status, state, _ = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 200)
+                self.assertEqual(state['reason_codes'], ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN'])
+                self.assertEqual(calls['count'], 2)
+
+                churn = {'count': 0}
+
+                def persistent_race(durable, principal):
+                    churn['count'] += 1
+                    value = original_snapshot(durable, principal)
+                    sequence = churn['count']
+                    payload = {'reason': 'product-state-persistent-race', 'attempt': sequence}
+                    writer.append_event({
+                        'event_id': f'product-state-persistent-race-{sequence}',
+                        'event_type': 'ProductStateRaceInjected',
+                        'aggregate_type': 'product_state_race_test',
+                        'aggregate_id': f'persistent-{sequence}',
+                        'aggregate_version': '1',
+                        'payload': payload,
+                        'payload_hash': payload_digest(payload),
+                        'committed_at': '2026-10-04T00:00:00Z',
+                    })
+                    return value
+
+                with patch.object(client.runtime.application, '_snapshot_provider', persistent_race):
+                    status, body, headers = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 503)
+                self.assertEqual(body, {'error': 'SNAPSHOT_BUSY', 'retryable': True})
+                self.assertEqual(headers['Retry-After'], '1')
+                self.assertEqual(churn['count'], 4)
+            finally:
+                client.close()
+
     def test_host_backpressure_rejects_before_admission_and_keeps_retry_identity(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

@@ -6,7 +6,7 @@ choose leverage or connect to a venue.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -130,6 +130,11 @@ class FuturesContract:
     settlement_method: Literal["CASH", "PHYSICAL"]
     price_base_currency: str | None = None
     canonical_instrument: InstrumentVersion | None = None
+    _lifecycle_authority_snapshot: tuple[str, str, datetime, datetime, datetime] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
@@ -216,6 +221,18 @@ class FuturesContract:
                 raise FuturesError(
                     "inverse price base currency conflicts with canonical InstrumentVersion"
                 )
+
+        object.__setattr__(
+            self,
+            "_lifecycle_authority_snapshot",
+            (
+                self.instrument,
+                self.settlement_method,
+                self.expiry,
+                self.last_trade_at,
+                self.delivery_cutoff,
+            ),
+        )
 
     @classmethod
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
@@ -364,6 +381,19 @@ def _require_settlement_contract(
 ) -> None:
     if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
+    snapshot = contract._lifecycle_authority_snapshot
+    current_lifecycle = (
+        contract.instrument,
+        contract.settlement_method,
+        contract.expiry,
+        contract.last_trade_at,
+        contract.delivery_cutoff,
+    )
+    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
+        raise FuturesError(
+            "futures lifecycle contract no longer matches construction authority"
+        )
+
     version = contract.canonical_instrument
     if version is None:
         raise FuturesError(

@@ -70,6 +70,17 @@ class HostApiRouteCodegenTests(unittest.TestCase):
             render_web(operations),
         )
 
+    def test_query_schema_reference_does_not_relax_path_parameter_validation(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        self.assertIn(Operation("get", "/api/v1/events", "streamEvents", ()), parse_operations(text))
+        invalid = text.replace(
+            "            type: string\n            format: uuid",
+            "            $ref: ../jsonschema/common.schema.json#/$defs/Sequence",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "must use schema type: string"):
+            parse_operations(invalid)
+
     def test_consumers_do_not_redeclare_canonical_route_literals(self):
         desktop = DESKTOP.read_text(encoding="utf-8")
         web = WEB_APP.read_text(encoding="utf-8")

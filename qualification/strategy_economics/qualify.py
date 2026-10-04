@@ -8,11 +8,11 @@ came from independent canonical owners.
 This qualification composition creates a separate issued assessment.  Current
 main can re-run the structural join, resolve an exact caller-selected product
 instrument version, and optionally reverify a durable provider-economic cut
-from canonical replay.  A caller-selected InstrumentRegistry is structural
-input, not proof that product composition selected the registry authority.  The
-assessment deliberately remains INCONCLUSIVE until the remaining WP-33 owner
-graph is independently available.  No green software test from this module is
-economic-edge evidence.
+from a caller-selected sealed book.  Structural replay of caller-selected
+sources is not proof that product composition selected those owner authorities.
+The assessment deliberately remains INCONCLUSIVE until the remaining WP-33
+owner graph is independently available.  No green software test from this
+module is economic-edge evidence.
 """
 
 from __future__ import annotations
@@ -40,9 +40,10 @@ class StrategyEconomicsAuthorityError(ValueError):
     """Terminal strategy-economics authority is unavailable or inconsistent."""
 
 
-# Retain the installed structural registry lookup.  Public class rebinding after
-# this composition loads must not redirect which primitive resolves the version.
+# Retain installed structural/replay primitives.  Later public module/class
+# rebinding must not redirect which implementation this composition uses.
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
+_REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
 _BASE_REQUIRED_OWNERS = (
     "registered_strategy_run_receipt",
@@ -272,13 +273,13 @@ def assess_strategy_economics_authority(
     expected_visibility_journal_sequence: int | None = None,
     additional_required_owners: tuple[str, ...] = (),
 ) -> StrategyEconomicsAuthorityAssessment:
-    """Reverify owners available on main and preserve every missing owner.
+    """Reverify structural/durable facts and preserve missing owner authority.
 
-    No caller-supplied verifier/callback is accepted.  Provider economics counts
-    as verified only when exact durable replay reproduces the supplied cut from
-    an independently selected book and visibility sequence.  A caller-supplied
-    exact InstrumentRegistry can validate structural version content only; it
-    does not establish product-selected registry authority.
+    No caller-supplied verifier/callback is accepted.  Provider economics replay
+    can verify that a supplied exact cut is reproduced by a supplied sealed book
+    at one visibility sequence.  Because this API does not select/authenticate
+    that book as the product's economic owner, replay is recorded separately and
+    does not satisfy the unresolved ``provider_economic_cut`` owner.
     """
 
     proposal = _snapshot_proposal(proposal)
@@ -346,7 +347,7 @@ def assess_strategy_economics_authority(
             raise StrategyEconomicsAuthorityError(
                 "expected_visibility_journal_sequence must be a positive integer"
             )
-        verified_cut = reverify_provider_economic_cut(
+        verified_cut = _REVERIFY_PROVIDER_ECONOMIC_CUT(
             provider_economic_book,
             provider_economic_cut,
             expected_visibility_journal_sequence=(
@@ -357,8 +358,7 @@ def assess_strategy_economics_authority(
             raise StrategyEconomicsAuthorityError(
                 "provider economic cut does not match instrument provider"
             )
-        verified.add("provider_economic_cut")
-        unresolved.discard("provider_economic_cut")
+        verified.add("provider_economic_cut_replay")
         cut_digest = verified_cut.cut_digest
 
     assessment = StrategyEconomicsAuthorityAssessment(

@@ -123,6 +123,13 @@ def _snapshot_kwdefaults(
     return tuple((key, value[key]) for key in keys)
 
 
+def _require_callback_shape(value: object, *, name: str) -> None:
+    if type(value) is not FunctionType and type(value) is not MethodType:
+        raise RuntimeTargetHostRunnerError(
+            f"{name} must be an exact Python function or bound method"
+        )
+
+
 def _snapshot_operations(
     plan: DeclaredRuntimeEventPlan,
     operations: object,
@@ -146,10 +153,10 @@ def _snapshot_operations(
     result: list[tuple[str, Callable[[], object]]] = []
     for event_id in expected_ids:
         operation = operations[event_id]
-        if not callable(operation):
-            raise RuntimeTargetHostRunnerError(
-                f"operation for {event_id} must be callable"
-            )
+        _require_callback_shape(
+            operation,
+            name=f"operation for {event_id}",
+        )
         result.append((event_id, operation))
     return tuple(result)
 
@@ -171,10 +178,10 @@ def _snapshot_research_operations(
             )
         phase = _text(item[0], name="research phase")
         operation = item[1]
-        if not callable(operation):
-            raise RuntimeTargetHostRunnerError(
-                "research operation must be callable"
-            )
+        _require_callback_shape(
+            operation,
+            name=f"research operation {phase}",
+        )
         result.append((phase, operation))
     if len(result) < minimum:
         raise RuntimeTargetHostRunnerError(
@@ -186,8 +193,7 @@ def _snapshot_research_operations(
 def _snapshot_resource_probe(value: object) -> Callable[[], Mapping[str, int]] | None:
     if value is None:
         return None
-    if not callable(value):
-        raise RuntimeTargetHostRunnerError("resource_probe must be callable or None")
+    _require_callback_shape(value, name="resource_probe")
     return value
 
 

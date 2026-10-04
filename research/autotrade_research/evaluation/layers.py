@@ -563,6 +563,18 @@ class EvaluationLayerReceipt:
             raise EvaluationLayersError(
                 "GateDecision status contradicts its own check statuses"
             )
+
+        # A bare GateDecision is a public value, not independent scientific
+        # authority.  WP-36 issue #1116 remains open on current main: callers
+        # can self-publish internally consistent PASS material without an
+        # issuer-owned authenticated evidence graph.  Preserve negative FAIL
+        # evidence, but never promote an unissued historical PASS through this
+        # composition.  Once WP-36 exposes a non-caller-forgeable accepted
+        # result, this boundary must consume that authority rather than infer it
+        # from provenance fields supplied by the caller.
+        receipt_status = (
+            "INCONCLUSIVE" if decision.status == "PASS" else decision.status
+        )
         return cls(
             layer=layer,
             candidate_id=candidate_id,
@@ -571,7 +583,7 @@ class EvaluationLayerReceipt:
             protocol_sha256=protocol_sha256,
             evidence_sha256=evidence_sha256,
             authority_result_sha256=_digest(payload),
-            status=decision.status,
+            status=receipt_status,
             evidence_class=_LAYER_EVIDENCE_CLASS[layer],
             information_mode=_LAYER_INFORMATION_MODE[layer],
             forward_events_unavailable_at_selection=False,

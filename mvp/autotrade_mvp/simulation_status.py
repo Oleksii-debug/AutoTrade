@@ -652,6 +652,14 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             raise ValueError(
                 "autonomous retained fill observation conflicts with provider state"
             )
+    recovery_disposition = None
+    if active is not None:
+        if observed_fill is not None:
+            recovery_disposition = "RETAINED_FILL_RECOVERY"
+        elif active.get("decision") in {"HOLD", "NO_TRADE"}:
+            recovery_disposition = "ZERO_WIRE_COMPLETION"
+        else:
+            recovery_disposition = "RECONCILIATION_REQUIRED"
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
     cash, position = economic.cash("USD"), economic.position(INSTRUMENT)
     reservations = DurableReservationBook(store, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -665,6 +673,7 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         "initial_cash": protocol["initial_cash"], "symbol": INSTRUMENT, "journal_sequence": cut,
         "replay_verified": active is None, "evidence_count": len(completed),
         "retained_fill_observed": bool(active is not None and observed_fill is not None),
+        "recovery_disposition": recovery_disposition,
         "active_reservations": [{"state": item.state, "remaining": {k: canonical_decimal_text(v) for k,v in item.remaining.items()}}
                                 for item in reservations.active()],
         "history": [{k: event[k] for k in ("event_id", "event_type", "aggregate_type", "journal_sequence")}

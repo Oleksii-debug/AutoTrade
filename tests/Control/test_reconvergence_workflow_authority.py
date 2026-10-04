@@ -114,7 +114,7 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
     def test_direct_python_tool_workflow_harnesses_are_registered(self):
         invoked = set()
         workflow_dir = REPO_ROOT / ".github" / "workflows"
-        pattern = re.compile(r"\\bpython\\s+(tools/[A-Za-z0-9_./-]+\\.py)\\b")
+        pattern = re.compile(r"\bpython\s+(tools/[A-Za-z0-9_./-]+\.py)\b")
         for workflow in workflow_dir.glob("*.y*ml"):
             if workflow.is_file():
                 invoked.update(

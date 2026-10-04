@@ -1,12 +1,12 @@
 """Production PAPER/LIVE composition for host lifetime and sender authority.
 
-This module is deliberately a narrow composition seam.  It reuses the exact
+This module is deliberately a narrow composition seam. It reuses the exact
 ``ProductionHostRuntime``/``JournalStore`` created by :mod:`production_host` and
 binds that same store to the durable recovery owner and
-``RecoveryBoundDispatcher``.  It does not create another journal, provider path,
+``RecoveryBoundDispatcher``. It does not create another journal, provider path,
 or authority model.
 
-The process-instance fence remains the outer lifetime fence.  Recovery sender
+The process-instance fence remains the outer lifetime fence. Recovery sender
 authority is revoked before that fence is released, including terminal teardown
 initiated internally by ``ProductionHostRuntime.serve_forever``.
 """
@@ -47,10 +47,10 @@ def _stage_durable_source_for_immediate_takeover(
 ) -> None:
     """Rehydrate a durable source only inside a non-escaping takeover build.
 
-    There is intentionally no public "resume old sender" operation.  The staged
+    There is intentionally no public "resume old sender" operation. The staged
     controller is never returned or bound to a dispatcher: the builder proceeds
     directly into ``execute_durable_takeover`` and stops the controller on every
-    failure path.  This closes the clean-restart gap without reviving prior send
+    failure path. This closes the clean-restart gap without reviving prior send
     authority as a product capability.
     """
 
@@ -143,7 +143,8 @@ def build_production_trading_host(
     3. start a first owner, or perform explicit durable takeover of an existing
        owner before exposing any dispatcher;
     4. bind ``RecoveryBoundDispatcher`` to that exact controller/store pair;
-    5. install recovery stop immediately before process-fence release.
+    5. drain retained dispatcher activity and revoke recovery before listener
+       close and process-fence release.
 
     REPLAY/SIMULATION intentionally expose no recovery-bound external sender.
     """
@@ -195,7 +196,7 @@ def build_production_trading_host(
             latest_durable = durable_chain[-1]
             # The latest durable owner may already be the requested target when
             # a prior process died after RecoveryOwnerChanged but before the
-            # takeover completion event.  The canonical takeover engine owns the
+            # takeover completion event. The canonical takeover engine owns the
             # distinction between a resumable pending transition and an invalid
             # same-owner request; do not pre-reject that crash-resume state here.
             _stage_durable_source_for_immediate_takeover(controller, latest_durable)
@@ -235,9 +236,10 @@ def build_production_trading_host(
             prepared_lease_seconds=prepared_lease_seconds,
         )
 
-        # The canonical host owns terminal teardown. Revoke sender authority
-        # after command drain/join but before listener close or fence release.
-        host.bind_terminal_finalizer(controller.stop)
+        # The canonical host owns terminal teardown. Drain the exact retained
+        # dispatcher first, then stop its controller while dispatcher entry is
+        # still fenced. Only after that may listener close / fence release run.
+        host.bind_terminal_finalizer(dispatcher.stop_and_drain)
         return ProductionTradingHostRuntime(
             host,
             recovery=controller,

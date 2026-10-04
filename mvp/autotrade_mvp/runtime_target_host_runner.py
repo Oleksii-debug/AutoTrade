@@ -535,6 +535,17 @@ def run_declared_target_host_campaign(
         minimum=spec.min_research_samples,
     )
     resource_probe = _snapshot_resource_probe(resource_probe)
+    callback_states = tuple(
+        (f"financial operation {event_id}", operation, _callable_authority_state(operation))
+        for event_id, operation in operation_snapshot
+    ) + tuple(
+        (f"research operation {phase}", operation, _callable_authority_state(operation))
+        for phase, operation in research_snapshot
+    )
+    if resource_probe is not None:
+        callback_states += (
+            ("resource probe", resource_probe, _callable_authority_state(resource_probe)),
+        )
 
     # Freeze every authority callable used after a caller-supplied callback. A
     # callback may exercise product/research code, but it cannot replace clocks,
@@ -633,6 +644,8 @@ def run_declared_target_host_campaign(
                 )
         for name, resolve, state in callable_states:
             _require_callable_authority(resolve(), state, name=name)
+        for name, callback, state in callback_states:
+            _require_callable_authority(callback, state, name=name)
         for name, value, state in class_states:
             _require_class_authority(value, state, name=name)
 

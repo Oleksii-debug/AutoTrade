@@ -282,8 +282,11 @@ class RecoveryController:
             raise RuntimeError("Host already has an owner")
         normalized_owner = owner_id.strip()
         durable = self._latest_durable_owner()
-        next_epoch = 1 if durable is None else durable.epoch + 1
-        candidate = OwnerFence(owner_id=normalized_owner, epoch=next_epoch)
+        if durable is not None:
+            raise PermissionError(
+                "Existing durable owner requires explicit takeover evidence"
+            )
+        candidate = OwnerFence(owner_id=normalized_owner, epoch=1)
         self._append_durable_owner(candidate)
         self.owner = candidate
         self.state = HostState.RECOVERING
@@ -884,6 +887,10 @@ class RecoveryController:
             raise TypeError("reconciled must be a boolean")
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
+        if self._owner_store is not None:
+            raise PermissionError(
+                "Durable owner transfer requires independently issued takeover evidence"
+            )
         if not old_sender_fenced:
             raise PermissionError("Old sender must be externally fenced")
         if (

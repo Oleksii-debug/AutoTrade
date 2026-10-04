@@ -500,6 +500,42 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_existing_source_change_during_sqlite_snapshot_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            self.assertTrue(checkpoint.is_file())
+            original_backup = backup_module._backup_sqlite
+            injected = False
+
+            def backup_then_change_source(source, destination):
+                nonlocal injected
+                result = original_backup(source, destination)
+                if not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_during_sqlite_backup":true}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=backup_then_change_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_partial_runtime_consistency_evidence_is_rejected(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

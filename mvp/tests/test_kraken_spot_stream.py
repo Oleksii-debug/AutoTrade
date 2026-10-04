@@ -1,5 +1,6 @@
 import hashlib
 import unittest
+from decimal import Decimal
 
 from mvp.autotrade_mvp.kraken_spot_stream import (
     KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION,
@@ -27,13 +28,30 @@ def frame_bytes(
                 "order_status": "new",
             }
         ]
+    normalized_reports = []
+    for report in reports:
+        normalized = dict(report)
+        if normalized.get("exec_type") == "trade":
+            normalized.setdefault("symbol", "BTC/USD")
+            normalized.setdefault("side", "buy")
+            normalized.setdefault("last_qty", 1)
+            normalized.setdefault("last_price", 25000)
+            normalized.setdefault(
+                "fees",
+                [{"asset": "USD", "qty": 1}],
+            )
+            normalized.setdefault(
+                "timestamp",
+                "2026-10-04T05:00:00.123456Z",
+            )
+        normalized_reports.append(normalized)
     import json
 
     return json.dumps(
         {
             "channel": channel,
             "type": frame_type,
-            "data": reports,
+            "data": normalized_reports,
             "sequence": sequence,
         },
         sort_keys=True,
@@ -132,6 +150,109 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(report.exec_id, "E-1")
         self.assertEqual(report.exec_type, "trade")
         self.assertEqual(report.order_status, "partially_filled")
+        self.assertEqual(report.symbol, "BTC/USD")
+        self.assertEqual(report.side, "buy")
+        self.assertEqual(report.last_qty, Decimal("1"))
+        self.assertEqual(report.last_price, Decimal("25000"))
+        self.assertEqual(len(report.fees), 1)
+        self.assertEqual(report.fees[0].asset, "USD")
+        self.assertEqual(report.fees[0].quantity, Decimal("1"))
+        self.assertEqual(report.event_time, "2026-10-04T05:00:00.123456Z")
+
+    def test_trade_frame_retains_exact_decimal_economics_from_provider_bytes(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-EXACT","cl_ord_id":"client-exact",'
+            b'"exec_id":"E-EXACT","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD",'
+            b'"side":"sell","last_qty":0.00000001,'
+            b'"last_price":12345.67890123,'
+            b'"fees":[{"asset":"USD","qty":0.00000123}],'
+            b'"timestamp":"2026-10-04T05:00:00.123456Z","trade_id":42}],'
+            b'"sequence":2}'
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+
+        self.assertEqual(report.exec_id, "E-EXACT")
+        self.assertEqual(report.symbol, "BTC/USD")
+        self.assertEqual(report.side, "sell")
+        self.assertEqual(report.last_qty, Decimal("0.00000001"))
+        self.assertEqual(report.last_price, Decimal("12345.67890123"))
+        self.assertEqual(report.fees[0].asset, "USD")
+        self.assertEqual(report.fees[0].quantity, Decimal("0.00000123"))
+        self.assertEqual(report.event_time, "2026-10-04T05:00:00.123456Z")
+        self.assertEqual(report.trade_id, 42)
+
+    def test_trade_frame_fails_closed_when_fill_economics_are_incomplete(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-INCOMPLETE","exec_id":"E-INCOMPLETE",'
+            b'"exec_type":"trade","order_status":"partially_filled",'
+            b'"symbol":"BTC/USD","side":"buy","last_qty":1,'
+            b'"last_price":25000,'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],'
+            b'"sequence":3}'
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "lacks complete fill economics: fees",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_non_trade_report_cannot_carry_trade_only_economics(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-STATUS",
+                    "exec_type": "status",
+                    "order_status": "new",
+                    "exec_id": "E-FORGED",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "non-trade report contains trade-only economics",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
+        huge_integer = b"9" * 1000
+        raw_sequence = (
+            b'{"channel":"executions","type":"snapshot","data":[],"sequence":'
+            + huge_integer
+            + b"}"
+        )
+        huge_exponent = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-HUGE","exec_id":"E-HUGE","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD","side":"buy",'
+            b'"last_qty":1e999999,"last_price":25000,'
+            b'"fees":[{"asset":"USD","qty":1}],'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],"sequence":1}'
+        )
+        for raw in (raw_sequence, huge_exponent):
+            with self.subTest(raw_prefix=raw[:80]), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                "numeric token exceeds the exact resource envelope",
+            ):
+                parse_execution_frame(
+                    raw,
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                )
 
     def test_byte_distinct_frames_have_distinct_evidence(self):
         compact = (

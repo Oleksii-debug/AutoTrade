@@ -2230,6 +2230,44 @@ def _verified_allocation_payload_owner(
     return owner, decoded
 
 
+def _allocation_evidence_valid_at(
+    evidence: ImmutableAllocationEvidence,
+    instant: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _getattribute=object.__getattribute__,
+    _datetime_type=datetime,
+    _utc=timezone.utc,
+) -> bool:
+    """Evaluate evidence validity without mutable evidence-class dispatch."""
+
+    if type(evidence) is not _evidence_type:
+        raise TypeError("allocation evidence must use the canonical evidence type")
+
+    def parse(value, *, name: str):
+        if type(value) is not str:
+            raise ValueError(f"{name} must be an exact ISO timestamp string")
+        try:
+            parsed = _datetime_type.fromisoformat(
+                str.replace(value, "Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError(f"{name} must be an ISO timestamp") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{name} must include timezone")
+        return parsed.astimezone(_utc)
+
+    point = parse(instant, name="allocation evidence decision time")
+    observed = parse(
+        _getattribute(evidence, "observed_at"),
+        name="allocation evidence observed_at",
+    )
+    valid_until = parse(
+        _getattribute(evidence, "valid_until"),
+        name="allocation evidence valid_until",
+    )
+    return observed <= point <= valid_until
+
+
 def _allocation_payload_snapshot(
     evidence: ImmutableAllocationEvidence,
     _verify=_verified_allocation_payload_owner,
@@ -2262,24 +2300,49 @@ class EvidenceBoundObjectiveAllocationResult:
     base_currency: str
 
 
-def _payload_text(evidence: ImmutableAllocationEvidence, key: str) -> str:
-    value = evidence.payload.get(key)
-    return _text(value, name=f"{evidence.kind} payload {key}")
+def _payload_text(
+    evidence: ImmutableAllocationEvidence,
+    key: str,
+    _getattribute=object.__getattribute__,
+    _text_helper=_text,
+    _text_code=getattr(_text, "__code__", None),
+) -> str:
+    if getattr(_text_helper, "__code__", None) is not _text_code:
+        raise ValueError("allocation payload text helper executable changed after binding")
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    value = payload.get(key)
+    return _text_helper(value, name=f"{kind} payload {key}")
 
 
-def _payload_decimal(evidence: ImmutableAllocationEvidence, key: str) -> Decimal:
-    if key not in evidence.payload:
-        raise ValueError(f"{evidence.kind} payload is missing {key}")
-    return _decimal(evidence.payload[key], name=f"{evidence.kind} payload {key}")
+def _payload_decimal(
+    evidence: ImmutableAllocationEvidence,
+    key: str,
+    _getattribute=object.__getattribute__,
+    _decimal_helper=_decimal,
+    _decimal_code=getattr(_decimal, "__code__", None),
+) -> Decimal:
+    if getattr(_decimal_helper, "__code__", None) is not _decimal_code:
+        raise ValueError(
+            "allocation payload decimal helper executable changed after binding"
+        )
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    if key not in payload:
+        raise ValueError(f"{kind} payload is missing {key}")
+    return _decimal_helper(payload[key], name=f"{kind} payload {key}")
 
 
 def _payload_nonnegative_int(
     evidence: ImmutableAllocationEvidence,
     key: str,
+    _getattribute=object.__getattribute__,
 ) -> int:
-    value = evidence.payload.get(key)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{evidence.kind} payload {key} must be a non-negative integer")
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    value = payload.get(key)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{kind} payload {key} must be a non-negative exact integer")
     return value
 
 
@@ -2293,44 +2356,58 @@ def _resolve_allocation_evidence(
     _evidence_type=ImmutableAllocationEvidence,
     _verify=_verified_allocation_payload_owner,
     _verify_code=getattr(_verified_allocation_payload_owner, "__code__", None),
+    _valid_at=_allocation_evidence_valid_at,
+    _valid_at_code=getattr(_allocation_evidence_valid_at, "__code__", None),
+    _getattribute=object.__getattribute__,
 ) -> ImmutableAllocationEvidence:
     if type(evidence) is not _evidence_type:
         raise TypeError("allocation evidence values must use the canonical evidence type")
-    if getattr(_verify, "__code__", None) is not _verify_code:
+    if (
+        getattr(_verify, "__code__", None) is not _verify_code
+        or getattr(_valid_at, "__code__", None) is not _valid_at_code
+    ):
         raise ValueError(
-            "allocation evidence resolver verifier executable changed after binding"
+            "allocation evidence resolver trust helper executable changed after binding"
         )
     _verify(evidence)
-    if evidence.kind != expected_kind:
+    evidence_id = _getattribute(evidence, "evidence_id")
+    evidence_kind = _getattribute(evidence, "kind")
+    evidence_environment = _getattribute(evidence, "environment")
+    evidence_digest = _getattribute(evidence, "digest")
+    if evidence_kind != expected_kind:
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} has kind {evidence.kind}, "
+            f"allocation evidence {evidence_id} has kind {evidence_kind}, "
             f"expected {expected_kind}"
         )
-    if evidence.environment != expected_environment:
+    if evidence_environment != expected_environment:
+        raise ValueError(f"allocation evidence {evidence_id} environment mismatch")
+    if not _valid_at(evidence, at):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} environment mismatch"
+            f"allocation evidence {evidence_id} is stale or not yet observable"
         )
-    if not evidence.valid_at(at):
-        raise ValueError(
-            f"allocation evidence {evidence.evidence_id} is stale or not yet observable"
-        )
-    resolved = resolved_evidence.get(evidence.evidence_id)
+    resolved = resolved_evidence.get(evidence_id)
     if type(resolved) is not _evidence_type:
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} cannot be resolved authoritatively"
+            f"allocation evidence {evidence_id} cannot be resolved authoritatively"
         )
     _verify(resolved)
-    if resolved.digest != evidence.digest:
+    resolved_digest = _getattribute(resolved, "digest")
+    resolved_kind = _getattribute(resolved, "kind")
+    resolved_environment = _getattribute(resolved, "environment")
+    if resolved_digest != evidence_digest:
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} digest does not match authoritative content"
+            f"allocation evidence {evidence_id} digest does not match authoritative content"
         )
-    if resolved.kind != expected_kind or resolved.environment != expected_environment:
+    if (
+        resolved_kind != expected_kind
+        or resolved_environment != expected_environment
+    ):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} authoritative scope mismatch"
+            f"allocation evidence {evidence_id} authoritative scope mismatch"
         )
-    if not resolved.valid_at(at):
+    if not _valid_at(resolved, at):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} authoritative record is stale"
+            f"allocation evidence {evidence_id} authoritative record is stale"
         )
     return resolved
 

@@ -435,6 +435,64 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
+    def test_resolver_ignores_evidence_class_valid_at_rebinding(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        evidence_type = type(evidence)
+        original_valid_at = evidence_type.valid_at
+        touched = []
+
+        def forged_valid_at(_self, _instant):
+            touched.append("valid_at")
+            return True
+
+        evidence_type.valid_at = forged_valid_at
+        try:
+            with self.assertRaisesRegex(ValueError, "stale or not yet observable"):
+                allocation_module._resolve_allocation_evidence(
+                    evidence,
+                    {object.__getattribute__(evidence, "evidence_id"): evidence},
+                    expected_kind="VALUATION",
+                    expected_environment="SIMULATION",
+                    at="2026-09-25T18:50:00Z",
+                )
+        finally:
+            evidence_type.valid_at = original_valid_at
+
+        self.assertEqual(touched, [])
+
+    def test_resolver_and_payload_helpers_ignore_class_attribute_dispatch(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        evidence_type = type(evidence)
+        evidence_type_dict = type.__getattribute__(evidence_type, "__dict__")
+        self.assertNotIn("__getattribute__", evidence_type_dict)
+        evidence_id = object.__getattribute__(evidence, "evidence_id")
+        original_getattribute = evidence_type.__getattribute__
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged evidence attribute dispatch executed")
+
+        evidence_type.__getattribute__ = forged_getattribute
+        try:
+            resolved = allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+            self.assertIs(resolved, evidence)
+            self.assertEqual(
+                allocation_module._payload_text(evidence, "symbol"),
+                "AAA",
+            )
+        finally:
+            evidence_type.__getattribute__ = original_getattribute
+
+        self.assertEqual(touched, [])
+
+
     def test_evidence_type_global_rebinding_cannot_admit_foreign_object(self):
         evidence = self.evidence({"symbol": "AAA"})
         original_type = allocation_module.ImmutableAllocationEvidence

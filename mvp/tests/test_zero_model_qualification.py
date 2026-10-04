@@ -8,7 +8,6 @@ import unittest
 from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
-    _git,
     _observed_source_sha,
     _qualifier_sha256,
     _require_clean_checkout,

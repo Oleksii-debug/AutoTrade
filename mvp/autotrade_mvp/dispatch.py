@@ -1044,6 +1044,26 @@ class GuardedDispatcher:
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
         except DispatchBlocked as error:
+            # A rejected guard is safe-to-report as BLOCKED only while the
+            # durable attempt still proves that no sender crossed the barrier.
+            # If another process already committed SubmissionSending for this
+            # exact attempt, external side effects may now be in flight even
+            # though this caller emitted zero provider bytes. Preserve UNKNOWN
+            # instead of converting that shared durable state into retryable
+            # BLOCKED. A concurrent terminal row, when already present, is the
+            # stronger durable authority and can be returned directly.
+            events = self._events(attempt_id)
+            if events:
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "concurrent_send_barrier_already_committed",
+                    )
+                if last["event_type"] in {"SubmissionSent", "SubmissionUnknown"}:
+                    return self._outcome_from_terminal(last, client_order_id)
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
         except Exception as error:
             events = self._events(attempt_id)

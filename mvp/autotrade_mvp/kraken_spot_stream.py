@@ -166,6 +166,53 @@ class KrakenSpotExecutionsSubscriptionBinding:
             )
 
 
+def _snapshot_subscription_binding(
+    binding: KrakenSpotExecutionsSubscriptionBinding,
+) -> KrakenSpotExecutionsSubscriptionBinding:
+    """Rebuild caller-owned binding into canonical inert local state."""
+
+    if type(binding) is not KrakenSpotExecutionsSubscriptionBinding:
+        raise TypeError(
+            "subscription_binding must be "
+            "KrakenSpotExecutionsSubscriptionBinding"
+        )
+    account_id = object.__getattribute__(binding, "account_id")
+    environment = object.__getattribute__(binding, "environment")
+    connection_generation = object.__getattribute__(
+        binding,
+        "connection_generation",
+    )
+    req_id = object.__getattribute__(binding, "req_id")
+    profile_items = object.__getattribute__(binding, "profile_items")
+    evidence_ref = object.__getattribute__(binding, "evidence_ref")
+
+    canonical = KrakenSpotExecutionsSubscriptionBinding.create(
+        account_id=account_id,
+        environment=environment,
+        connection_generation=connection_generation,
+        req_id=req_id,
+    )
+    if type(profile_items) is not tuple or any(
+        type(item) is not tuple
+        or len(item) != 2
+        or type(item[0]) is not str
+        or type(item[1]) not in {str, bool}
+        for item in profile_items
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription binding profile state is not canonical"
+        )
+    if profile_items != canonical.profile_items:
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription profile is not canonical"
+        )
+    if type(evidence_ref) is not str or evidence_ref != canonical.evidence_ref:
+        raise KrakenSpotStreamError(
+            "Kraken subscription binding evidence_ref is invalid"
+        )
+    return canonical
+
+
 _ALLOWED_FRAME_TYPES = frozenset({"snapshot", "update"})
 _ALLOWED_EXEC_TYPES = frozenset(
     {
@@ -313,20 +360,16 @@ class KrakenSpotExecutionsSubscriptionAck:
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if type(self.subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
-            raise TypeError(
-                "subscription_binding must be "
-                "KrakenSpotExecutionsSubscriptionBinding"
-            )
+        binding = _snapshot_subscription_binding(self.subscription_binding)
         if (
-            self.subscription_binding.account_id != self.account_id
-            or self.subscription_binding.environment != self.environment
-            or self.subscription_binding.connection_generation
-            != self.connection_generation
+            binding.account_id != self.account_id
+            or binding.environment != self.environment
+            or binding.connection_generation != self.connection_generation
         ):
             raise KrakenSpotStreamError(
                 "Kraken subscription binding scope mismatch"
             )
+        object.__setattr__(self, "subscription_binding", binding)
         if type(self.response_bytes) is not bytes:
             raise TypeError("response_bytes must be bytes")
         if self.maxratecount is not None and (
@@ -367,6 +410,9 @@ def parse_executions_subscription_ack(
             "subscription_binding must be "
             "KrakenSpotExecutionsSubscriptionBinding"
         )
+    subscription_binding = _snapshot_subscription_binding(
+        subscription_binding
+    )
     raw = _decode_exact_json(response_bytes)
     allowed_root = {
         "method",
@@ -875,6 +921,24 @@ def parse_execution_frame(
     )
 
 
+def _snapshot_execution_frame(
+    frame: KrakenSpotExecutionFrame,
+) -> KrakenSpotExecutionFrame:
+    """Reparse exact bytes so parsed caller state cannot outlive its evidence."""
+
+    if type(frame) is not KrakenSpotExecutionFrame:
+        raise TypeError("frame must be exact KrakenSpotExecutionFrame")
+    return parse_execution_frame(
+        object.__getattribute__(frame, "response_bytes"),
+        account_id=object.__getattribute__(frame, "account_id"),
+        connection_generation=object.__getattribute__(
+            frame,
+            "connection_generation",
+        ),
+        environment=object.__getattribute__(frame, "environment"),
+    )
+
+
 def _provider_fills_from_execution_frame(
     frame: object,
     *,
@@ -890,6 +954,7 @@ def _provider_fills_from_execution_frame(
 
     if type(frame) is not KrakenSpotExecutionFrame:
         raise TypeError("frame must be exact KrakenSpotExecutionFrame")
+    frame = _snapshot_execution_frame(frame)
     if type(instrument_versions) is not dict:
         raise TypeError("instrument_versions must be an exact dict")
     if type(fee_currency_by_symbol) is not dict:
@@ -1169,6 +1234,16 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken subscription acknowledgement is out of phase"
             )
+        binding = _snapshot_subscription_binding(
+            object.__getattribute__(
+                acknowledgement,
+                "subscription_binding",
+            )
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            object.__getattribute__(acknowledgement, "response_bytes"),
+            subscription_binding=binding,
+        )
         if (
             acknowledgement.account_id != self.account_id
             or acknowledgement.environment != self.environment
@@ -1234,7 +1309,8 @@ class KrakenSpotExecutionStreamRecovery:
     def apply_frame(self, frame: KrakenSpotExecutionFrame) -> None:
         """Consume one frame while keeping reconciliation as the READY authority."""
 
-        self._require_scope(frame)
+        if type(frame) is not KrakenSpotExecutionFrame:
+            raise TypeError("frame must be KrakenSpotExecutionFrame")
         if self.phase == self.DISCONNECTED:
             raise KrakenSpotStreamError(
                 "Kraken stream frame received while disconnected"
@@ -1247,6 +1323,8 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken stream requires subscription acknowledgement before data"
             )
+        frame = _snapshot_execution_frame(frame)
+        self._require_scope(frame)
 
         if self.phase == self.AWAITING_SNAPSHOT:
             if frame.frame_type != "snapshot":

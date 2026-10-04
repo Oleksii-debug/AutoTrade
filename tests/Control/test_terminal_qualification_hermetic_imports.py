@@ -34,7 +34,6 @@ import autotrade_runtime.artifacts as runtime_artifacts
 import mvp.autotrade_mvp.bounded_real
 import mvp.autotrade_mvp.execution_qualification
 import mvp.autotrade_mvp.qualification_attestation as qualification_attestation
-import mvp.autotrade_mvp.provider_qualification_authority
 import mvp.autotrade_mvp.recovery_qualification
 import mvp.autotrade_mvp.release_qualification
 import mvp.autotrade_mvp.supply_chain_qualification

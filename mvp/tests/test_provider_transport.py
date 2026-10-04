@@ -4513,15 +4513,27 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         # only deterministic network I/O is replaced for this unit test.
         canonical_opener.open = fake_open
         proof = object()
-        request = AuthenticatedReadHttpRequest(
-            url="https://api.example.test/read?signature=SYNTHETIC",
-            headers={"X-API-KEY": "SYNTHETIC"},
-            timeout_seconds=2,
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
         )
         object.__setattr__(
             request,
             "_terminal_qualified_read_authority",
             proof,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            binding,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
         )
 
         response = client.send(request)
@@ -4557,15 +4569,27 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
 
         client = UrllibJsonWireClient(max_response_bytes=64)
         client._opener = InjectedOpener()
-        request = AuthenticatedReadHttpRequest(
-            url="https://api.example.test/read?signature=SYNTHETIC",
-            headers={"X-API-KEY": "SYNTHETIC"},
-            timeout_seconds=2,
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
         )
         object.__setattr__(
             request,
             "_terminal_qualified_read_authority",
             object(),
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            binding,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
         )
         response = client.send(request)
         with self.assertRaisesRegex(

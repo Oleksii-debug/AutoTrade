@@ -211,6 +211,9 @@ def load_immutable_web_bundle(
         raise TypeError("web bundle bodies must be an exact dict")
     if len(asset_bodies) > _MAX_ASSETS:
         raise ValueError("web bundle body set has too many assets")
+    body_paths = tuple(asset_bodies)
+    if any(type(path) is not str for path in body_paths):
+        raise TypeError("web bundle body paths must be exact strings")
 
     def reject_duplicate_keys(
         pairs: list[tuple[str, object]],
@@ -336,6 +339,8 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
         headers: Mapping[str, str],
         body: bytes = b"",
     ) -> TransportResponse:
+        if type(target) is not str:
+            return _static_error(400, "INVALID_STATIC_REQUEST")
         parsed = urlsplit(target)
         if parsed.scheme or parsed.netloc or parsed.fragment:
             return super().dispatch(

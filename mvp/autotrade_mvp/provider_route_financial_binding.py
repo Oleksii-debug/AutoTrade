@@ -75,7 +75,7 @@ def build_selected_provider_route_financial_submission_scope(
 def build_selected_provider_route_transport_capability_registry(
     route: SelectedProviderRoute,
 ) -> CapabilityRegistry:
-    """Project the sealed route C1 into the existing Bybit transport registry.
+    """Project the sealed route C1 into the existing provider transport registry.
 
     No new capability is minted here.  ``SelectedProviderRoute.capability`` is
     the exact fresh ``CapabilitySnapshot`` returned by durable selection; the
@@ -115,6 +115,25 @@ def build_selected_provider_route_transport_capability_registry(
     registry = CapabilityRegistry()
     registry.add(capability)
     return registry
+
+
+def build_selected_bybit_transport_authority_inputs(
+    route: SelectedProviderRoute,
+) -> dict[str, object]:
+    """Derive every route-sensitive input accepted by the public Bybit builder."""
+
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
+    if route.candidate.provider_id != "BYBIT":
+        raise ProviderRouteFinancialBindingError(
+            "Bybit transport inputs require a selected BYBIT route"
+        )
+    registry = build_selected_provider_route_transport_capability_registry(route)
+    return {
+        "provider_environment": route.candidate.provider_environment,
+        "capability_snapshot_id": route.capability_snapshot_id,
+        "capability_registry": registry,
+    }
 
 
 def require_financial_binding_matches_selected_route(

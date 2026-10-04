@@ -147,6 +147,8 @@ class _ProductionBybitSecretResolver:
         "__provider_environment",
         "__credential_handle",
         "__credential_identity",
+        "__credential_identity_reader",
+        "__credential_identity_reader_code",
         "__session_token",
     )
 
@@ -170,7 +172,9 @@ class _ProductionBybitSecretResolver:
             name="provider_environment",
         )
         session_token = _exact_text(session_token, name="session_token")
-        credential_identity = _credential_identity(credential_handle)
+        credential_identity_reader = _credential_identity
+        credential_identity_reader_code = credential_identity_reader.__code__
+        credential_identity = credential_identity_reader(credential_handle)
 
         application = runtime.application
         if type(application) is not AuthenticatedHostApplication:
@@ -210,6 +214,8 @@ class _ProductionBybitSecretResolver:
         self.__provider_environment = provider_environment
         self.__credential_handle = credential_handle
         self.__credential_identity = credential_identity
+        self.__credential_identity_reader = credential_identity_reader
+        self.__credential_identity_reader_code = credential_identity_reader_code
         self.__session_token = session_token
 
     @property
@@ -247,7 +253,15 @@ class _ProductionBybitSecretResolver:
             raise PermissionError("production financial dispatcher account changed")
         if self.__dispatcher.environment != self.__environment:
             raise PermissionError("production financial dispatcher environment changed")
-        if _credential_identity(self.__credential_handle) != self.__credential_identity:
+        credential_identity_reader = self.__credential_identity_reader
+        if _credential_identity is not credential_identity_reader:
+            raise PermissionError("Bybit credential identity authority changed")
+        if credential_identity_reader.__code__ is not self.__credential_identity_reader_code:
+            raise PermissionError("Bybit credential identity authority code changed")
+        if (
+            credential_identity_reader(self.__credential_handle)
+            != self.__credential_identity
+        ):
             raise PermissionError("Bybit credential handle changed after composition")
 
     @contextmanager
@@ -312,8 +326,11 @@ class ProductionBybitOrderSender:
         "__recovery",
         "__owner",
         "__resolver",
+        "__policy_registry",
         "__policy",
         "__policy_identity",
+        "__policy_identity_reader",
+        "__policy_identity_reader_code",
         "__account_id",
         "__environment",
         "__origin",
@@ -322,6 +339,8 @@ class ProductionBybitOrderSender:
         "__capability_registry",
         "__credential_handle",
         "__credential_identity",
+        "__credential_identity_reader",
+        "__credential_identity_reader_code",
         "__session_token",
     )
 
@@ -349,14 +368,19 @@ class ProductionBybitOrderSender:
 
         config = runtime.config
         provider_environment = transport.provider_environment
-        policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
+        policy_registry = BYBIT_V5_ENDPOINT_POLICIES
+        policy_identity_reader = _bybit_policy_identity
+        policy_identity_reader_code = policy_identity_reader.__code__
+        credential_identity_reader = _credential_identity
+        credential_identity_reader_code = credential_identity_reader.__code__
+        policy = policy_registry.get(provider_environment)
         if policy is None or transport.policy is not policy:
             raise RuntimeError("Bybit sender policy is not canonical provider policy")
-        policy_identity = _bybit_policy_identity(
+        policy_identity = policy_identity_reader(
             policy,
             provider_environment=provider_environment,
         )
-        credential_identity = _credential_identity(transport.credential_handle)
+        credential_identity = credential_identity_reader(transport.credential_handle)
         if transport.account_id != config.account_id:
             raise RuntimeError("Bybit sender account does not match production host")
         if transport.policy.environment != config.environment:
@@ -372,8 +396,11 @@ class ProductionBybitOrderSender:
         self.__recovery = recovery
         self.__owner = owner
         self.__resolver = resolver
+        self.__policy_registry = policy_registry
         self.__policy = policy
         self.__policy_identity = policy_identity
+        self.__policy_identity_reader = policy_identity_reader
+        self.__policy_identity_reader_code = policy_identity_reader_code
         self.__account_id = config.account_id
         self.__environment = config.environment
         self.__origin = config.public_origin
@@ -382,6 +409,8 @@ class ProductionBybitOrderSender:
         self.__capability_registry = transport.capability_registry
         self.__credential_handle = transport.credential_handle
         self.__credential_identity = credential_identity
+        self.__credential_identity_reader = credential_identity_reader
+        self.__credential_identity_reader_code = credential_identity_reader_code
         self.__session_token = transport.session_token
 
     @property
@@ -403,11 +432,18 @@ class ProductionBybitOrderSender:
             raise PermissionError("production financial sender owner changed")
         if type(transport) is not BybitV5HttpTransport:
             raise PermissionError("Bybit transport authority changed")
-        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(self.__provider_environment)
+        if BYBIT_V5_ENDPOINT_POLICIES is not self.__policy_registry:
+            raise PermissionError("Bybit provider policy registry authority changed")
+        canonical_policy = self.__policy_registry.get(self.__provider_environment)
         if canonical_policy is not self.__policy or transport.policy is not self.__policy:
             raise PermissionError("Bybit provider policy changed after composition")
+        policy_identity_reader = self.__policy_identity_reader
+        if _bybit_policy_identity is not policy_identity_reader:
+            raise PermissionError("Bybit provider policy identity authority changed")
+        if policy_identity_reader.__code__ is not self.__policy_identity_reader_code:
+            raise PermissionError("Bybit provider policy identity authority code changed")
         if (
-            _bybit_policy_identity(
+            policy_identity_reader(
                 self.__policy,
                 provider_environment=self.__provider_environment,
             )
@@ -432,7 +468,15 @@ class ProductionBybitOrderSender:
             raise PermissionError("Bybit capability registry changed after composition")
         if transport.credential_handle is not self.__credential_handle:
             raise PermissionError("Bybit credential handle changed after composition")
-        if _credential_identity(self.__credential_handle) != self.__credential_identity:
+        credential_identity_reader = self.__credential_identity_reader
+        if _credential_identity is not credential_identity_reader:
+            raise PermissionError("Bybit credential identity authority changed")
+        if credential_identity_reader.__code__ is not self.__credential_identity_reader_code:
+            raise PermissionError("Bybit credential identity authority code changed")
+        if (
+            credential_identity_reader(self.__credential_handle)
+            != self.__credential_identity
+        ):
             raise PermissionError("Bybit credential handle changed after composition")
         if transport.session_token != self.__session_token:
             raise PermissionError("Bybit session authority changed after composition")

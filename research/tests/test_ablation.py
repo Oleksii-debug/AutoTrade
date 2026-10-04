@@ -2174,5 +2174,58 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(immature.reason, "incomplete_registered_population")
 
 
+    def test_trusted_iterable_ingress_fails_before_callbacks(self):
+        calls: list[str] = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iterable callback executed")
+
+        authority = object.__new__(AblationQualificationAuthority)
+        cases = [
+            pair("trusted-ingress-a", "2", population_unit="trusted-ingress-unit-a"),
+            pair("trusted-ingress-b", "2", population_unit="trusted-ingress-unit-b"),
+        ]
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "pairs must be an exact list or tuple",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                HostileList(cases),
+                authority=authority,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+        self.assertEqual(calls, [])
+
+        for field, kwargs, message in (
+            (
+                "canonical_outcomes",
+                {"canonical_outcomes": HostileList()},
+                "canonical_outcomes must be an exact list or tuple",
+            ),
+            (
+                "outcome_refs",
+                {"outcome_refs": HostileList()},
+                "outcome_refs must be an exact list or tuple",
+            ),
+        ):
+            with self.subTest(field=field):
+                calls.clear()
+                with self.assertRaisesRegex(TypeError, message):
+                    evaluate_qualified_incremental_value(
+                        "agent",
+                        cases,
+                        authority=authority,
+                        minimum_pairs=2,
+                        required_lower_bound=Decimal("0"),
+                        **kwargs,
+                    )
+                self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

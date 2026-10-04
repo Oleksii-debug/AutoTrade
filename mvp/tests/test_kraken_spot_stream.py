@@ -1512,6 +1512,135 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertIsNone(reset.subscription_maxratecount)
         self.assertEqual(reset.subscription_warnings, ())
 
+    def test_ack_admission_reparses_exact_bytes_after_object_mutation(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        binding = subscription_binding(
+            connection_generation=generation,
+            req_id=77,
+        )
+        raw = (
+            b'{"method":"subscribe","req_id":77,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":240,"warnings":["schema change pending"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        object.__setattr__(acknowledgement, "maxratecount", 999999)
+        object.__setattr__(
+            acknowledgement,
+            "warnings",
+            ("caller-forged-warning",),
+        )
+        object.__setattr__(
+            acknowledgement,
+            "evidence_ref",
+            "provider-stream:sha256:" + "f" * 64,
+        )
+
+        recovery.apply_subscription_ack(acknowledgement)
+        evidence = recovery.evidence()
+
+        self.assertEqual(evidence.subscription_maxratecount, 240)
+        self.assertEqual(
+            evidence.subscription_warnings,
+            ("schema change pending",),
+        )
+        self.assertEqual(
+            evidence.subscription_ack_evidence_ref,
+            "provider-stream:sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+
+    def test_ack_admission_rejects_mutated_subscription_binding(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        acknowledgement = parse_executions_subscription_ack(
+            ack_bytes(req_id=77),
+            subscription_binding=subscription_binding(
+                connection_generation=generation,
+                req_id=77,
+            ),
+        )
+        object.__setattr__(
+            acknowledgement.subscription_binding,
+            "req_id",
+            78,
+        )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "binding evidence_ref is invalid",
+        ):
+            recovery.apply_subscription_ack(acknowledgement)
+
+        self.assertEqual(
+            recovery.evidence().phase,
+            recovery.AWAITING_SUBSCRIPTION_ACK,
+        )
+
+    def test_buffered_fill_is_detached_from_mutated_caller_frame(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        self.acknowledge(recovery)
+        recovery.apply_frame(
+            self.parse(
+                recovery=recovery,
+                frame_type="snapshot",
+                sequence=1,
+                reports=[
+                    {
+                        "order_id": "O-SNAPSHOT",
+                        "exec_type": "new",
+                        "order_status": "new",
+                    }
+                ],
+            )
+        )
+        update = self.parse(
+            recovery=recovery,
+            frame_type="update",
+            sequence=2,
+            reports=[
+                {
+                    "order_id": "O-IMMUTABLE-BYTES",
+                    "cl_ord_id": "client-immutable-bytes",
+                    "exec_id": "E-IMMUTABLE-BYTES",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "last_qty": 2,
+                    "last_price": 25000,
+                    "cost": 50000,
+                }
+            ],
+        )
+        recovery.apply_frame(update)
+
+        caller_report = update.reports[0]
+        object.__setattr__(caller_report, "last_qty", Decimal("999"))
+        object.__setattr__(caller_report, "last_price", Decimal("1"))
+        object.__setattr__(caller_report, "cost", Decimal("999"))
+        object.__setattr__(caller_report, "exec_id", "E-FORGED-AFTER-ADMISSION")
+        object.__setattr__(update, "reports", (caller_report,))
+
+        fills = recovery.buffered_provider_fills(
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )
+
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "E-IMMUTABLE-BYTES")
+        self.assertEqual(fills[0].quantity, Decimal("2"))
+        self.assertEqual(fills[0].price, Decimal("25000"))
+        self.assertEqual(
+            fills[0].evidence_refs,
+            (
+                "provider-stream:sha256:"
+                + hashlib.sha256(update.response_bytes).hexdigest(),
+            ),
+        )
+
     def test_generation_requires_fresh_snapshot_and_never_grants_ready(self):
         recovery = self.make_recovery()
         generation = recovery.begin_connection()

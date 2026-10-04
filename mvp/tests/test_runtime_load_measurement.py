@@ -380,6 +380,63 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                 event_types,
             )
 
+    def test_operation_kwdefault_mutation_cannot_execute_equality_in_measurement_fence(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-1", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="latency-kwdefault-authority-mutation",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+            kwdefaults = JournalStore.append_event.__kwdefaults__
+            self.assertIs(type(kwdefaults), dict)
+            original = kwdefaults["outbox_topic"]
+            equality_called = False
+
+            class HostileValue:
+                def __eq__(self, other):
+                    nonlocal equality_called
+                    equality_called = True
+                    raise AssertionError("keyword-default equality callback executed")
+
+            def operation():
+                _append(store, expected)
+                kwdefaults["outbox_topic"] = HostileValue()
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadMeasurementError,
+                        "measurement executable authority changed during financial operation: "
+                        "JournalStore.append_event",
+                    ),
+                ):
+                    measure_declared_financial_operation(
+                        store,
+                        _spec(),
+                        plan_id=plan.plan_id,
+                        event_id=expected.event_id,
+                        operation=operation,
+                    )
+            finally:
+                kwdefaults["outbox_topic"] = original
+
+            self.assertFalse(equality_called)
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationFinancialLatencyMeasured",
+                event_types,
+            )
+
     def test_operation_without_durable_financial_event_fails_closed(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

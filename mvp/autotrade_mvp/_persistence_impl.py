@@ -1146,6 +1146,15 @@ class JournalStore:
         expected_journal_sequence: int | None = None,
         expected_whole_store_counts: Mapping[str, int] | None = None,
     ) -> AppendResult:
+        # Freeze the caller-owned event envelope once before reading any
+        # authority-bearing field. All validation, durable payload bytes and
+        # envelope identity are derived from this one canonical snapshot.
+        envelope_json = canonical_json(envelope)
+        frozen_envelope = json.loads(envelope_json)
+        if type(frozen_envelope) is not dict:
+            raise TypeError("envelope must serialize to a JSON object")
+        envelope = frozen_envelope
+
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
@@ -1167,7 +1176,6 @@ class JournalStore:
         if supplied_hash != expected_hash:
             raise ValueError("payload_hash does not match payload")
         payload_json = canonical_json(payload)
-        envelope_json = canonical_json(envelope)
         envelope_hash = _event_envelope_digest(envelope_json)
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:

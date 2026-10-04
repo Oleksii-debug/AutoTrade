@@ -52,9 +52,19 @@ class BorrowRecallConflict(BorrowEvidenceError):
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} is required")
-    return value.strip()
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be exact non-empty text")
+    return value
+
+
+def _exact_evidence(evidence: object):
+    if type(evidence) not in {
+        BorrowAvailabilityEvidence,
+        BorrowRecallEvidence,
+        BorrowRecallResolutionEvidence,
+    }:
+        raise TypeError("securities-borrow evidence must use an exact canonical type")
+    return replace(evidence)
 
 
 def _environment(value: str) -> str:
@@ -72,8 +82,8 @@ def _instrument_id(value: str) -> str:
 
 
 def _version(value: int) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError("instrument_version must be a positive integer")
+    if type(value) is not int or value < 1:
+        raise ValueError("instrument_version must be an exact positive integer")
     return value
 
 
@@ -165,11 +175,11 @@ def _dt(value: str) -> datetime:
 
 
 def _immutable_evidence_ref(value: object) -> tuple[str, str, str]:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value or value != value.strip():
         raise BorrowEvidenceError(
-            "provider borrow evidence requires immutable artifact reference"
+            "provider borrow evidence requires exact canonical artifact reference"
         )
-    reference = value.strip()
+    reference = value
     marker = "@sha256:"
     if not reference.startswith("artifact:") or marker not in reference:
         raise BorrowEvidenceError(
@@ -193,21 +203,24 @@ def _immutable_evidence_ref(value: object) -> tuple[str, str, str]:
 
 
 def _provider_evidence_kind(evidence: object) -> str:
-    if isinstance(evidence, BorrowAvailabilityEvidence):
+    if type(evidence) is BorrowAvailabilityEvidence:
         return "AVAILABILITY"
-    if isinstance(evidence, BorrowRecallEvidence):
+    if type(evidence) is BorrowRecallEvidence:
         return "RECALL"
-    if isinstance(evidence, BorrowRecallResolutionEvidence):
+    if type(evidence) is BorrowRecallResolutionEvidence:
         return "RECALL_RESOLUTION"
     raise TypeError("unsupported securities-borrow evidence type")
 
 
 def provider_borrow_evidence_receipt(evidence: object) -> dict[str, object]:
+    evidence = _exact_evidence(evidence)
     kind = _provider_evidence_kind(evidence)
-    if isinstance(evidence, BorrowAvailabilityEvidence):
-        observation = evidence.resource_detail()
+    if type(evidence) is BorrowAvailabilityEvidence:
+        observation = BorrowAvailabilityEvidence.resource_detail(evidence)
+    elif type(evidence) is BorrowRecallEvidence:
+        observation = BorrowRecallEvidence.payload(evidence)
     else:
-        observation = evidence.payload()
+        observation = BorrowRecallResolutionEvidence.payload(evidence)
     observation = dict(observation)
     observation.pop("evidence_ref", None)
     return {
@@ -219,6 +232,7 @@ def provider_borrow_evidence_receipt(evidence: object) -> dict[str, object]:
 
 
 def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
+    evidence = _exact_evidence(evidence)
     kind = _provider_evidence_kind(evidence)
     metadata: dict[str, object] = {
         "evidence_type": BORROW_PROVIDER_EVIDENCE_TYPE,
@@ -230,9 +244,9 @@ def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
         "instrument_version": evidence.instrument_version,
         "provider_revision": evidence.provider_revision,
     }
-    if isinstance(evidence, BorrowAvailabilityEvidence):
+    if type(evidence) is BorrowAvailabilityEvidence:
         metadata["locate_id"] = evidence.locate_id
-    elif isinstance(evidence, BorrowRecallEvidence):
+    elif type(evidence) is BorrowRecallEvidence:
         metadata["recall_id"] = evidence.recall_id
     else:
         metadata["recall_id"] = evidence.recall_id
@@ -244,6 +258,7 @@ def verify_provider_borrow_evidence(
     evidence: object,
     artifact_store: ArtifactStore,
 ) -> str:
+    evidence = _exact_evidence(evidence)
     if type(artifact_store) is not ArtifactStore:
         raise BorrowEvidenceError(
             "provider borrow evidence requires the exact canonical ArtifactStore"
@@ -754,8 +769,9 @@ class DurableBorrowRecallProjection:
         self._reload()
 
     def record_recall(self, evidence: BorrowRecallEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallEvidence):
-            raise TypeError("evidence must be BorrowRecallEvidence")
+        if type(evidence) is not BorrowRecallEvidence:
+            raise TypeError("evidence must be exact BorrowRecallEvidence")
+        evidence = replace(evidence)
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,
@@ -776,8 +792,9 @@ class DurableBorrowRecallProjection:
         return self.remaining(evidence.recall_id)
 
     def resolve_recall(self, evidence: BorrowRecallResolutionEvidence) -> Decimal:
-        if not isinstance(evidence, BorrowRecallResolutionEvidence):
-            raise TypeError("evidence must be BorrowRecallResolutionEvidence")
+        if type(evidence) is not BorrowRecallResolutionEvidence:
+            raise TypeError("evidence must be exact BorrowRecallResolutionEvidence")
+        evidence = replace(evidence)
         verify_provider_borrow_evidence(
             evidence,
             self.evidence_artifact_store,

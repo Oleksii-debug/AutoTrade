@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.securities_borrow import (
     BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
     borrow_resource_key,
+    provider_borrow_evidence_receipt,
 )
 from mvp.tests.securities_borrow_evidence_helpers import (
     EvidencedBorrowRecallProjection,
@@ -126,6 +127,47 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
         self.assertEqual(restored.capacity_quantity, Decimal("100"))
         self.assertTrue(restored.hard_to_borrow)
         self.assertEqual(restored.indicative_rate, Decimal("0.0125"))
+
+    def test_provider_evidence_subclasses_cannot_execute_financial_callbacks(self):
+        calls = []
+
+        class HostileAvailability(BorrowAvailabilityEvidence):
+            def resource_detail(self):
+                calls.append("resource_detail")
+                raise AssertionError("caller callback executed")
+
+        base = availability()
+        hostile = HostileAvailability(
+            provider_id=base.provider_id,
+            account_id=base.account_id,
+            environment=base.environment,
+            instrument_id=base.instrument_id,
+            instrument_version=base.instrument_version,
+            locate_id=base.locate_id,
+            provider_revision=base.provider_revision,
+            capacity_quantity=base.capacity_quantity,
+            hard_to_borrow=base.hard_to_borrow,
+            observed_at=base.observed_at,
+            effective_at=base.effective_at,
+            expires_at=base.expires_at,
+            evidence_ref=base.evidence_ref,
+            indicative_rate=base.indicative_rate,
+        )
+        with self.assertRaises(TypeError):
+            provider_borrow_evidence_receipt(hostile)
+        self.assertEqual(calls, [])
+
+    def test_financial_text_rejects_string_subclass_before_strip_callback(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self):
+                calls.append("strip")
+                raise AssertionError("caller strip executed")
+
+        with self.assertRaises(ValueError):
+            availability(provider_id=HostileText(PROVIDER_ID))
+        self.assertEqual(calls, [])
 
     def test_availability_rejects_ambiguous_or_non_exact_inputs(self):
         with self.assertRaises(TypeError):

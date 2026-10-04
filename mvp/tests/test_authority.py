@@ -768,7 +768,7 @@ class AuthorityTests(unittest.TestCase):
                     environment="SIMULATION",
                     account_id="paper-1",
                 )
-                result = authority.admit(
+                admit_kwargs = dict(
                     command_id=f"cmd-bound-{label}",
                     idempotency_key=f"idem-bound-{label}",
                     admission_id=f"admission-bound-{label}",
@@ -780,7 +780,6 @@ class AuthorityTests(unittest.TestCase):
                     instrument_version=1,
                     action="ORDER.SUBMIT",
                     notional="100",
-                    reservation_book=reservations,
                     reservation_id=f"reservation-bound-{label}",
                     confirmation_id=f"bound-{label}",
                     **public_financial_kwargs(
@@ -790,14 +789,60 @@ class AuthorityTests(unittest.TestCase):
                         reservation_requirements=changed_requirements,
                     ),
                 )
+                result = authority.admit(
+                    reservation_book=reservations,
+                    **admit_kwargs,
+                )
                 self.assertEqual(result.outcome, "REJECTED")
                 self.assertEqual(
                     result.reason,
                     "confirmation_financial_binding_mismatch",
                 )
+                self.assertIsNone(result.confirmation_id)
+                self.assertEqual(
+                    result.requested_confirmation_id,
+                    f"bound-{label}",
+                )
                 self.assertEqual(
                     reservations.total_reserved("CASH:USD"),
                     Decimal("0"),
+                )
+                authority_event_count = len(
+                    store.load_events("authority_state", "canonical")
+                )
+                risk_event_count = len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                )
+                retry = authority.admit(
+                    reservation_book=reservations,
+                    **admit_kwargs,
+                )
+                self.assertEqual(retry, result)
+                self.assertEqual(
+                    len(store.load_events("authority_state", "canonical")),
+                    authority_event_count,
+                )
+                self.assertEqual(
+                    len(
+                        store.load_events(
+                            "risk_decision",
+                            result.risk_decision_id,
+                        )
+                    ),
+                    risk_event_count,
+                )
+                historical = (
+                    authority._validate_historical_financial_retry_evidence(
+                        result,
+                        item,
+                    )
+                )
+                self.assertEqual(
+                    historical["decision_id"],
+                    result.risk_decision_id,
                 )
 
     def test_symbol_alias_is_not_an_authority_identity(self):

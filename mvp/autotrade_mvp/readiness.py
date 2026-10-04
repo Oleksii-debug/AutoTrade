@@ -111,6 +111,57 @@ class RuntimeSafetySignals:
             )
 
 
+_RUNTIME_BOOLEAN_FIELDS = (
+    "journal_writable",
+    "emergency_disk_reserve_available",
+    "schema_compatible",
+    "provider_authenticated",
+    "provider_reconciled",
+    "market_data_fresh",
+    "sender_ownership_proven",
+    "old_sender_fenced",
+    "provider_native_protection_present",
+    "emergency_execution_path_qualified",
+    "protection_required_for_new_exposure",
+    "new_exposure_protection_path_qualified",
+    "financial_authority_dispatch_composition_qualified",
+    "unresolved_external_uncertainty",
+    "recovery_in_progress",
+)
+_RUNTIME_DECIMAL_FIELDS = (
+    "reconciliation_lag_seconds",
+    "maximum_reconciliation_lag_seconds",
+    "clock_skew_seconds",
+    "maximum_clock_skew_seconds",
+)
+
+
+def _reseal_runtime_safety_signals(value: object) -> RuntimeSafetySignals:
+    """Revalidate exact runtime safety state at the readiness trust boundary."""
+
+    if type(value) is not RuntimeSafetySignals:
+        raise ReadinessError("signals must be exact RuntimeSafetySignals")
+    state: dict[str, object] = {}
+    for field in _RUNTIME_BOOLEAN_FIELDS:
+        item = object.__getattribute__(value, field)
+        if type(item) is not bool:
+            raise ReadinessError(f"{field} must be boolean")
+        state[field] = item
+
+    count = object.__getattribute__(value, "unknown_send_count")
+    if type(count) is not int or count < 0:
+        raise ReadinessError("unknown_send_count must be a non-negative integer")
+    state["unknown_send_count"] = count
+
+    for field in _RUNTIME_DECIMAL_FIELDS:
+        item = object.__getattribute__(value, field)
+        if type(item) is not Decimal:
+            raise ReadinessError(f"{field} must retain exact Decimal state")
+        state[field] = item
+
+    return RuntimeSafetySignals(**state)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeReadiness:
     live: bool
@@ -127,8 +178,7 @@ class RuntimeReadiness:
 
 
 def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
-    if not isinstance(signals, RuntimeSafetySignals):
-        raise TypeError("signals must be RuntimeSafetySignals")
+    signals = _reseal_runtime_safety_signals(signals)
 
     blockers: list[str] = []
     warnings: list[str] = []

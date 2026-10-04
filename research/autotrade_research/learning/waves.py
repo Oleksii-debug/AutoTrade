@@ -387,6 +387,7 @@ class CandidateWave:
     candidate_artifact_hash: str
     candidate_created_at: datetime
     pause_decision_hash: str
+    pause_reasons: tuple[str, ...]
     paused_source_cut_hash: str
     paused_at: datetime
     error_analysis_hash: str
@@ -432,6 +433,12 @@ class CandidateWave:
             "pause_decision_hash",
             _digest(self.pause_decision_hash, name="pause_decision_hash"),
         )
+        if (
+            type(self.pause_reasons) is not tuple
+            or not self.pause_reasons
+            or any(type(reason) is not str or not reason for reason in self.pause_reasons)
+        ):
+            raise ValueError("pause_reasons must be a non-empty immutable tuple")
         paused_cut = _digest(
             self.paused_source_cut_hash,
             name="paused_source_cut_hash",
@@ -518,6 +525,7 @@ class CandidateWave:
             candidate_artifact_hash=candidate_artifact_hash,
             candidate_created_at=candidate_created_at,
             pause_decision_hash=pause.decision_hash,
+            pause_reasons=pause.reasons,
             paused_source_cut_hash=pause.source_cut_hash,
             paused_at=pause.paused_at,
             error_analysis_hash=error_analysis_hash,
@@ -614,6 +622,7 @@ def resolve_candidate(
         "candidate_id": wave.candidate_id,
         "candidate_artifact_hash": wave.candidate_artifact_hash,
         "pause_decision_hash": wave.pause_decision_hash,
+        "pause_reasons": list(wave.pause_reasons),
         "paused_at": wave.paused_at.isoformat(),
         "error_analysis_hash": wave.error_analysis_hash,
         "error_analysis_at": wave.error_analysis_at.isoformat(),
@@ -670,11 +679,25 @@ def publish_wave_resolution(
         "schema_version": "1.0.0",
         "artifact_kind": "LEARNING_WAVE_RESOLUTION",
         "wave_id": wave.wave_id,
-        "policy_hash": wave.policy_hash,
+        "policy": {
+            "policy_id": wave.policy.policy_id,
+            "policy_hash": wave.policy_hash,
+            "max_market_seconds": wave.policy.max_market_seconds,
+            "max_trades": wave.policy.max_trades,
+            "min_evidence_events": wave.policy.min_evidence_events,
+            "max_drawdown": (
+                None
+                if wave.policy.max_drawdown is None
+                else str(wave.policy.max_drawdown)
+            ),
+            "pause_on_regime_change": wave.policy.pause_on_regime_change,
+            "promotion_mode": wave.policy.promotion_mode,
+        },
         "champion_artifact_hash": wave.champion_artifact_hash,
         "candidate_id": wave.candidate_id,
         "candidate_artifact_hash": wave.candidate_artifact_hash,
         "pause_decision_hash": wave.pause_decision_hash,
+        "pause_reasons": list(wave.pause_reasons),
         "paused_source_cut_hash": wave.paused_source_cut_hash,
         "paused_at": wave.paused_at.isoformat(),
         "error_analysis_hash": wave.error_analysis_hash,
@@ -707,6 +730,7 @@ def publish_wave_resolution(
             "evaluation_id": approval.evaluation_id,
             "evaluation_result_hash": approval.evaluation_result_hash,
         },
+        "resolved_at": _time(resolved_at, name="resolved_at").isoformat(),
         "resolution": {
             "action": resolution.action,
             "reasons": list(resolution.reasons),

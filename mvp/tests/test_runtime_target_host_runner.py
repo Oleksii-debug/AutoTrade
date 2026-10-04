@@ -167,6 +167,41 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             self.assertTrue(result.retained_campaign_bytes)
             self.assertTrue(result.inventory_bytes)
 
+    def test_mutable_callable_object_is_rejected_before_campaign_cut(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            called = False
+
+            class MutableOperation:
+                def __call__(self) -> None:
+                    nonlocal called
+                    called = True
+                    append_expected(journal, "fin-1")
+
+            before = journal.current_journal_sequence()
+            with patch(
+                "mvp.autotrade_mvp.runtime_target_host_runner._require_shared_clock_contract",
+                return_value=None,
+            ), self.assertRaisesRegex(
+                RuntimeTargetHostRunnerError,
+                "exact Python function or bound method",
+            ):
+                run_declared_target_host_campaign(
+                    journal=journal,
+                    spec=spec,
+                    declared_plan_id="runner-plan",
+                    release_artifact_id=RELEASE_ID,
+                    release_artifact_sha256=RELEASE_SHA,
+                    declared_duration_ms=1_000,
+                    operations={"fin-1": MutableOperation()},
+                    research_operations=(("contention", lambda: None),),
+                )
+
+            self.assertFalse(called)
+            self.assertEqual(journal.current_journal_sequence(), before)
+
     def test_operation_mapping_must_match_durable_plan_before_campaign_cut(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

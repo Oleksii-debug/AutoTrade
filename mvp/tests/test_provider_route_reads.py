@@ -97,6 +97,7 @@ class ProviderRouteReadTests(unittest.TestCase):
             )
             self.assertEqual(binding.provider_environment, "TESTNET")
             self.assertTrue(binding.route_semantics_digest.startswith("sha256:"))
+            self.assertTrue(binding.endpoint_rule_digest.startswith("sha256:"))
             self.assertTrue(binding.qualified_route_rule_digest.startswith("sha256:"))
             self.assertEqual(binding.data_entitlement, "BALANCES")
             self.assertEqual(binding.accepted_success_statuses, (200,))
@@ -112,6 +113,7 @@ class ProviderRouteReadTests(unittest.TestCase):
                     query_binding=binding.query_binding,
                     qualification_id=binding.qualification_id,
                     route_semantics_digest=binding.route_semantics_digest,
+                    endpoint_rule_digest=binding.endpoint_rule_digest,
                     qualified_route_rule_digest=binding.qualified_route_rule_digest,
                     data_entitlement=binding.data_entitlement,
                     accepted_success_statuses=binding.accepted_success_statuses,
@@ -224,6 +226,10 @@ class ProviderRouteReadTests(unittest.TestCase):
             self.assertNotEqual(
                 first.route_semantics_digest,
                 second.route_semantics_digest,
+            )
+            self.assertEqual(
+                first.endpoint_rule_digest,
+                second.endpoint_rule_digest,
             )
             self.assertNotEqual(
                 first.qualified_route_rule_digest,

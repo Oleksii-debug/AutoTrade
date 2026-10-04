@@ -225,6 +225,79 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 permission_scope="ORDER.READ",
             )
 
+    def test_evidence_boundary_rejects_hostile_text_without_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "canonical non-empty text",
+        ):
+            resolve_authoritative_corporate_action(
+                HostileText(source.evidence_ref),
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
+    def test_evidence_boundary_rejects_registry_subclass_before_dispatch(self):
+        calls = []
+
+        class HostileRegistry(InstrumentRegistry):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("hostile registry dispatched")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=object.__new__(HostileRegistry),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
+    def test_evidence_boundary_rejects_response_subclass_before_dispatch(self):
+        calls = []
+        source = sealed_dividend()
+
+        class HostileResponse(type(source)):
+            def __getattribute__(self, name):
+                calls.append(name)
+                raise AssertionError("hostile response dispatched")
+
+        hostile = object.__new__(HostileResponse)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver=lambda _ref: hostile,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(calls, [])
+
     def test_expected_provider_account_environment_scope_is_authoritative(self):
         source = sealed_dividend()
         for field, value in (

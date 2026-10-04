@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
@@ -12,7 +13,10 @@ from mvp.autotrade_mvp.capabilities import (
     artifact_store_evidence_verifier,
     derive_capability_snapshot,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
@@ -65,7 +69,12 @@ def _trusted_issuer_verifiers():
     return {source: make(source) for source in SOURCES}
 
 
-def _claim(source: str, evidence_ref: dict[str, object], *, expires_at=None) -> CapabilityClaim:
+def _claim(
+    source: str,
+    evidence_ref: dict[str, object],
+    *,
+    expires_at=None,
+) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
         provider_id="simulated",
@@ -86,7 +95,12 @@ def _claim(source: str, evidence_ref: dict[str, object], *, expires_at=None) -> 
     )
 
 
-def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -> dict[str, object]:
+def _publish(
+    store: ArtifactStore,
+    source: str,
+    *,
+    account_id="paper-account",
+) -> dict[str, object]:
     artifact_id = str(uuid4())
     observed_at = "2026-09-24T15:59:00Z"
     source_uri = f"https://evidence.invalid/{source.lower()}"
@@ -118,6 +132,7 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
             "account_id": account_id,
             "entity_id": "entity-1",
             "environment": "PAPER",
+            "provider_environment": "PAPER",
             "instrument_version": "instrument-v1",
             "observed_at": observed_at,
             "issuer_ref": _issuer_ref(source),
@@ -135,6 +150,14 @@ def _publish(store: ArtifactStore, source: str, *, account_id="paper-account") -
     }
 
 
+def _verifier(directory, store, *, issuers=True):
+    return artifact_store_evidence_verifier(
+        evidence_root=directory,
+        publication_store=store,
+        issuer_verifiers=_trusted_issuer_verifiers() if issuers else None,
+    )
+
+
 class CapabilityArtifactEvidenceTests(unittest.TestCase):
     def test_evidence_verdict_cannot_use_truthy_non_boolean_authority(self):
         with self.assertRaisesRegex(CapabilityError, "must be boolean"):
@@ -143,6 +166,126 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             EvidenceVerification(valid=False)
         with self.assertRaisesRegex(CapabilityError, "reason must be text"):
             EvidenceVerification(valid=False, reason=123)
+
+    def test_trusted_root_is_mandatory_and_store_cannot_select_it(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            with self.assertRaisesRegex(TypeError, "evidence_root is required"):
+                artifact_store_evidence_verifier(store)
+
+    def test_publication_store_must_match_independent_root_generation(self):
+        with TemporaryDirectory() as trusted_directory:
+            with TemporaryDirectory() as other_directory:
+                trusted_store = ArtifactStore(trusted_directory)
+                other_store = ArtifactStore(other_directory)
+                _publish(other_store, "API")
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "does not match trusted artifact root",
+                ):
+                    artifact_store_evidence_verifier(
+                        evidence_root=trusted_directory,
+                        publication_store=other_store,
+                        issuer_verifiers=_trusted_issuer_verifiers(),
+                    )
+                self.assertIsInstance(trusted_store, ArtifactStore)
+
+    def test_publication_store_subclass_is_rejected_before_verification(self):
+        class ForgedStore(ArtifactStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            _publish(canonical, "API")
+            forged = ForgedStore(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "publication_store must be the canonical ArtifactStore",
+            ):
+                artifact_store_evidence_verifier(
+                    evidence_root=directory,
+                    publication_store=forged,
+                    issuer_verifiers=_trusted_issuer_verifiers(),
+                )
+
+    def test_caller_store_poisoning_before_capture_cannot_select_reader(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("caller store authority must not be used")
+
+            store.load_manifest = forbidden
+            store.read_bytes = forbidden
+            store._read_verified_object_bytes = forbidden
+            store._decode_manifest_bytes = forbidden
+            store.root = Path(directory) / "caller-redirect-before-capture"
+
+            verifier = _verifier(directory, store)
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+            self.assertEqual(snapshot.status, "VERIFIED")
+            self.assertEqual(snapshot.sources, frozenset(SOURCES))
+
+    def test_caller_store_methods_cannot_redirect_captured_trusted_reader(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+            verifier = _verifier(directory, store)
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("caller store method must not be used")
+
+            store.load_manifest = forbidden
+            store.read_bytes = forbidden
+            store._read_verified_object_bytes = forbidden
+            store._decode_manifest_bytes = forbidden
+            store.root = Path(directory) / "caller-redirected-root"
+
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+            self.assertEqual(snapshot.status, "VERIFIED")
+            self.assertEqual(snapshot.sources, frozenset(SOURCES))
+
+    def test_each_claim_uses_exactly_one_authenticated_snapshot_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            evidence_ref = _publish(store, "API")
+            claim = _claim("API", evidence_ref)
+            artifact_id = str(evidence_ref["artifact_id"])
+            held_snapshot = store.read_authenticated_snapshot(artifact_id)
+            calls: list[str] = []
+
+            def counted_reader(requested_artifact_id: str):
+                calls.append(requested_artifact_id)
+                return held_snapshot
+
+            with patch(
+                "mvp.autotrade_mvp.capabilities.trusted_authenticated_reader",
+                return_value=counted_reader,
+            ) as reader_factory:
+                verifier = artifact_store_evidence_verifier(
+                    evidence_root=directory,
+                    publication_store=store,
+                    issuer_verifiers=_trusted_issuer_verifiers(),
+                )
+                result = verifier(claim)
+
+            self.assertTrue(result.valid)
+            self.assertEqual(calls, [artifact_id])
+            reader_factory.assert_called_once_with(
+                directory,
+                publication_store=store,
+            )
 
     def test_syntactically_valid_but_missing_artifacts_never_verify(self):
         with TemporaryDirectory() as directory:
@@ -162,10 +305,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=claims,
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(
-                    store,
-                    issuer_verifiers=_trusted_issuer_verifiers(),
-                ),
+                evidence_verifier=_verifier(directory, store),
             )
             self.assertEqual(snapshot.status, "UNKNOWN")
             self.assertEqual(snapshot.sources, frozenset())
@@ -179,7 +319,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=tuple(_claim(source, refs[source]) for source in SOURCES),
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=_verifier(directory, store, issuers=False),
             )
             self.assertEqual(snapshot.status, "UNKNOWN")
             self.assertEqual(snapshot.sources, frozenset())
@@ -196,10 +336,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=tuple(_claim(source, refs[source]) for source in SOURCES),
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(
-                    store,
-                    issuer_verifiers=_trusted_issuer_verifiers(),
-                ),
+                evidence_verifier=_verifier(directory, store),
             )
             self.assertEqual(snapshot.status, "CONFLICTED")
             self.assertNotIn("API", snapshot.sources)
@@ -214,7 +351,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=tuple(_claim(source, refs[source]) for source in SOURCES),
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=_verifier(directory, store, issuers=False),
             )
             self.assertEqual(snapshot.status, "CONFLICTED")
 
@@ -227,7 +364,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                 snapshot_id=SNAPSHOT,
                 claims=tuple(_claim(source, refs[source]) for source in SOURCES),
                 observed_at=NOW,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=_verifier(directory, store, issuers=False),
             )
             self.assertEqual(snapshot.status, "CONFLICTED")
 
@@ -236,10 +373,7 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
             store = ArtifactStore(directory)
             refs = {source: _publish(store, source) for source in SOURCES}
             claims = tuple(_claim(source, refs[source]) for source in SOURCES)
-            verifier = artifact_store_evidence_verifier(
-                store,
-                issuer_verifiers=_trusted_issuer_verifiers(),
-            )
+            verifier = _verifier(directory, store)
             current = derive_capability_snapshot(
                 snapshot_id=SNAPSHOT,
                 claims=claims,

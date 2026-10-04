@@ -142,6 +142,61 @@ class DurableSettlementBindingUnforgeabilityTests(unittest.TestCase):
             gc.collect()
             self.assertIsNone(store_ref())
 
+    def test_failed_initial_reload_releases_bindings_for_safe_same_object_retry(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = JournalStore(root / "selected.sqlite")
+            artifacts = ArtifactStore(root / "evidence")
+            book = object.__new__(DurableSettlementBook)
+
+            original_reload = DurableSettlementBook._reload
+
+            def fail_initial_reload(_value) -> None:
+                raise RuntimeError("forced initial settlement reload failure")
+
+            DurableSettlementBook._reload = fail_initial_reload
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced initial settlement reload failure",
+                ):
+                    book.__init__(
+                        selected,
+                        provider_id="PROVIDER-A",
+                        account_id="acct-1",
+                        environment="PAPER",
+                        evidence_artifact_root=root / "evidence",
+                        evidence_artifact_store=artifacts,
+                    )
+            finally:
+                DurableSettlementBook._reload = original_reload
+
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "evidence authority is unavailable",
+            ):
+                settlement_authority._durable_settlement_evidence_reader(book)
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "binding is unavailable",
+            ):
+                settlement_authority._bound_durable_settlement_store(book)
+
+            book.__init__(
+                selected,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+                evidence_artifact_root=root / "evidence",
+                evidence_artifact_store=artifacts,
+            )
+            bound_store, _identity = book._selected_store()
+            self.assertIs(bound_store, selected)
+            self.assertIsNotNone(
+                settlement_authority._durable_settlement_evidence_reader(book)
+            )
+            book.refresh()
+
     def test_store_binding_is_not_observable_until_initial_reload_completes(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

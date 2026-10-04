@@ -536,7 +536,7 @@ def _install_durable_settlement_store_binding():
                 object.__setattr__(book, "scope_id", scope_id)
                 object.__setattr__(book, "_book", SettlementBook())
                 DurableSettlementBook._reload(book)
-            except Exception:
+            except BaseException:
                 entry = bindings.get(object_id)
                 if entry is not None and entry[0]() is book:
                     bindings.pop(object_id, None)
@@ -679,12 +679,41 @@ def _install_durable_settlement_evidence_reader():
             )
         return reader
 
-    return bind, bound
+    def unbind(book: object) -> None:
+        """Remove only this exact book's unpublished evidence binding."""
+        with lock:
+            object_id = id(book)
+            entry = readers.get(object_id)
+            if entry is None:
+                return
+            book_ref, reader_ref = entry
+            current = book_ref()
+            if current is not book:
+                if current is None:
+                    readers.pop(object_id, None)
+                    return
+                raise SettlementConflict(
+                    "durable settlement evidence binding identity collision"
+                )
+            reader = reader_ref()
+            readers.pop(object_id, None)
+            try:
+                visible_reader = object.__getattribute__(
+                    book,
+                    "_settlement_evidence_reader",
+                )
+            except AttributeError:
+                return
+            if reader is not None and visible_reader is reader:
+                object.__delattr__(book, "_settlement_evidence_reader")
+
+    return bind, bound, unbind
 
 
 (
     _bind_durable_settlement_evidence_reader,
     _durable_settlement_evidence_reader,
+    _unbind_durable_settlement_evidence_reader,
 ) = _install_durable_settlement_evidence_reader()
 del _install_durable_settlement_evidence_reader
 
@@ -712,40 +741,44 @@ class DurableSettlementBook:
             evidence_artifact_root,
             evidence_artifact_store,
         )
-        scope = SettlementAccountScope(
-            provider_id=provider_id,
-            account_id=account_id,
-            environment=environment,
-            provider_environment=provider_environment,
-        )
-        scope_id = _scope_id(scope)
+        try:
+            scope = SettlementAccountScope(
+                provider_id=provider_id,
+                account_id=account_id,
+                environment=environment,
+                provider_environment=provider_environment,
+            )
+            scope_id = _scope_id(scope)
 
-        if (
-            scope.provider_id == "BYBIT"
-            and scope.environment == "PAPER"
-            and scope.provider_environment != scope.environment
-        ):
-            legacy_scope_id = _legacy_runtime_only_scope_id(scope)
-            if legacy_scope_id != scope_id:
-                with journal_store_authority_scope(store, store_identity):
-                    legacy_events = JournalStore.load_events(
-                        store,
-                        _AGGREGATE_TYPE,
-                        legacy_scope_id,
-                    )
-                if legacy_events:
-                    raise SettlementConflict(
-                        "legacy BYBIT/PAPER settlement history lacks "
-                        "provider_environment; migration/reconciliation is required"
-                    )
+            if (
+                scope.provider_id == "BYBIT"
+                and scope.environment == "PAPER"
+                and scope.provider_environment != scope.environment
+            ):
+                legacy_scope_id = _legacy_runtime_only_scope_id(scope)
+                if legacy_scope_id != scope_id:
+                    with journal_store_authority_scope(store, store_identity):
+                        legacy_events = JournalStore.load_events(
+                            store,
+                            _AGGREGATE_TYPE,
+                            legacy_scope_id,
+                        )
+                    if legacy_events:
+                        raise SettlementConflict(
+                            "legacy BYBIT/PAPER settlement history lacks "
+                            "provider_environment; migration/reconciliation is required"
+                        )
 
-        _initialize_durable_settlement_store(
-            self,
-            store,
-            store_identity,
-            scope,
-            scope_id,
-        )
+            _initialize_durable_settlement_store(
+                self,
+                store,
+                store_identity,
+                scope,
+                scope_id,
+            )
+        except BaseException:
+            _unbind_durable_settlement_evidence_reader(self)
+            raise
 
     def _selected_authority(
         self,

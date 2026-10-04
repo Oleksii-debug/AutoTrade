@@ -1781,8 +1781,8 @@ class AblationTests(unittest.TestCase):
             cost_projection_ref = projection_ref(
                 "44444444-4444-4444-8444-444444444444",
                 projection_kind="COST",
-                owner_authority="CANONICAL_PROVIDER_ECONOMIC_BOOK",
-                rule_id="provider-economic-after-cost-v1",
+                owner_authority="CANONICAL_ABLATION_COST_COMPOSITE",
+                rule_id="complete-after-cost-attribution-v1",
             )
             protocol_payload = {
                 "hypothesis": "agent adds after-cost value",

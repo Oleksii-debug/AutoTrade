@@ -695,6 +695,34 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
         self.assertEqual(result.components[0].rate_used, Decimal("1.1000"))
         self.assertEqual(result.total, Decimal("110.0000"))
 
+    def test_quote_keys_are_normalized_before_currency_lookup(self):
+        result = value_cash_balances(
+            {"EUR": "100"},
+            reporting_currency="USD",
+            quotes={"eur": eurusd(bid="1.1", ask="1.2")},
+            as_of=NOW,
+            max_age=timedelta(minutes=1),
+        )
+
+        self.assertEqual(result.status, "CERTAIN")
+        self.assertEqual(result.total, Decimal("110"))
+
+    def test_duplicate_normalized_quote_keys_fail_closed(self):
+        with self.assertRaisesRegex(
+            FxValuationError,
+            "quotes contain duplicate normalized currency codes",
+        ):
+            value_cash_balances(
+                {"EUR": "100"},
+                reporting_currency="USD",
+                quotes={
+                    "EUR": eurusd(bid="1.1", ask="1.2"),
+                    "eur": eurusd(bid="9", ask="9"),
+                },
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
     def test_mapping_subclasses_are_rejected_before_mapping_callbacks(self):
         touched = []
 

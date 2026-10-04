@@ -2438,5 +2438,73 @@ class AblationTests(unittest.TestCase):
         self.assertIsNone(summary.mean_latency_delta_ms)
 
 
+    def test_authority_permissions_reject_text_subclass_before_sort_or_strip(self):
+        calls: list[str] = []
+
+        class HostileText(str):
+            def __lt__(self, other):
+                calls.append("lt")
+                raise AssertionError("permission comparison callback executed")
+
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("permission strip callback executed")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            permissions = {"RESEARCH", HostileText("ATTACKER")}
+
+            with self.assertRaisesRegex(ValueError, "exact canonical text"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id="permission-preflight",
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="1" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions=permissions,
+                )
+            self.assertEqual(calls, [])
+
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="permission-revalidation",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            authority.granted_permissions.add(HostileText("ATTACKER"))
+            result = evaluate_qualified_incremental_value(
+                "agent",
+                [
+                    pair(
+                        "permission-revalidation-a",
+                        "2",
+                        population_unit="permission-revalidation-unit-a",
+                    ),
+                    pair(
+                        "permission-revalidation-b",
+                        "2",
+                        population_unit="permission-revalidation-unit-b",
+                    ),
+                ],
+                authority=authority,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(
+                result.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

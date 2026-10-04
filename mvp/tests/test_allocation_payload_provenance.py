@@ -176,19 +176,25 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         self.assertEqual(hostile.calls, [])
 
-    def test_resolver_rechecks_sealed_payload_against_evidence_digest(self):
+    def test_sealed_payload_canonical_source_is_closure_private(self):
         evidence = self.evidence({"symbol": "AAA"})
         owner = evidence._payload_owners[-1]
-        object.__setattr__(owner, "_canonical_json", '{"symbol":"BBB"}')
 
-        with self.assertRaisesRegex(ValueError, "provenance digest mismatch"):
-            allocation_module._resolve_allocation_evidence(
-                evidence,
-                {evidence.evidence_id: evidence},
-                expected_kind="VALUATION",
-                expected_environment="SIMULATION",
-                at="2026-09-25T18:30:00Z",
-            )
+        with self.assertRaises(AttributeError):
+            object.__setattr__(owner, "_canonical_json", '{"symbol":"BBB"}')
+
+        resolved = allocation_module._resolve_allocation_evidence(
+            evidence,
+            {evidence.evidence_id: evidence},
+            expected_kind="VALUATION",
+            expected_environment="SIMULATION",
+            at="2026-09-25T18:30:00Z",
+        )
+        self.assertIs(resolved, evidence)
+        self.assertEqual(
+            allocation_module._allocation_payload_snapshot(evidence),
+            {"symbol": "AAA"},
+        )
 
     def test_mappingproxy_over_hostile_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileMapping()

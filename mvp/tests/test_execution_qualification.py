@@ -336,6 +336,35 @@ class ExecutionQualificationTests(unittest.TestCase):
                 **self.validation_kwargs(exec_model)
             )
 
+    def test_caller_poisoned_artifact_root_cannot_redirect_evidence_authority(self):
+        exec_model = model()
+        original_root = object.__getattribute__(self.store, "root")
+        with TemporaryDirectory() as directory:
+            attacker = ArtifactStore(Path(directory) / "attacker-artifacts")
+            attacker.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["protocol:wp13"],
+                metadata={"kind": "execution-qualification-evidence"},
+            )
+            object.__setattr__(
+                self.store,
+                "root",
+                object.__getattribute__(attacker, "root"),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ExecutionQualificationError,
+                    "artifact cannot be verified",
+                ):
+                    validate_execution_qualification(
+                        **self.validation_kwargs(exec_model)
+                    )
+            finally:
+                object.__setattr__(self.store, "root", original_root)
+
     def test_artifact_store_subclass_cannot_supply_execution_evidence_authority(self):
         class DerivedArtifactStore(ArtifactStore):
             pass
@@ -367,8 +396,11 @@ class ExecutionQualificationTests(unittest.TestCase):
         manifest = self.store.load_manifest(ARTIFACT_ID)
         with patch.object(
             execution_qualification_module,
-            "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
-            return_value=(manifest, b"different execution evidence bytes"),
+            "_CANONICAL_TRUSTED_AUTHENTICATED_READER",
+            return_value=lambda _artifact_id: (
+                manifest,
+                b"different execution evidence bytes",
+            ),
         ):
             with self.assertRaisesRegex(
                 ExecutionQualificationError,

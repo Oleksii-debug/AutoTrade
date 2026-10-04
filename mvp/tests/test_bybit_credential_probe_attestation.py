@@ -291,6 +291,111 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 1)
         self.assertEqual(result.ret_code, 10003)
         self.assertFalse(result.api_key_echo_confirmed)
+        self.assertFalse(result.provider_transport_confirmed)
+
+    def test_malformed_transport_proof_fails_closed_without_container_dispatch(self):
+        malformed = {}
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeWireResponse(
+                http_status=200,
+                response={"retCode": 10003},
+                _provider_transport_attestation=malformed,
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "transport attestation is invalid",
+        ):
+            BybitCredentialProbeEvidence(
+                credential_handle=_handle(),
+                provider_environment="MAINNET",
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                response_surface="V5_UTA_REST",
+                product_family="SPOT",
+                request_timestamp_ms=1791064800123,
+                recv_window_ms=5000,
+                http_status=200,
+                ret_code=10003,
+                response_sha256="sha256:" + "0" * 64,
+                observed_at="2030-01-01T00:00:00Z",
+                _provider_transport_attestation=malformed,
+            )
+
+    def test_transport_proof_controls_negative_classification(self):
+        untrusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+        )
+        trusted = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+        )
+        self.assertFalse(untrusted.provider_transport_confirmed)
+        self.assertTrue(trusted.provider_transport_confirmed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def untrusted_wire(**kwargs):
+                del kwargs
+                return untrusted
+
+            evidence = _probe(
+                vault=vault,
+                handle=handle,
+                wire_query=untrusted_wire,
+            )
+            self.assertFalse(evidence.provider_transport_confirmed)
+            self.assertEqual(evidence.classification.value, "INCONCLUSIVE")
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def trusted_wire(**kwargs):
+                del kwargs
+                return trusted
+
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=trusted_wire,
+                )
+
+        forged_success = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {"apiKey": "probe-key", "secret": ""},
+            },
+            api_key_echo_confirmed=True,
+            _provider_transport_attestation=probe_module._PROVIDER_TRANSPORT_ATTESTATION,
+            _provider_echo_attestation=probe_module._PROVIDER_ECHO_ATTESTATION,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def forged_success_wire(**kwargs):
+                del kwargs
+                return forged_success
+
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "canonical direct wire query",
+            ):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=forged_success_wire,
+                )
 
     def test_polymorphic_header_mapping_is_rejected_before_callbacks(self):
         hostile = _HostileHeaders(_headers())

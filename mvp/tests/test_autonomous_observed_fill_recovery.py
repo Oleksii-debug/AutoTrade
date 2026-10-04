@@ -111,6 +111,65 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                     store.current_journal_sequence(), replay_cut
                 )
 
+    def test_reduce_commit_response_loss_recovers_then_continues_once(self):
+        with TemporaryDirectory() as reference_dir:
+            reference = run(reference_dir)
+
+        with TemporaryDirectory() as directory:
+            original_atomic = (
+                session.commit_order_fill_with_reservation_consumption
+            )
+
+            def crash_after_reduce_commit(*args, **kwargs):
+                result = original_atomic(*args, **kwargs)
+                if kwargs["committed_at"] == "2026-10-03T00:00:04Z":
+                    raise RuntimeError("reduce commit response lost")
+                return result
+
+            with patch.object(
+                session,
+                "commit_order_fill_with_reservation_consumption",
+                crash_after_reduce_commit,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "reduce commit response lost"
+                ):
+                    run(directory)
+
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("recovery cannot resend reduce"),
+            ), patch.object(
+                session.AuthorityService,
+                "admit",
+                side_effect=AssertionError(
+                    "recovery cannot perform fresh risk admission"
+                ),
+            ):
+                recovered = run(
+                    directory,
+                    stop_after_episodes=5,
+                )
+
+            self.assertEqual(recovered["status"], "PAUSED")
+            self.assertEqual(recovered["completed_episodes"], 5)
+            self.assertEqual(recovered["position"], "0")
+            self.assertEqual(recovered["new_outbound_requests"], 0)
+            self.assertEqual(
+                recovered["decisions"],
+                reference["decisions"][:5],
+            )
+
+            completed = run(directory)
+            self.assertEqual(completed["status"], "COMPLETED")
+            self.assertEqual(
+                completed["decisions"], reference["decisions"]
+            )
+            self.assertEqual(completed["cash"], reference["cash"])
+            self.assertEqual(completed["position"], reference["position"])
+            self.assertEqual(completed["new_outbound_requests"], 1)
+
     def test_missing_retained_fill_stays_unknown_without_resend(self):
         original_event = session._loop_event
 

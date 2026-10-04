@@ -139,6 +139,63 @@ async function exercisePortfolioTableTools(page) {
     (document.querySelector("#portfolio-filter-status")?.textContent || "").endsWith(" rows shown."));
 }
 
+async function exerciseSnapshotBusyFailClosed(page) {
+  stage = "snapshot busy keyboard refresh";
+  let busy = true;
+  const routePattern = "**/api/v1/state";
+  const urgentBefore = await page.locator("#urgent-status").innerText();
+  await page.route(routePattern, async route => {
+    if (!busy) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Retry-After": "1",
+      },
+      body: JSON.stringify({error: "SNAPSHOT_BUSY", retryable: true}),
+    });
+  });
+  try {
+    await tabTo(page, "refresh-state");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => {
+      const refresh = document.querySelector("#refresh-state");
+      const submit = document.querySelector("#submit-command");
+      const freshness = document.querySelector("#freshness")?.textContent || "";
+      const polite = document.querySelector("#polite-status")?.textContent || "";
+      return refresh && !refresh.disabled && submit && submit.disabled
+        && /temporarily busy/i.test(freshness)
+        && /waiting for one coherent snapshot/i.test(polite);
+    });
+    assert.equal(
+      await page.evaluate(() => document.activeElement.id),
+      "refresh-state",
+      "snapshot-busy keyboard refresh focus");
+    assert.equal(await page.locator("#urgent-status").innerText(), urgentBefore);
+    busy = false;
+    await page.unroute(routePattern);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => {
+      const refresh = document.querySelector("#refresh-state");
+      const submit = document.querySelector("#submit-command");
+      const freshness = document.querySelector("#freshness")?.textContent || "";
+      return refresh && !refresh.disabled && submit && !submit.disabled
+        && freshness.includes("host=CURRENT");
+    });
+    assert.equal(
+      await page.evaluate(() => document.activeElement.id),
+      "refresh-state",
+      "snapshot-busy recovery focus");
+  } finally {
+    busy = false;
+    await page.unroute(routePattern).catch(() => {});
+  }
+}
+
 async function exerciseHostOutageFailClosed(page) {
   stage = "host outage keyboard refresh";
   await tabTo(page, "refresh-state");
@@ -182,6 +239,7 @@ async function exerciseHostOutageFailClosed(page) {
   assert.equal(await page.evaluate(() => document.activeElement.id), "main");
   assert.equal(await page.locator("#polite-status").getAttribute("role"), "status");
   assert.equal(await page.locator("#urgent-status").getAttribute("role"), "alert");
+  await exerciseSnapshotBusyFailClosed(page);
   await stop();
   await exerciseHostOutageFailClosed(page);
 

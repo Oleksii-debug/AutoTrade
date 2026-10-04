@@ -166,7 +166,15 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             project = write_project(root)
-            noncanonical = GOOD_HASH + '='
+            # 64 bytes encode with two pad characters.  Alter only the
+            # unused low pad bits so Python's strict decoder still yields the
+            # same 64 bytes while canonical base64 re-encoding differs.
+            self.assertTrue(GOOD_HASH.endswith('w=='))
+            noncanonical = GOOD_HASH[:-3] + 'x=='
+            self.assertEqual(
+                base64.b64decode(noncanonical, validate=True),
+                base64.b64decode(GOOD_HASH, validate=True),
+            )
             write_lock(project, content_hash=noncanonical)
             blockers = dotnet_lock_content_blockers(root, project)
             self.assertTrue(

@@ -2239,5 +2239,17 @@ class JournalBackedHostApiTests(unittest.TestCase):
             [1],
         )
 
+
+    def test_canonical_long_sequence_avoids_python_int_digit_limit(self):
+        store = self.store()
+        long_sequence = "9" * 5000
+        result = store.submit(self.command(version=long_sequence))
+        self.assertEqual(result.status, "CONFLICT")
+        self.assertEqual(result.reason_codes, ("stale_state_version",))
+        self.assertEqual(store.state_version, 0)
+        with self.assertRaisesRegex(ValueError, "ahead of host state"):
+            store.events_after(long_sequence)
+
+
 if __name__ == "__main__":
     unittest.main()

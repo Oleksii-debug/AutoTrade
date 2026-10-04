@@ -168,10 +168,18 @@ class AccessibleStatusTests(unittest.TestCase):
                 "cash": "1000",
                 "position": "0",
                 "journal_sequence": "7",
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "reconciled": True,
                 "fills": {},
                 "active_reservations": [],
             },
             {
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "initial_equity": "1000",
+                "cash": "1000",
+                "ending_position": "0",
                 "valuation_status": "CASH_ONLY",
                 "final_equity": "1000",
                 "net_pnl": "0",
@@ -195,10 +203,18 @@ class AccessibleStatusTests(unittest.TestCase):
                 "cash": "900",
                 "position": "1",
                 "journal_sequence": "8",
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "reconciled": True,
                 "fills": {"fill-1": {}},
                 "active_reservations": [],
             },
             {
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "initial_equity": "1000",
+                "cash": "900",
+                "ending_position": "1",
                 "valuation_status": "MARK_UNAVAILABLE",
                 "final_equity": None,
                 "net_pnl": None,
@@ -225,10 +241,18 @@ class AccessibleStatusTests(unittest.TestCase):
                 "cash": "1000",
                 "position": "0",
                 "journal_sequence": "9",
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "reconciled": True,
                 "fills": {},
                 "active_reservations": [],
             },
             {
+                "environment": "SIMULATION",
+                "currency": "USD",
+                "initial_equity": "1000",
+                "cash": "1000",
+                "ending_position": "0",
                 "valuation_status": "CASH_ONLY",
                 "final_equity": "987654321",
                 "net_pnl": "876543210",
@@ -267,10 +291,18 @@ class AccessibleStatusTests(unittest.TestCase):
                         "cash": "1000",
                         "position": "0",
                         "journal_sequence": "8",
+                        "environment": "SIMULATION",
+                        "currency": "USD",
+                        "reconciled": True,
                         "fills": {},
                         "active_reservations": [],
                     },
                     {
+                        "environment": "SIMULATION",
+                        "currency": "USD",
+                        "initial_equity": "1000",
+                        "cash": "1000",
+                        "ending_position": "0",
                         "valuation_status": "CASH_ONLY",
                         "final_equity": "1000",
                         "net_pnl": "0",
@@ -282,6 +314,88 @@ class AccessibleStatusTests(unittest.TestCase):
                 )
                 self.assertIn("Economic reconciliation: not confirmed", text)
                 self.assertIn("Final equity: Unavailable", text)
+
+    def test_canonical_economic_report_identity_and_arithmetic_fail_closed(self):
+        base_status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "11",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        base_report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": "1000",
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "reconciled": True,
+            "journal_sequence": "11",
+        }
+        cases = (
+            {"currency": "EUR"},
+            {"ending_position": "1"},
+            {"net_pnl": "1"},
+            {"total_fees": "-1"},
+            {"turnover": "-1"},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                report = dict(base_report)
+                report.update(override)
+                text = format_accessible_status(base_status, report)
+                self.assertIn("Economic reconciliation: not confirmed", text)
+                self.assertIn("Final equity: Unavailable", text)
+                self.assertIn(
+                    "Economic report validation: unavailable; malformed or incomplete canonical state",
+                    text,
+                )
+
+    def test_canonical_reconciliation_requires_status_and_report_agreement(self):
+        status = {
+            "status": "needs_recovery",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "12",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": False,
+            "fills": {},
+            "active_reservations": [],
+        }
+        report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": "1000",
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "reconciled": True,
+            "journal_sequence": "12",
+        }
+        text = format_accessible_status(status, report)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn("Final equity: 1000", text)
+        self.assertIn("Action required: recovery or reconciliation is needed", text)
 
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(

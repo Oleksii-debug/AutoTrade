@@ -11,7 +11,11 @@ from math import isfinite
 from typing import Any
 
 from ._generated_common_scalars import is_valid_common_scalar
-from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_subtract,
+    parse_canonical_decimal_text,
+)
 
 
 STATE_TEXT = {
@@ -96,29 +100,68 @@ def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable
 def _canonical_economic_report_is_readable(
     report: dict[str, Any],
     *,
-    expected_journal_sequence: str,
+    status: dict[str, Any],
 ) -> bool:
+    status_journal_sequence = status.get("journal_sequence")
     report_journal_sequence = report.get("journal_sequence")
     if (
-        not is_valid_common_scalar("Sequence", expected_journal_sequence)
+        not is_valid_common_scalar("Sequence", status_journal_sequence)
         or not is_valid_common_scalar("Sequence", report_journal_sequence)
-        or report_journal_sequence != expected_journal_sequence
+        or report_journal_sequence != status_journal_sequence
     ):
         return False
+
+    for key in ("environment", "currency"):
+        status_text = _safe_text(status.get(key), "")
+        report_text = _safe_text(report.get(key), "")
+        if not status_text or report_text != status_text:
+            return False
+
+    matched_values = {}
+    for report_key, status_key in (
+        ("initial_equity", "initial_cash"),
+        ("cash", "cash"),
+        ("ending_position", "position"),
+    ):
+        report_value = report.get(report_key)
+        status_value = status.get(status_key)
+        try:
+            parsed_report = parse_canonical_decimal_text(report_value)
+            parsed_status = parse_canonical_decimal_text(status_value)
+        except ExactDecimalError:
+            return False
+        if report_value != status_value or parsed_report != parsed_status:
+            return False
+        matched_values[report_key] = parsed_report
+
+    try:
+        total_fees = parse_canonical_decimal_text(report.get("total_fees"))
+        turnover = parse_canonical_decimal_text(report.get("turnover"))
+    except ExactDecimalError:
+        return False
+    if total_fees < 0 or turnover < 0:
+        return False
+
     valuation_status = _safe_text(report.get("valuation_status"), "")
-    required = ("total_fees", "turnover")
     if valuation_status == "CASH_ONLY":
-        required += ("final_equity", "net_pnl")
+        try:
+            final_equity = parse_canonical_decimal_text(report.get("final_equity"))
+            net_pnl = parse_canonical_decimal_text(report.get("net_pnl"))
+        except ExactDecimalError:
+            return False
+        if (
+            final_equity != matched_values["cash"]
+            or net_pnl != exact_subtract(
+                final_equity,
+                matched_values["initial_equity"],
+            )
+        ):
+            return False
     elif valuation_status == "MARK_UNAVAILABLE":
         if report.get("final_equity") is not None or report.get("net_pnl") is not None:
             return False
     else:
         return False
-    for key in required:
-        try:
-            parse_canonical_decimal_text(report.get(key))
-        except ExactDecimalError:
-            return False
     return True
 
 
@@ -288,11 +331,7 @@ def format_accessible_status(
             canonical_report_readable = (
                 _canonical_economic_report_is_readable(
                     economic_report,
-                    expected_journal_sequence=_canonical_sequence_value(
-                        status,
-                        "journal_sequence",
-                        "",
-                    ),
+                    status=status,
                 )
                 if state_format == "canonical_journal"
                 else True
@@ -308,6 +347,10 @@ def format_accessible_status(
             reconciliation_passed = (
                 economic_report.get("reconciled") is True
                 and canonical_report_readable
+                and (
+                    state_format != "canonical_journal"
+                    or status.get("reconciled") is True
+                )
             )
             lines.extend(
                 [

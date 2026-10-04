@@ -1137,7 +1137,7 @@ def create_backup(
         # backup. A restored generation must issue fresh authority after the
         # existing reconciliation/fencing gate is completed.
         runtime_checkpoint_evidence = "ABSENT"
-        runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state.parent)
+        runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state)
         if (
             runtime_checkpoint_source.exists()
             or runtime_checkpoint_source.is_symlink()

@@ -170,6 +170,32 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                     clock_utc=lambda: _NOW,
                 )
 
+    def test_product_modules_do_not_reach_raw_callback_sender_surface(self) -> None:
+        product_root = Path(__file__).resolve().parents[1] / "autotrade_mvp"
+        allowed = {"production_bybit.py", "financial_send_authority.py"}
+        forbidden = {
+            "ProductionBybitOrderSender",
+            "_build_production_bybit_order_sender",
+        }
+        violations = []
+        for source_path in sorted(product_root.glob("*.py")):
+            if source_path.name in allowed:
+                continue
+            source = source_path.read_text(encoding="utf-8")
+            for token in sorted(forbidden):
+                if token in source:
+                    violations.append(f"{source_path.name}:{token}")
+
+        self.assertEqual(violations, [])
+        public_arguments = build_production_bybit_order_sender.__code__.co_varnames[
+            : (
+                build_production_bybit_order_sender.__code__.co_argcount
+                + build_production_bybit_order_sender.__code__.co_kwonlyargcount
+            )
+        ]
+        self.assertIn("financial_issuer", public_arguments)
+        self.assertNotIn("authority_check", public_arguments)
+
     def test_builder_uses_exact_host_security_boundary_and_financial_scope(self) -> None:
         with TemporaryDirectory() as root:
             runtime, _host, boundary = self._runtime(root)

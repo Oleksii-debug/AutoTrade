@@ -10,6 +10,8 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
+from mvp.tests.test_reconciliation_journal import reconciliation
 
 
 class _FenceStub:
@@ -44,6 +46,37 @@ class ProductionFinancialHostTests(unittest.TestCase):
             admission_gate=object(),
             issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
+
+    def _mark_ready(
+        self,
+        runtime,
+        *,
+        provider_id: str = "BYBIT",
+        reconciliation_id: str = "production-host-ready",
+    ) -> None:
+        recovery = runtime.recovery_controller
+        owner = recovery.owner
+        self.assertIsNotNone(owner)
+        result = reconciliation(
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        record_reconciliation_checkpoint(
+            runtime.journal,
+            reconciliation_id=reconciliation_id,
+            result=result,
+            observed_at="2026-10-04T01:59:59Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            account_id=runtime.config.account_id,
+            environment=runtime.config.environment,
+        )
+        self.assertIs(recovery.state, HostState.READY)
 
     def test_exposed_config_mutation_cannot_retarget_financial_scope(self):
         with TemporaryDirectory() as directory:
@@ -162,9 +195,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             host = self._host(directory)
             runtime = compose_financial_authority(host)
             recovery = runtime.recovery_controller
-            recovery.state = HostState.READY
-            recovery.provider_reconciled = True
-            recovery.reason_codes.clear()
+            self._mark_ready(runtime)
 
             transport_entered = Event()
             release_transport = Event()

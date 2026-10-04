@@ -3,8 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+import json
+from tempfile import TemporaryDirectory
 import unittest
 
+from research.autotrade_research.artifacts.store import ArtifactStore
 from research.autotrade_research.learning.champion import CandidateApproval
 from research.autotrade_research.learning.waves import (
     CandidateWave,
@@ -12,6 +15,7 @@ from research.autotrade_research.learning.waves import (
     LearningWavePolicy,
     MarketWaveSnapshot,
     evaluate_pause,
+    publish_wave_resolution,
     resolve_candidate,
 )
 
@@ -730,6 +734,100 @@ class CandidateResolutionTests(unittest.TestCase):
         first = resolve(wave)
         second = resolve(wave)
         self.assertEqual(first.resolution_hash, second.resolution_hash)
+
+
+class LearningWavePersistenceTests(unittest.TestCase):
+    def test_resolution_is_retained_as_immutable_canonical_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            wave = candidate_wave(promotion_mode="CONFIRMATION")
+            approval_value = approval()
+            resolution, manifest = publish_wave_resolution(
+                store,
+                wave,
+                approval_value,
+                resolved_at=RESOLUTION_TIME,
+                rights={"storage": True, "export": False},
+            )
+            payload = json.loads(store.read_bytes(manifest["artifact_id"]).decode("utf-8"))
+
+            self.assertEqual(payload["artifact_kind"], "LEARNING_WAVE_RESOLUTION")
+            self.assertEqual(payload["wave_id"], wave.wave_id)
+            self.assertEqual(payload["candidate_artifact_hash"], wave.candidate_artifact_hash)
+            self.assertEqual(
+                payload["resolution"]["resolution_hash"],
+                resolution.resolution_hash,
+            )
+            self.assertEqual(
+                payload["resolution"]["action"],
+                "AWAITING_CONFIRMATION",
+            )
+            self.assertFalse(payload["resolution"]["grants_trading_authority"])
+            self.assertEqual(payload["training_population"]["observation_count"], 3)
+            self.assertEqual(payload["validation_population"]["observation_count"], 2)
+            self.assertEqual(
+                manifest["metadata"]["artifact_kind"],
+                "LEARNING_WAVE_RESOLUTION",
+            )
+            self.assertFalse(manifest["metadata"]["grants_trading_authority"])
+
+    def test_same_resolution_publication_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            wave = candidate_wave(promotion_mode="AUTO")
+            approval_value = approval()
+            first_resolution, first_manifest = publish_wave_resolution(
+                store,
+                wave,
+                approval_value,
+                resolved_at=RESOLUTION_TIME,
+                rights={"storage": True, "export": False},
+            )
+            second_resolution, second_manifest = publish_wave_resolution(
+                store,
+                wave,
+                approval_value,
+                resolved_at=RESOLUTION_TIME,
+                rights={"storage": True, "export": False},
+            )
+            self.assertEqual(first_resolution, second_resolution)
+            self.assertEqual(first_manifest["artifact_id"], second_manifest["artifact_id"])
+            self.assertEqual(first_manifest["sha256"], second_manifest["sha256"])
+
+    def test_rejected_candidate_retains_failure_reason_separately(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            wave = candidate_wave(promotion_mode="AUTO")
+            passing_resolution, passing_manifest = publish_wave_resolution(
+                store,
+                wave,
+                approval(),
+                resolved_at=RESOLUTION_TIME,
+                rights={"storage": True, "export": False},
+            )
+            rejected_resolution, rejected_manifest = publish_wave_resolution(
+                store,
+                wave,
+                approval(risk=False),
+                resolved_at=RESOLUTION_TIME,
+                rights={"storage": True, "export": False},
+            )
+            rejected = json.loads(
+                store.read_bytes(rejected_manifest["artifact_id"]).decode("utf-8")
+            )
+            self.assertNotEqual(
+                passing_resolution.resolution_hash,
+                rejected_resolution.resolution_hash,
+            )
+            self.assertNotEqual(
+                passing_manifest["artifact_id"],
+                rejected_manifest["artifact_id"],
+            )
+            self.assertIn(
+                "LEARNING_WAVE.RISK_GATE_FAILED",
+                rejected["resolution"]["reasons"],
+            )
+            self.assertEqual(rejected["resolution"]["action"], "REJECTED")
 
 
 if __name__ == "__main__":

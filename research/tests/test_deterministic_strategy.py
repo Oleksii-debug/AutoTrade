@@ -706,6 +706,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload["schema_version"] = 3
         del payload["descriptor_fingerprint"]
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
@@ -863,6 +864,7 @@ class DeterministicStrategyTests(unittest.TestCase):
         payload = json.loads(strategy.snapshot())
         payload["schema_version"] = 4
         del payload["configuration_fingerprint"]
+        del payload["strategy_family"]
         restored = ReturnThresholdBaseline.restore(
             json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )

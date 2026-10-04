@@ -392,7 +392,8 @@ class FuturesSettlementEvidence:
         if type(self.scope) is not FuturesSettlementScope:
             raise FuturesError("settlement scope must be exact FuturesSettlementScope")
         object.__setattr__(
-            self, "effective_at", _utc(self.effective_at, "effective_at")
+            self,
+            "effective_at", _utc(self.effective_at, "effective_at")
         )
         for name in ("sequence", "revision"):
             value = getattr(self, name)
@@ -967,12 +968,24 @@ def lifecycle_gate(
 
     for field_name in (
         "instrument",
+        "payoff",
+        "quote_currency",
+        "settlement_currency",
         "settlement_method",
     ):
         if type(getattr(contract, field_name)) is not str:
             raise FuturesError(
                 f"lifecycle contract {field_name} must be exact text"
             )
+    if type(contract.multiplier) is not Decimal:
+        raise FuturesError("lifecycle contract multiplier must be exact Decimal")
+    if (
+        contract.price_base_currency is not None
+        and type(contract.price_base_currency) is not str
+    ):
+        raise FuturesError(
+            "lifecycle contract price_base_currency must be exact text or None"
+        )
     for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
         value = getattr(contract, field_name)
         if type(value) is not datetime or value.tzinfo is not timezone.utc:
@@ -989,6 +1002,11 @@ def lifecycle_gate(
         type(version.instrument_id) is not str
         or type(version.version) is not int
         or type(version.asset_class) is not str
+        or type(version.payoff) is not str
+        or type(version.contract_multiplier) is not Decimal
+        or type(version.quote_currency) is not str
+        or type(version.settlement_currency) is not str
+        or type(version.base_currency) is not str
         or type(version.settlement_method) is not str
         or type(version.expiry) is not datetime
         or type(version.last_trade_at) is not datetime
@@ -1003,10 +1021,18 @@ def lifecycle_gate(
     if (
         version.asset_class != "FUTURE"
         or contract.instrument != f"{version.instrument_id}@{version.version}"
+        or contract.payoff != version.payoff
+        or contract.multiplier != version.contract_multiplier
+        or contract.quote_currency != version.quote_currency
+        or contract.settlement_currency != version.settlement_currency
         or contract.expiry != version.expiry
         or contract.last_trade_at != version.last_trade_at
         or contract.delivery_cutoff != version.delivery_cutoff
         or contract.settlement_method != version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != version.base_currency
+        )
     ):
         raise FuturesError(
             "futures lifecycle contract no longer matches canonical InstrumentVersion"
@@ -1046,41 +1072,84 @@ def lifecycle_gate(
         raise FuturesError(
             "canonical registry returned invalid InstrumentVersion authority"
         )
-    selected_lifecycle = (
+
+    selected_contract_cut = (
         selected_version.instrument_id,
         selected_version.version,
         selected_version.asset_class,
+        selected_version.payoff,
+        selected_version.contract_multiplier,
+        selected_version.quote_currency,
+        selected_version.settlement_currency,
+        selected_version.base_currency,
         selected_version.settlement_method,
         selected_version.expiry,
         selected_version.last_trade_at,
         selected_version.delivery_cutoff,
     )
-    supplied_lifecycle = (
+    supplied_contract_cut = (
         version.instrument_id,
         version.version,
         version.asset_class,
+        version.payoff,
+        version.contract_multiplier,
+        version.quote_currency,
+        version.settlement_currency,
+        version.base_currency,
         version.settlement_method,
         version.expiry,
         version.last_trade_at,
         version.delivery_cutoff,
     )
-    if selected_lifecycle != supplied_lifecycle:
+    if selected_contract_cut != supplied_contract_cut:
         raise FuturesError(
             "futures lifecycle InstrumentVersion differs from canonical registry selection"
         )
     if (
         contract.instrument
         != f"{selected_version.instrument_id}@{selected_version.version}"
+        or contract.payoff != selected_version.payoff
+        or contract.multiplier != selected_version.contract_multiplier
+        or contract.quote_currency != selected_version.quote_currency
+        or contract.settlement_currency != selected_version.settlement_currency
         or contract.expiry != selected_version.expiry
         or contract.last_trade_at != selected_version.last_trade_at
         or contract.delivery_cutoff != selected_version.delivery_cutoff
         or contract.settlement_method != selected_version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != selected_version.base_currency
+        )
     ):
         raise FuturesError(
             "futures lifecycle contract differs from canonical registry selection"
         )
 
     point = _utc(at, "at")
+    try:
+        effective_version = InstrumentRegistry.at(
+            instrument_registry,
+            selected_version.instrument_id,
+            point,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        ) from error
+    if type(effective_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid effective InstrumentVersion authority"
+        )
+    if (
+        effective_version.instrument_id != selected_version.instrument_id
+        or effective_version.version != selected_version.version
+    ):
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        )
+
+    if selected_version.status != "ACTIVE":
+        return f"INSTRUMENT_{selected_version.status}"
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:

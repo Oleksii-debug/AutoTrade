@@ -753,7 +753,11 @@ class ScientificRegistry:
                 canonical_dataset_id,
                 dataset_version,
             )
-            dataset_digest = _hash(vintage_manifest)
+            dataset_digest = HistoricalVintageRegistry.digest(
+                authoritative_vintages,
+                canonical_dataset_id,
+                dataset_version,
+            )
         except (HistoricalDataError, FileNotFoundError, OSError, ValueError) as error:
             raise ProtocolViolation(
                 "locked holdout historical vintage is unavailable or invalid"
@@ -812,6 +816,20 @@ class ScientificRegistry:
                 raise ProtocolViolation(
                     "locked holdout historical vintage does not cover "
                     "protocol forward_period"
+                )
+            availability = vintage_manifest.get("availability_policy")
+            if type(availability) is not dict:
+                raise ProtocolViolation(
+                    "locked holdout historical vintage lacks availability authority"
+                )
+            availability_cutoff = _registered_utc(
+                availability.get("cutoff"),
+                "locked holdout vintage availability cutoff",
+            )
+            if availability_cutoff < required_end:
+                raise ProtocolViolation(
+                    "locked holdout historical vintage availability cutoff "
+                    "does not cover protocol forward_period"
                 )
             identity = {
                 "dataset_digest": dataset_digest,

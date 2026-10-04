@@ -1545,7 +1545,9 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
-            with self.assertRaisesRegex(ValueError, "after causal cutoff"):
+            with self.assertRaisesRegex(ValueError, "not available by causal cutoff"):
+                pre_outcome_authority.resolve(cases, outcome_refs=())
+            with self.assertRaisesRegex(ValueError, "not available by causal cutoff"):
                 pre_outcome_authority.resolve(cases, outcome_refs=refs)
 
             with self.assertRaisesRegex(ValueError, "exactly match selected pairs"):

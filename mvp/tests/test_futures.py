@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 import unittest
@@ -798,6 +798,56 @@ class FuturesLifecycleTests(unittest.TestCase):
         hostile = object.__new__(HostileContract)
         with self.assertRaisesRegex(FuturesError, "exact FuturesContract"):
             lifecycle_gate(hostile, utc(29, 12))
+
+    def test_nested_hostile_timezone_is_rejected_without_callback_dispatch(self):
+        calls = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                calls.append("utcoffset")
+                raise AssertionError("hostile timezone callback executed")
+
+            def dst(self, _dt):
+                calls.append("dst")
+                raise AssertionError("hostile timezone callback executed")
+
+            def tzname(self, _dt):
+                calls.append("tzname")
+                raise AssertionError("hostile timezone callback executed")
+
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        hostile_expiry = datetime(2026, 9, 30, 21, tzinfo=HostileTimezone())
+        object.__setattr__(contract, "expiry", hostile_expiry)
+
+        with self.assertRaisesRegex(FuturesError, "exact UTC datetime"):
+            self._lifecycle_state(contract, utc(29, 11))
+        self.assertEqual(calls, [])
+
+    def test_nested_hostile_timezone_on_bound_version_is_rejected_without_callback_dispatch(self):
+        calls = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                calls.append("utcoffset")
+                raise AssertionError("hostile timezone callback executed")
+
+            def dst(self, _dt):
+                calls.append("dst")
+                raise AssertionError("hostile timezone callback executed")
+
+            def tzname(self, _dt):
+                calls.append("tzname")
+                raise AssertionError("hostile timezone callback executed")
+
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        version = contract.canonical_instrument
+        self.assertIsNotNone(version)
+        hostile_expiry = datetime(2026, 9, 30, 21, tzinfo=HostileTimezone())
+        object.__setattr__(version, "expiry", hostile_expiry)
+
+        with self.assertRaisesRegex(FuturesError, "exact UTC types"):
+            self._lifecycle_state(contract, utc(29, 11))
+        self.assertEqual(calls, [])
 
     def test_post_construction_contract_mutation_cannot_reopen_physical_delivery(self):
         contract = self._linear_contract(settlement_method="PHYSICAL")

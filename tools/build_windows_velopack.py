@@ -303,9 +303,10 @@ def _load_installer_manifest(path: Path) -> tuple[dict[str, object], str]:
     return manifest, "sha256:" + digest_hex
 
 
-def _validate_tool_manifest(path: Path = TOOL_MANIFEST) -> None:
+def _validate_tool_manifest(path: Path = TOOL_MANIFEST) -> str:
+    payload = _stable_bytes(path, name="dotnet tool manifest")
     value = _load_json_bytes(
-        _stable_bytes(path, name="dotnet tool manifest"),
+        payload,
         name="dotnet tool manifest",
     )
     if value.get("version") != 1 or value.get("isRoot") is not True:
@@ -320,6 +321,7 @@ def _validate_tool_manifest(path: Path = TOOL_MANIFEST) -> None:
         raise VelopackPackagingError(
             f"repository vpk tool must be pinned exactly to {VELOPACK_VERSION}"
         )
+    return "sha256:" + sha256(payload).hexdigest()
 
 
 def _match_installer_to_bundle(
@@ -736,7 +738,7 @@ def build_velopack_release(
     """
 
     _ensure_empty_output_directory(output_dir)
-    _validate_tool_manifest()
+    tool_manifest_sha256 = _validate_tool_manifest()
     installer, installer_digest = _load_installer_manifest(installer_manifest)
     signing_policy = None
     signing_policy_sha256 = None
@@ -851,6 +853,7 @@ def build_velopack_release(
         "installer_technology": {
             "name": "Velopack",
             "version": VELOPACK_VERSION,
+            "tool_manifest_sha256": tool_manifest_sha256,
             "pack_id": PACK_ID,
             "delivery_mode": "PER_USER_SETUP",
         },

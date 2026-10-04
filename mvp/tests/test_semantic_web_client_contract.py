@@ -47,13 +47,13 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'id="server-time"',
         ):
             self.assertIn(required, html)
-        self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
-        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("function renderProjection(bodyId, record, emptyMessage, {preserveSelection = true} = {})", js)
+        self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
         self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged})", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
-        self.assertIn("renderJobs(parsed.jobs)", js)
+        self.assertIn("renderJobs(parsed.jobs, {preserveSelection: !scopeChanged})", js)
         self.assertIn('text("server-time", parsed.serverTime)', js)
         self.assertNotIn("Not loaded.", html)
 

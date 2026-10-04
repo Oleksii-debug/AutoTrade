@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import autotrade_runtime.artifacts.durable_publish as durable_publish_module
 from tools.build_windows_bundle import (
     BundleError,
     WINDOWS_REPARSE_POINT,

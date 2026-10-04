@@ -22,7 +22,7 @@ from autotrade_foundation.windows_namespace import (
     retain_windows_parent_namespace,
     retain_windows_regular_file,
 )
-from research.autotrade_research.artifacts.durable_publish import (
+from autotrade_runtime.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_bytes_with_sha256_sidecar,
     validate_publication_destination,

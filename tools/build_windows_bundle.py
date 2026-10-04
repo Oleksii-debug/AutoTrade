@@ -12,7 +12,7 @@ import re
 import sys
 import zipfile
 
-from research.autotrade_research.artifacts.durable_publish import (
+from autotrade_runtime.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,

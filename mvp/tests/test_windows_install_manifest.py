@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import autotrade_runtime.artifacts.durable_publish as durable_publish_module
 import tools.build_windows_install_manifest as installer_manifest_module
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import (

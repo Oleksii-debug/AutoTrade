@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 from tempfile import TemporaryDirectory
 from typing import Mapping
@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.option_lifecycle import (
     OptionLifecycleConflict,
     OptionLifecycleError,
     OptionLifecycleObservation,
+    canonical_option_lifecycle_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -54,6 +55,10 @@ def option_version(
     settlement_method: str = "PHYSICAL",
     deliverable_quantity: str = "100",
     strike: str = "50",
+    quantity_unit: str = "contract",
+    quantity_step: str = "1",
+    minimum_quantity: str = "1",
+    maximum_quantity: str | None = None,
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
@@ -65,11 +70,14 @@ def option_version(
         base_currency="ABC",
         quote_currency="USD",
         settlement_currency="USD",
-        quantity_unit="contract",
+        quantity_unit=quantity_unit,
         contract_multiplier=Decimal("100"),
         price_tick=Decimal("0.01"),
-        quantity_step=Decimal("1"),
-        minimum_quantity=Decimal("1"),
+        quantity_step=Decimal(quantity_step),
+        minimum_quantity=Decimal(minimum_quantity),
+        maximum_quantity=(
+            None if maximum_quantity is None else Decimal(maximum_quantity)
+        ),
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
         effective_from=effective_from,
@@ -416,6 +424,280 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertRegex(
             evidence["parser_contract_digest"],
             r"^sha256:[0-9a-f]{64}$",
+        )
+
+    def test_fractional_lifecycle_quantity_off_canonical_grid_fails_before_mutation(self):
+        self.seed_option_position("0.5")
+        before_transactions = tuple(self.book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity_step",
+        ):
+            self.authority.apply(self.evidence(signed_contracts="0.5"))
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
+    def test_explicit_smaller_canonical_quantity_step_accepts_aligned_lifecycle_quantity(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.25",
+                    minimum_quantity="0.25",
+                ),
+            )
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("0.5")
+
+        result = authority.apply(self.evidence(signed_contracts="0.5"))
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("50"))
+
+    def test_lifecycle_quantity_does_not_inherit_order_entry_minimum(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.25",
+                    minimum_quantity="1",
+                ),
+            )
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("0.5")
+
+        result = authority.apply(self.evidence(signed_contracts="0.5"))
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("50"))
+
+    def test_lifecycle_quantity_does_not_inherit_order_entry_maximum(self):
+        registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="1",
+                    minimum_quantity="1",
+                    maximum_quantity="2",
+                ),
+            )
+        )
+        authority = self._authority(
+            registry=registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("3")
+
+        result = authority.apply(self.evidence(signed_contracts="3"))
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("300"))
+
+    def test_lifecycle_observation_decimal_identity_ignores_ambient_context(self):
+        observation = OptionLifecycleObservation(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            venue_id="OPTIONS",
+            instrument_version=f"{OPTION_ID}@1",
+            external_event_id="identity-context",
+            event_kind="EXERCISE",
+            signed_contracts=Decimal("12345678901234567890.125"),
+            effective_at=utc(12, 18, 19),
+            observed_at=utc(12, 18, 19, 1),
+            raw_evidence_digest="sha256:" + "c" * 64,
+            provider_revision="provider-context-r1",
+            underlying_price=Decimal("98765432109876543210.375"),
+        )
+        payloads = []
+        for precision in (6, 10, 28, 80):
+            with localcontext() as context:
+                context.prec = precision
+                payloads.append(canonical_option_lifecycle_observation(observation))
+
+        self.assertTrue(all(payload == payloads[0] for payload in payloads[1:]))
+        self.assertEqual(
+            payloads[0]["signed_contracts"],
+            "12345678901234567890.125",
+        )
+        self.assertEqual(
+            payloads[0]["underlying_price"],
+            "98765432109876543210.375",
+        )
+
+    def test_quantity_grid_admission_is_independent_of_ambient_decimal_context(self):
+        # Built-in abs(Decimal) is context-sensitive. Under this precision the
+        # off-grid .5 tail would round away if ambient Decimal context were
+        # allowed to become financial authority.
+        off_grid = "100000000000000000000000000000.5"
+        with localcontext() as context:
+            context.prec = 2
+            with self.assertRaisesRegex(
+                OptionLifecycleError,
+                "canonical instrument quantity_step",
+            ):
+                self.authority.apply(
+                    self.evidence(signed_contracts=off_grid)
+                )
+
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(self.book.transactions, ())
+
+    def test_correction_reproves_quantity_grid_before_any_reversal(self):
+        self.seed_option_position("-2")
+        first = self.evidence(
+            external_event_id="assignment-grid-r1",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+        before_transactions = tuple(self.book.transactions)
+        before_position = self.book.position(f"{OPTION_ID}@1")
+        before_cash = self.book.cash("USD")
+
+        correction = self.evidence(
+            external_event_id="assignment-grid-r2",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1.5",
+            observed_at=utc(12, 18, 19, 2),
+            provider_revision="provider-r2",
+            corrects_external_event_id="assignment-grid-r1",
+        )
+        with self.assertRaisesRegex(
+            OptionLifecycleError,
+            "canonical instrument quantity_step",
+        ):
+            self.authority.apply(correction)
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), before_position)
+        self.assertEqual(self.book.cash("USD"), before_cash)
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            1,
+        )
+
+    def test_correction_rejects_changed_instrument_grid_authority_before_reversal(self):
+        self.seed_option_position("-2")
+        first = self.evidence(
+            external_event_id="assignment-grid-authority-r1",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+
+        before_transactions = tuple(self.book.transactions)
+        before_position = self.book.position(f"{OPTION_ID}@1")
+        before_cash = self.book.cash("USD")
+
+        changed_registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.5",
+                    minimum_quantity="0.5",
+                ),
+            )
+        )
+        restarted_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        changed_authority = self._authority(
+            registry=changed_registry,
+            economic_book=restarted_book,
+        )
+        correction = self.evidence(
+            external_event_id="assignment-grid-authority-r2",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            observed_at=utc(12, 18, 19, 2),
+            provider_revision="provider-r2",
+            corrects_external_event_id="assignment-grid-authority-r1",
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "instrument version authority",
+        ):
+            changed_authority.apply(correction)
+
+        self.assertEqual(tuple(restarted_book.transactions), before_transactions)
+        self.assertEqual(
+            restarted_book.position(f"{OPTION_ID}@1"),
+            before_position,
+        )
+        self.assertEqual(restarted_book.cash("USD"), before_cash)
+        self.assertEqual(
+            len(
+                self.store.load_events(
+                    "option_lifecycle",
+                    changed_authority.aggregate_id,
+                )
+            ),
+            1,
+        )
+
+    def test_retry_under_changed_quantity_grid_is_not_equivalent(self):
+        self.seed_option_position("1")
+        reference = self.evidence()
+        first = self.authority.apply(reference)
+        self.assertTrue(first.inserted)
+        before_transactions = tuple(self.book.transactions)
+
+        changed_registry = InstrumentRegistry(
+            versions=(
+                option_version(
+                    quantity_step="0.5",
+                    minimum_quantity="0.5",
+                ),
+            )
+        )
+        restarted_book = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+        )
+        changed_authority = self._authority(
+            registry=changed_registry,
+            economic_book=restarted_book,
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "reused with changed evidence",
+        ):
+            changed_authority.apply(reference)
+
+        self.assertEqual(tuple(restarted_book.transactions), before_transactions)
+        self.assertEqual(
+            len(
+                self.store.load_events(
+                    "option_lifecycle",
+                    changed_authority.aggregate_id,
+                )
+            ),
+            1,
         )
 
     def test_lifecycle_cannot_consume_contracts_absent_from_canonical_position(self):

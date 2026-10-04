@@ -21,6 +21,15 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import JournalTransaction, posting, reverse_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_abs,
+    exact_multiply,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+    is_exact_decimal_multiple,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -183,12 +192,16 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise OptionLifecycleError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise OptionLifecycleError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise OptionLifecycleError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(f"{name} must be a bounded exact decimal") from error
+
+
+def _exact(operation, *args):
+    try:
+        return operation(*args)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError("option lifecycle arithmetic exceeds the exact resource envelope") from error
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -204,10 +217,12 @@ def _utc_text(value: datetime) -> str:
 def _decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    if value == 0:
-        return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "lifecycle decimal exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -356,7 +371,7 @@ def _standard_physical_exercise_cash(version: InstrumentVersion) -> Decimal:
         raise OptionLifecycleError(
             "adjusted physical deliverable requires explicit canonical exercise cash evidence"
         )
-    return version.strike * version.contract_multiplier
+    return _exact(exact_multiply, version.strike, version.contract_multiplier)
 
 
 def _contract_from_version(version: InstrumentVersion) -> OptionContract:
@@ -407,10 +422,16 @@ def _bind_version(
     registry: InstrumentRegistry,
     observation: OptionLifecycleObservation,
 ) -> InstrumentVersion:
-    if not isinstance(registry, InstrumentRegistry):
-        raise TypeError("registry must be InstrumentRegistry")
-    version = registry.exact(observation.instrument_version)
-    effective = registry.at(version.instrument_id, observation.effective_at)
+    if type(registry) is not InstrumentRegistry:
+        raise TypeError("registry must be exact InstrumentRegistry")
+    # Invoke the exact canonical implementation through the class so an exact
+    # registry instance cannot shadow financial lookup methods in __dict__.
+    version = InstrumentRegistry.exact(registry, observation.instrument_version)
+    effective = InstrumentRegistry.at(
+        registry,
+        version.instrument_id,
+        observation.effective_at,
+    )
     if effective != version:
         raise OptionLifecycleError(
             "instrument_version is not the version effective for lifecycle event"
@@ -421,6 +442,22 @@ def _bind_version(
         raise OptionLifecycleError("venue_id does not match instrument version")
     if version.asset_class != "OPTION":
         raise OptionLifecycleError("lifecycle event is not bound to an option")
+    # Lifecycle events are not order entry: minimum/maximum order size must not
+    # be invented as assignment/exercise constraints. The exact InstrumentVersion
+    # quantity grid remains financial authority here. Provider-native quantity-unit
+    # provenance is a separate provider/parser qualification boundary; this layer
+    # must neither invent a unit mapping nor turn an order-entry min/max into one.
+    try:
+        quantity = exact_abs(observation.signed_contracts)
+        aligned = is_exact_decimal_multiple(quantity, version.quantity_step)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "signed_contracts exceeds the supported exact-decimal quantity envelope"
+        ) from error
+    if not aligned:
+        raise OptionLifecycleError(
+            "signed_contracts is not aligned to canonical instrument quantity_step"
+        )
     return version
 
 
@@ -449,7 +486,7 @@ def _economic_transaction(
         posting(
             f"POSITION:{contract.instrument}",
             contract.instrument,
-            -observation.signed_contracts,
+            _exact(exact_subtract, Decimal("0"), observation.signed_contracts),
         ),
         posting(
             f"CLEARING:{contract.instrument}",
@@ -524,7 +561,7 @@ def _project_position_after_reversal(
             raise OptionLifecycleConflict(
                 "prior lifecycle economics do not contain one option-position retirement"
             )
-        projected -= matching[0].signed_amount
+        projected = _exact(exact_subtract, projected, matching[0].signed_amount)
     return projected
 
 
@@ -764,6 +801,10 @@ class DurableOptionLifecycleAuthority:
             if prior_payload.get("instrument_version") != observation.instrument_version:
                 raise OptionLifecycleConflict(
                     "correction cannot change instrument version identity"
+                )
+            if prior_payload.get("instrument_digest") != instrument_digest:
+                raise OptionLifecycleConflict(
+                    "correction cannot change instrument version authority"
                 )
             if prior_payload.get("event_kind") != observation.event_kind:
                 raise OptionLifecycleConflict("correction cannot change lifecycle event kind")

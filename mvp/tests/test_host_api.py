@@ -271,6 +271,16 @@ class HostCommandStateTests(unittest.TestCase):
             self.store.events_after("1")
 
 
+    def test_expected_state_version_requires_canonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                ValueError,
+                "canonical Sequence",
+            ):
+                self.store.submit(self.command(version=version))
+            self.assertEqual(self.store.state_version, 0)
+            self.assertEqual(self.store.cursor, 0)
+
     def test_event_cursor_rejects_noncanonical_sequence_text(self):
         self.store.submit(self.command())
         for after in ("01", "+1", "-0", " 0", "0 ", "\t0", "", True, 1.0, None):

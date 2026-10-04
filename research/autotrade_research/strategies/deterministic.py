@@ -1468,10 +1468,10 @@ class ReturnThresholdBaseline:
             expected.add("strategy_family")
         if set(payload) != expected or not isinstance(payload["history"], dict):
             raise ValueError("strategy snapshot structure is invalid")
-        if version in {2, 3, 4, 5} and not isinstance(payload["seen_events"], dict):
+        if version in {2, 3, 4, 5, 6} and not isinstance(payload["seen_events"], dict):
             raise ValueError("strategy seen-event snapshot is invalid")
         descriptor = None
-        if version in {3, 4, 5} and payload["descriptor"] is not None:
+        if version in {3, 4, 5, 6} and payload["descriptor"] is not None:
             raw_descriptor = payload["descriptor"]
             if not isinstance(raw_descriptor, dict):
                 raise ValueError("strategy descriptor snapshot is invalid")
@@ -1504,7 +1504,7 @@ class ReturnThresholdBaseline:
                 )
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("strategy descriptor snapshot is invalid") from error
-        if version in {4, 5}:
+        if version in {4, 5, 6}:
             declared_fingerprint = payload["descriptor_fingerprint"]
             if descriptor is None:
                 if declared_fingerprint is not None:
@@ -1531,7 +1531,7 @@ class ReturnThresholdBaseline:
             proposal_quantity=payload["proposal_quantity"],
             descriptor=descriptor,
         )
-        if version == 5:
+        if version in {5, 6}:
             declared_configuration = payload["configuration_fingerprint"]
             if strategy.configuration_fingerprint is None:
                 if declared_configuration is not None:
@@ -1570,7 +1570,7 @@ class ReturnThresholdBaseline:
                 )
                 strategy.ingest(observation, simulation_time=observation.available_at)
 
-        if version in {2, 3, 4, 5}:
+        if version in {2, 3, 4, 5, 6}:
             declared_seen: set[str] = set()
             for event_id, row in sorted(payload["seen_events"].items()):
                 if not isinstance(row, dict) or set(row) != {"symbol", "available_at", "price"}:

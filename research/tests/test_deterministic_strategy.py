@@ -2294,6 +2294,41 @@ class DeterministicStrategyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "legacy strategy snapshot"):
             BreakoutThresholdBaseline.restore(legacy)
 
+    def test_v6_registered_family_snapshot_restores_descriptor_seen_state_and_identity(self):
+        descriptor = self.family_descriptor(
+            family="DETERMINISTIC_BREAKOUT_THRESHOLD",
+            strategy_id="breakout-control",
+            minimum_history=3,
+        )
+        strategy = BreakoutThresholdBaseline(
+            lookback=3, threshold="0.01", proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        for item in (obs(0, "100"), obs(1, "101"), obs(2, "103")):
+            strategy.ingest(item, simulation_time=item.available_at)
+        snapshot = strategy.snapshot()
+        restored = BreakoutThresholdBaseline.restore(snapshot)
+        self.assertEqual(restored.snapshot(), snapshot)
+        self.assertEqual(restored.descriptor.fingerprint, descriptor.fingerprint)
+        self.assertEqual(
+            restored.configuration_fingerprint,
+            strategy.configuration_fingerprint,
+        )
+        self.assertEqual(
+            set(restored._observations_by_id),
+            {"event-0", "event-1", "event-2"},
+        )
+        self.assertEqual(
+            restored.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=2),
+            ),
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=2),
+            ),
+        )
+
     def test_registered_receipts_replay_each_supported_strategy_family(self):
         cases = (
             (

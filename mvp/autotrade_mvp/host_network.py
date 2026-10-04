@@ -21,6 +21,8 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from contracts.bindings.python.common_scalars import is_valid_common_scalar
+
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_api import EventGap, command_result_payload, operation_result_payload
 from .persistence import JournalStore
@@ -555,6 +557,8 @@ class AuthenticatedHostApplication:
                 if set(query) - {"after"} or len(query.get("after", ["0"])) != 1:
                     return _error(400, "INVALID_EVENT_CURSOR")
                 after = query.get("after", ["0"])[0]
+                if not is_valid_common_scalar("Sequence", after):
+                    return _error(400, "INVALID_EVENT_CURSOR")
                 events = tuple(
                     self._event_payload(event)
                     for event in self.store.events_after(after)

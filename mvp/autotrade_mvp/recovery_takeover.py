@@ -1051,6 +1051,22 @@ def execute_durable_takeover(
             raise DurableTakeoverError(
                 "takeover commit is blocked by durable submission uncertainty"
             )
+        started_effectful_sequence = started_payload.get(
+            "latest_effectful_submission_sequence"
+        )
+        current_effectful_sequence = _latest_effectful_submission_sequence(
+            store,
+            environment=handle.environment,
+            account_id=handle.account_id,
+        )
+        if (
+            type(started_effectful_sequence) is not int
+            or started_effectful_sequence < 0
+            or current_effectful_sequence != started_effectful_sequence
+        ):
+            raise DurableTakeoverError(
+                "durable submission state changed after takeover freeze"
+            )
 
         evidence_payload = events[1]["payload"]
         _verify_evidence_seal(vault, evidence_payload)

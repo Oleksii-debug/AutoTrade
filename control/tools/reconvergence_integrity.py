@@ -325,22 +325,45 @@ def assess_reconvergence(
     protected_damage: set[str] = set(protected)
     for change in validated_changes:
         kind = change.status[:1]
+        existing_workflow_path = (
+            change.path in base_path_set and _is_workflow_authority_path(change.path)
+        )
+        previous_existing_workflow_path = (
+            change.previous_path is not None
+            and change.previous_path in base_path_set
+            and _is_workflow_authority_path(change.previous_path)
+        )
+
         if (
             kind == "R"
-            and change.previous_path in protected_sentinels
+            and (
+                change.previous_path in protected_sentinels
+                or previous_existing_workflow_path
+            )
             and change.path != change.previous_path
         ):
             protected_damage.add(
                 f"{change.previous_path} -> {change.path} (rename)"
             )
-        if kind == "T" and change.path in protected_sentinels:
+        if (
+            kind == "D"
+            and existing_workflow_path
+        ):
+            protected_damage.add(change.path)
+        if (
+            kind == "T"
+            and (
+                change.path in protected_sentinels
+                or existing_workflow_path
+            )
+        ):
             protected_damage.add(f"{change.path} (type change)")
         if (
             kind == "M"
             and (
                 change.path in SELF_PROTECTING_TRUST_ROOTS
                 or change.path in BOOTSTRAP_TRUST_ROOTS
-                or change.path in WORKFLOW_AUTHORITY_ROOTS
+                or existing_workflow_path
                 or change.path in INTEGRATION_HARNESS_ROOTS
             )
             and not exactly_authorized(change.path)

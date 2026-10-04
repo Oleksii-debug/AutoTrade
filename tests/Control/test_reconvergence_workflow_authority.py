@@ -32,7 +32,44 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         }
 
         self.assertGreaterEqual(len(workflows), 10)
-        self.assertEqual(workflows - WORKFLOW_AUTHORITY_ROOTS, set())
+        self.assertTrue(WORKFLOW_AUTHORITY_ROOTS.issubset(workflows))
+        for path in sorted(workflows):
+            with self.subTest(path=path):
+                blocked = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="M", path=path)],
+                )
+                self.assertFalse(blocked.allowed)
+                self.assertIn(
+                    f"{path} (unauthorized trust-root modification)",
+                    blocked.protected_violations,
+                )
+
+                allowed = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="M", path=path)],
+                    allowed_scopes=(path,),
+                )
+                self.assertTrue(allowed.allowed)
+                self.assertEqual(allowed.protected_violations, ())
+
+    def test_newly_accepted_workflow_becomes_protected_without_static_registration(self):
+        path = ".github/workflows/future-authority.yaml"
+        self.assertNotIn(path, WORKFLOW_AUTHORITY_ROOTS)
+
+        for change in (
+            Change(status="M", path=path),
+            Change(status="D", path=path),
+            Change(status="T", path=path),
+            Change(status="R100", previous_path=path, path="archive/future-authority.yaml"),
+        ):
+            with self.subTest(status=change.status):
+                result = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[change],
+                )
+                self.assertFalse(result.allowed)
+                self.assertTrue(result.protected_violations)
 
     def test_untrusted_modification_of_integration_workflow_authorities_fails_closed(self):
         for path in (

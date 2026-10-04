@@ -422,6 +422,12 @@ class NewsRevision:
             + [alias for item in identities for alias in item.aliases]
         )
         allowed_slots = frozenset(slots)
+        for identity in identities:
+            for raw in raw_identities:
+                if _contains_identity(identity.slot, raw):
+                    raise NewsReplayError(
+                        f"identity slot {identity.slot} exposes a declared raw identity"
+                    )
         summary = _validate_template(
             self.summary_template,
             name="summary_template",
@@ -745,6 +751,12 @@ def build_news_replay_bundle(
     global_raw_identities = frozenset(all_raw_identities)
     for record in records_tuple:
         allowed_slots = frozenset(item.slot for item in record.identities)
+        for identity in record.identities:
+            for raw in global_raw_identities:
+                if _contains_identity(identity.slot, raw):
+                    raise NewsReplayError(
+                        f"identity slot {identity.slot} exposes a declared raw identity"
+                    )
         _validate_template(
             record.summary_template,
             name=f"{record.information_id} summary_template",

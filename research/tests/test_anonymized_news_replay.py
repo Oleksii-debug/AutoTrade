@@ -418,6 +418,42 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
                 claims=(claim(predicate="ACME_WARNING"),),
             )
 
+    def test_identity_slot_name_cannot_expose_declared_alias(self):
+        with self.assertRaisesRegex(NewsReplayError, "identity slot acme exposes"):
+            revision(
+                identities=(
+                    NewsIdentity("acme", "COMPANY", "Acme Corp", ("ACME",)),
+                ),
+                summary_template="{acme} reported quarterly earnings above expectations",
+                claims=(claim(subject_slot="acme"),),
+            )
+
+    def test_later_alias_declaration_rejects_earlier_cross_record_slot_leak(self):
+        earlier = revision(
+            information_id="story-a",
+            identities=(
+                NewsIdentity("acme", "COMPANY", "First Corp"),
+            ),
+            summary_template="{acme} reported quarterly earnings above expectations",
+            claims=(claim(subject_slot="acme"),),
+        )
+        later = revision(
+            information_id="story-b",
+            source_id="Independent Source",
+            source_sequence=2,
+            syndication_sha256="sha256:" + ("8" * 64),
+            content_sha256="sha256:" + ("8" * 64),
+            published_at="2024-03-12T10:01:00Z",
+            available_at="2024-03-12T10:01:05Z",
+            ingested_at="2024-03-12T10:01:07Z",
+            identities=(
+                NewsIdentity("company", "COMPANY", "Other Corp", ("ACME",)),
+            ),
+            summary_template="{company} reported quarterly earnings above expectations",
+        )
+        with self.assertRaisesRegex(NewsReplayError, "identity slot acme exposes"):
+            self.bundle(earlier, later)
+
     def test_alias_collision_across_distinct_entities_is_rejected(self):
         first = revision(
             information_id="story-a",

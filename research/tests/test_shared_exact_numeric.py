@@ -11,9 +11,9 @@ from autotrade_numeric._generated_common_scalars import CONTRACT_VERSION
 
 
 class SharedResearchNumericDependencyTests(unittest.TestCase):
-    def test_research_consumes_the_identical_shipped_v5_numeric_authority(self):
+    def test_research_consumes_the_identical_shipped_v6_numeric_authority(self):
         self.assertEqual((MAX_SIGNIFICANT_DIGITS, MAX_SCALE, MAX_INTEGER_DIGITS, MAX_RATIONAL_DIGITS), (256, 256, 256, 1024))
-        self.assertEqual(CONTRACT_VERSION, "5.0.0")
+        self.assertEqual(CONTRACT_VERSION, "6.0.0")
         self.assertEqual(as_fraction(Decimal("0.125")), Fraction(1, 8))
         self.assertEqual(bounded_fraction(Fraction(1, 3)), Fraction(1, 3))
         self.assertEqual(parse_canonical_decimal_text("1.25"), Decimal("1.25"))

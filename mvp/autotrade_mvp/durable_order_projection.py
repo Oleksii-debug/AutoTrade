@@ -26,6 +26,7 @@ from threading import RLock
 import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import research.autotrade_research.artifacts.store as artifact_store_module
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
@@ -297,6 +298,54 @@ def _order_projection_binding_operations():
     artifact_store_type = ArtifactStore
     authenticated_snapshot_read = ArtifactStore.read_authenticated_snapshot
     authenticated_snapshot_read_code = authenticated_snapshot_read.__code__
+    authenticated_manifest_method_names = (
+        "_assert_no_instance_method_shadows",
+        "_artifact_id",
+        "_manifest_path",
+        "_open_manifest_descriptor",
+        "_read_manifest_descriptor",
+        "_decode_manifest_bytes",
+        "_revalidate_manifest_descriptor",
+        "_validate_manifest_contract",
+        "_validate_manifest_entry",
+        "_validate_manifest_namespace",
+        "_same_filesystem_entry",
+        "_reject_reparse_point",
+    )
+    authenticated_manifest_module_names = (
+        "_verify_manifest_integrity",
+        "_manifest_integrity_hash",
+        "strict_json_loads",
+    )
+
+    def callable_identity(value):
+        function = getattr(value, "__func__", value)
+        return function, getattr(function, "__code__", None)
+
+    authenticated_manifest_methods = {
+        name: callable_identity(getattr(artifact_store_type, name))
+        for name in authenticated_manifest_method_names
+    }
+    authenticated_manifest_module_functions = {
+        name: callable_identity(getattr(artifact_store_module, name))
+        for name in authenticated_manifest_module_names
+    }
+
+    def require_authenticated_reader_graph():
+        if authenticated_snapshot_read.__code__ is not authenticated_snapshot_read_code:
+            raise OrderProjectionConflict(
+                "provider evidence authenticated snapshot reader authority changed"
+            )
+        for name, expected in authenticated_manifest_methods.items():
+            if callable_identity(getattr(artifact_store_type, name)) != expected:
+                raise OrderProjectionConflict(
+                    "provider evidence authenticated snapshot reader graph changed"
+                )
+        for name, expected in authenticated_manifest_module_functions.items():
+            if callable_identity(getattr(artifact_store_module, name)) != expected:
+                raise OrderProjectionConflict(
+                    "provider evidence authenticated snapshot reader graph changed"
+                )
 
     def evidence_namespace(evidence):
         if evidence is None:
@@ -391,10 +440,7 @@ def _order_projection_binding_operations():
                     raise OrderProjectionConflict(
                         "provider evidence ArtifactStore namespace authority changed"
                     )
-                if authenticated_snapshot_read.__code__ is not authenticated_snapshot_read_code:
-                    raise OrderProjectionConflict(
-                        "provider evidence authenticated snapshot reader authority changed"
-                    )
+                require_authenticated_reader_graph()
             return store, identity
 
     def read_provider_evidence(value, artifact_id: str):
@@ -410,10 +456,7 @@ def _order_projection_binding_operations():
                 raise OrderProjectionConflict(
                     "provider evidence ArtifactStore authority is unavailable"
                 )
-            if authenticated_snapshot_read.__code__ is not authenticated_snapshot_read_code:
-                raise OrderProjectionConflict(
-                    "provider evidence authenticated snapshot reader authority changed"
-                )
+            require_authenticated_reader_graph()
         return authenticated_snapshot_read(evidence, artifact_id)
 
     return registered, bind, require, read_provider_evidence

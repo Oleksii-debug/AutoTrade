@@ -163,6 +163,16 @@ def _identity_text(value: object, field: str) -> str:
     return normalized
 
 
+def _canonical_identity_text(value: object, field: str) -> str:
+    """Require already-canonical built-in text without normalizing authority identity."""
+
+    if type(value) is not str:
+        raise ValueError(f"{field} must be exact canonical non-empty text")
+    if not value or value != value.strip():
+        raise ValueError(f"{field} must be exact canonical non-empty text")
+    return value
+
+
 def _utc(value: datetime, field: str) -> datetime:
     # Scientific/economic evidence timestamps are authority-bearing UtcInstant
     # values. Reject caller-controlled datetime/tzinfo subclasses before any
@@ -1157,7 +1167,7 @@ class CanonicalAblationOutcomeEvidence:
             object.__setattr__(
                 self,
                 name,
-                _identity_text(getattr(self, name), name),
+                _canonical_identity_text(getattr(self, name), name),
             )
         if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be exact FULL or ABLATED text")
@@ -1222,7 +1232,7 @@ class RegisteredAblationPopulation:
                 "population_unit_ids must be a non-empty exact immutable tuple"
             )
         normalized = tuple(
-            _identity_text(value, "population_unit_id")
+            _canonical_identity_text(value, "population_unit_id")
             for value in self.population_unit_ids
         )
         if tuple(sorted(normalized)) != normalized:

@@ -626,6 +626,29 @@ class AblationTests(unittest.TestCase):
                 evaluation_cutoff_utc=CUT + timedelta(hours=2),
                 population_unit_ids=(HostileText("unit"),),
             )
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            CanonicalAblationOutcomeEvidence(
+                case_id=" case ",
+                variant="FULL",
+                population_unit_id="unit",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                outcome_available_utc=CUT + timedelta(hours=1),
+                source_revision="9" * 40,
+                utility_evidence_digest=FINGERPRINT_B,
+                cost_evidence_digest=FINGERPRINT_C,
+                evidence_digest=FINGERPRINT_D,
+            )
+        with self.assertRaisesRegex(ValueError, "population_unit_id"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_D,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision="9" * 40,
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT + timedelta(hours=2),
+                population_unit_ids=(" unit ",),
+            )
 
         with TemporaryDirectory() as directory:
             root = Path(directory)

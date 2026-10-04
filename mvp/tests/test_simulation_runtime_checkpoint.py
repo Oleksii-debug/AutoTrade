@@ -63,6 +63,20 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             )
             self.assertEqual(final_checkpoint.replay.cursor, len(PRICES))
 
+    def test_identical_semantics_in_distinct_journal_backings_keep_distinct_provenance(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            run(first, stop_after_episodes=3)
+            run(second, stop_after_episodes=3)
+            left = CompositeReplayCheckpoint.from_canonical_json(
+                checkpoint_path(first).read_text(encoding="utf-8")
+            )
+            right = CompositeReplayCheckpoint.from_canonical_json(
+                checkpoint_path(second).read_text(encoding="utf-8")
+            )
+            self.assertEqual(left.replay, right.replay)
+            self.assertNotEqual(left.runtime_cut_id, right.runtime_cut_id)
+            self.assertNotEqual(left.fingerprint, right.fingerprint)
+
     def test_same_terminal_cut_can_be_reopened_without_transport_or_mutation(self):
         with TemporaryDirectory() as directory:
             run(directory, stop_after_episodes=3)

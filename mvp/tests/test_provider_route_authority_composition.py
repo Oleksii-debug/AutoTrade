@@ -4,6 +4,7 @@ import unittest
 
 from mvp.autotrade_mvp import financial_send_authority, production_host
 from mvp.autotrade_mvp.authority import AuthorityService
+from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthorityError,
@@ -307,6 +308,43 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                 ),
                 route.capability,
             )
+
+    def test_public_bybit_builder_rejects_registry_without_exact_selected_capability(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "exact selected provider capability",
+            ):
+                build_production_bybit_order_sender(
+                    runtime,
+                    financial_issuer=issuer,
+                    provider_environment=route.candidate.provider_environment,
+                    capability_snapshot_id=route.capability_snapshot_id,
+                    capability_registry=CapabilityRegistry(),
+                    credential_handle=PersistentCredentialHandle(
+                        handle_id="cred-route-bybit-missing-capability",
+                        account_id="paper-account",
+                        provider="BYBIT",
+                        environment="PAPER",
+                        provider_environment=route.candidate.provider_environment,
+                        purpose="TRADE",
+                        generation=1,
+                    ),
+                    session_token="route-session-missing-capability",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: NOW,
+                )
 
     def test_partial_provider_route_binding_is_rejected(self):
         with TemporaryDirectory() as directory:

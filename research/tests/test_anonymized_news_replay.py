@@ -373,6 +373,62 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
                 )
             )
 
+    def test_revision_identity_slot_cannot_switch_entity_binding(self):
+        original = revision()
+        correction = revision(
+            revision_number=2,
+            revision_kind="CORRECTION",
+            supersedes_revision=1,
+            published_at="2024-03-12T10:20:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:01Z",
+            source_sequence=2,
+            identities=(
+                NewsIdentity("company", "COMPANY", "Other Corp"),
+            ),
+            summary_template="{company} corrected the reported earnings surprise to 11%",
+            claims=(
+                claim(
+                    claim_id="earnings-corrected",
+                    magnitude="11",
+                    relevance_bps=9000,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            NewsReplayError, "identity slot company changes binding"
+        ):
+            self.bundle(original, correction)
+
+    def test_revision_may_add_new_identity_slot_without_rebinding_existing_slot(self):
+        original = revision()
+        update = revision(
+            revision_number=2,
+            revision_kind="UPDATE",
+            supersedes_revision=1,
+            published_at="2024-03-12T10:20:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:01Z",
+            source_sequence=2,
+            identities=(
+                NewsIdentity("company", "COMPANY", "Acme Corp"),
+                NewsIdentity("country", "COUNTRY", "Freedonia"),
+            ),
+            summary_template="{company} updated guidance for operations in {country}",
+            claims=(
+                claim(
+                    claim_id="guidance",
+                    predicate="GUIDANCE_UPDATE",
+                    magnitude=None,
+                    unit=None,
+                    direction="MIXED",
+                    relevance_bps=7500,
+                ),
+            ),
+        )
+        bundle = self.bundle(original, update)
+        self.assertEqual(len(bundle.dataset.events), 2)
+
     def test_revision_chain_must_be_contiguous_and_historically_ordered(self):
         with self.assertRaisesRegex(NewsReplayError, "contiguous"):
             self.bundle(

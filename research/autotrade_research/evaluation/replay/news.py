@@ -515,6 +515,16 @@ def _validate_revision_chains(records: tuple[NewsRevision, ...]) -> None:
             raise NewsReplayError(
                 f"{information_id} revision 1 must be ORIGINAL and supersede nothing"
             )
+        slot_bindings: dict[str, tuple[str, str]] = {}
+        for current in ordered:
+            for identity in current.identities:
+                binding = (identity.namespace, identity.raw_value)
+                existing = slot_bindings.setdefault(identity.slot, binding)
+                if existing != binding:
+                    raise NewsReplayError(
+                        f"{information_id} identity slot {identity.slot} changes "
+                        "binding across revisions"
+                    )
         for current in ordered[1:]:
             if current.source_id != first.source_id:
                 raise NewsReplayError(

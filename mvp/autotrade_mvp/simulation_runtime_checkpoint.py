@@ -936,6 +936,24 @@ def preflight_autonomous_runtime_checkpoint(
         raise AutonomousRuntimeCheckpointError(
             "persisted autonomous runtime checkpoint identity differs from durable state"
         )
+
+    # Authenticate the persisted common-cut envelope before any provider or
+    # financial projection is reconstructed. The plain checkpoint fingerprint
+    # detects accidental corruption but is not an authority boundary: a writer
+    # that can replace the JSON bytes can recompute it. The product-owned HMAC
+    # key is available at this stage and verifies the exact replay, component,
+    # cut, build and protocol binding without consulting mutable runtime state.
+    key = _require_autonomous_runtime_authority_key(
+        root,
+        authority_key_identity,
+    )
+    verifier = _verifier(expected_authority_id, key)
+    try:
+        RuntimeStateVerifier.verify_checkpoint_binding(verifier, checkpoint)
+    except (ReplayError, TypeError, ValueError) as error:
+        raise AutonomousRuntimeCheckpointError(
+            "persisted autonomous runtime checkpoint authority seal is invalid"
+        ) from error
     return checkpoint
 
 

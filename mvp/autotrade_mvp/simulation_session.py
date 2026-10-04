@@ -1567,9 +1567,8 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     )
     protocol = dict(protocol)
     if not events:
-        protocol["runtime_authority_key_sha256"] = (
-            _issue_autonomous_runtime_authority_key(root)
-        )
+        key_identity = _issue_autonomous_runtime_authority_key(root)
+        protocol["runtime_authority_key_sha256"] = key_identity
     else:
         first = events[0]
         if (
@@ -1631,6 +1630,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         preflight_autonomous_runtime_checkpoint(
             root,
             protocol=protocol,
+            authority_key_identity=key_identity,
             completed_episodes=len(completed),
         )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
@@ -1663,6 +1663,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             root,
             store,
             protocol=protocol,
+            authority_key_identity=key_identity,
             completed=completed,
         )
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
@@ -1924,6 +1925,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             root,
             store,
             protocol=protocol,
+            authority_key_identity=key_identity,
             completed=completed,
         )
         previous_equities.append(equity)

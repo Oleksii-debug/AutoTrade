@@ -16,6 +16,7 @@ if __package__:
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
         dotnet_restore_command_tokens,
+        dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
     )
 else:
@@ -559,7 +560,10 @@ def build_manifest() -> dict[str, object]:
                     project.relative_to(ROOT).as_posix()
                     for project in dotnet_projects
                     if not any(
-                        project.relative_to(ROOT).as_posix() in tokens
+                        dotnet_restore_targets_project(
+                            tokens,
+                            project.relative_to(ROOT).as_posix(),
+                        )
                         for tokens in restore_tokens
                     )
                 ]

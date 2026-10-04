@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/5.0.0/market.schema.json",
+  "$id": "https://schemas.autotrade.local/6.0.0/market.schema.json",
   "title": "AutoTrade market/instrument contracts",
   "$defs": {
     "CapabilitySnapshot": {
@@ -130,6 +130,7 @@
       "required": [
         "event_id",
         "instrument_version",
+        "adapter_version",
         "kind",
         "source_event_at",
         "available_at",
@@ -147,6 +148,12 @@
         "instrument_version": {
           "type": "string",
           "minLength": 1
+        },
+        "adapter_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$"
         },
         "kind": {
           "enum": [
@@ -360,6 +367,83 @@
           "items": {
             "$ref": "common.schema.json#/$defs/EvidenceRef"
           }
+        },
+        "settlement_convention": {
+          "$ref": "#/$defs/SettlementConvention"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "asset_class": {
+                "const": "FUTURE"
+              },
+              "payoff": {
+                "const": "INVERSE"
+              }
+            },
+            "required": [
+              "asset_class",
+              "payoff"
+            ]
+          },
+          "then": {
+            "required": [
+              "settlement_convention"
+            ]
+          }
+        }
+      ]
+    },
+    "SettlementConvention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "provider_id",
+        "instrument_id",
+        "instrument_version",
+        "settlement_currency",
+        "quantum",
+        "rounding",
+        "evidence_artifact_id",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instrument_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "instrument_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "settlement_currency": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quantum": {
+          "$ref": "common.schema.json#/$defs/Decimal"
+        },
+        "rounding": {
+          "enum": [
+            "HALF_EVEN",
+            "DOWN"
+          ]
+        },
+        "evidence_artifact_id": {
+          "$ref": "common.schema.json#/$defs/Id"
+        },
+        "evidence_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         }
       }
     }

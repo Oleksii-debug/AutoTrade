@@ -1,10 +1,13 @@
 from dataclasses import fields, replace
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from datetime import datetime, timezone
 from inspect import signature
 import unittest
 from uuid import UUID
 
-from mvp.autotrade_mvp.futures import settle_and_book_inverse_variation_margin
+from mvp.autotrade_mvp.futures import (FuturesContract, FuturesError, inverse_settlement_convention,
+    settle_and_book_inverse_variation_margin, settle_fraction)
 from mvp.autotrade_mvp.instruments import (
     InstrumentRegistry,
     InstrumentRegistryError,
@@ -121,7 +124,7 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
                     calls.append(name)
                 return super().__getattribute__(name)
 
-        base = inverse_future()
+        base = inverse_future(settlement_convention=settlement_convention())
         hostile = HostileInstrumentVersion(**base.__dict__)
         calls.clear()
 
@@ -148,6 +151,41 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
             "settlement convention|settlement_convention",
         ):
             inverse_future()
+
+    def test_convention_scope_and_evidence_cannot_cross_instrument_authority(self):
+        for changes in ({"provider_id":"OTHER"}, {"instrument_id":"00000000-0000-0000-0000-000000000999"},
+                        {"instrument_version":2}, {"settlement_currency":"USD"},
+                        {"evidence_sha256":"sha256:" + "4" * 64}):
+            with self.subTest(changes=changes), self.assertRaises(InstrumentRegistryError):
+                inverse_future(settlement_convention=settlement_convention(**changes))
+
+    def test_hostile_convention_subclass_cannot_supply_terminal_policy(self):
+        calls = []
+        class HostileConvention(SettlementConvention):
+            def payload(self):
+                calls.append("payload")
+                raise AssertionError("virtual policy must be inert")
+        base = settlement_convention()
+        hostile = HostileConvention(**{field.name:getattr(base,field.name) for field in fields(base)})
+        with self.assertRaisesRegex(InstrumentRegistryError,"exact SettlementConvention"):
+            inverse_future(settlement_convention=hostile)
+        self.assertEqual(calls,[])
+
+    def test_terminal_policy_is_detached_and_revalidated_before_rounding(self):
+        supplied = settlement_convention()
+        version = inverse_future(settlement_convention=supplied)
+        object.__setattr__(supplied,"quantum","1")
+        contract = FuturesContract.from_instrument_version(version)
+        policy = inverse_settlement_convention(contract)
+        self.assertEqual(policy.quantum,"0.00000001")
+        for precision in (2,8,80):
+            with localcontext() as context:
+                context.prec=precision
+                self.assertEqual(settle_fraction(Fraction(1,1100),quantum=policy.quantum,
+                    rounding=policy.rounding),Decimal("0.00090909"))
+        object.__setattr__(version.settlement_convention,"instrument_version",2)
+        with self.assertRaises(FuturesError):
+            inverse_settlement_convention(contract)
 
     def test_inverse_booking_does_not_accept_free_caller_quantization_policy(self):
         parameters = signature(settle_and_book_inverse_variation_margin).parameters

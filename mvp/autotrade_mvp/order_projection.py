@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
 from typing import Mapping
 
 
@@ -29,15 +30,13 @@ def _environment(value: str) -> str:
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
+
 
 
 @dataclass(frozen=True)
@@ -131,6 +130,7 @@ class OrderProjection:
         self.cancel_command_id: str | None = None
         self.replace_requested = False
         self.replace_command_id: str | None = None
+        self._resolved_replace_commands: set[str] = set()
         self.expired = False
         self.rejected = False
         self._fills: dict[str, FillRecord] = {}
@@ -395,6 +395,8 @@ class OrderProjection:
     def request_replace(self, *, command_id: str) -> None:
         """Record one pending replace command without inventing completion."""
         command = _text(command_id, name="command_id")
+        if command in self._resolved_replace_commands:
+            raise OrderProjectionConflict("resolved replace command_id cannot be reused")
         if self.replace_command_id is not None:
             if self.replace_command_id == command:
                 return
@@ -415,6 +417,25 @@ class OrderProjection:
             )
         self.replace_command_id = command
         self.replace_requested = True
+
+    def reject_replace(self, *, command_id: str, reason_code: str) -> None:
+        """Reject only the pending amendment; preserve original order/fills.
+
+        A fill racing the response stays authoritative, including a complete
+        fill or overfill. Rejection never changes requested quantity, invents a
+        successor, or grants permission to submit a replacement.
+        """
+        command = _text(command_id, name="command_id")
+        _text(reason_code, name="reason_code")
+        if not self.replace_requested or self.replace_command_id is None:
+            raise OrderProjectionConflict("order has no pending replace request")
+        if self.replace_command_id != command:
+            raise OrderProjectionConflict(
+                "replace rejection command_id does not match pending request"
+            )
+        self._resolved_replace_commands.add(command)
+        self.replace_requested = False
+        self.replace_command_id = None
 
     def confirm_expired(self) -> None:
         """Record provider-evidenced expiry of the remaining quantity."""
@@ -462,10 +483,7 @@ class OrderProjection:
 
     @property
     def filled_quantity(self) -> Decimal:
-        return sum(
-            (fill.quantity for fill in self._fills.values() if fill.active),
-            Decimal("0"),
-        )
+        return exact_sum(fill.quantity for fill in self._fills.values() if fill.active)
 
     @property
     def active_fills(self) -> tuple[FillRecord, ...]:
@@ -481,19 +499,22 @@ class OrderProjection:
 
     @property
     def average_fill_price(self) -> Decimal | None:
+        # Display-only projection; hard lifecycle quantity comparisons remain
+        # exact. Individual execution prices never use this rounded average.
         fills = self.active_fills
-        total = sum((fill.quantity for fill in fills), Decimal("0"))
+        total = exact_sum(fill.quantity for fill in fills)
         if total == 0:
             return None
-        notional = sum(
-            (fill.quantity * fill.price for fill in fills),
-            Decimal("0"),
-        )
-        return notional / total
+        notional = exact_sum(exact_multiply(fill.quantity, fill.price) for fill in fills)
+        average = as_fraction(notional) / as_fraction(total)
+        try:
+            return terminating_decimal(average)
+        except ExactDecimalError:
+            return round_fraction_to_quantum(average, Decimal("0.000000000000000001"), mode="HALF_EVEN")
 
     @property
     def open_quantity(self) -> Decimal:
-        remaining = self.requested_quantity - self.filled_quantity
+        remaining = exact_subtract(self.requested_quantity, self.filled_quantity)
         return remaining if remaining > 0 else Decimal("0")
 
     def _state_without_oco(self) -> str:
@@ -572,7 +593,7 @@ class OrderProjection:
             filled_quantity=self.filled_quantity,
             open_quantity=self.open_quantity,
             overfill_quantity=max(
-                self.filled_quantity - self.requested_quantity,
+                exact_subtract(self.filled_quantity, self.requested_quantity),
                 Decimal("0"),
             ),
             average_fill_price=self.average_fill_price,

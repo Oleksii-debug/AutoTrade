@@ -38,6 +38,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "BAR",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "availability_basis": "provider-history",
             "payload": {"close": "100"},
@@ -76,6 +77,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
             "ingested_at": "2026-01-01T10:10:00Z",
@@ -102,6 +104,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "BAR",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
             "ingested_at": "2026-01-01T10:01:30Z",
@@ -137,6 +140,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:05:00Z",
             "ingested_at": "2026-01-01T10:05:01Z",
@@ -150,6 +154,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:01:00Z",
             "available_at": "2026-01-01T10:02:00Z",
             "ingested_at": "2026-01-01T10:02:01Z",
@@ -177,6 +182,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "availability_basis": "provider",
             "quality_flags": [],
         }
@@ -210,6 +216,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:01:00Z",
             "ingested_at": "2026-01-01T10:01:01Z",
@@ -241,6 +248,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:00:01Z",
             "ingested_at": "2026-01-01T10:00:02Z",
@@ -261,6 +269,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": event_id,
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "availability_basis": "provider",
             "quality_flags": [],
@@ -292,6 +301,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:02Z",
             "available_at": "2026-01-01T10:00:03Z",
             "ingested_at": "2026-01-01T10:00:04Z",
@@ -315,6 +325,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:00Z",
             "available_at": "2026-01-01T10:00:01Z",
             "ingested_at": "2026-01-01T10:00:02Z",
@@ -335,6 +346,7 @@ class HistoricalVintageTests(unittest.TestCase):
             "event_id": str(uuid4()),
             "instrument_version": "instrument:v1",
             "kind": "TRADE",
+            "adapter_version": "research-fixture-v1",
             "source_event_at": "2026-01-01T10:00:02Z",
             "available_at": "2026-01-01T10:00:01Z",
             "ingested_at": "2026-01-01T10:00:03Z",
@@ -416,10 +428,13 @@ class HistoricalVintageTests(unittest.TestCase):
                 )
 
     def _manifest(self, dataset_id: str, version: int, content: str) -> dict:
+        content_digest = digest(content)
+        content_evidence = evidence("2026-01-01T00:00:00Z")
+        content_evidence["sha256"] = content_digest
         return {
             "dataset_id": dataset_id,
             "version": str(version),
-            "content_hashes": [digest(content)],
+            "content_hashes": [content_digest],
             "instrument_universe_version": "universe:2026-01-01",
             "calendar_version": "calendar:2026a",
             "coverage": {"from": "2025-01-01T00:00:00Z", "to": "2026-01-01T00:00:00Z"},
@@ -448,9 +463,42 @@ class HistoricalVintageTests(unittest.TestCase):
             "missingness_report": explicit_missingness(
                 ["slot-1", "slot-2"], ["slot-1"]
             ).to_dict(),
-            "source_evidence": [evidence("2026-01-01T00:00:00Z")],
+            "source_evidence": [content_evidence],
             "created_at": "2026-01-01T00:00:01Z",
         }
+
+    def test_manifest_rejects_non_schema_scalar_coercion(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            dataset_id = str(uuid4())
+
+            numeric_version = self._manifest(dataset_id, 1, "numeric-version")
+            numeric_version["version"] = 1
+            with self.assertRaisesRegex(
+                HistoricalDataError,
+                "version must be canonical string Sequence",
+            ):
+                registry.commit(numeric_version)
+
+            datetime_created = self._manifest(dataset_id, 2, "datetime-created")
+            datetime_created["created_at"] = datetime(
+                2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc
+            )
+            with self.assertRaisesRegex(
+                HistoricalDataError,
+                "created_at must be canonical UTC text",
+            ):
+                registry.commit(datetime_created)
+
+            datetime_evidence = self._manifest(dataset_id, 3, "datetime-evidence")
+            datetime_evidence["source_evidence"][0]["observed_at"] = datetime(
+                2026, 1, 1, tzinfo=timezone.utc
+            )
+            with self.assertRaisesRegex(
+                HistoricalDataError,
+                "observed_at must be canonical UTC text",
+            ):
+                registry.commit(datetime_evidence)
 
     def test_manifest_cannot_claim_future_availability_cutoff(self):
         with TemporaryDirectory() as directory:
@@ -468,7 +516,9 @@ class HistoricalVintageTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = HistoricalVintageRegistry(Path(directory))
             manifest = self._manifest(str(uuid4()), 1, "chronology")
-            manifest["source_evidence"] = [evidence("2026-01-01T00:00:02Z")]
+            late_evidence = evidence("2026-01-01T00:00:02Z")
+            late_evidence["sha256"] = manifest["content_hashes"][0]
+            manifest["source_evidence"] = [late_evidence]
             manifest["created_at"] = "2026-01-01T00:00:01Z"
             with self.assertRaisesRegex(HistoricalDataError, "created_at cannot precede"):
                 registry.commit(manifest)

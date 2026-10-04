@@ -161,6 +161,37 @@ class ContractSchemaTests(unittest.TestCase):
     def test_dataset_manifest_fixture(self):
         self.validate("data.schema.json", "DatasetManifest", json.loads((FIXTURES / "dataset-manifest.valid.json").read_text()))
 
+    def test_dataset_manifest_requires_non_empty_source_evidence(self):
+        fixture = json.loads((FIXTURES / "dataset-manifest.valid.json").read_text())
+        schema = self.schemas["data.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/DatasetManifest"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        self.assertTrue(validator.is_valid(fixture))
+        candidate = json.loads(json.dumps(fixture))
+        candidate["source_evidence"] = []
+        self.assertFalse(validator.is_valid(candidate))
+
+    def test_market_event_requires_canonical_adapter_version(self):
+        fixture = json.loads((FIXTURES / "market-event.valid.json").read_text())
+        self.validate("market.schema.json", "MarketEvent", fixture)
+        schema = self.schemas["market.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/MarketEvent"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        for bad in ("", " adapter@1", "adapter version", "a" * 129):
+            with self.subTest(adapter_version=bad):
+                candidate = json.loads(json.dumps(fixture))
+                candidate["adapter_version"] = bad
+                self.assertFalse(validator.is_valid(candidate))
+        missing = json.loads(json.dumps(fixture))
+        missing.pop("adapter_version")
+        self.assertFalse(validator.is_valid(missing))
+
     def test_ui_command_fixture(self):
         self.validate("ui.schema.json", "UiCommand", json.loads((FIXTURES / "ui-command.valid.json").read_text()))
 

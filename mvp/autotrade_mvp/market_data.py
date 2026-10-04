@@ -69,6 +69,27 @@ def _admission_text(value: object, field: str) -> str:
     return normalized
 
 
+_ADAPTER_VERSION_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$"
+)
+
+
+def _adapter_version(value: object) -> str:
+    """Admit one bounded canonical adapter/source-build identity.
+
+    This is provenance identity, not provider qualification or authenticity by
+    possession.  Product-owned adapters must supply the exact build they used.
+    """
+
+    if type(value) is not str:
+        raise MarketDataError("adapter_version must be an exact string")
+    if _ADAPTER_VERSION_PATTERN.fullmatch(value) is None:
+        raise MarketDataError(
+            "adapter_version must be a canonical 1-128 character build token"
+        )
+    return value
+
+
 _MAX_BOOK_CAUSAL_TEXT_UTF8_BYTES = 1024
 
 
@@ -219,6 +240,7 @@ class RawMarketUpdate:
     provider_id: str
     venue_id: str
     provider_symbol: str
+    adapter_version: str
     kind: str
     source_event_at: datetime
     available_at: datetime
@@ -238,6 +260,11 @@ class RawMarketUpdate:
                 field,
                 _admission_text(getattr(self, field), field),
             )
+        object.__setattr__(
+            self,
+            "adapter_version",
+            _adapter_version(self.adapter_version),
+        )
         kind = _admission_text(self.kind, "kind").upper()
         if kind not in KINDS:
             raise MarketDataError("kind is unsupported")
@@ -298,6 +325,7 @@ class RawMarketUpdate:
 class NormalizedMarketEvent:
     event_id: str
     instrument_version: str
+    adapter_version: str
     kind: str
     source_event_at: datetime
     available_at: datetime
@@ -318,6 +346,7 @@ class NormalizedMarketEvent:
         result = {
             "event_id": self.event_id,
             "instrument_version": self.instrument_version,
+            "adapter_version": self.adapter_version,
             "kind": self.kind,
             "source_event_at": _utc_text(self.source_event_at),
             "available_at": _utc_text(self.available_at),
@@ -523,16 +552,24 @@ class MarketNormalizer:
             max_retained_book_events_per_stream
         )
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
-        self._seen_sequence_ids: set[tuple[str, str, str, str, int]] = set()
-        self._last_revision: dict[tuple[str, str, str, str, int], int] = {}
+        self._seen_sequence_ids: set[
+            tuple[str, str, str, str, str, str, int]
+        ] = set()
+        self._last_revision: dict[
+            tuple[str, str, str, str, str, str, int], int
+        ] = {}
         self._last_revision_available_at: dict[
-            tuple[str, str, str, str, int], datetime
+            tuple[str, str, str, str, str, str, int], datetime
         ] = {}
         self._sequence_source_identity: dict[
-            tuple[str, str, str, str, int], tuple[str, str, datetime]
+            tuple[str, str, str, str, str, str, int],
+            tuple[str, str, str, datetime],
         ] = {}
         self._seen_revision: dict[
-            tuple[str, str, str, str, int, int], tuple[str, str]
+            tuple[str, str, str, str, str, str, int, int], tuple[str, str]
+        ] = {}
+        self._adapter_version_by_stream_generation: dict[
+            tuple[str, str, str, str, str], str
         ] = {}
         self._book_state: dict[tuple[str, str, str, str], str] = {}
         self._book_last_available_at: dict[
@@ -545,6 +582,9 @@ class MarketNormalizer:
         self._provider_book_cursor: dict[
             tuple[str, str, str, str], int
         ] = {}
+        self._provider_book_baseline_cursor: dict[
+            tuple[str, str, str, str], int
+        ] = {}
         self._book_event_keys: dict[
             str, tuple[str, str, str, str]
         ] = {}
@@ -553,6 +593,9 @@ class MarketNormalizer:
             tuple[str, str, str, str], deque[str]
         ] = {}
         self._active_book_generation: dict[
+            tuple[str, str, str, str], int
+        ] = {}
+        self._generic_book_generation: dict[
             tuple[str, str, str, str], int
         ] = {}
         self._invalidated_provider_book_generations: set[
@@ -974,6 +1017,7 @@ class MarketNormalizer:
         self._book_last_available_at.pop(key, None)
         self._book_levels.pop(key, None)
         self._provider_book_cursor.pop(key, None)
+        self._provider_book_baseline_cursor.pop(key, None)
 
     def provider_book_generation(
         self,
@@ -1010,6 +1054,7 @@ class MarketNormalizer:
         self._book_last_available_at.pop(key, None)
         self._book_levels.pop(key, None)
         self._provider_book_cursor.pop(key, None)
+        self._provider_book_baseline_cursor.pop(key, None)
         self._clear_retained_book_events(key)
 
     def provider_book_cursor(
@@ -1076,6 +1121,10 @@ class MarketNormalizer:
             raise MarketDataError("provider book baseline requires BOOK_SNAPSHOT")
         if "BOOK_PROVIDER_CONTINUITY_PENDING" not in event.quality_flags:
             raise MarketDataError("snapshot is not pending provider continuity")
+        if "BOOK_RANGE_CONTINUITY_UNVERIFIED" in event.quality_flags:
+            raise MarketDataError(
+                "snapshot provider continuity is not qualified"
+            )
         if any(
             flag in event.quality_flags
             for flag in (
@@ -1099,6 +1148,7 @@ class MarketNormalizer:
             raise MarketDataError("provider snapshot baseline is crossed")
         self._book_levels[key] = materialized
         self._provider_book_cursor[key] = cursor
+        self._provider_book_baseline_cursor[key] = cursor
         self._book_state[key] = "BOOTSTRAPPING"
         # Snapshot availability is a causal prerequisite for every buffered
         # delta replay. Preserve it as a non-executable lower bound so the
@@ -1300,6 +1350,25 @@ class MarketNormalizer:
         cursor = admission.prior_sequence
 
         if admission.disposition == "DISCARD":
+            if "CORRECTION" in event.quality_flags:
+                baseline_cursor = self._provider_book_baseline_cursor.get(key)
+                if (
+                    baseline_cursor is None
+                    or admission.last_sequence > baseline_cursor
+                ):
+                    # A correction to any range covered after the accepted
+                    # snapshot can change levels already materialized into the
+                    # current book.  Sequence policy may classify that old range
+                    # as DISCARD relative to the current cursor, but correction
+                    # semantics take precedence: rebuild from a fresh snapshot.
+                    self._book_state[key] = "GAPPED"
+                    self._book_last_available_at.pop(key, None)
+                    self._book_levels.pop(key, None)
+                    self._provider_book_cursor.pop(key, None)
+                    self._provider_book_baseline_cursor.pop(key, None)
+                    raise MarketDataError(
+                        "historical provider range correction requires book rebuild"
+                    )
             return admission
         if (
             "DUPLICATE" in event.quality_flags
@@ -1315,6 +1384,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             return admission
 
         if admission.next_sequence != admission.last_sequence:
@@ -1336,6 +1406,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range event is not eligible for executable application"
             )
@@ -1351,6 +1422,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range delta exceeds the configured book-depth resource envelope"
             )
@@ -1359,6 +1431,7 @@ class MarketNormalizer:
             self._book_last_available_at.pop(key, None)
             self._book_levels.pop(key, None)
             self._provider_book_cursor.pop(key, None)
+            self._provider_book_baseline_cursor.pop(key, None)
             raise MarketDataError(
                 "qualified range delta would create a crossed book"
             )
@@ -1578,6 +1651,7 @@ class MarketNormalizer:
             provider_id=update.provider_id,
             venue_id=update.venue_id,
             provider_symbol=update.provider_symbol,
+            adapter_version=update.adapter_version,
             kind=update.kind,
             source_event_at=update.source_event_at,
             available_at=update.available_at,
@@ -1608,6 +1682,25 @@ class MarketNormalizer:
             stream,
         )
         book_kind = update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}
+        generation_identity = (
+            "NO_GENERATION"
+            if update.stream_generation is None
+            else f"GENERATION:{update.stream_generation}"
+        )
+        adapter_generation_key = (*stream_key, generation_identity)
+        if update.source_sequence is not None:
+            current_adapter_version = (
+                self._adapter_version_by_stream_generation.get(
+                    adapter_generation_key
+                )
+            )
+            if (
+                current_adapter_version is not None
+                and current_adapter_version != update.adapter_version
+            ):
+                raise MarketDataError(
+                    "adapter_version changed within active stream generation"
+                )
         bound_streams = {
             bound_stream
             for (provider_id, venue_id, bound_stream) in self._book_stream_policies
@@ -1641,6 +1734,37 @@ class MarketNormalizer:
                 raise MarketDataError(
                     "provider book event belongs to a superseded stream generation"
                 )
+        elif book_kind:
+            generic_generation = self._generic_book_generation.get(stream_key)
+            if generic_generation is not None and update.stream_generation is None:
+                raise MarketDataError(
+                    "book stream requires the active stream generation"
+                )
+            if update.stream_generation is not None:
+                if (
+                    generic_generation is not None
+                    and update.stream_generation < generic_generation
+                ):
+                    raise MarketDataError(
+                        "book event belongs to a superseded stream generation"
+                    )
+                if (
+                    generic_generation is None
+                    or update.stream_generation > generic_generation
+                ):
+                    # A generation boundary invalidates the previous materialized
+                    # book before any event from the new subscription can use it.
+                    # The new generation must establish its own snapshot baseline;
+                    # a first delta therefore remains non-executable.
+                    self._generic_book_generation[
+                        stream_key
+                    ] = update.stream_generation
+                    self._book_state[stream_key] = "UNINITIALIZED"
+                    self._book_last_available_at.pop(stream_key, None)
+                    self._book_levels.pop(stream_key, None)
+                    self._provider_book_cursor.pop(stream_key, None)
+                    self._provider_book_baseline_cursor.pop(stream_key, None)
+                    self._clear_retained_book_events(stream_key)
         try:
             normalized_payload = self._normalize_payload(
                 instrument,
@@ -1663,6 +1787,7 @@ class MarketNormalizer:
                 self._book_last_available_at.pop(stream_key, None)
                 self._book_levels.pop(stream_key, None)
                 self._provider_book_cursor.pop(stream_key, None)
+                self._provider_book_baseline_cursor.pop(stream_key, None)
             raise
         provider_continuity_fields = {
             "first_sequence",
@@ -1688,11 +1813,6 @@ class MarketNormalizer:
         has_unqualified_provider_continuity = (
             has_provider_continuity_fields or provider_qualified_stream
         )
-        generation_identity = (
-            "NO_GENERATION"
-            if update.stream_generation is None
-            else f"GENERATION:{update.stream_generation}"
-        )
         sequence_state_key = (
             stream_key
             if update.stream_generation is None
@@ -1710,6 +1830,7 @@ class MarketNormalizer:
                 update.provider_symbol,
                 stream,
                 generation_identity,
+                update.adapter_version,
             )
             if not has_unqualified_provider_continuity
             else (
@@ -1718,6 +1839,7 @@ class MarketNormalizer:
                 update.provider_symbol,
                 f"{stream}:{update.kind}",
                 generation_identity,
+                update.adapter_version,
             )
         )
         sequence_identity = (
@@ -1753,6 +1875,7 @@ class MarketNormalizer:
             instrument_version_id = self._instrument_version_id(instrument)
             source_identity = (
                 instrument_version_id,
+                update.adapter_version,
                 update.kind,
                 update.source_event_at,
             )
@@ -1771,6 +1894,7 @@ class MarketNormalizer:
                 _canonical(
                     {
                         "instrument_version": instrument_version_id,
+                        "adapter_version": update.adapter_version,
                         "kind": update.kind,
                         "source_event_at": _utc_text(update.source_event_at),
                         "available_at": _utc_text(update.available_at),
@@ -1990,6 +2114,7 @@ class MarketNormalizer:
                 update.provider_id,
                 update.venue_id,
                 update.provider_symbol,
+                update.adapter_version,
                 stream,
                 (
                     str(update.stream_generation)
@@ -2019,6 +2144,7 @@ class MarketNormalizer:
         event = NormalizedMarketEvent(
             event_id=event_id,
             instrument_version=self._instrument_version_id(instrument),
+            adapter_version=update.adapter_version,
             kind=update.kind,
             source_event_at=update.source_event_at,
             available_at=update.available_at,
@@ -2045,5 +2171,19 @@ class MarketNormalizer:
                     generation=active_generation,
                     sequence_identity=sequence_identity,
                     revision_identity=revision_identity,
+                )
+        if update.source_sequence is not None:
+            bound_adapter_version = (
+                self._adapter_version_by_stream_generation.get(
+                    adapter_generation_key
+                )
+            )
+            if bound_adapter_version is None:
+                self._adapter_version_by_stream_generation[
+                    adapter_generation_key
+                ] = update.adapter_version
+            elif bound_adapter_version != update.adapter_version:
+                raise RuntimeError(
+                    "adapter build authority changed after ingress validation"
                 )
         return event

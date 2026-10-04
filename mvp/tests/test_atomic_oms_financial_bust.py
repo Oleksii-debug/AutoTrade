@@ -123,6 +123,7 @@ def seed(
 def atomic_bust(
     orders: DurableOrderBookProjection,
     economics: DurableProviderEconomicBook,
+    reservations: DurableReservationBook,
     projected: ProjectedFillEvidence,
     provider: ProviderFillEvidence,
 ):
@@ -138,6 +139,8 @@ def atomic_bust(
         bust_provider_revision=BUST_REVISION,
         bust_observed_at=WHEN,
         order_event_key="bust-1",
+        reservation_book=reservations,
+        reservation_id="reservation-1",
         committed_at=WHEN,
     )
 
@@ -155,11 +158,15 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
         self.assertEqual(reversal.reverses_transaction_id, original.transaction_id)
         self.assertEqual(
             reservations.get("reservation-1").consumed["CASH:USD"],
-            Decimal("100"),
+            Decimal("0"),
         )
         self.assertEqual(
             reservations.get("reservation-1").remaining["CASH:USD"],
-            Decimal("20"),
+            Decimal("120"),
+        )
+        self.assertEqual(
+            reservations.total_reserved("CASH:USD"),
+            Decimal("120"),
         )
 
     def test_fresh_bust_is_atomic_restart_safe_and_idempotent(self):
@@ -170,13 +177,13 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             projected, provider = seed(orders, economics, reservations)
 
             self.assertTrue(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
             self.assert_busted(orders, economics, reservations)
 
             reopened = JournalStore(path)
             ro, re, rr = books(reopened)
-            self.assertFalse(atomic_bust(ro, re, projected, provider))
+            self.assertFalse(atomic_bust(ro, re, rr, projected, provider))
             self.assert_busted(ro, re, rr)
 
     def test_precommit_failure_leaves_oms_and_economics_unbusted(self):
@@ -202,7 +209,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     RuntimeError,
                     "atomic bust failure",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 JournalStore.commit_command = original
 
@@ -247,12 +254,12 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     RuntimeError,
                     "bust acknowledgement loss",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 JournalStore.commit_command = original
 
             ro, re, rr = books(JournalStore(path))
-            self.assertFalse(atomic_bust(ro, re, projected, provider))
+            self.assertFalse(atomic_bust(ro, re, rr, projected, provider))
             self.assert_busted(ro, re, rr)
 
     def test_replay_rejects_command_effect_from_wrong_aggregate_identity(self):
@@ -260,7 +267,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             store = JournalStore(Path(directory) / "journal.sqlite3")
             orders, economics, reservations = books(store)
             projected, provider = seed(orders, economics, reservations)
-            self.assertTrue(atomic_bust(orders, economics, projected, provider))
+            self.assertTrue(atomic_bust(orders, economics, reservations, projected, provider))
 
             original_load = accounting_impl._economic_store_load_command_event_batch
 
@@ -288,7 +295,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     AccountingConflict,
                     "unexpected durable effects",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 accounting_impl._economic_store_load_command_event_batch = original_load
 
@@ -316,11 +323,11 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(economics.position("ABC"), Decimal("1"))
 
             self.assertTrue(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
             self.assert_busted(orders, economics, reservations)
             self.assertFalse(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
 
     def test_fully_split_bust_state_is_not_relabelled_atomic(self):
@@ -352,11 +359,23 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "exist without one atomic/recovery command authority",
+                "missing reservation restoration",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
-            self.assert_busted(orders, economics, reservations)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("0"))
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
 
     def test_oms_only_recovery_fences_post_cut_journal_mutation(self):
         with TemporaryDirectory() as directory:
@@ -393,7 +412,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     ValueError,
                     "journal sequence changed after financial evidence validation",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 DurableOrderBookProjection.prepare_bust_fill_mutation = original_prepare
 
@@ -456,7 +475,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     AccountingConflict,
                     "settled fill bust requires provider settlement compensation authority",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 accounting_impl._economic_store_load_events = original_load
 
@@ -504,7 +523,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             accounting_impl._economic_store_load_events = with_unsettled_registration
             try:
                 self.assertTrue(
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
                 )
             finally:
                 accounting_impl._economic_store_load_events = original_load
@@ -532,7 +551,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 AccountingConflict,
                 "economic fill reversal is committed without the matching OMS bust",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
             self.assertEqual(
                 orders.order("order-1").snapshot().filled_quantity,
@@ -629,7 +648,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 AccountingConflict,
                 "OMS state differs from active provider evidence",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
             self.assertEqual(economics.position("ABC"), Decimal("1"))
             self.assertEqual(

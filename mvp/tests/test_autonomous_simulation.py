@@ -147,6 +147,44 @@ class AutonomousSimulationTests(unittest.TestCase):
                 ],
             )
 
+    def test_completed_replay_rejects_missing_settlement_completion_artifact(self):
+        prices = ["100", "101", "103", "90", "110", "120", "121"]
+        with TemporaryDirectory() as d:
+            with patch.object(simulation_module, "INITIAL_CASH", Decimal("150")):
+                result = run(d, prices)
+                self.assertEqual(result["status"], "COMPLETED")
+
+                store = JournalStore(Path(d) / "journal.sqlite3")
+                artifacts = ArtifactStore(Path(d) / "artifacts")
+                settlements = DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=ENVIRONMENT,
+                    evidence_artifact_root=Path(d) / "artifacts",
+                    evidence_artifact_store=artifacts,
+                )
+                evidence = next(iter(settlements.settled_obligation_evidence.values()))
+                artifact_id = (
+                    evidence.evidence_ref.removeprefix("artifact:").split("@", 1)[0]
+                )
+                artifacts._manifest_path(artifact_id).unlink()
+                before_submissions = store.load_events_by_aggregate_type(
+                    "submission_attempt"
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "artifact verification failed",
+                ):
+                    run(d, prices)
+
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("submission_attempt"),
+                    before_submissions,
+                )
+
     def test_consecutive_buy_signals_do_not_add_duplicate_exposure(self):
         with TemporaryDirectory() as d:
             result = run(d, [str(x) for x in range(100, 120)])

@@ -2149,7 +2149,10 @@ class JournalStore:
 
     @staticmethod
     def _command_environment(value: object) -> str:
-        normalized = value.strip().upper() if isinstance(value, str) else ""
+        # Match the exact-text authority boundary used by the rest of the
+        # command scope.  A str subclass must not execute caller-controlled
+        # strip/upper callbacks inside persistence admission.
+        normalized = value.strip().upper() if type(value) is str else ""
         if normalized not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError(
                 "environment must be REPLAY, SIMULATION, PAPER, or LIVE"

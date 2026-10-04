@@ -2766,7 +2766,7 @@ class KrakenSpotHttpTransport:
         ) as credential_plaintext:
             provider_api_key = None
             try:
-                provider_api_key = KrakenSpotCredential.parse(
+                provider_api_key = kraken_credential_parse(
                     credential_plaintext
                 ).api_key
                 nonce_domain = self.nonce_allocator.for_provider_api_key(
@@ -2999,7 +2999,7 @@ class KrakenSpotAuthenticatedReadTransport:
                 provider_api_key = None
                 with nonce_domain.serialized_send():
                     nonce = nonce_domain.allocate()
-                    signed = KrakenSpotAuthenticatedReadSigner.sign(
+                    signed = kraken_read_sign(
                         policy=self.policy,
                         query_binding=query_binding,
                         credential_plaintext=credential_plaintext,
@@ -4039,7 +4039,7 @@ class BybitV5AuthenticatedReadTransport:
             provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
-                signed = BybitV5AuthenticatedReadSigner.sign(
+                signed = bybit_read_sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -4638,7 +4638,7 @@ class BinanceSpotAuthenticatedReadTransport:
             purpose="READ",
         ) as credential_plaintext:
             try:
-                signed = BinanceSpotAuthenticatedReadSigner.sign(
+                signed = binance_read_sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -4695,6 +4695,13 @@ def _install_authenticated_read_execution_receipt_authority():
     direct_proxy_handler = ProxyHandler
     direct_redirect_handler = _NoRedirectHandler
     direct_response_limiter = require_provider_response_bytes
+    canonical_binance_policies = dict(BINANCE_SPOT_ENDPOINT_POLICIES)
+    canonical_bybit_policies = dict(BYBIT_V5_ENDPOINT_POLICIES)
+    canonical_kraken_policies = dict(KRAKEN_SPOT_ENDPOINT_POLICIES)
+    binance_read_sign = BinanceSpotAuthenticatedReadSigner.sign
+    bybit_read_sign = BybitV5AuthenticatedReadSigner.sign
+    kraken_read_sign = KrakenSpotAuthenticatedReadSigner.sign
+    kraken_credential_parse = KrakenSpotCredential.parse
 
     def prune() -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
@@ -4827,6 +4834,27 @@ def _install_authenticated_read_execution_receipt_authority():
             }
         )
 
+    def require_direct_request_scope(
+        request: AuthenticatedReadHttpRequest,
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> None:
+        parsed = urlsplit(request.url)
+        expected = urlsplit(policy.base_url + query_binding.endpoint)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected.hostname
+            or parsed.port not in (None, 443)
+            or parsed.path != expected.path
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read signed request escaped exact provider policy"
+            )
+
     def direct_execute_observe(
         *,
         request: AuthenticatedReadHttpRequest,
@@ -4916,6 +4944,15 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Binance authenticated-read transport type changed"
             )
+        canonical_policy = canonical_binance_policies.get(self.policy.environment)
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Binance authenticated-read network policy is not canonical"
+            )
+        if BinanceSpotAuthenticatedReadSigner.sign is not binance_read_sign:
+            raise ProviderTransportError(
+                "direct Binance authenticated-read signer authority changed"
+            )
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (
@@ -4957,6 +4994,11 @@ def _install_authenticated_read_execution_receipt_authority():
             finally:
                 credential_plaintext = None
             self._require_current_capability(query_binding, rule)
+            require_direct_request_scope(
+                signed,
+                policy=canonical_policy,
+                query_binding=query_binding,
+            )
             return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
@@ -4976,6 +5018,15 @@ def _install_authenticated_read_execution_receipt_authority():
         if type(self) is not BybitV5AuthenticatedReadTransport:
             raise ProviderTransportError(
                 "direct Bybit authenticated-read transport type changed"
+            )
+        canonical_policy = canonical_bybit_policies.get(self.provider_environment)
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Bybit authenticated-read network policy is not canonical"
+            )
+        if BybitV5AuthenticatedReadSigner.sign is not bybit_read_sign:
+            raise ProviderTransportError(
+                "direct Bybit authenticated-read signer authority changed"
             )
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
@@ -5019,6 +5070,11 @@ def _install_authenticated_read_execution_receipt_authority():
             finally:
                 credential_plaintext = None
             self._require_current_capability(query_binding, rule)
+            require_direct_request_scope(
+                signed,
+                policy=canonical_policy,
+                query_binding=query_binding,
+            )
             return direct_execute_observe(
                 request=signed,
                 query_binding=query_binding,
@@ -5038,6 +5094,18 @@ def _install_authenticated_read_execution_receipt_authority():
         if type(self) is not KrakenSpotAuthenticatedReadTransport:
             raise ProviderTransportError(
                 "direct Kraken authenticated-read transport type changed"
+            )
+        canonical_policy = canonical_kraken_policies.get("LIVE")
+        if self.policy is not canonical_policy:
+            raise ProviderTransportError(
+                "direct Kraken authenticated-read network policy is not canonical"
+            )
+        if (
+            KrakenSpotAuthenticatedReadSigner.sign is not kraken_read_sign
+            or KrakenSpotCredential.parse is not kraken_credential_parse
+        ):
+            raise ProviderTransportError(
+                "direct Kraken authenticated-read signer authority changed"
             )
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
@@ -5082,6 +5150,11 @@ def _install_authenticated_read_execution_receipt_authority():
                         nonce=nonce,
                     )
                     self._require_current_capability(query_binding, rule)
+                    require_direct_request_scope(
+                        signed,
+                        policy=canonical_policy,
+                        query_binding=query_binding,
+                    )
                     return direct_execute_observe(
                         request=signed,
                         query_binding=query_binding,

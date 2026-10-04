@@ -285,6 +285,8 @@ class KrakenSpotExecutionsSubscriptionAck:
     subscription_binding: KrakenSpotExecutionsSubscriptionBinding
     evidence_ref: str
     response_bytes: bytes = field(repr=False, compare=False)
+    maxratecount: int | None = None
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -324,6 +326,18 @@ class KrakenSpotExecutionsSubscriptionAck:
             )
         if type(self.response_bytes) is not bytes:
             raise TypeError("response_bytes must be bytes")
+        if self.maxratecount is not None and (
+            type(self.maxratecount) is not int or self.maxratecount < 0
+        ):
+            raise KrakenSpotStreamError(
+                "maxratecount must be a non-negative exact integer when present"
+            )
+        if type(self.warnings) is not tuple or any(
+            type(item) is not str for item in self.warnings
+        ):
+            raise KrakenSpotStreamError(
+                "warnings must be an exact tuple of strings"
+            )
         expected_ref = (
             "provider-stream:sha256:"
             + sha256(self.response_bytes).hexdigest()
@@ -410,6 +424,20 @@ def parse_executions_subscription_ack(
         raise KrakenSpotStreamError(
             "Kraken executions subscription must acknowledge snap_trades=false"
         )
+    maxratecount = result.get("maxratecount")
+    if maxratecount is not None and (
+        type(maxratecount) is not int or maxratecount < 0
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription maxratecount must be a non-negative integer"
+        )
+    raw_warnings = result.get("warnings", [])
+    if type(raw_warnings) is not list or any(
+        type(item) is not str for item in raw_warnings
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription warnings must be an array of strings"
+        )
 
     exact = response_bytes
     return KrakenSpotExecutionsSubscriptionAck(
@@ -421,6 +449,8 @@ def parse_executions_subscription_ack(
             "provider-stream:sha256:" + sha256(exact).hexdigest()
         ),
         response_bytes=exact,
+        maxratecount=maxratecount,
+        warnings=tuple(raw_warnings),
     )
 
 

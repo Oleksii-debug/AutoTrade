@@ -563,6 +563,49 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertNotIn(b"token", acknowledgement.response_bytes.lower())
         self.assertNotIn("token", binding.evidence_ref)
 
+    def test_subscription_ack_retains_rate_ceiling_and_schema_warnings(self):
+        binding = subscription_binding()
+        raw = (
+            b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":180,"warnings":["field deprecation scheduled"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        self.assertEqual(acknowledgement.maxratecount, 180)
+        self.assertEqual(
+            acknowledgement.warnings,
+            ("field deprecation scheduled",),
+        )
+
+    def test_subscription_ack_rejects_malformed_rate_ceiling_or_warnings(self):
+        binding = subscription_binding()
+        cases = (
+            (
+                b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+                b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+                b'"maxratecount":true}}',
+                "maxratecount",
+            ),
+            (
+                b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+                b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+                b'"warnings":"deprecated"}}',
+                "warnings",
+            ),
+        )
+        for raw, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                message,
+            ):
+                parse_executions_subscription_ack(
+                    raw,
+                    subscription_binding=binding,
+                )
+
     def test_subscription_binding_rejects_noncanonical_profile(self):
         valid = subscription_binding()
         with self.assertRaisesRegex(

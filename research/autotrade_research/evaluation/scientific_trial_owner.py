@@ -76,22 +76,50 @@ def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
     Sequence order is preserved exactly because GateProfile itself preserves it;
     the subject digest must not silently canonicalize two distinct exact values
     into one identity.
+
+    Frozen dataclasses are not a trust boundary in Python: object.__setattr__
+    can still mutate an instance after construction. Revalidate the exact
+    built-in text/sequence shape at the moment the scientific subject is hashed
+    so post-construction mutation cannot execute caller text callbacks or mint a
+    different authority shape.
     """
 
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
+
+    text_fields = (
+        "profile_id",
+        "primary_baseline_id",
+        "selection_correction",
+    )
+    for name in text_fields:
+        value = object.__getattribute__(profile, name)
+        if type(value) is not str:
+            raise TypeError(f"{name} must remain exact built-in text")
+
+    for name in ("baseline_ids", "required_regimes"):
+        values = object.__getattribute__(profile, name)
+        if type(values) is not tuple or any(type(value) is not str for value in values):
+            raise TypeError(f"{name} must remain an exact tuple of built-in text")
+
+    profile_id = object.__getattribute__(profile, "profile_id")
+    primary_baseline_id = object.__getattribute__(profile, "primary_baseline_id")
+    baseline_ids = object.__getattribute__(profile, "baseline_ids")
+    selection_correction = object.__getattribute__(profile, "selection_correction")
+    required_regimes = object.__getattribute__(profile, "required_regimes")
+
     return {
         "schema_version": "wp36-gate-profile-subject-v1",
-        "profile_id": profile.profile_id,
+        "profile_id": profile_id,
         "minimum_net_advantage": _decimal_text(profile.minimum_net_advantage),
         "max_drawdown": _decimal_text(profile.max_drawdown),
         "max_adverse_cost_loss": _decimal_text(profile.max_adverse_cost_loss),
         "min_power": _decimal_text(profile.min_power),
-        "primary_baseline_id": profile.primary_baseline_id,
-        "baseline_ids": list(profile.baseline_ids),
-        "selection_correction": profile.selection_correction,
+        "primary_baseline_id": primary_baseline_id,
+        "baseline_ids": list(baseline_ids),
+        "selection_correction": selection_correction,
         "max_trials": profile.max_trials,
-        "required_regimes": list(profile.required_regimes),
+        "required_regimes": list(required_regimes),
         "require_complete_trials": profile.require_complete_trials,
         "require_causal_audit": profile.require_causal_audit,
         "require_financial_invariants": profile.require_financial_invariants,

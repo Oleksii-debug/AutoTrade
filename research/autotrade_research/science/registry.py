@@ -748,11 +748,12 @@ class ScientificRegistry:
             authoritative_vintages = HistoricalVintageRegistry(
                 vintage_state["root"]
             )
-            dataset_digest = HistoricalVintageRegistry.digest(
+            vintage_manifest = HistoricalVintageRegistry.load(
                 authoritative_vintages,
                 canonical_dataset_id,
                 dataset_version,
             )
+            dataset_digest = _hash(vintage_manifest)
         except (HistoricalDataError, FileNotFoundError, OSError, ValueError) as error:
             raise ProtocolViolation(
                 "locked holdout historical vintage is unavailable or invalid"
@@ -771,6 +772,47 @@ class ScientificRegistry:
                 protocol_payload["forward_period"],
                 "forward_period",
             )
+            coverage = vintage_manifest.get("coverage")
+            if (
+                type(coverage) is not dict
+                or "from" not in coverage
+                or "to" not in coverage
+            ):
+                raise ProtocolViolation(
+                    "locked holdout historical vintage lacks coverage authority"
+                )
+            coverage_start = _registered_utc(
+                coverage["from"],
+                "locked holdout vintage coverage.from",
+            )
+            coverage_end = _registered_utc(
+                coverage["to"],
+                "locked holdout vintage coverage.to",
+            )
+            if coverage_start > coverage_end:
+                raise ProtocolViolation(
+                    "locked holdout historical vintage coverage is reversed"
+                )
+            required_start = datetime(
+                forward_start.year,
+                forward_start.month,
+                forward_start.day,
+                tzinfo=timezone.utc,
+            )
+            required_end = datetime(
+                forward_end.year,
+                forward_end.month,
+                forward_end.day,
+                23,
+                59,
+                59,
+                tzinfo=timezone.utc,
+            )
+            if coverage_start > required_start or coverage_end < required_end:
+                raise ProtocolViolation(
+                    "locked holdout historical vintage does not cover "
+                    "protocol forward_period"
+                )
             identity = {
                 "dataset_digest": dataset_digest,
                 "segment_start": forward_start.isoformat(),

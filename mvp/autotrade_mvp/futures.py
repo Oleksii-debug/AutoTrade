@@ -217,17 +217,6 @@ class FuturesContract:
                     "inverse price base currency conflicts with canonical InstrumentVersion"
                 )
 
-        _futures_contract_lifecycle_initialize(
-            self,
-            (
-                self.instrument,
-                self.settlement_method,
-                self.expiry,
-                self.last_trade_at,
-                self.delivery_cutoff,
-            ),
-        )
-
     @classmethod
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
         if type(version) is not InstrumentVersion:
@@ -262,8 +251,16 @@ class FuturesContract:
         )
 
 
-def _install_futures_contract_lifecycle_authority():
-    """Keep construction-time lifecycle authority outside caller-writable state."""
+def _bind_futures_contract_lifecycle_authority(
+    contract_type: type,
+    validation_post_init,
+):
+    """Bind lifecycle minting to successful normal construction only.
+
+    The registration capability stays closure-owned.  A forged exact instance
+    created with object.__new__ cannot acquire lifecycle authority by importing
+    a module-level helper or by calling __post_init__ manually.
+    """
 
     authorities: dict[
         int,
@@ -272,33 +269,55 @@ def _install_futures_contract_lifecycle_authority():
             tuple[str, str, datetime, datetime, datetime],
         ],
     ] = {}
+    provisional: dict[int, weakref.ReferenceType] = {}
 
     def prune_dead() -> None:
-        dead = [
-            object_id
-            for object_id, (value_ref, _snapshot) in authorities.items()
-            if value_ref() is None
-        ]
-        for object_id in dead:
-            authorities.pop(object_id, None)
+        for states in (authorities, provisional):
+            dead = [
+                object_id
+                for object_id, entry in tuple(states.items())
+                if (entry[0] if isinstance(entry, tuple) else entry)() is None
+            ]
+            for object_id in dead:
+                states.pop(object_id, None)
 
-    def initialize(
-        value: object,
-        snapshot: tuple[str, str, datetime, datetime, datetime],
-    ) -> None:
-        if type(value) is not FuturesContract:
-            raise FuturesError("lifecycle authority requires exact FuturesContract")
+    def construction_new(cls):
+        value = object.__new__(cls)
+        if cls is contract_type:
+            prune_dead()
+            provisional[id(value)] = weakref.ref(value)
+        return value
+
+    def construction_post_init(value) -> None:
+        if type(value) is not contract_type:
+            validation_post_init(value)
+            return
+
         prune_dead()
-        if id(value) in authorities:
+        value_ref = provisional.pop(id(value), None)
+        if value_ref is None or value_ref() is not value:
+            raise FuturesError(
+                "futures lifecycle authority requires normal constructor execution"
+            )
+
+        validation_post_init(value)
+        object_id = id(value)
+        current = authorities.get(object_id)
+        if current is not None and current[0]() is not None:
             raise FuturesError("futures lifecycle authority is already established")
-        if type(snapshot) is not tuple or len(snapshot) != 5:
-            raise FuturesError("futures lifecycle authority snapshot is invalid")
-        authorities[id(value)] = (weakref.ref(value), snapshot)
+        snapshot = (
+            value.instrument,
+            value.settlement_method,
+            value.expiry,
+            value.last_trade_at,
+            value.delivery_cutoff,
+        )
+        authorities[object_id] = (weakref.ref(value), snapshot)
 
     def snapshot_for(
         value: object,
     ) -> tuple[str, str, datetime, datetime, datetime]:
-        if type(value) is not FuturesContract:
+        if type(value) is not contract_type:
             raise FuturesError("lifecycle authority requires exact FuturesContract")
         prune_dead()
         entry = authorities.get(id(value))
@@ -313,13 +332,16 @@ def _install_futures_contract_lifecycle_authority():
             raise FuturesError("futures lifecycle authority is not established")
         raise FuturesError("futures lifecycle authority identity collision")
 
-    return initialize, snapshot_for
+    contract_type.__new__ = staticmethod(construction_new)
+    contract_type.__post_init__ = construction_post_init
+    return snapshot_for
 
 
-(
-    _futures_contract_lifecycle_initialize,
-    _futures_contract_lifecycle_snapshot_for,
-) = _install_futures_contract_lifecycle_authority()
+_futures_contract_lifecycle_snapshot_for = _bind_futures_contract_lifecycle_authority(
+    FuturesContract,
+    FuturesContract.__post_init__,
+)
+del _bind_futures_contract_lifecycle_authority
 
 
 @dataclass(frozen=True)

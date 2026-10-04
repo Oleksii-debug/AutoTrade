@@ -30,7 +30,7 @@ import weakref
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
@@ -1032,6 +1032,7 @@ class DirectAuthenticatedReadExecutionReceipt:
     transport_identity: str
     network_policy_identity: str
     request_sha256: str
+    request_semantics_sha256: str
     http_status: int
     response_sha256: str
     terminal_authority: object
@@ -1074,6 +1075,189 @@ def _direct_authenticated_read_request_digest(
     return "sha256:" + sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _authenticated_read_wire_policy(
+    query_binding: AuthenticatedReadQueryBinding,
+    *,
+    provider_environment: str,
+) -> ProviderEndpointPolicy:
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise ProviderTransportError(
+            "wire semantics require exact authenticated-read query binding"
+        )
+    provider = query_binding.provider_id
+    provider_env = _canonical_text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    if provider == "BYBIT":
+        policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_env)
+    elif provider == "BINANCE":
+        policy = BINANCE_SPOT_ENDPOINT_POLICIES.get(query_binding.environment)
+        expected_provider_env = (
+            "TESTNET" if query_binding.environment == "PAPER" else "LIVE"
+        )
+        if provider_env != expected_provider_env:
+            policy = None
+    elif provider == "KRAKEN":
+        policy = KRAKEN_SPOT_ENDPOINT_POLICIES.get(query_binding.environment)
+        if provider_env != "LIVE":
+            policy = None
+    else:
+        policy = None
+    if type(policy) is not ProviderEndpointPolicy:
+        raise ProviderTransportError(
+            "authenticated-read provider environment has no canonical wire policy"
+        )
+    return policy
+
+
+def qualified_authenticated_read_expected_wire_semantics_digest(
+    query_binding: AuthenticatedReadQueryBinding,
+    *,
+    provider_environment: str,
+) -> str:
+    policy = _authenticated_read_wire_policy(
+        query_binding,
+        provider_environment=provider_environment,
+    )
+    provider = query_binding.provider_id
+    method = "POST" if provider == "KRAKEN" else "GET"
+    base = urlsplit(policy.absolute_url(query_binding.endpoint))
+    material = {
+        "provider_id": provider,
+        "provider_environment": provider_environment.upper(),
+        "environment": query_binding.environment,
+        "method": method,
+        "host": base.hostname,
+        "endpoint": query_binding.endpoint,
+        "query": dict(sorted(dict(query_binding.query).items())),
+        "timeout_seconds": policy.timeout_seconds,
+    }
+    return "sha256:" + sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _validated_authenticated_read_wire_semantics_digest(
+    request: AuthenticatedReadHttpRequest,
+    query_binding: AuthenticatedReadQueryBinding,
+    *,
+    provider_environment: str,
+) -> str:
+    if type(request) is not AuthenticatedReadHttpRequest:
+        raise ProviderTransportError(
+            "wire semantics require exact authenticated-read HTTP request"
+        )
+    policy = _authenticated_read_wire_policy(
+        query_binding,
+        provider_environment=provider_environment,
+    )
+    expected_url = urlsplit(policy.absolute_url(query_binding.endpoint))
+    actual_url = urlsplit(request.url)
+    if (
+        actual_url.scheme != "https"
+        or actual_url.hostname != expected_url.hostname
+        or actual_url.port not in (None, 443)
+        or actual_url.path != query_binding.endpoint
+        or actual_url.fragment
+        or request.timeout_seconds != policy.timeout_seconds
+    ):
+        raise ProviderTransportError(
+            "authenticated-read transmitted endpoint differs from canonical policy"
+        )
+
+    headers = dict(request.headers)
+    provider = query_binding.provider_id
+    expected_query = dict(query_binding.query)
+    if provider == "BINANCE":
+        if request.method != "GET" or request.body:
+            raise ProviderTransportError("Binance read wire shape is not canonical")
+        pairs = parse_qsl(actual_url.query, keep_blank_values=True, strict_parsing=True)
+        actual = dict(pairs)
+        if len(actual) != len(pairs):
+            raise ProviderTransportError("Binance read wire query contains duplicate keys")
+        timestamp = actual.pop("timestamp", None)
+        recv_window = actual.pop("recvWindow", None)
+        signature = actual.pop("signature", None)
+        if actual != expected_query:
+            raise ProviderTransportError(
+                "Binance transmitted base query differs from prepared read"
+            )
+        if (
+            type(timestamp) is not str
+            or not timestamp.isdigit()
+            or type(recv_window) is not str
+            or not recv_window.isdigit()
+            or not 1 <= int(recv_window) <= 60000
+            or type(signature) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+            or set(headers) != {"Accept", "X-MBX-APIKEY"}
+            or not headers["X-MBX-APIKEY"]
+        ):
+            raise ProviderTransportError("Binance authenticated-read signing envelope is invalid")
+    elif provider == "BYBIT":
+        if request.method != "GET" or request.body:
+            raise ProviderTransportError("Bybit read wire shape is not canonical")
+        pairs = parse_qsl(actual_url.query, keep_blank_values=True, strict_parsing=True)
+        actual = dict(pairs)
+        if len(actual) != len(pairs) or actual != expected_query:
+            raise ProviderTransportError(
+                "Bybit transmitted query differs from prepared read"
+            )
+        required = {
+            "Accept",
+            "X-BAPI-API-KEY",
+            "X-BAPI-TIMESTAMP",
+            "X-BAPI-RECV-WINDOW",
+            "X-BAPI-SIGN",
+        }
+        if (
+            set(headers) != required
+            or not headers["X-BAPI-API-KEY"]
+            or not headers["X-BAPI-TIMESTAMP"].isdigit()
+            or not headers["X-BAPI-RECV-WINDOW"].isdigit()
+            or not 1 <= int(headers["X-BAPI-RECV-WINDOW"]) <= 60000
+            or re.fullmatch(r"[0-9a-f]{64}", headers["X-BAPI-SIGN"]) is None
+        ):
+            raise ProviderTransportError("Bybit authenticated-read signing envelope is invalid")
+    elif provider == "KRAKEN":
+        if request.method != "POST" or actual_url.query or not request.body:
+            raise ProviderTransportError("Kraken read wire shape is not canonical")
+        try:
+            pairs = parse_qsl(
+                request.body.decode("ascii"),
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ProviderTransportError("Kraken read wire body is invalid") from error
+        actual = dict(pairs)
+        if len(actual) != len(pairs):
+            raise ProviderTransportError("Kraken read wire body contains duplicate keys")
+        nonce = actual.pop("nonce", None)
+        if actual != expected_query:
+            raise ProviderTransportError(
+                "Kraken transmitted base query differs from prepared read"
+            )
+        if (
+            type(nonce) is not str
+            or not nonce.isdigit()
+            or int(nonce) <= 0
+            or set(headers) != {"Content-Type", "API-Key", "API-Sign"}
+            or headers["Content-Type"] != "application/x-www-form-urlencoded"
+            or not headers["API-Key"]
+            or not headers["API-Sign"]
+        ):
+            raise ProviderTransportError("Kraken authenticated-read signing envelope is invalid")
+    else:
+        raise ProviderTransportError("provider has no authenticated-read wire semantics")
+
+    return qualified_authenticated_read_expected_wire_semantics_digest(
+        query_binding,
+        provider_environment=provider_environment,
+    )
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

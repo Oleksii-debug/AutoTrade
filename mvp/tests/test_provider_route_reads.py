@@ -30,7 +30,7 @@ from mvp.tests.test_provider_selection import (
 
 
 class ProviderRouteReadTests(unittest.TestCase):
-    def setup_route(self, directory: str):
+    def setup_route(self, directory: str, *, include_read_rule=True):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
@@ -49,7 +49,10 @@ class ProviderRouteReadTests(unittest.TestCase):
             evidence_store=ArtifactStore(evidence_root),
             evidence_root=evidence_root,
         )
-        q1, receipt1, protocol1 = accepted_spot_q(ordinal=50)
+        q1, receipt1, protocol1 = accepted_spot_q(
+            ordinal=50,
+            include_read_rule=include_read_rule,
+        )
         harness.register(
             protocol_key=protocol1.key,
             record=q1,
@@ -80,7 +83,7 @@ class ProviderRouteReadTests(unittest.TestCase):
             endpoint="/v5/account/wallet-balance",
             query={"accountType": "UNIFIED"},
             at=at,
-            permission_scope="ORDER.READ",
+            permission_scope="ACCOUNT.READ",
         )
 
     def test_prepared_read_binds_exact_current_q_c_and_rule_identity(self):
@@ -94,6 +97,11 @@ class ProviderRouteReadTests(unittest.TestCase):
             )
             self.assertEqual(binding.provider_environment, "TESTNET")
             self.assertTrue(binding.route_semantics_digest.startswith("sha256:"))
+            self.assertTrue(binding.endpoint_rule_digest.startswith("sha256:"))
+            self.assertTrue(binding.qualified_route_rule_digest.startswith("sha256:"))
+            self.assertEqual(binding.data_entitlement, "BALANCES")
+            self.assertEqual(binding.accepted_success_statuses, (200,))
+            self.assertEqual(binding.parser_identity, "BYBIT_ORDER_V5_JSON_V1")
             self.assertEqual(len(binding.query_digest), 71)
 
     def test_qualified_read_and_response_constructors_are_sealed(self):
@@ -105,6 +113,11 @@ class ProviderRouteReadTests(unittest.TestCase):
                     query_binding=binding.query_binding,
                     qualification_id=binding.qualification_id,
                     route_semantics_digest=binding.route_semantics_digest,
+                    endpoint_rule_digest=binding.endpoint_rule_digest,
+                    qualified_route_rule_digest=binding.qualified_route_rule_digest,
+                    data_entitlement=binding.data_entitlement,
+                    accepted_success_statuses=binding.accepted_success_statuses,
+                    parser_identity=binding.parser_identity,
                     authority_journal_sequence_cut=binding.authority_journal_sequence_cut,
                     provider_environment=binding.provider_environment,
                     adapter_code_sha=binding.adapter_code_sha,
@@ -166,6 +179,96 @@ class ProviderRouteReadTests(unittest.TestCase):
                     at=NOW + timedelta(seconds=2),
                 )
 
+    def test_changed_q_parser_semantics_change_exact_qualified_read_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, q1, harness = self.setup_route(directory)
+            first = self.prepare(route, capabilities, qualifications)
+
+            q2, receipt2, protocol2 = successor_spot_q(
+                old_qualification_id=q1.qualification_id,
+                ordinal=51,
+            )
+            harness.register(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_accepted(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_supersession(
+                old_id=q1.qualification_id,
+                new_id=q2.qualification_id,
+            )
+
+            selection = select_provider(
+                route_request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(selection.status, "SELECTED_UNAMBIGUOUS")
+            self.assertIsNotNone(selection.selected)
+            second = self.prepare(
+                selection.selected,
+                capabilities,
+                qualifications,
+                at=NOW,
+            )
+            self.assertEqual(
+                first.query_binding.query_digest,
+                second.query_binding.query_digest,
+            )
+            self.assertNotEqual(first.qualification_id, second.qualification_id)
+            self.assertNotEqual(
+                first.route_semantics_digest,
+                second.route_semantics_digest,
+            )
+            self.assertEqual(
+                first.endpoint_rule_digest,
+                second.endpoint_rule_digest,
+            )
+            self.assertNotEqual(
+                first.qualified_route_rule_digest,
+                second.qualified_route_rule_digest,
+            )
+            self.assertEqual(first.data_entitlement, second.data_entitlement)
+            self.assertEqual(
+                first.accepted_success_statuses,
+                second.accepted_success_statuses,
+            )
+            self.assertNotEqual(first.parser_identity, second.parser_identity)
+
+            raw = b'{"retCode":0,"result":{"equity":"10.25"}}'
+            first_response = observe_qualified_provider_json_response(
+                query_binding=first,
+                http_status=200,
+                response_bytes=raw,
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            second_response = observe_qualified_provider_json_response(
+                query_binding=second,
+                http_status=200,
+                response_bytes=raw,
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(
+                first_response.observation.evidence_ref,
+                second_response.observation.evidence_ref,
+            )
+            self.assertNotEqual(
+                first_response.evidence_ref,
+                second_response.evidence_ref,
+            )
+            self.assertTrue(
+                first_response.evidence_ref.startswith(
+                    "qualified-provider-read:sha256:"
+                )
+            )
+
     def test_new_current_capability_invalidates_old_selected_route_for_new_read(self):
         with TemporaryDirectory() as directory:
             _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
@@ -183,6 +286,69 @@ class ProviderRouteReadTests(unittest.TestCase):
                     capabilities,
                     qualifications,
                     at=NOW + timedelta(minutes=2),
+                )
+
+    def test_q_without_exact_endpoint_rule_cannot_authorize_provider_read(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(
+                directory,
+                include_read_rule=False,
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "does not cover exact authenticated-read endpoint rule",
+            ):
+                self.prepare(route, capabilities, qualifications)
+
+    def test_wallet_q_claim_cannot_authorize_distinct_orders_entitlement(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "does not cover exact authenticated-read endpoint rule",
+            ):
+                prepare_qualified_provider_read(
+                    route,
+                    capabilities,
+                    qualifications,
+                    surface=Surface.AUTHENTICATED_READ,
+                    endpoint="/v5/order/realtime",
+                    query={},
+                    at=NOW,
+                    permission_scope="ORDER.READ",
+                )
+
+    def test_canonical_endpoint_policy_rejects_wrong_permission_before_binding(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "permission differs from canonical provider policy",
+            ):
+                prepare_qualified_provider_read(
+                    route,
+                    capabilities,
+                    qualifications,
+                    surface=Surface.AUTHENTICATED_READ,
+                    endpoint="/v5/account/wallet-balance",
+                    query={"accountType": "UNIFIED"},
+                    at=NOW,
+                    permission_scope="ORDER.READ",
+                )
+
+    def test_response_status_must_match_qualified_endpoint_contract(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "outside qualified endpoint contract",
+            ):
+                observe_qualified_provider_json_response(
+                    query_binding=binding,
+                    http_status=201,
+                    response_bytes=b'{"retCode":0}',
+                    observed_at=NOW + timedelta(seconds=1),
                 )
 
     def test_q_registry_and_capability_registry_must_share_exact_store_instance(self):

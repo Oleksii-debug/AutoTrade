@@ -17,6 +17,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Callable, Mapping
 
+from . import provider_transport as _provider_transport
 from .capabilities import CapabilityRegistry
 from .dispatch import AuthorityCheck, DispatchOutcome
 from .host_network import AuthenticatedHostApplication
@@ -38,31 +39,6 @@ from .security import SecurityBoundary
 from .windows_secrets import PersistentCredentialHandle
 
 
-_BYBIT_POLICY_IDENTITIES: Mapping[str, tuple[object, ...]] = {
-    "MAINNET": (
-        "BYBIT",
-        "LIVE",
-        "https://api.bybit.com",
-        frozenset({"api.bybit.com"}),
-        15,
-    ),
-    "TESTNET": (
-        "BYBIT",
-        "PAPER",
-        "https://api-testnet.bybit.com",
-        frozenset({"api-testnet.bybit.com"}),
-        15,
-    ),
-    "DEMO": (
-        "BYBIT",
-        "PAPER",
-        "https://api-demo.bybit.com",
-        frozenset({"api-demo.bybit.com"}),
-        15,
-    ),
-}
-
-
 def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be canonical exact text")
@@ -76,8 +52,21 @@ def _bybit_policy_identity(
 ) -> tuple[object, ...]:
     if type(policy) is not ProviderEndpointPolicy:
         raise PermissionError("Bybit provider policy authority is not exact")
-    expected = _BYBIT_POLICY_IDENTITIES.get(provider_environment)
-    if expected is None:
+    if type(provider_environment) is not str:
+        raise PermissionError("Bybit provider environment authority is not canonical")
+    if provider_environment == "MAINNET":
+        expected_environment = "LIVE"
+        expected_base_url = "https://api.bybit.com"
+        expected_host = "api.bybit.com"
+    elif provider_environment == "TESTNET":
+        expected_environment = "PAPER"
+        expected_base_url = "https://api-testnet.bybit.com"
+        expected_host = "api-testnet.bybit.com"
+    elif provider_environment == "DEMO":
+        expected_environment = "PAPER"
+        expected_base_url = "https://api-demo.bybit.com"
+        expected_host = "api-demo.bybit.com"
+    else:
         raise PermissionError("Bybit provider environment authority is not canonical")
     state = vars(policy)
     if type(state) is not dict:
@@ -103,7 +92,14 @@ def _bybit_policy_identity(
         allowed_hosts,
         timeout_seconds,
     )
-    if identity != expected:
+    if (
+        provider_id != "BYBIT"
+        or environment != expected_environment
+        or base_url != expected_base_url
+        or len(allowed_hosts) != 1
+        or expected_host not in allowed_hosts
+        or timeout_seconds != 15
+    ):
         raise PermissionError("Bybit provider policy values changed")
     return identity
 
@@ -594,7 +590,11 @@ class ProductionBybitOrderSender:
 
         def terminal_guard() -> None:
             final_guard()
-            self._require_wire_authority()
+            # The transport executes current-capability/clock callbacks after
+            # the outer send-authority check. Revalidate the complete production
+            # authority graph after those callbacks and immediately before the
+            # transport crosses the wire boundary.
+            self._require_send_authority()
 
         transport_call = self.__transport_call
         return transport_call(self.__transport, client_order_id, request, terminal_guard)
@@ -663,8 +663,67 @@ def build_production_bybit_order_sender(
     policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
     if policy is None:
         raise ValueError("Bybit provider_environment must be MAINNET, TESTNET or DEMO")
-    _bybit_policy_identity(policy, provider_environment=provider_environment)
+    policy_identity_reader = _bybit_policy_identity
+    policy_identity_reader_code = policy_identity_reader.__code__
+    signer_class = _provider_transport.BybitV5Signer
+    signer = signer_class.sign
+    signer_code = signer.__code__
+    policy_url_reader = ProviderEndpointPolicy.absolute_url
+    policy_url_reader_code = policy_url_reader.__code__
+    policy_identity_reader(policy, provider_environment=provider_environment)
     _credential_identity(credential_handle)
+    if not callable(clock_millis):
+        raise TypeError("clock_millis must be callable")
+    if (
+        type(recv_window_ms) is not int
+        or recv_window_ms < 1
+        or recv_window_ms > 60000
+    ):
+        raise ValueError("recv_window_ms must be an exact integer from 1 through 60000")
+
+    raw_clock_millis = clock_millis
+    transport_slot: list[BybitV5HttpTransport | None] = [None]
+
+    def guarded_clock_millis() -> int:
+        value = raw_clock_millis()
+        # clock_millis is the last caller-supplied callback evaluated before
+        # BybitV5Signer consumes the endpoint policy. Re-establish every mutable
+        # transport input that the signer will read after this callback.
+        if type(value) is not int or value < 0:
+            raise ValueError("clock_millis must return an exact non-negative integer")
+        if _bybit_policy_identity is not policy_identity_reader:
+            raise PermissionError("Bybit provider policy identity authority changed")
+        if policy_identity_reader.__code__ is not policy_identity_reader_code:
+            raise PermissionError(
+                "Bybit provider policy identity authority code changed"
+            )
+        if _provider_transport.BybitV5Signer is not signer_class:
+            raise PermissionError("Bybit signer class authority changed before signing")
+        if signer_class.sign is not signer:
+            raise PermissionError("Bybit signer authority changed before signing")
+        if signer.__code__ is not signer_code:
+            raise PermissionError("Bybit signer authority code changed before signing")
+        if ProviderEndpointPolicy.absolute_url is not policy_url_reader:
+            raise PermissionError("Bybit policy URL authority changed before signing")
+        if policy_url_reader.__code__ is not policy_url_reader_code:
+            raise PermissionError("Bybit policy URL authority code changed before signing")
+        policy_identity_reader(
+            policy,
+            provider_environment=provider_environment,
+        )
+        current_transport = transport_slot[0]
+        if (
+            current_transport is None
+            or type(current_transport) is not BybitV5HttpTransport
+            or current_transport.policy is not policy
+        ):
+            raise PermissionError("Bybit transport policy authority changed before signing")
+        if (
+            type(current_transport.recv_window_ms) is not int
+            or current_transport.recv_window_ms != recv_window_ms
+        ):
+            raise PermissionError("Bybit receive-window authority changed before signing")
+        return value
 
     dispatcher = runtime.financial_dispatcher
     recovery = runtime.recovery_controller
@@ -702,10 +761,11 @@ def build_production_bybit_order_sender(
         session_token=session_token,
         origin=config.public_origin,
         execution_identity=dispatcher.owner.owner_id,
-        clock_millis=clock_millis,
+        clock_millis=guarded_clock_millis,
         clock_utc=clock_utc,
         quota_gate=quota_gate,
         wire_client=wire_client,
         recv_window_ms=recv_window_ms,
     )
+    transport_slot[0] = transport
     return ProductionBybitOrderSender(runtime=runtime, transport=transport)

@@ -160,6 +160,112 @@ class FuturesLifecycleRegistryAuthorityTests(unittest.TestCase):
                 instrument_registry=registry,
             )
 
+    def test_same_registry_identity_cannot_hide_forged_futures_economics(self):
+        instrument_id = "88888888-8888-4888-8888-888888888888"
+        canonical = InstrumentVersion(
+            instrument_id=instrument_id,
+            version=1,
+            provider_id="TEST_CLEARER",
+            venue_id="TEST_VENUE",
+            provider_symbol="FUT-ECONOMICS-202609",
+            asset_class="FUTURE",
+            base_currency="TEST",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("10"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(1),
+            payoff="LINEAR",
+            underlying_id="cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd@1",
+            expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
+        )
+        forged = InstrumentVersion(
+            instrument_id=instrument_id,
+            version=1,
+            provider_id="TEST_CLEARER",
+            venue_id="TEST_VENUE",
+            provider_symbol="FUT-ECONOMICS-202609",
+            asset_class="FUTURE",
+            base_currency="TEST",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("999"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(1),
+            payoff="LINEAR",
+            underlying_id="cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd@1",
+            expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
+        )
+        registry = InstrumentRegistry(versions=(canonical,))
+        contract = FuturesContract.from_instrument_version(forged)
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "differs from canonical registry selection",
+        ):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 11),
+                instrument_registry=registry,
+            )
+
+    def test_inactive_registry_version_cannot_authorize_new_exposure(self):
+        version = InstrumentVersion(
+            instrument_id="99999999-9999-4999-8999-999999999999",
+            version=1,
+            provider_id="TEST_CLEARER",
+            venue_id="TEST_VENUE",
+            provider_symbol="FUT-INACTIVE-202609",
+            asset_class="FUTURE",
+            base_currency="TEST",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("10"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(1),
+            status="INACTIVE",
+            payoff="LINEAR",
+            underlying_id="dededede-dede-4ede-8ede-dededededede@1",
+            expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
+        )
+        registry = InstrumentRegistry(versions=(version,))
+        selected = InstrumentRegistry.exact(registry, f"{version.instrument_id}@1")
+        contract = FuturesContract.from_instrument_version(selected)
+
+        with self.assertRaisesRegex(FuturesError, "INSTRUMENT_INACTIVE"):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 11),
+                instrument_registry=registry,
+            )
+
     def test_wrong_registry_cannot_authorize_bound_contract(self):
         version = InstrumentVersion(
             instrument_id="55555555-5555-4555-8555-555555555555",

@@ -631,6 +631,45 @@ def measure_declared_financial_operation(
                         f"measurement {label} executable authority changed during financial "
                         f"operation: {name}"
                     )
+        current_plan_state = object_getattribute(plan, "__dict__")
+        if type_for(current_plan_state) is not dict_type:
+            raise error_type(
+                "measurement durable plan instance state became non-canonical"
+            )
+        if tuple_for(current_plan_state) != plan_state_names:
+            raise error_type(
+                "measurement durable plan instance state shape changed during financial operation"
+            )
+        for name, expected_value in plan_state_snapshot:
+            if current_plan_state.get(name, missing) is not expected_value:
+                raise error_type(
+                    "measurement durable plan instance state changed during financial "
+                    f"operation: {name}"
+                )
+        for planned_event, state_names, state_snapshot in expected_event_state_snapshots:
+            if type_for(planned_event) is not expected_type:
+                raise error_type(
+                    "measurement durable plan event class changed during financial operation"
+                )
+            current_event_state = object_getattribute(planned_event, "__dict__")
+            if type_for(current_event_state) is not dict_type:
+                raise error_type(
+                    "measurement durable plan event instance state became non-canonical"
+                )
+            if tuple_for(current_event_state) != state_names:
+                raise error_type(
+                    "measurement durable plan event instance state shape changed during financial operation"
+                )
+            for name, expected_value in state_snapshot:
+                if current_event_state.get(name, missing) is not expected_value:
+                    raise error_type(
+                        "measurement durable plan event instance state changed during financial "
+                        f"operation: {name}"
+                    )
+        if plan_state_snapshot[4][1][expected_index] is not expected:
+            raise error_type(
+                "measurement selected durable plan event identity changed during financial operation"
+            )
         if type_for(store) is not journal_store_type:
             raise error_type(
                 "measurement JournalStore exact class changed during financial operation"
@@ -852,6 +891,29 @@ def measure_declared_financial_operation(
     with journal_store_authority_scope(store, store_identity):
         plan = load_declared_runtime_event_plan(store, plan_id=plan_id, spec=spec)
         expected_index, expected = _expected_for_id(plan, event_id)
+        if type_for(plan) is not plan_type:
+            raise error_type("loaded durable plan must use the exact canonical class")
+        plan_state = object_getattribute(plan, "__dict__")
+        if type_for(plan_state) is not dict_type:
+            raise error_type("loaded durable plan instance state must be canonical")
+        plan_state_names = tuple_for(plan_state)
+        plan_state_snapshot = tuple_for(plan_state.items())
+        expected_event_state_entries = []
+        for planned_event in plan.expected_events:
+            if type_for(planned_event) is not expected_type:
+                raise error_type("loaded durable plan event must use the exact canonical class")
+            planned_event_state = object_getattribute(planned_event, "__dict__")
+            if type_for(planned_event_state) is not dict_type:
+                raise error_type("loaded durable plan event instance state must be canonical")
+            expected_event_state_entries.append(
+                (
+                    planned_event,
+                    tuple_for(planned_event_state),
+                    tuple_for(planned_event_state.items()),
+                )
+            )
+        expected_event_state_snapshots = tuple_for(expected_event_state_entries)
+        del expected_event_state_entries, planned_event, planned_event_state
         measurement_id = measurement_event_id_for(plan.plan_id, expected.event_id)
         if get_event(store, measurement_id) is not None:
             raise RuntimeLoadMeasurementError("financial latency was already measured")

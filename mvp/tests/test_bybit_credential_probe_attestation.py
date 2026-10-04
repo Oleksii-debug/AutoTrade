@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
@@ -9,6 +10,10 @@ from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
 )
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+from mvp.tests.test_bybit_credential_probe_evidence import (
+    _probe,
+    _register_probe_credential,
+)
 
 
 class _FakeWireClient:
@@ -98,6 +103,28 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 api_key_echo_confirmed=True,
             )
 
+    def test_mutated_negative_wire_cannot_be_promoted_to_accepted_evidence(self):
+        forged = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+        )
+        object.__setattr__(forged, "ret_code", 0)
+        object.__setattr__(forged, "api_key_echo_confirmed", True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def wire_query(**kwargs):
+                del kwargs
+                return forged
+
+            with self.assertRaisesRegex(ProviderCoreError, "provider-derived attestation"):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=wire_query,
+                )
+
     def test_wire_boundary_attests_success_after_exact_provider_echo(self):
         client = _FakeWireClient(
             b'{"retCode":0,"retMsg":"OK","result":{"apiKey":"probe-key","secret":""}}'
@@ -112,6 +139,7 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         self.assertEqual(result.ret_code, 0)
         self.assertTrue(result.api_key_echo_confirmed)
         self.assertNotIn("probe-key", repr(result))
+        self.assertNotIn("provider_echo_proof", repr(result))
 
     def test_wire_boundary_rejects_success_for_different_api_key(self):
         client = _FakeWireClient(

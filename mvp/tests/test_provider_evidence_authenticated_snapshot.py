@@ -6,6 +6,7 @@ import unittest
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
@@ -183,6 +184,44 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                     )
             finally:
                 reader.__code__ = original_code
+
+    def test_instance_reader_shadow_fails_closed_before_redirect(self):
+        with TemporaryDirectory() as directory:
+            book, artifacts, _request, ref = prepared_book(directory)
+            artifacts.read_authenticated_snapshot = lambda _artifact_id: (
+                {"sha256": ref["sha256"], "metadata": {}},
+                b"forged provider bytes",
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "not resolvable and intact",
+            ):
+                book.acknowledge(
+                    event_key="ack-instance-shadow",
+                    client_order_id="c1",
+                    provider_order_id="provider-order-1",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+    def test_module_reader_rebinding_does_not_redirect_captured_authority(self):
+        with TemporaryDirectory() as directory:
+            book, _artifacts, _request, ref = prepared_book(directory)
+            with patch.object(
+                durable_order_projection_module,
+                "_read_authenticated_provider_evidence",
+                side_effect=AssertionError("rebound module reader must not run"),
+            ):
+                result = book.acknowledge(
+                    event_key="ack-module-rebind",
+                    client_order_id="c1",
+                    provider_order_id="provider-order-1",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+            self.assertEqual(result.snapshot.state, "WORKING")
 
     def test_public_reader_rebinding_does_not_redirect_captured_authority(self):
         with TemporaryDirectory() as directory:

@@ -344,6 +344,13 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
     csproj name/version pairs are insufficient release provenance because they
     omit transitive packages and NuGet's content integrity identity.
     """
+    imported_blockers = dotnet_imported_package_reference_blockers(root)
+    if imported_blockers:
+        raise ValueError(
+            'imported MSBuild PackageReference is outside the static release graph: '
+            + ';'.join(imported_blockers)
+        )
+
     graph: list[dict[str, str]] = []
     for project in sorted(set(package_projects)):
         relative = project.relative_to(root).as_posix()

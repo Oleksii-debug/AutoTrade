@@ -653,6 +653,11 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 dotnet_imported_package_reference_blockers(root),
                 ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:Directory.Build.props'],
             )
+            with self.assertRaisesRegex(
+                ValueError,
+                'imported MSBuild PackageReference',
+            ):
+                dotnet_locked_dependency_graph(root, [])
 
     def test_namespaced_src_props_package_reference_fails_closed(self):
         with TemporaryDirectory() as directory:

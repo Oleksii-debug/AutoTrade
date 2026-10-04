@@ -13,7 +13,6 @@ import xml.etree.ElementTree as ET
 
 if __package__:
     from .dotnet_lock import (
-        dotnet_imported_package_reference_blockers,
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
     )
@@ -426,14 +425,6 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     dotnet_projects = dotnet_package_projects()
-    imported_dotnet_blockers = dotnet_imported_package_reference_blockers(ROOT)
-    for detail in imported_dotnet_blockers:
-        blockers.append(
-            {
-                "code": "DOTNET_PACKAGE_REFERENCE_DISCOVERY_INCOMPLETE",
-                "detail": detail,
-            }
-        )
     try:
         dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
     except ValueError as error:

@@ -316,6 +316,179 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_autonomous_runtime_checkpoint_is_quarantined_not_reauthorized(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            authority_key = state / ".autonomous-runtime-authority.key"
+            checkpoint_bytes = b'{"sealed":"source-generation-checkpoint"}\n'
+            checkpoint.write_bytes(checkpoint_bytes)
+            authority_key.write_bytes(b"source-local-secret-must-not-travel")
+
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest = verify_backup(backup)
+            self.assertEqual(manifest["schema_version"], BACKUP_SCHEMA_VERSION)
+            self.assertEqual(
+                manifest["runtime_checkpoint_evidence"],
+                "QUARANTINED",
+            )
+            entries = {
+                item["path"]: item
+                for item in manifest["files"]
+            }
+            evidence_path = (
+                "restore-evidence/autonomous-runtime-checkpoint.json"
+            )
+            self.assertEqual(
+                entries[evidence_path]["kind"],
+                "runtime-checkpoint-evidence",
+            )
+            self.assertEqual(
+                (backup / evidence_path).read_bytes(),
+                checkpoint_bytes,
+            )
+            self.assertFalse(
+                (backup / "state" / "autonomous-runtime-checkpoint.json").exists()
+            )
+            self.assertFalse(
+                any(
+                    path.name == ".autonomous-runtime-authority.key"
+                    for path in backup.rglob("*")
+                )
+            )
+
+            restored = restore_backup(backup, root / "restored")
+            marker = json.loads(
+                (
+                    restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                marker["runtime_checkpoint_evidence"],
+                "QUARANTINED",
+            )
+            self.assertTrue(
+                marker["runtime_checkpoint_reconstitution_required"]
+            )
+            self.assertEqual(
+                marker["runtime_checkpoint_evidence_sha256"],
+                entries[evidence_path]["sha256"],
+            )
+            self.assertEqual(
+                (restored / evidence_path).read_bytes(),
+                checkpoint_bytes,
+            )
+            self.assertFalse(
+                (
+                    restored
+                    / "state"
+                    / "autonomous-runtime-checkpoint.json"
+                ).exists()
+            )
+            self.assertFalse(
+                any(
+                    path.name == ".autonomous-runtime-authority.key"
+                    for path in restored.rglob("*")
+                )
+            )
+            self.assertTrue(restore_requires_reconciliation(restored))
+
+    def test_runtime_checkpoint_manifest_claim_must_match_inventory(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest_path = backup / "backup-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["runtime_checkpoint_evidence"], "ABSENT")
+            manifest["runtime_checkpoint_evidence"] = "QUARANTINED"
+            manifest_path.write_text(
+                json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _reseal_backup_manifest(backup)
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "claim does not match",
+            ):
+                verify_backup(backup)
+
+    def test_restored_runtime_checkpoint_evidence_tamper_fails_marker_validation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            checkpoint.write_bytes(b'{"sealed":"source-generation-checkpoint"}\n')
+            backup = create_backup(state, artifacts, root / "backup")
+            restored = restore_backup(backup, root / "restored")
+            evidence = (
+                restored
+                / "restore-evidence"
+                / "autonomous-runtime-checkpoint.json"
+            )
+            evidence.write_bytes(b'{"sealed":"tampered"}\n')
+
+            with self.assertRaisesRegex(
+                BackupIntegrityError,
+                "runtime checkpoint evidence digest mismatch",
+            ):
+                complete_restore_reconciliation(
+                    restored,
+                    controller=None,
+                    reconciliation_checkpoint_event_id="unused",
+                    fencing_evidence=(),
+                    completed_at="2026-09-25T08:00:03Z",
+                )
+
+    def test_schema_v1_backup_remains_readable_without_runtime_checkpoint_claim(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            manifest_path = backup / "backup-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["runtime_checkpoint_evidence"], "ABSENT")
+            manifest["schema_version"] = 1
+            manifest.pop("runtime_checkpoint_evidence")
+            manifest_path.write_text(
+                json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _reseal_backup_manifest(backup)
+
+            verified = verify_backup(backup)
+            self.assertEqual(verified["schema_version"], 1)
+            restored = restore_backup(backup, root / "restored-v1")
+            marker = json.loads(
+                (
+                    restored / "RESTORE_RECONCILIATION_REQUIRED.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                marker["runtime_checkpoint_evidence"],
+                "UNAVAILABLE_LEGACY_BACKUP",
+            )
+            self.assertFalse(
+                marker["runtime_checkpoint_reconstitution_required"]
+            )
+            self.assertIsNone(marker["runtime_checkpoint_evidence_sha256"])
+            self.assertTrue(restore_requires_reconciliation(restored))
+
     def test_journal_only_backup_declares_journal_only_consistency(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

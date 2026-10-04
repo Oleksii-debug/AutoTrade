@@ -806,6 +806,52 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(InstallerManifestError, pattern):
                     verify_release_bundle(tampered)
 
+    def test_tampered_schema_compatibility_range_is_rejected(self):
+        source = self.release_bundle()
+        cases = (
+            (
+                "minimum",
+                "latest",
+                "schema minimum must use major.minor.patch",
+            ),
+            (
+                "maximum",
+                "1.x",
+                "schema maximum must use major.minor.patch or major.minor.x",
+            ),
+            (
+                "inverted",
+                {"minimum": "2.0.0", "maximum": "1.9.x"},
+                "schema compatibility maximum precedes minimum",
+            ),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                tampered = self.root / f"schema-{name}.zip"
+
+                def mutate(entries, name=name, value=value):
+                    result = []
+                    for entry, payload in entries:
+                        if entry != "bundle-manifest.json":
+                            result.append((entry, payload))
+                            continue
+                        manifest = json.loads(payload)
+                        if name == "inverted":
+                            manifest["composition"]["schema_compatibility"] = value
+                        else:
+                            manifest["composition"]["schema_compatibility"][name] = value
+                        result.append(
+                            (
+                                entry,
+                                json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                            )
+                        )
+                    return result
+
+                self.rewrite_zip(source, tampered, mutate)
+                with self.assertRaisesRegex(InstallerManifestError, expected):
+                    verify_release_bundle(tampered)
+
     def test_semantically_valid_composition_tamper_breaks_canonical_digest(self):
         source = self.release_bundle()
         for case in ("schema-range", "minimum-windows"):

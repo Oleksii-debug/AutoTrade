@@ -96,6 +96,57 @@ class ProductionHostConfig:
         object.__setattr__(self, "public_origin", canonical_origin)
 
 
+def _readmit_production_host_config(
+    config: ProductionHostConfig,
+) -> ProductionHostConfig:
+    """Detach one exact canonical config snapshot before host side effects.
+
+    frozen dataclasses prevent ordinary assignment but are not an authority
+    boundary: object.__setattr__ can still replace fields after initial
+    construction. Reject executable scalar/path subclasses before invoking
+    normalization, URL parsing, comparison, hashing, or filesystem code.
+    """
+
+    if type(config) is not ProductionHostConfig:
+        raise TypeError("config must be exact ProductionHostConfig")
+    state = vars(config)
+    if type(state) is not dict:
+        raise TypeError("production host config state must be an exact dict")
+    if any(type(key) is not str for key in state):
+        raise TypeError("production host config field names must be exact strings")
+    if set(state) != _CONFIG_FIELDS:
+        raise ValueError("production host config state is not canonical")
+
+    journal_path = state["journal_path"]
+    if type(journal_path) is not type(Path()):
+        raise TypeError("production host journal_path must be an exact platform Path")
+    for field in (
+        "account_id",
+        "environment",
+        "host_id",
+        "bind_host",
+        "public_origin",
+    ):
+        if type(state[field]) is not str:
+            raise TypeError(
+                f"production host config field {field} must be exact text"
+            )
+    if type(state["bind_port"]) is not int:
+        raise TypeError(
+            "production host config field bind_port must be an exact integer"
+        )
+
+    return ProductionHostConfig(
+        journal_path=journal_path,
+        account_id=state["account_id"],
+        environment=state["environment"],
+        host_id=state["host_id"],
+        bind_host=state["bind_host"],
+        bind_port=state["bind_port"],
+        public_origin=state["public_origin"],
+    )
+
+
 def _strict_json_object(payload: bytes) -> dict[str, object]:
     if not isinstance(payload, bytes):
         raise TypeError("production host config payload must be bytes")
@@ -557,10 +608,9 @@ def build_production_host(
 ) -> ProductionHostRuntime:
     """Compose the existing durable host authorities into one runnable process seam."""
 
-    if not isinstance(config, ProductionHostConfig):
-        raise TypeError("config must be ProductionHostConfig")
-    if not isinstance(security_boundary, SecurityBoundary):
-        raise TypeError("security_boundary must be SecurityBoundary")
+    config = _readmit_production_host_config(config)
+    if type(security_boundary) is not SecurityBoundary:
+        raise TypeError("security_boundary must be exact SecurityBoundary")
     if not callable(principal_resolver):
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):

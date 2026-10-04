@@ -36,10 +36,23 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             base_sha="a" * 40,
             head_sha="b" * 40,
             assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=False,
         )
+        self.assertEqual(evidence["source_sha"], "b" * 40)
+        self.assertEqual(evidence["trusted_guard_source_sha"], "a" * 40)
         self.assertEqual(evidence["base_sha"], "a" * 40)
         self.assertEqual(evidence["head_sha"], "b" * 40)
         self.assertEqual(evidence["result"], "PASS")
+        self.assertEqual(evidence["policy"]["max_deletions"], 50)
+        self.assertEqual(evidence["policy"]["max_deleted_fraction"], 0.35)
+        self.assertFalse(evidence["policy"]["scope_enforced"])
+        self.assertEqual(
+            evidence["unresolved_limits"],
+            ["mutation_scope_not_enforced_without_trusted_external_scope"],
+        )
+        self.assertNotIn("trusted-mutation-scope", evidence["checks_run"])
         self.assertFalse(evidence["contains_secrets"])
 
         with self.assertRaisesRegex(ValueError, "exact lowercase Git object id"):
@@ -47,7 +60,34 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 base_sha="A" * 40,
                 head_sha="b" * 40,
                 assessment=assessment,
+                max_deletions=50,
+                max_deleted_fraction=0.35,
+                scope_enforced=False,
             )
+
+    def test_evidence_records_trusted_scope_when_enforced(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=10,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=True,
+        )
+        self.assertTrue(evidence["policy"]["scope_enforced"])
+        self.assertEqual(evidence["unresolved_limits"], [])
+        self.assertIn("trusted-mutation-scope", evidence["checks_run"])
 
     def test_cli_writes_fail_evidence_before_returning_blocked(self):
         blocked = IntegrityAssessment(
@@ -89,6 +129,11 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 evidence["reasons"],
                 ["head is not descended from exact base revision"],
             )
+            self.assertEqual(
+                evidence["unresolved_limits"],
+                ["mutation_scope_not_enforced_without_trusted_external_scope"],
+            )
+
     def test_mass_base_tree_deletion_fails_closed(self):
         base = [f"path-{index}.txt" for index in range(100)]
         changes = [Change(status="D", path=path) for path in base[:60]]

@@ -182,6 +182,21 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             path = checkpoint_path(directory)
             value = json.loads(path.read_text(encoding="utf-8"))
             value["runtime_components"]["strategy_state"] = "f" * 64
+            # Recompute the unkeyed fingerprint so this remains structurally
+            # valid and only the product-owned authority seal exposes tampering.
+            material = {
+                key: item
+                for key, item in value.items()
+                if key != "fingerprint"
+            }
+            value["fingerprint"] = sha256(
+                json.dumps(
+                    material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest()
             path.write_text(
                 json.dumps(
                     value,
@@ -198,7 +213,7 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                 "from_state",
                 side_effect=AssertionError("invalid checkpoint cannot restore provider"),
             ):
-                with self.assertRaisesRegex(ValueError, "runtime checkpoint"):
+                with self.assertRaisesRegex(ValueError, "authority seal is invalid"):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), before)
 

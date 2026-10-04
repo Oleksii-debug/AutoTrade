@@ -251,6 +251,11 @@ class ProductionFinancialHostTests(unittest.TestCase):
             observed = {}
             wire_calls = []
 
+            def transport_send(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"status": "accepted"}
+
             def fail_listener():
                 observed["owner"] = recovery.owner
                 observed["state"] = recovery.state
@@ -262,7 +267,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
                     request={"symbol": "BTCUSDT"},
                     now="2026-10-04T04:30:00Z",
                     authority_check=lambda _intent_hash, _now: (True, "allowed"),
-                    transport_send=lambda *_args: wire_calls.append("wire"),
+                    transport_send=transport_send,
                     final_barrier_clock=lambda: "2026-10-04T04:30:00Z",
                 )
                 observed["dispatch"] = outcome

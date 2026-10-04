@@ -874,6 +874,7 @@ class BybitCredentialProbeUrllibClient:
 
 
 _DIRECT_PROVIDER_WIRE_CLIENT_TYPE = BybitCredentialProbeUrllibClient
+_DIRECT_PROVIDER_WIRE_CLIENT_INIT = BybitCredentialProbeUrllibClient.__init__
 _DIRECT_PROVIDER_WIRE_CLIENT_SEND = BybitCredentialProbeUrllibClient.send
 
 
@@ -900,6 +901,10 @@ def execute_bybit_credential_probe_wire_query(
             raise ProviderCoreError(
                 "Bybit credential probe direct transport type authority is not canonical"
             )
+        if BybitCredentialProbeUrllibClient.__init__ is not _DIRECT_PROVIDER_WIRE_CLIENT_INIT:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport constructor authority is not canonical"
+            )
         if BybitCredentialProbeUrllibClient.send is not _DIRECT_PROVIDER_WIRE_CLIENT_SEND:
             raise ProviderCoreError(
                 "Bybit credential probe direct transport send authority is not canonical"
@@ -918,7 +923,11 @@ def execute_bybit_credential_probe_wire_query(
         headers=headers,
         timeout_seconds=timeout_seconds,
     )
-    raw_response = client.send(request)
+    raw_response = (
+        _DIRECT_PROVIDER_WIRE_CLIENT_SEND(client, request)
+        if direct_provider_transport
+        else client.send(request)
+    )
     if type(raw_response) is not BybitCredentialProbeRawHttpResponse:
         raise TypeError(
             "Bybit credential probe wire client must return exact BybitCredentialProbeRawHttpResponse"

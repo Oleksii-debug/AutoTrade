@@ -15,7 +15,7 @@ scope or credential authority.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from .capabilities import CapabilityRegistry
 from .dispatch import AuthorityCheck, DispatchOutcome
@@ -36,6 +36,15 @@ from .provider_transport import (
 from .recovery import RecoveryController
 from .security import SecurityBoundary
 from .windows_secrets import PersistentCredentialHandle
+
+if TYPE_CHECKING:
+    from .financial_send_authority import (
+        FinancialSendAuthorityIssuer,
+        FinanciallyBoundBybitOrderSender,
+    )
+
+
+_PRODUCTION_BYBIT_FACTORY_TOKEN = object()
 
 
 _BYBIT_POLICY_IDENTITIES: Mapping[str, tuple[object, ...]] = {
@@ -394,7 +403,12 @@ class ProductionBybitOrderSender:
         *,
         runtime: FinancialProductionHostRuntime,
         transport: BybitV5HttpTransport,
+        _factory_token: object = None,
     ) -> None:
+        if _factory_token is not _PRODUCTION_BYBIT_FACTORY_TOKEN:
+            raise PermissionError(
+                "raw ProductionBybitOrderSender requires internal financial composition"
+            )
         if type(runtime) is not FinancialProductionHostRuntime:
             raise TypeError("runtime must be exact FinancialProductionHostRuntime")
         if type(transport) is not BybitV5HttpTransport:
@@ -630,7 +644,7 @@ class ProductionBybitOrderSender:
         )
 
 
-def build_production_bybit_order_sender(
+def _build_production_bybit_order_sender(
     runtime: FinancialProductionHostRuntime,
     *,
     provider_environment: str,
@@ -644,7 +658,7 @@ def build_production_bybit_order_sender(
     wire_client: ProviderWireClient | None = None,
     recv_window_ms: int = 5000,
 ) -> ProductionBybitOrderSender:
-    """Compose the existing Bybit writer under one current production host.
+    """Compose the raw Bybit writer for trusted financial binding only.
 
     MAINNET is LIVE only. TESTNET and DEMO are PAPER only. The caller chooses the
     already-qualified provider domain/capability/credential inputs, but cannot
@@ -708,4 +722,58 @@ def build_production_bybit_order_sender(
         wire_client=wire_client,
         recv_window_ms=recv_window_ms,
     )
-    return ProductionBybitOrderSender(runtime=runtime, transport=transport)
+    return ProductionBybitOrderSender(
+        runtime=runtime,
+        transport=transport,
+        _factory_token=_PRODUCTION_BYBIT_FACTORY_TOKEN,
+    )
+
+
+def build_production_bybit_order_sender(
+    runtime: FinancialProductionHostRuntime,
+    *,
+    financial_issuer: "FinancialSendAuthorityIssuer",
+    provider_environment: str,
+    capability_snapshot_id: str,
+    capability_registry: CapabilityRegistry,
+    credential_handle: PersistentCredentialHandle,
+    session_token: str,
+    clock_millis: ClockMillis,
+    clock_utc: ClockUtc,
+    quota_gate: QuotaGate | None = None,
+    wire_client: ProviderWireClient | None = None,
+    recv_window_ms: int = 5000,
+) -> "FinanciallyBoundBybitOrderSender":
+    """Compose the product-facing Bybit sender under sealed financial authority.
+
+    Product composition cannot obtain the callback-taking raw sender through this
+    public factory.  The exact issuer must belong to the same current production
+    host, and the returned surface accepts only issuer-minted financial send
+    capabilities.
+    """
+
+    from .financial_send_authority import (
+        FinancialSendAuthorityIssuer,
+        bind_financial_bybit_order_sender,
+    )
+
+    if type(financial_issuer) is not FinancialSendAuthorityIssuer:
+        raise TypeError("financial_issuer must be exact FinancialSendAuthorityIssuer")
+    if financial_issuer.runtime is not runtime:
+        raise PermissionError(
+            "financial issuer and Bybit sender must share one production host"
+        )
+    sender = _build_production_bybit_order_sender(
+        runtime,
+        provider_environment=provider_environment,
+        capability_snapshot_id=capability_snapshot_id,
+        capability_registry=capability_registry,
+        credential_handle=credential_handle,
+        session_token=session_token,
+        clock_millis=clock_millis,
+        clock_utc=clock_utc,
+        quota_gate=quota_gate,
+        wire_client=wire_client,
+        recv_window_ms=recv_window_ms,
+    )
+    return bind_financial_bybit_order_sender(sender, financial_issuer)

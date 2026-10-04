@@ -12,7 +12,7 @@ from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
+from mvp.autotrade_mvp.production_bybit import _build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.security import SecurityBoundary
@@ -108,7 +108,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             position_side="LONG",
             position_idx=1,
         )
-        sender = build_production_bybit_order_sender(
+        sender = _build_production_bybit_order_sender(
             runtime,
             provider_environment="TESTNET",
             capability_snapshot_id=capability.snapshot_id,

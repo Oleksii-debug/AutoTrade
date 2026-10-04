@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjectio
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
+    ProviderFillFinancialPlan,
     build_provider_fill_bust_transaction,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -258,6 +259,36 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(reservation.state, "FILLED")
             self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
+
+    def test_provider_fill_binding_rejects_polymorphic_plan_before_field_access(self):
+        class HostilePlan(ProviderFillFinancialPlan):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile provider-fill plan field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, _reservations = books(store)
+            projected, provider = evidence()
+            hostile = object.__new__(HostilePlan)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "plan must be exact ProviderFillFinancialPlan",
+            ):
+                accounting_impl._prepare_provider_fill_binding(
+                    economics,
+                    plan=hostile,
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    committed_at=WHEN,
+                )
+            self.assertEqual(HostilePlan.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
 
     def test_fill_bust_rejects_polymorphic_fill_evidence_before_field_access(self):
         class HostileProjectedFill(ProjectedFillEvidence):

@@ -100,6 +100,7 @@ def candidate_wave(*, promotion_mode="CONFIRMATION") -> CandidateWave:
         candidate_artifact_hash=digest("candidate"),
         candidate_created_at=BASE + timedelta(minutes=15),
         error_analysis_hash=digest("error-analysis"),
+        error_analysis_at=BASE + timedelta(minutes=12),
         change_summary="Correct observed errors without changing hard risk",
         training_population=training,
         validation_population=validation,
@@ -238,12 +239,13 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=train,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
 
     def test_pause_policy_cannot_be_swapped_before_candidate_handoff(self):
@@ -268,12 +270,13 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
         self.assertEqual(p.promotion_mode, "CONFIRMATION")
 
@@ -298,12 +301,103 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=digest("different-champion"),
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
+    def test_candidate_cannot_be_created_before_pause(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+        )
+        with self.assertRaisesRegex(ValueError, "before the learning-wave pause"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=9),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=9),
+                change_summary="Premature candidate",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
+    def test_error_analysis_cannot_precede_pause(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+        )
+        with self.assertRaisesRegex(ValueError, "error analysis cannot precede"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=9),
+                change_summary="Analysis happened too early",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=16),
+            )
+
+    def test_candidate_cannot_precede_error_analysis_completion(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("obs-1",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE,
+            observations=("obs-2",),
+        )
+        with self.assertRaisesRegex(ValueError, "before error analysis completes"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=16),
+                change_summary="Candidate fixed too early",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=17),
             )
 
     def test_training_population_must_bind_paused_causal_cut(self):
@@ -327,12 +421,13 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
 
     def test_training_and_validation_observations_must_be_disjoint(self):
@@ -356,12 +451,13 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
 
     def test_validation_must_use_distinct_causal_cut(self):
@@ -385,12 +481,13 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=digest("candidate"),
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=1),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
 
     def test_candidate_cannot_use_training_data_that_arrived_after_creation(self):
@@ -416,6 +513,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 candidate_artifact_hash=digest("candidate"),
                 candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
@@ -445,6 +543,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 candidate_artifact_hash=digest("candidate"),
                 candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
@@ -474,6 +573,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 candidate_artifact_hash=digest("candidate"),
                 candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
@@ -501,8 +601,9 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 champion_artifact_hash=snap.champion_artifact_hash,
                 candidate_id="candidate",
                 candidate_artifact_hash=snap.champion_artifact_hash,
-                candidate_created_at=BASE + timedelta(minutes=1),
+                candidate_created_at=BASE + timedelta(minutes=15),
                 error_analysis_hash=digest("error-analysis"),
+                error_analysis_at=BASE + timedelta(minutes=12),
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
@@ -584,6 +685,15 @@ class CandidateResolutionTests(unittest.TestCase):
         object.__setattr__(wave.policy, "promotion_mode", "AUTO")
         with self.assertRaisesRegex(ValueError, "policy changed"):
             resolve_candidate(wave, evaluation())
+
+    def test_inconclusive_status_cannot_hide_failed_hard_gate(self):
+        result = resolve_candidate(
+            candidate_wave(promotion_mode="AUTO"),
+            evaluation(status="INCONCLUSIVE", risk=False),
+        )
+        self.assertEqual(result.action, "REJECTED")
+        self.assertIn("LEARNING_WAVE.RISK_GATE_FAILED", result.reasons)
+        self.assertNotIn("LEARNING_WAVE.EVALUATION_INCONCLUSIVE", result.reasons)
 
     def test_evaluation_must_bind_exact_candidate_artifact(self):
         with self.assertRaisesRegex(ValueError, "does not bind"):

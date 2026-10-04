@@ -5188,20 +5188,16 @@ class AuthorityService:
                     )
                 # Historical evidence above is intentionally regenerated at the
                 # admission instant so restart/replay remains deterministic.
-                # Sending is a distinct authority boundary: the exact persisted
-                # checkpoint/resources must still be current *now*. When local
-                # settlement capital participates, freeze one outer journal cut
-                # around both the provider checkpoint read and the local-capital
-                # projection. Otherwise a newer reconciliation checkpoint could
-                # land between those reads and leave stale provider CASH paired
-                # with a newer local projection.
+                # Sending is a distinct authority boundary: freeze one global
+                # journal cut across every final provider/local financial read.
+                # A newer reconciliation, settlement or borrow fact appearing
+                # between component reads must invalidate the whole decision
+                # rather than letting mixed-generation authority reach send.
+                financial_validation_sequence = _authority_store_call(
+                    self, "current_journal_sequence"
+                )
                 raw_capital_adjustment = availability_evidence.get(
                     "settlement_capital_adjustment"
-                )
-                capital_validation_sequence = (
-                    _authority_store_call(self, "current_journal_sequence")
-                    if raw_capital_adjustment is not None
-                    else None
                 )
                 current_provider_evidence = (
                     load_account_resource_availability_evidence(
@@ -5292,14 +5288,6 @@ class AuthorityService:
                             raise AuthorityConflict(
                                 "current settlement capital no longer covers reservation"
                             )
-                    if (
-                        _authority_store_call(self, "current_journal_sequence")
-                        != capital_validation_sequence
-                    ):
-                        raise AuthorityConflict(
-                            "provider/local capital authority changed during dispatch validation"
-                        )
-
                 borrow_resources = tuple(
                     resource
                     for resource in risk_requirements
@@ -5356,6 +5344,13 @@ class AuthorityService:
                         )
                         if projection.active_quantity > 0:
                             return False, "borrow_recall_active"
+                if (
+                    _authority_store_call(self, "current_journal_sequence")
+                    != financial_validation_sequence
+                ):
+                    raise AuthorityConflict(
+                        "financial authority changed during dispatch validation"
+                    )
             except Exception:
                 return False, "financial_evidence_invalid"
             if reservation.intent_id != record.intent_id:

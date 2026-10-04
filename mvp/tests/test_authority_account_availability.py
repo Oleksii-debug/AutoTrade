@@ -433,6 +433,54 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 )
             self.assertTrue(injected)
 
+    def test_dispatch_rejects_reconciliation_advance_after_provider_read_without_capital(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            original_load = authority_module.load_account_resource_availability_evidence
+            injected = False
+
+            def load_then_advance(*args, **kwargs):
+                nonlocal injected
+                evidence = original_load(*args, **kwargs)
+                if not injected:
+                    injected = True
+                    _checkpoint(
+                        store,
+                        cash="0",
+                        available_cash="0",
+                        observed_at="2026-09-24T18:00:40Z",
+                        reconciliation_id="availability-dispatch-race-newer",
+                        snapshot_id="availability-dispatch-race-newer",
+                    )
+                return evidence
+
+            with patch.object(
+                authority_module,
+                "load_account_resource_availability_evidence",
+                side_effect=load_then_advance,
+            ):
+                self.assertEqual(
+                    _dispatch(authority, admitted),
+                    (False, "financial_evidence_invalid"),
+                )
+            self.assertTrue(injected)
+
     def test_bybit_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

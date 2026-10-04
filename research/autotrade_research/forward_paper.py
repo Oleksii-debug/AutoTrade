@@ -164,7 +164,9 @@ def forward_paper_protocol_hash(
                 "minimum_independent_decisions_per_regime": independent_minimum,
                 "required_simulation_limitations": list(limitations),
                 "reporting_currency": currency,
-                "maximum_drawdown": None if drawdown is None else str(drawdown),
+                "maximum_drawdown": (
+                    None if drawdown is None else _canonical_decimal_text(drawdown)
+                ),
                 "evaluation_profile_hash": evaluation_profile,
             }
         )
@@ -190,6 +192,30 @@ def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
     if nonnegative and result < 0:
         raise ForwardPaperError(f"{name} cannot be negative")
     return result
+
+
+def _canonical_decimal_text(value: Decimal) -> str:
+    """Render one exact Decimal without representation-only trailing zeros."""
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ForwardPaperError("canonical decimal must be finite Decimal")
+    sign, digits_tuple, exponent = value.as_tuple()
+    digits = list(digits_tuple)
+    while digits and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    if not digits:
+        return "0"
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        rendered = coefficient + ("0" * exponent)
+    else:
+        split = len(coefficient) + exponent
+        if split > 0:
+            rendered = coefficient[:split] + "." + coefficient[split:]
+        else:
+            rendered = "0." + ("0" * (-split)) + coefficient
+    return ("-" if sign else "") + rendered
 
 
 def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
@@ -261,6 +287,8 @@ class ForwardPaperProtocol:
         regimes = tuple(value.upper() for value in raw_regimes)
         if len(set(regimes)) != len(regimes):
             raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+        if "UNSPECIFIED" in regimes:
+            raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
         independent_minimum = _positive_int(
             self.minimum_independent_decisions_per_regime,
             name="minimum_independent_decisions_per_regime",
@@ -273,6 +301,10 @@ class ForwardPaperProtocol:
         if len(set(limitations)) != len(limitations):
             raise ForwardPaperError(
                 "required_simulation_limitations contains case-insensitive duplicates"
+            )
+        if "UNSPECIFIED" in limitations:
+            raise ForwardPaperError(
+                "UNSPECIFIED cannot be a required simulation limitation"
             )
         currency = _text(self.reporting_currency, name="reporting_currency").upper()
         drawdown = (
@@ -413,6 +445,8 @@ class ForwardPaperProtocol:
         regimes = tuple(value.upper() for value in raw_regimes)
         if len(set(regimes)) != len(regimes):
             raise ForwardPaperError("required_regimes contains case-insensitive duplicates")
+        if "UNSPECIFIED" in regimes:
+            raise ForwardPaperError("UNSPECIFIED cannot be a required regime")
         independent_minimum = _positive_int(
             minimum_independent_decisions_per_regime,
             name="minimum_independent_decisions_per_regime",
@@ -425,6 +459,10 @@ class ForwardPaperProtocol:
         if len(set(limitations)) != len(limitations):
             raise ForwardPaperError(
                 "required_simulation_limitations contains case-insensitive duplicates"
+            )
+        if "UNSPECIFIED" in limitations:
+            raise ForwardPaperError(
+                "UNSPECIFIED cannot be a required simulation limitation"
             )
         currency = _text(reporting_currency, name="reporting_currency").upper()
         drawdown = (
@@ -985,14 +1023,24 @@ def assess_forward_paper(
             if prediction.regime not in regime_independence:
                 invalid.append("undeclared_regime")
             else:
-                prior_regime = independence_regime.get(prediction.independence_key)
-                if prior_regime is not None and prior_regime != prediction.regime:
-                    invalid.append("independence_key_regime_conflict")
+                if prediction.independence_key == "UNSPECIFIED":
+                    invalid.append("independence_key_unspecified")
                 else:
-                    independence_regime[prediction.independence_key] = prediction.regime
-                    regime_independence[prediction.regime].add(
+                    prior_regime = independence_regime.get(
                         prediction.independence_key
                     )
+                    if (
+                        prior_regime is not None
+                        and prior_regime != prediction.regime
+                    ):
+                        invalid.append("independence_key_regime_conflict")
+                    else:
+                        independence_regime[
+                            prediction.independence_key
+                        ] = prediction.regime
+                        regime_independence[prediction.regime].add(
+                            prediction.independence_key
+                        )
         if not prediction.met_deadline:
             operational_failures.append("decision_deadline_missed")
         if prediction.decision_latency_ms > protocol.maximum_decision_latency_ms:
@@ -1104,6 +1152,11 @@ def assess_forward_paper(
         invalid.append("paper_economics_sequence_gap")
     previous: PaperDecisionEconomics | None = None
     for item in ordered_economics:
+        if previous is not None and _instant(
+            item.realized_at,
+            name="realized_at",
+        ) < _instant(previous.realized_at, name="realized_at"):
+            invalid.append("paper_economics_time_regression")
         if previous is None:
             if Fraction(item.peak_equity_before) != Fraction(item.equity_before):
                 invalid.append("paper_equity_opening_peak_mismatch")
@@ -1132,9 +1185,29 @@ def assess_forward_paper(
             incomplete.append("missing_paper_economics")
 
     observed_limitations = set(evidence.simulation_limitations)
+    required_limitations = set(protocol.required_simulation_limitations)
     for limitation in protocol.required_simulation_limitations:
         if limitation not in observed_limitations:
             incomplete.append(f"missing_simulation_limitation:{limitation}")
+    for limitation in sorted(observed_limitations - required_limitations):
+        incomplete.append(f"unregistered_simulation_limitation:{limitation}")
+
+    execution_cost = sum(
+        (
+            Fraction(item.fees)
+            + Fraction(item.spread_cost)
+            + Fraction(item.slippage_cost)
+        )
+        for item in economics_by_prediction.values()
+    )
+    reporting_ledger_cost = evidence.costs_by_currency.get(protocol.reporting_currency)
+    if economics_by_prediction and reporting_ledger_cost is None:
+        incomplete.append("reporting_currency_cost_ledger_missing")
+    elif (
+        reporting_ledger_cost is not None
+        and Fraction(reporting_ledger_cost) < execution_cost
+    ):
+        invalid.append("paper_execution_costs_exceed_cost_ledger")
 
     if not evidence.costs_complete:
         incomplete.append("actual_costs_incomplete")

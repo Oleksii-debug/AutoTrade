@@ -158,7 +158,21 @@ class ProductionFinancialHostRuntime:
         self.host.serve_forever(poll_interval=poll_interval)
 
     def close(self) -> None:
-        """Drain provider secrets, drop recovery owner, then release host fence."""
+        """Drain commands and financial authorities before releasing host fence.
+
+        Command admission closes first while provider leases and recovery ownership
+        are still available, allowing already-admitted commands to finish their
+        canonical provider work.  Once no command is active, provider lease
+        admission closes and any background/provider lease is drained.  Recovery
+        ownership is then dropped before the underlying host performs listener
+        teardown and releases the process-lifetime instance fence.
+        """
+
+        command_error: BaseException | None = None
+        try:
+            self.host._admission_gate.stop_and_drain()
+        except BaseException as error:
+            command_error = error
 
         provider_error: BaseException | None = None
         try:
@@ -178,10 +192,11 @@ class ProductionFinancialHostRuntime:
         except BaseException as error:
             host_error = error
 
-        terminal_error = provider_error or recovery_error or host_error
+        terminal_error = command_error or provider_error or recovery_error or host_error
         if terminal_error is None:
             return
         for label, error in (
+            ("command admission drain", command_error),
             ("provider lease drain", provider_error),
             ("recovery stop", recovery_error),
             ("production host teardown", host_error),

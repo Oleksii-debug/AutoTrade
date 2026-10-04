@@ -1,4 +1,5 @@
 import unittest
+from types import MappingProxyType
 
 from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
     BybitCredentialProbeEvidence,
@@ -22,6 +23,29 @@ class _FakeWireClient:
             http_status=200,
             body=self.body,
         )
+
+
+class _HostileHeaders(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.touched = False
+
+    def _touch(self):
+        self.touched = True
+        raise AssertionError("hostile header mapping callback executed")
+
+    def __iter__(self):
+        return self._touch()
+
+    def items(self):
+        return self._touch()
+
+    def keys(self):
+        return self._touch()
+
+    def __getitem__(self, key):
+        del key
+        return self._touch()
 
 
 def _headers():
@@ -124,6 +148,33 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 1)
         self.assertEqual(result.ret_code, 10003)
         self.assertFalse(result.api_key_echo_confirmed)
+
+    def test_polymorphic_header_mapping_is_rejected_before_callbacks(self):
+        hostile = _HostileHeaders(_headers())
+        client = _FakeWireClient(b'{"retCode":10003}')
+        with self.assertRaisesRegex(ProviderCoreError, "exact built-in"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=hostile,
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertFalse(hostile.touched)
+        self.assertEqual(client.requests, [])
+
+    def test_mappingproxy_over_hostile_headers_is_rejected_before_callbacks(self):
+        hostile = _HostileHeaders(_headers())
+        proxy = MappingProxyType(hostile)
+        client = _FakeWireClient(b'{"retCode":10003}')
+        with self.assertRaisesRegex(ProviderCoreError, "exact built-in"):
+            execute_bybit_credential_probe_wire_query(
+                source_uri="https://api.bybit.com/v5/user/query-api",
+                headers=proxy,
+                timeout_seconds=15,
+                wire_client=client,
+            )
+        self.assertFalse(hostile.touched)
+        self.assertEqual(client.requests, [])
 
     def test_wire_boundary_rejects_success_for_different_api_key(self):
         client = _FakeWireClient(

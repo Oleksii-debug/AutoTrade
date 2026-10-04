@@ -371,6 +371,22 @@ class QualifiedProviderResponseObservation:
         object.__setattr__(self, "query_binding", query_binding)
 
     @property
+    def evidence_ref(self) -> str:
+        material = {
+            "neutral_evidence_ref": self.observation.evidence_ref,
+            "qualified_query_digest": self.query_binding.query_digest,
+            "qualification_id": self.query_binding.qualification_id,
+            "qualified_route_rule_digest": self.query_binding.qualified_route_rule_digest,
+            "data_entitlement": self.query_binding.data_entitlement,
+            "parser_identity": self.query_binding.parser_identity,
+            "response_sha256": self.observation.response_sha256,
+            "observed_at": self.observation.observed_at,
+        }
+        return "qualified-provider-read:sha256:" + sha256(
+            canonical_json(material).encode("utf-8")
+        ).hexdigest()
+
+    @property
     def qualification_id(self) -> str:
         return self.query_binding.qualification_id
 

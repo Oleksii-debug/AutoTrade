@@ -481,21 +481,49 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         )
         self.assertEqual(result.scope_violations, ())
 
-    def test_trust_root_approval_does_not_constrain_unrelated_changes(self):
+    def test_trust_root_approval_requires_separate_exact_full_changed_path_scope(self):
         guard_path = "control/tools/reconvergence_integrity.py"
         ordinary_path = "owned/change.py"
-        result = assess_reconvergence(
+        changes = [
+            Change(status="M", path=guard_path),
+            Change(status="M", path=ordinary_path),
+        ]
+
+        missing_scope = assess_reconvergence(
             base_paths=[guard_path, ordinary_path],
-            changes=[
-                Change(status="M", path=guard_path),
-                Change(status="M", path=ordinary_path),
-            ],
+            changes=changes,
             trusted_root_approvals=(guard_path,),
         )
+        self.assertFalse(missing_scope.allowed)
+        self.assertEqual(missing_scope.protected_violations, ())
+        self.assertIn(
+            "trust-root evolution requires exact-head full mutation scope",
+            missing_scope.reasons,
+        )
 
-        self.assertTrue(result.allowed)
-        self.assertEqual(result.protected_violations, ())
-        self.assertEqual(result.scope_violations, ())
+        broad_scope = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=changes,
+            allowed_scopes=("control", ordinary_path),
+            trusted_root_approvals=(guard_path,),
+        )
+        self.assertFalse(broad_scope.allowed)
+        self.assertTrue(
+            any(
+                "trust-root evolution requires exact changed-path scope" in reason
+                for reason in broad_scope.reasons
+            )
+        )
+
+        exact_scope = assess_reconvergence(
+            base_paths=[guard_path, ordinary_path],
+            changes=changes,
+            allowed_scopes=(guard_path, ordinary_path),
+            trusted_root_approvals=(guard_path,),
+        )
+        self.assertTrue(exact_scope.allowed)
+        self.assertEqual(exact_scope.protected_violations, ())
+        self.assertEqual(exact_scope.scope_violations, ())
 
     def test_trust_root_approval_is_exact_path_not_directory_authority(self):
         guard_path = "control/tools/reconvergence_integrity.py"

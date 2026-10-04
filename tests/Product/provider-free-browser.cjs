@@ -139,6 +139,72 @@ async function exercisePortfolioTableTools(page) {
     (document.querySelector("#portfolio-filter-status")?.textContent || "").endsWith(" rows shown."));
 }
 
+async function exerciseSnapshotSelectionPreservation(page) {
+  stage = "same-scope snapshot text selection";
+  const selected = await page.evaluate(() => {
+    const cell = [...document.querySelectorAll("#portfolio-body td")]
+      .find(candidate => candidate.textContent.includes("895.696"));
+    if (!cell || !cell.firstChild) return null;
+    const value = cell.firstChild.data;
+    const start = value.indexOf("895.696");
+    if (start < 0) return null;
+    const range = document.createRange();
+    range.setStart(cell.firstChild, start);
+    range.setEnd(cell.firstChild, start + "895.696".length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    if (typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(
+        cell.firstChild, start + "895.696".length, cell.firstChild, start);
+    } else {
+      selection.addRange(range);
+    }
+    return {
+      text: selection.toString(),
+      backward: selection.anchorNode === cell.firstChild &&
+        selection.focusNode === cell.firstChild &&
+        selection.anchorOffset > selection.focusOffset
+    };
+  });
+  assert.equal(selected.text, "895.696", "portfolio evidence is selectable before refresh");
+
+  const routePattern = "**/api/v1/state";
+  await page.route(routePattern, async route => {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await route.continue();
+  });
+  try {
+    // Invoke the same user refresh path without moving focus/selection to the
+    // button. This isolates the DOM-update invariant: a same-scope snapshot
+    // must not erase ordinary selectable/copyable financial evidence.
+    await page.evaluate(() => document.querySelector("#refresh-state").click());
+    await page.waitForFunction(() => document.querySelector("#refresh-state").disabled);
+    await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
+    const after = await page.evaluate(() => {
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount === 1 ? selection.getRangeAt(0) : null;
+      const body = document.querySelector("#portfolio-body");
+      return {
+        text: selection ? selection.toString() : "",
+        inside: Boolean(range && body &&
+          body.contains(range.startContainer) && body.contains(range.endContainer)),
+        backward: Boolean(selection && selection.anchorNode && selection.focusNode &&
+          selection.anchorOffset > selection.focusOffset)
+      };
+    });
+    assert.equal(after.text, "895.696",
+      "same-scope canonical snapshot preserves selected portfolio evidence");
+    assert.equal(after.inside, true,
+      "restored selection remains inside the portfolio evidence table");
+    if (selected.backward) {
+      assert.equal(after.backward, true,
+        "backward selection direction survives snapshot replacement");
+    }
+  } finally {
+    await page.unroute(routePattern).catch(() => {});
+  }
+}
+
 async function exerciseSnapshotBusyFailClosed(page) {
   stage = "snapshot busy keyboard refresh";
   let busy = true;
@@ -264,6 +330,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
   await exercisePortfolioTableTools(page);
+  await exerciseSnapshotSelectionPreservation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);
   await command(page, "BACKUP_SIMULATION", 4);

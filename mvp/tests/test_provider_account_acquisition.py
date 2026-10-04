@@ -1,11 +1,17 @@
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import unittest
 from unittest.mock import patch
+import weakref
 
 from mvp.autotrade_mvp import provider_account_acquisition as acquisition_module
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from mvp.autotrade_mvp.provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
     ProviderAccountAcquisitionError,
@@ -334,6 +340,71 @@ class DurableProviderAccountAcquisitionAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(first.current_journal_sequence(), 0)
             self.assertEqual(second.current_journal_sequence(), 0)
+
+    def test_binding_registry_is_not_importable_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            first = JournalStore(Path(directory) / "first.sqlite3")
+            second = JournalStore(Path(directory) / "second.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(first)
+            second_identity = require_exact_journal_store_authority(
+                second,
+                subject="adversarial replacement provider acquisition journal",
+            )
+
+            self.assertFalse(hasattr(acquisition_module, "_BINDINGS"))
+            self.assertFalse(hasattr(acquisition_module, "_BINDINGS_LOCK"))
+            callbacks = [
+                reference.__callback__
+                for reference in weakref.getweakrefs(authority)
+                if reference.__callback__ is not None
+            ]
+            self.assertEqual(callbacks, [])
+
+            # Recreate the historical module-global attack surface and align the
+            # caller-visible diagnostic slots with a legitimate second store.
+            # The closure-owned original selection must remain authoritative.
+            acquisition_module._BINDINGS = {
+                id(authority): (
+                    weakref.ref(authority),
+                    weakref.ref(second),
+                    second_identity,
+                )
+            }
+            acquisition_module._BINDINGS_LOCK = threading.RLock()
+            try:
+                authority.store = second
+                authority._journal_store_identity = second_identity
+                with self.assertRaisesRegex(
+                    ProviderAccountAcquisitionError,
+                    "composition changed",
+                ):
+                    authority.issue_serialized(
+                        provider_scope=scope(),
+                        account_id="account-1",
+                        acquisition_request_id="retarget-attempt",
+                        committed_at=NOW,
+                    )
+            finally:
+                del acquisition_module._BINDINGS
+                del acquisition_module._BINDINGS_LOCK
+
+            self.assertEqual(first.current_journal_sequence(), 0)
+            self.assertEqual(second.current_journal_sequence(), 0)
+
+    def test_explicit_reinitialization_cannot_replace_original_store(self):
+        with TemporaryDirectory() as directory:
+            first = JournalStore(Path(directory) / "first.sqlite3")
+            second = JournalStore(Path(directory) / "second.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(first)
+
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "already initialized",
+            ):
+                authority.__init__(second)
+
+            selected, _identity = authority._journal_authority()
+            self.assertIs(selected, first)
 
     def test_public_journal_method_rebinding_does_not_redirect_retained_path(self):
         with TemporaryDirectory() as directory:

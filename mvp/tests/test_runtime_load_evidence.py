@@ -238,6 +238,40 @@ class RuntimeLoadEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence.missing_event_ids, ("old-financial",))
             self.assertEqual(evidence.end_journal_sequence, start)
 
+    def test_store_generation_change_after_selection_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected("financial-generation", 1)
+            _append(store, expected)
+
+            other = JournalStore(Path(root) / "other-runtime-load.sqlite")
+            other.current_journal_sequence()
+            other_identity = other.store_identity
+            original_current_sequence = JournalStore.current_journal_sequence
+
+            def retarget_before_read(selected_store):
+                selected_store.path = other.path
+                selected_store._store_identity = other_identity
+                return original_current_sequence(selected_store)
+
+            with (
+                patch.object(
+                    JournalStore,
+                    "current_journal_sequence",
+                    new=retarget_before_read,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "journal operation authority changed before connection",
+                ),
+            ):
+                collect_journal_conservation_evidence(
+                    store,
+                    scenario_id="journal-load",
+                    start_journal_sequence=0,
+                    expected_events=(expected,),
+                )
+
     def test_writer_after_frozen_terminal_cut_cannot_expand_evidence_horizon(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

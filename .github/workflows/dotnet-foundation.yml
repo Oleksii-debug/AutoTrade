@@ -69,9 +69,9 @@ jobs:
         with:
           dotnet-version: "10.0.100"
       - run: dotnet --info
-      # AutoTrade.Contracts has no PackageReference dependencies; package-bearing
-      # release projects are restored separately from committed locks below.
-      - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
+      # Keep every canonical project restore in locked mode; package-bearing
+      # release projects additionally carry their committed exact dependency locks.
+      - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --locked-mode
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
       - name: Write exact-head .NET foundation evidence
         run: >-

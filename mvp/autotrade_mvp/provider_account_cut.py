@@ -90,9 +90,11 @@ class ProviderAccountCutIdentity:
                 "provider_scope must be exact ProviderFinancialScope"
             )
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        mode = _text(self.acquisition_mode, name="acquisition_mode").upper()
+        mode = _text(self.acquisition_mode, name="acquisition_mode")
         if mode not in _MODES:
-            raise ProviderAccountCutError("acquisition_mode is unsupported")
+            raise ProviderAccountCutError(
+                "acquisition_mode must be an exact canonical acquisition model"
+            )
         object.__setattr__(self, "acquisition_mode", mode)
         object.__setattr__(
             self,

@@ -5236,18 +5236,6 @@ class AuthorityService:
         if risk_decision.capability_snapshot_id != capability:
             raise AuthorityConflict("risk decision capability snapshot is stale")
 
-        reservation_plan = None
-        if risk_decision.admitted:
-            reservation_plan = reservation_book.prepare_reserve_mutation(
-                event_key=cid,
-                idempotency_key=idem,
-                reservation_id=rid,
-                intent_id=iid,
-                requirements=reservation_requirements,
-                available=reservation_available,
-                committed_at=now,
-            )
-
         # Per-order confirmation must bind the authoritative financial envelope,
         # not merely a caller-supplied opaque intent label.
         financial_confirmation_binding_hash = None
@@ -5296,9 +5284,16 @@ class AuthorityService:
             ),
         )
 
-        if candidate.outcome == "ADMITTED" and reservation_plan is None:
-            raise AuthorityConflict(
-                "admitted command is missing an atomic reservation plan"
+        reservation_plan = None
+        if candidate.outcome == "ADMITTED":
+            reservation_plan = reservation_book.prepare_reserve_mutation(
+                event_key=cid,
+                idempotency_key=idem,
+                reservation_id=rid,
+                intent_id=iid,
+                requirements=reservation_requirements,
+                available=reservation_available,
+                committed_at=now,
             )
 
         request = {
@@ -5325,7 +5320,11 @@ class AuthorityService:
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
             ),
-            "reservation_availability_evidence": reservation_availability_evidence,
+            "reservation_availability_evidence": (
+                reservation_availability_evidence
+                if candidate.outcome == "ADMITTED"
+                else None
+            ),
             "authoritative_risk_snapshot": risk_snapshot_binding,
             "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
@@ -5367,7 +5366,11 @@ class AuthorityService:
             "reservation_requirements": reservation_requirements_payload(
                 risk_decision.reservation_requirements
             ),
-            "reservation_availability_evidence": reservation_availability_evidence,
+            "reservation_availability_evidence": (
+                reservation_availability_evidence
+                if candidate.outcome == "ADMITTED"
+                else None
+            ),
             "journal_sequence_cut": journal_sequence_cut,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "authoritative_risk_snapshot": risk_snapshot_binding,

@@ -706,5 +706,177 @@ class HardCrashPersistenceTests(unittest.TestCase):
             self.assertEqual(saved, {"status": "ACCEPTED"})
 
 
+    def test_first_event_claim_process_exit_before_commit_leaves_store_empty(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"schema_version": "1.0.0", "owner": "session-1"}
+                envelope = {
+                    "event_id": "owner-hard-crash",
+                    "event_type": "SimulationSessionOwned",
+                    "aggregate_type": "simulation-session",
+                    "aggregate_id": "session-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+
+                original_connect = JournalStore._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(85)
+
+                @contextmanager
+                def crashing_connect(self):
+                    with original_connect(self) as connection:
+                        yield CrashBeforeCommit(connection)
+
+                JournalStore._connect = crashing_connect
+                JournalStore.claim_first_event(store, envelope)
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 85)
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.whole_store_state_cut(),
+                {
+                    "journal_sequence": 0,
+                    "counts": {
+                        "events": 0,
+                        "outbox": 0,
+                        "command_dedupe": 0,
+                        "projection_checkpoints": 0,
+                        "global_projection_checkpoints": 0,
+                    },
+                },
+            )
+
+    def test_first_event_claim_process_exit_after_commit_preserves_single_owner(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"schema_version": "1.0.0", "owner": "session-1"}
+                envelope = {
+                    "event_id": "owner-hard-crash",
+                    "event_type": "SimulationSessionOwned",
+                    "aggregate_type": "simulation-session",
+                    "aggregate_id": "session-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+
+                original_connect = JournalStore._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(86)
+
+                @contextmanager
+                def crashing_connect(self):
+                    with original_connect(self) as connection:
+                        yield CrashAfterCommit(connection)
+
+                JournalStore._connect = crashing_connect
+                JournalStore.claim_first_event(store, envelope)
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 86)
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.whole_store_state_cut(),
+                {
+                    "journal_sequence": 1,
+                    "counts": {
+                        "events": 1,
+                        "outbox": 0,
+                        "command_dedupe": 0,
+                        "projection_checkpoints": 0,
+                        "global_projection_checkpoints": 0,
+                    },
+                },
+            )
+            persisted = reopened.get_event("owner-hard-crash")
+            self.assertIsNotNone(persisted)
+            self.assertEqual(persisted["event_type"], "SimulationSessionOwned")
+            self.assertEqual(
+                persisted["payload"],
+                {"schema_version": "1.0.0", "owner": "session-1"},
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal store already contains durable business state",
+            ):
+                reopened.claim_first_event(
+                    {
+                        "event_id": "owner-hard-crash-2",
+                        "event_type": "SimulationSessionOwned",
+                        "aggregate_type": "simulation-session",
+                        "aggregate_id": "session-2",
+                        "aggregate_version": "1",
+                        "payload": {"schema_version": "1.0.0", "owner": "session-2"},
+                        "payload_hash": payload_digest(
+                            {"schema_version": "1.0.0", "owner": "session-2"}
+                        ),
+                        "committed_at": "2026-10-04T15:20:01+00:00",
+                    }
+                )
+            self.assertEqual(reopened.current_journal_sequence(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

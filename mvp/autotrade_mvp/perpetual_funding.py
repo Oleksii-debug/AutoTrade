@@ -58,7 +58,7 @@ class PerpetualFundingConflict(PerpetualFundingError):
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise PerpetualFundingError(f"{name} is required")
     return value.strip()
 

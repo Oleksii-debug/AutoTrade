@@ -15,12 +15,13 @@ or manufacture qualification evidence.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Mapping
 
 from .authority import AuthorityService
 from .dispatch import DispatchOutcome
 from .financial_request_binding import FinancialRequestBindingMaterial
-from .persistence import JournalStore, payload_digest
+from .persistence import JournalStore, canonical_json, payload_digest
 from .production_bybit import ProductionBybitOrderSender
 from .production_financial_host import FinancialProductionHostRuntime
 
@@ -39,6 +40,21 @@ def _mapping_digest(value: Mapping[str, Any], *, name: str) -> str:
         raise TypeError(f"{name} must be a mapping")
     # payload_digest uses the same canonical-json contract as GuardedDispatcher.
     return payload_digest(dict(value))
+
+
+def _detached_mapping_snapshot(
+    value: Mapping[str, Any],
+    *,
+    name: str,
+) -> dict[str, Any]:
+    """Materialize caller-owned mapping state exactly once and detach nested JSON."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    detached = json.loads(canonical_json(dict(value)))
+    if type(detached) is not dict:
+        raise TypeError(f"{name} must canonicalize to a JSON object")
+    return detached
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -516,6 +532,16 @@ class FinanciallyBoundBybitOrderSender:
         final_barrier_clock: Callable[[], str] | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        request_snapshot = _detached_mapping_snapshot(request, name="request")
+        submission_scope_snapshot = (
+            {}
+            if submission_scope is None
+            else _detached_mapping_snapshot(
+                submission_scope,
+                name="submission_scope",
+            )
+        )
+
         issuer = self.__issuer
         authority_check = issuer._dispatch_guard_for(authority)
         if issuer.runtime is not self.__runtime:
@@ -526,21 +552,21 @@ class FinanciallyBoundBybitOrderSender:
             )
         require_exact_bybit_financial_request(
             authority.binding,
-            request,
-            submission_scope,
+            request_snapshot,
+            submission_scope_snapshot,
             provider_environment=self.__provider_environment,
         )
         return self.__sender.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash=intent_hash,
-            request=request,
+            request=request_snapshot,
             now=now,
             authority_check=authority_check,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
             final_barrier_clock=final_barrier_clock,
-            submission_scope=submission_scope,
+            submission_scope=submission_scope_snapshot,
         )
 
 

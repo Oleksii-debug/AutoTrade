@@ -70,6 +70,49 @@ class DurableSettlementBindingUnforgeabilityTests(unittest.TestCase):
                 original_reader,
             )
 
+    def test_live_book_retains_selected_store_after_external_reference_release(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = JournalStore(root / "selected.sqlite")
+            store_ref = weakref.ref(selected)
+            book = self._book(selected, root)
+
+            del selected
+            gc.collect()
+
+            retained = store_ref()
+            self.assertIsNotNone(retained)
+            bound_store, _identity = book._selected_store()
+            self.assertIs(bound_store, retained)
+
+            del bound_store
+            del retained
+            book_ref = weakref.ref(book)
+            del book
+            gc.collect()
+
+            self.assertIsNone(book_ref())
+            self.assertIsNone(store_ref())
+
+    def test_caller_cannot_retarget_trusted_evidence_reader(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = JournalStore(root / "selected.sqlite")
+            book = self._book(selected, root)
+            original_reader = settlement_authority._durable_settlement_evidence_reader(
+                book
+            )
+
+            book._settlement_evidence_reader = object()
+
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "durable settlement evidence authority changed",
+            ):
+                settlement_authority._durable_settlement_evidence_reader(book)
+
+            self.assertIsNotNone(original_reader)
+
     def test_destroyed_book_releases_store_and_reader_without_next_bind(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

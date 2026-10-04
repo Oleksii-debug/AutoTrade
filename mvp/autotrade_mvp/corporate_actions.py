@@ -284,8 +284,9 @@ class CorporateEvent:
         if type(self.payload) is not dict:
             raise TypeError("payload must be an exact dict")
 
+        payload_snapshot = dict.copy(self.payload)
         normalized_payload: dict[str, str] = {}
-        for raw_key, raw_value in self.payload.items():
+        for raw_key, raw_value in payload_snapshot.items():
             key = _text(raw_key, name="payload key")
             if key in normalized_payload:
                 raise ValueError(
@@ -339,8 +340,9 @@ class CorporateEvent:
             raise ValueError("effective_date must be an exact date")
         if type(payload) is not dict:
             raise TypeError("payload must be an exact dict")
+        payload_snapshot = dict.copy(payload)
         normalized_payload: dict[str, str] = {}
-        for raw_key, raw_value in payload.items():
+        for raw_key, raw_value in payload_snapshot.items():
             key = _text(raw_key, name="payload key")
             if key in normalized_payload:
                 raise ValueError(
@@ -391,24 +393,26 @@ class CorporateActionCheckpoint:
             "checkpoint_id",
             _text(self.checkpoint_id, name="checkpoint_id"),
         )
-        if not isinstance(self.state, EquityState):
-            raise TypeError("checkpoint state must be EquityState")
-        if not isinstance(self.instrument_version, InstrumentVersion):
+        if type(self.state) is not EquityState:
+            raise TypeError("checkpoint state must be exact EquityState")
+        if type(self.instrument_version) is not InstrumentVersion:
             raise TypeError(
-                "checkpoint instrument_version must be InstrumentVersion"
+                "checkpoint instrument_version must be exact InstrumentVersion"
             )
+        if type(self.records) is not tuple:
+            raise TypeError("checkpoint records must be an exact tuple")
 
         seen: set[str] = set()
         previous_after: EquityState | None = None
         for record in self.records:
             if (
-                not isinstance(record, tuple)
+                type(record) is not tuple
                 or len(record) != 2
-                or not isinstance(record[0], CorporateEvent)
-                or not isinstance(record[1], Transition)
+                or type(record[0]) is not CorporateEvent
+                or type(record[1]) is not Transition
             ):
                 raise TypeError(
-                    "checkpoint records must contain CorporateEvent/Transition pairs"
+                    "checkpoint records must contain exact CorporateEvent/Transition pairs"
                 )
             event, transition = record
             if event.event_id in seen:
@@ -438,12 +442,12 @@ class CorporateActionBook:
         instrument_version: InstrumentVersion,
         registry: InstrumentRegistry,
     ):
-        if not isinstance(state, EquityState):
-            raise TypeError("state must be EquityState")
-        if not isinstance(instrument_version, InstrumentVersion):
-            raise TypeError("instrument_version must be InstrumentVersion")
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
+        if type(state) is not EquityState:
+            raise TypeError("state must be exact EquityState")
+        if type(instrument_version) is not InstrumentVersion:
+            raise TypeError("instrument_version must be exact InstrumentVersion")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
         if instrument_version.asset_class != "CASH_EQUITY":
             raise ValueError("corporate-action book requires a CASH_EQUITY instrument")
         registered = tuple(
@@ -879,6 +883,8 @@ class CorporateActionBook:
 def settle_cash(state: EquityState, amount) -> EquityState:
     """Move an evidenced receivable or payable from unsettled to settled cash."""
 
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     value = _decimal(amount, name="amount")
     outstanding = state.unsettled_cash
     if value == 0:
@@ -913,6 +919,8 @@ def record_unsettled_purchase(
     quantity,
     price,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     unit_price = _positive(price, name="price")
     if state.quantity < 0 or state.borrowed_quantity != 0:
@@ -948,6 +956,8 @@ def establish_short(
     quantity,
     sale_price,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     price = _positive(sale_price, name="sale_price")
     if state.quantity > 0:
@@ -980,6 +990,8 @@ def accrue_borrow_financing(
     marked_value,
     days: int,
 ) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     rate = _positive(daily_rate, name="daily_rate", allow_zero=True)
     value = _positive(marked_value, name="marked_value", allow_zero=True)
     if type(days) is not int or days < 0:
@@ -1006,6 +1018,8 @@ def accrue_borrow_financing(
 
 
 def record_recall(state: EquityState, quantity) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     available = _exact_difference(
         state.borrowed_quantity,
@@ -1025,6 +1039,8 @@ def record_recall(state: EquityState, quantity) -> EquityState:
 
 
 def cover_recalled_short(state: EquityState, *, quantity, buy_price) -> EquityState:
+    if type(state) is not EquityState:
+        raise TypeError("state must be exact EquityState")
     qty = _positive(quantity, name="quantity")
     price = _positive(buy_price, name="buy_price")
     if qty > state.recalled_quantity or qty > state.borrowed_quantity:

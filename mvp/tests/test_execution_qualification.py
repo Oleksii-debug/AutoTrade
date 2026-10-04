@@ -152,6 +152,35 @@ class ExecutionQualificationTests(unittest.TestCase):
         values.update(overrides)
         return values
 
+    def test_qualified_wrapper_rejects_polymorphic_inputs_before_authority_reads(self):
+        class OrderAlias(SimulatedOrder):
+            pass
+
+        class ModelAlias(ExecutionModel):
+            pass
+
+        base_order = order()
+        aliased_order = OrderAlias(**base_order.__dict__)
+        with self.assertRaisesRegex(TypeError, "order must be exact SimulatedOrder"):
+            simulate_qualified_execution(
+                order=aliased_order,
+                observation=observation(),
+                model=model(),
+                qualification=qualification(model()),
+                instrument=instrument(),
+                asset_class="EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+            )
+
+        base_model = model()
+        aliased_model = ModelAlias(**base_model.__dict__)
+        with self.assertRaisesRegex(TypeError, "model must be exact ExecutionModel"):
+            validate_execution_qualification(
+                **self.validation_kwargs(aliased_model)
+            )
+
     def test_exact_qualified_model_can_execute_simulation(self):
         exec_model = model()
         result = simulate_qualified_execution(

@@ -163,7 +163,9 @@ class DurableModelBudget:
         self.journal = journal
         self.budget_id = _text(budget_id, name="budget_id")
         self.environment = _environment(environment)
-        self._clock = clock or _now
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = _now if clock is None else clock
 
         candidate = BudgetLedger(ceiling)
         self._ceiling = candidate.snapshot().ceiling

@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.host_network import (
     header_principal_resolver,
     public_session_reference,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
@@ -194,6 +194,54 @@ class HostNetworkTests(unittest.TestCase):
             public_session_reference(self.owner.token),
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
+
+    def test_snapshot_fails_closed_if_global_journal_advances_during_projection(self):
+        writer = JournalStore(self.path)
+        inserted = {"done": False}
+
+        def advancing_snapshot(durable, principal):
+            value = self._snapshot(durable, principal)
+            if not inserted["done"]:
+                inserted["done"] = True
+                payload = {"reason": "snapshot-cut-race-regression"}
+                writer.append_event(
+                    {
+                        "event_id": "snapshot-cut-race-event",
+                        "event_type": "SnapshotCutRaceInjected",
+                        "aggregate_type": "snapshot_cut_test",
+                        "aggregate_id": "singleton",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-25T09:30:00Z",
+                    }
+                )
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=advancing_snapshot,
+        )
+        response = app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+
+        # The injected unrelated journal event is durable, but a subsequent
+        # stable projection is coherent and remains readable.
+        response = self.app.dispatch(
+            method="GET",
+            target="/api/v1/state",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["state_version"], "0")
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):
         observer = self.boundary.create_session(

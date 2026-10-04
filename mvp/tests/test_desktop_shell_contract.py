@@ -152,6 +152,8 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
             "ReferenceEquals(focusedElement, RefreshStatusButton)",
             code,
         )
+        self.assertNotIn("System.Windows.Input.IInputElement", code)
+        self.assertIn("System.Windows.IInputElement?", code)
         self.assertIn("_lifetime.Cancel()", code)
 
     def test_live_regions_raise_automation_events_without_moving_focus(self):

@@ -88,9 +88,14 @@ def _trusted_git(
     *args: str,
     source_root: Path,
     text: bool = False,
+    input_bytes: bytes | None = None,
 ) -> bytes | str:
     """Execute one bounded Git object query under the canonical clean process cut."""
 
+    if input_bytes is not None and type(input_bytes) is not bytes:
+        raise TypeError("trusted Git stdin must be exact bytes")
+    if text and input_bytes is not None:
+        raise ValueError("trusted Git byte stdin requires binary output mode")
     source_root = source_root.resolve(strict=True)
     executable = _trusted_git_executable(source_root=source_root)
     try:
@@ -98,6 +103,7 @@ def _trusted_git(
             [executable, *args],
             cwd=source_root,
             check=False,
+            input=input_bytes,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=text,
@@ -623,13 +629,13 @@ def normalize_inspected_components(
 
 
 def git_blob_sha(path: Path) -> str:
-    """Return Git's canonical object identity for a repository file.
+    """Return a checkout-independent Git object identity for a provenance text file.
 
-    Release provenance must identify the bytes Git would store after applying
-    the repository's clean-filter and EOL attributes, not platform-specific
-    working-tree bytes. The path is deliberately constrained to this
-    repository so callers cannot mint provenance identities for unrelated
-    filesystem content.
+    Release-provenance inputs are source-controlled UTF-8 text.  Normalize only
+    checkout CRLF to canonical LF in-process, then ask the OS-managed Git binary
+    to hash those exact bytes through stdin without path/attribute filters.
+    Local .git/info/attributes, ambient Git configuration, and platform checkout
+    EOL policy therefore cannot retarget the recorded source identity.
     """
     try:
         resolved = path.resolve(strict=True)
@@ -640,61 +646,39 @@ def git_blob_sha(path: Path) -> str:
 
     repository_root = ROOT.resolve()
     try:
-        relative = resolved.relative_to(repository_root)
+        resolved.relative_to(repository_root)
     except ValueError as exc:
         raise ValueError(
             f"provenance path must be inside repository: {path}"
         ) from exc
 
     try:
-        attribute_raw = _trusted_git(
-            "check-attr",
-            "-z",
-            "text",
-            "eol",
-            "--",
-            relative.as_posix(),
-            source_root=repository_root,
-        )
-    except ValueError as exc:
-        raise RuntimeError(
-            f"trusted git check-attr failed for {relative.as_posix()}"
-        ) from exc
-    if not isinstance(attribute_raw, bytes):
-        raise RuntimeError("trusted git check-attr returned non-bytes output")
-    relative_bytes = relative.as_posix().encode("utf-8")
-    if attribute_raw.split(b"\0") != [
-        relative_bytes,
-        b"text",
-        b"set",
-        relative_bytes,
-        b"eol",
-        b"lf",
-        b"",
-    ]:
-        raise ValueError(
-            "provenance text path must enforce repository-controlled text eol=lf: "
-            f"{relative.as_posix()}"
-        )
+        working_bytes = resolved.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"provenance path is unavailable: {path}") from exc
+    canonical_bytes = working_bytes.replace(b"\r\n", b"\n")
 
     try:
         object_id_raw = _trusted_git(
             "hash-object",
-            f"--path={relative.as_posix()}",
-            str(resolved),
+            "--stdin",
             source_root=repository_root,
-            text=True,
+            input_bytes=canonical_bytes,
         )
     except ValueError as exc:
         raise RuntimeError(
-            f"trusted git hash-object failed for {relative.as_posix()}"
+            f"trusted git hash-object failed for {resolved.relative_to(repository_root).as_posix()}"
         ) from exc
-    if not isinstance(object_id_raw, str):
-        raise RuntimeError("trusted git hash-object returned non-text output")
-    object_id = object_id_raw.strip()
+    if not isinstance(object_id_raw, bytes):
+        raise RuntimeError("trusted git hash-object returned non-bytes output")
+    try:
+        object_id = object_id_raw.decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("trusted git hash-object returned non-ASCII output") from exc
     if GIT_OBJECT_ID.fullmatch(object_id) is None:
         raise RuntimeError(
-            f"git hash-object returned a noncanonical object id for {relative.as_posix()}"
+            "git hash-object returned a noncanonical object id for "
+            f"{resolved.relative_to(repository_root).as_posix()}"
         )
     return object_id
 

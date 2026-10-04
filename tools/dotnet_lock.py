@@ -56,6 +56,56 @@ def _valid_sha512_content_hash(value: object) -> bool:
     return len(decoded) == 64
 
 
+def _lock_dependency_edges(
+    value: object,
+    *,
+    relative: str,
+    target_name: str,
+    package_name: str,
+) -> list[dict[str, str]]:
+    """Return canonical dependency-edge identities for one NuGet lock record."""
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        raise ValueError(
+            f'invalid NuGet dependency edges for {relative}:{target_name}:{package_name}'
+        )
+
+    edges: list[dict[str, str]] = []
+    seen_names: dict[str, str] = {}
+    for dependency_name, requested in sorted(
+        value.items(), key=lambda item: str(item[0]).casefold()
+    ):
+        if (
+            not isinstance(dependency_name, str)
+            or not dependency_name
+            or dependency_name != dependency_name.strip()
+        ):
+            raise ValueError(
+                f'invalid NuGet dependency edge name for '
+                f'{relative}:{target_name}:{package_name}'
+            )
+        folded = dependency_name.casefold()
+        previous = seen_names.get(folded)
+        if previous is not None:
+            raise ValueError(
+                f'ambiguous NuGet dependency edge package id for '
+                f'{relative}:{target_name}:{package_name}:{previous}:{dependency_name}'
+            )
+        seen_names[folded] = dependency_name
+        if (
+            not isinstance(requested, str)
+            or not requested
+            or requested != requested.strip()
+        ):
+            raise ValueError(
+                f'invalid NuGet dependency edge requirement for '
+                f'{relative}:{target_name}:{package_name}:{dependency_name}'
+            )
+        edges.append({'name': dependency_name, 'requested': requested})
+    return edges
+
+
 def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
     """Fail closed when a project's NuGet lock does not bind declared packages.
 
@@ -96,21 +146,83 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
         if not isinstance(target_name, str) or not target_name or not isinstance(target, dict):
             blockers.append(f'DOTNET_PROJECT_LOCK_TARGET_INVALID:{relative}')
             continue
+        seen_target_packages: dict[str, str] = {}
         for package_name, record in sorted(target.items(), key=lambda item: str(item[0]).casefold()):
-            if not isinstance(package_name, str) or not isinstance(record, dict):
+            if (
+                not isinstance(package_name, str)
+                or not package_name
+                or package_name != package_name.strip()
+                or not isinstance(record, dict)
+            ):
                 blockers.append(f'DOTNET_PROJECT_LOCK_RECORD_INVALID:{relative}:{target_name}')
                 continue
-            if record.get('type') != 'Direct':
-                continue
             folded = package_name.casefold()
-            if folded not in declared_casefold:
-                # SDK auto-referenced packages can be Direct in some project types.
-                # Do not claim they came from the csproj, but leave them to locked
-                # restore instead of falsely marking them as stale user references.
+            previous_name = seen_target_packages.get(folded)
+            if previous_name is not None:
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_PACKAGE_CASE_AMBIGUOUS:'
+                    f'{relative}:{target_name}:{previous_name}:{package_name}'
+                )
                 continue
-            expected_name, expected_version = declared_casefold[folded]
+            seen_target_packages[folded] = package_name
+
+            kind = record.get('type')
+            if kind == 'Project':
+                continue
+            if kind not in {'Direct', 'Transitive'}:
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_DEPENDENCY_TYPE_UNSUPPORTED:'
+                    f'{relative}:{target_name}:{package_name}:{kind}'
+                )
+                continue
+
             resolved = record.get('resolved')
             content_hash = record.get('contentHash')
+            if (
+                not isinstance(resolved, str)
+                or not resolved
+                or resolved != resolved.strip()
+            ):
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_RESOLVED_INVALID:'
+                    f'{relative}:{target_name}:{package_name}'
+                )
+            if not _valid_sha512_content_hash(content_hash):
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:'
+                    f'{relative}:{package_name}:{target_name}'
+                )
+            try:
+                _lock_dependency_edges(
+                    record.get('dependencies'),
+                    relative=relative,
+                    target_name=target_name,
+                    package_name=package_name,
+                )
+            except ValueError:
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_DEPENDENCY_EDGES_INVALID:'
+                    f'{relative}:{target_name}:{package_name}'
+                )
+
+            if kind != 'Direct':
+                continue
+            requested = record.get('requested')
+            if (
+                not isinstance(requested, str)
+                or not requested
+                or requested != requested.strip()
+            ):
+                blockers.append(
+                    f'DOTNET_PROJECT_LOCK_REQUESTED_INVALID:'
+                    f'{relative}:{target_name}:{package_name}'
+                )
+            if folded not in declared_casefold:
+                # SDK auto-referenced packages can be Direct in some project types.
+                # They remain valid NuGet artifacts and therefore still require
+                # canonical resolved/hash/requested/dependency-edge evidence.
+                continue
+            expected_name, expected_version = declared_casefold[folded]
             seen_direct[folded].append((target_name, str(resolved), content_hash))
             if package_name != expected_name:
                 blockers.append(
@@ -119,10 +231,6 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
             if resolved != expected_version:
                 blockers.append(
                     f'DOTNET_PROJECT_LOCK_RESOLVED_MISMATCH:{relative}:{expected_name}@{expected_version}:{resolved}'
-                )
-            if not _valid_sha512_content_hash(content_hash):
-                blockers.append(
-                    f'DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:{relative}:{expected_name}:{target_name}'
                 )
 
     for folded, (name, version) in sorted(declared_casefold.items()):
@@ -191,10 +299,20 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
                     'type': kind,
                     'version': resolved,
                     'content_hash_sha512_base64': content_hash,
+                    'dependencies': _lock_dependency_edges(
+                        record.get('dependencies'),
+                        relative=relative,
+                        target_name=target_name,
+                        package_name=package_name,
+                    ),
                 }
                 if kind == 'Direct':
                     requested = record.get('requested')
-                    if not isinstance(requested, str) or not requested:
+                    if (
+                        not isinstance(requested, str)
+                        or not requested
+                        or requested != requested.strip()
+                    ):
                         raise ValueError(
                             f'missing NuGet requested range for {relative}:{target_name}:{package_name}'
                         )

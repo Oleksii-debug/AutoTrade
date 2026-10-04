@@ -292,6 +292,22 @@ def _require_provider_origin_causal_chronology(
         )
 
 
+def _require_direct_terminal_after_prepared_sequence(
+    *,
+    prepared_event: object,
+    terminal_cut: object,
+) -> None:
+    if type(prepared_event) is not dict:
+        raise ProviderOriginError("durable Prepared event is unavailable")
+    prepared_sequence = prepared_event.get("journal_sequence")
+    if type(prepared_sequence) is not int or prepared_sequence < 1:
+        raise ProviderOriginError("durable Prepared journal sequence is invalid")
+    if type(terminal_cut) is not int or terminal_cut < prepared_sequence:
+        raise ProviderOriginError(
+            "terminal direct-wire authority predates durable Prepared"
+        )
+
+
 def _response_artifact_id(
     *,
     attempt_id: str,
@@ -585,6 +601,7 @@ def _claim_direct_wire_execution(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
+
 
 def _require_event(
     event: object,
@@ -1074,6 +1091,10 @@ class ProviderOriginJournal:
         if prepared_payload.get("qualified_query") != snapshot:
             raise ProviderOriginError("durable Prepared query differs from exact qualified binding")
         if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=terminal_cut,
+            )
             try:
                 direct_receipt_snapshot = (
                     direct_authenticated_read_execution_receipt_snapshot(receipt)
@@ -1248,6 +1269,10 @@ class ProviderOriginJournal:
             claim = _load_direct_wire_execution_claim(
                 store,
                 attempt_id=attempt,
+            )
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=claim["terminal_authority_journal_sequence_cut"],
             )
             if (
                 claim["qualified_query_digest"]
@@ -1434,6 +1459,12 @@ class ProviderOriginJournal:
             observed_at=retained_payload.get("observed_at"),
         )
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=retained_payload.get(
+                    "terminal_authority_journal_sequence_cut"
+                ),
+            )
             _require_direct_wire_execution_claim(
                 store,
                 attempt_id=attempt,
@@ -1613,6 +1644,10 @@ class ProviderOriginJournal:
             observed_at=observed_text,
         )
         if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=terminal_cut,
+            )
             _require_direct_wire_execution_claim(
                 self._require_store(),
                 attempt_id=attempt,
@@ -1700,8 +1735,6 @@ class ProviderOriginJournal:
             terminal_authority_verified_at=terminal_verified_at,
             _binding_token=_BINDING_TOKEN,
         )
-
-
 
 
 def _install_provider_origin_response_binding_authority():
@@ -1801,7 +1834,70 @@ ProviderOriginJournal.load_response_binding = _bind_provider_origin_response_loa
 del _bind_provider_origin_response_load
 del _register_provider_origin_response_binding_authority
 
-def execute_direct_provider_origin_read(
+
+def _install_direct_provider_origin_record_authority():
+    record_impl = ProviderOriginJournal._record_provider_origin
+    direct_record_token = object()
+
+    def guarded_record(
+        self,
+        attempt_id,
+        query_binding,
+        *,
+        http_status=None,
+        response_bytes=None,
+        observed_at=None,
+        provider_observation=None,
+        _origin_token=None,
+    ):
+        if provider_observation is not None:
+            if _origin_token is not direct_record_token:
+                raise ProviderOriginError(
+                    "direct provider origin requires canonical execute authority"
+                )
+            return record_impl(
+                self,
+                attempt_id,
+                query_binding,
+                provider_observation=provider_observation,
+            )
+        return record_impl(
+            self,
+            attempt_id,
+            query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            provider_observation=None,
+            _origin_token=_origin_token,
+        )
+
+    def record_from_execute(
+        origin,
+        attempt_id,
+        query_binding,
+        *,
+        provider_observation,
+    ):
+        return guarded_record(
+            origin,
+            attempt_id,
+            query_binding,
+            provider_observation=provider_observation,
+            _origin_token=direct_record_token,
+        )
+
+    return guarded_record, record_from_execute
+
+
+(
+    ProviderOriginJournal._record_provider_origin,
+    _record_direct_provider_origin_from_execute,
+) = _install_direct_provider_origin_record_authority()
+del _install_direct_provider_origin_record_authority
+
+
+def _execute_direct_provider_origin_read_impl(
     *,
     origin: ProviderOriginJournal,
     route: object,
@@ -1809,6 +1905,7 @@ def execute_direct_provider_origin_read(
     qualification_registry: object,
     query_binding: QualifiedProviderReadQueryBinding,
     transport: object,
+    _record_direct_provider_origin,
 ) -> AuthenticatedReadResponseBinding:
     """Execute one qualified read through the canonical direct provider wire.
 
@@ -1918,11 +2015,45 @@ def execute_direct_provider_origin_read(
         base,
         terminal_authority_factory=terminal_authority_factory,
     )
-    return origin.record_direct_provider_origin_observation(
+    return _record_direct_provider_origin(
+        origin,
         attempt_id,
         query_binding,
         provider_observation=provider_observation,
     )
+
+
+def _bind_execute_direct_provider_origin_read(execute_impl, record_direct):
+    def execute_direct_provider_origin_read(
+        *,
+        origin: ProviderOriginJournal,
+        route: object,
+        capability_registry: object,
+        qualification_registry: object,
+        query_binding: QualifiedProviderReadQueryBinding,
+        transport: object,
+    ) -> AuthenticatedReadResponseBinding:
+        return execute_impl(
+            origin=origin,
+            route=route,
+            capability_registry=capability_registry,
+            qualification_registry=qualification_registry,
+            query_binding=query_binding,
+            transport=transport,
+            _record_direct_provider_origin=record_direct,
+        )
+
+    return execute_direct_provider_origin_read
+
+
+execute_direct_provider_origin_read = _bind_execute_direct_provider_origin_read(
+    _execute_direct_provider_origin_read_impl,
+    _record_direct_provider_origin_from_execute,
+)
+del _bind_execute_direct_provider_origin_read
+del _execute_direct_provider_origin_read_impl
+del _record_direct_provider_origin_from_execute
+
 
 def observe_provider_origin_json_response(
     *,

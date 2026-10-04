@@ -170,7 +170,7 @@ class ExecutionModel:
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
     ) -> "ExecutionModel":
-        if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
+        if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:

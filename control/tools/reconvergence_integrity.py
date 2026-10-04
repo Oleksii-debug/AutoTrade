@@ -30,6 +30,7 @@ small unrelated changes hidden inside otherwise valid work.
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -40,6 +41,7 @@ from control.tools.registry_state import _normalized_scopes, path_covers
 
 TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_GIT_OBJECT_HEX = frozenset("0123456789abcdef")
 
 PROTECTED_SENTINELS = frozenset(
     {
@@ -168,6 +170,115 @@ class IntegrityAssessment:
     protected_violations: tuple[str, ...]
     scope_violations: tuple[str, ...]
     reasons: tuple[str, ...]
+
+
+def _exact_git_object_id(value: object, *, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) not in {40, 64}
+        or value != value.lower()
+        or any(character not in _GIT_OBJECT_HEX for character in value)
+    ):
+        raise ValueError(f"{field} must be an exact lowercase Git object id")
+    return value
+
+
+def reconvergence_evidence(
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
+    trusted_root_approvals: Sequence[str] | None,
+) -> dict[str, object]:
+    """Build secret-free exact-revision evidence from one trusted-base decision."""
+
+    if type(assessment) is not IntegrityAssessment:
+        raise TypeError("assessment must be exact IntegrityAssessment")
+    if type(max_deletions) is not int or max_deletions < 1:
+        raise ValueError("max_deletions must be a positive exact integer")
+    if (
+        type(max_deleted_fraction) is not float
+        or not (0.0 < max_deleted_fraction <= 1.0)
+    ):
+        raise ValueError("max_deleted_fraction must be an exact float in (0, 1]")
+    if type(scope_enforced) is not bool:
+        raise TypeError("scope_enforced must be exact bool")
+
+    base_sha = _exact_git_object_id(base_sha, field="base_sha")
+    head_sha = _exact_git_object_id(head_sha, field="head_sha")
+    approvals = _normalized_trust_root_approvals(trusted_root_approvals)
+    unresolved_limits = (
+        []
+        if scope_enforced
+        else ["mutation_scope_not_enforced_without_trusted_external_scope"]
+    )
+    checks_run = [
+        "exact-base-ancestry",
+        "protected-sentinel-integrity",
+        "protected-trust-root-authorization",
+        "mass-base-tree-deletion-or-rename-away",
+    ]
+    if scope_enforced:
+        checks_run.append("trusted-mutation-scope")
+
+    return {
+        "schema_version": "1.1.0",
+        "source_sha": head_sha,
+        "trusted_guard_source_sha": base_sha,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "input_schema_version": "git-tree-reconvergence/v1",
+        "result": "PASS" if assessment.allowed else "FAIL",
+        "policy": {
+            "max_deletions": max_deletions,
+            "max_deleted_fraction": max_deleted_fraction,
+            "scope_enforced": scope_enforced,
+            "trusted_root_approval_count": len(approvals),
+        },
+        "approved_trust_roots": list(approvals),
+        "checks_run": checks_run,
+        "unresolved_limits": unresolved_limits,
+        "base_is_ancestor": assessment.base_is_ancestor,
+        "base_path_count": assessment.base_path_count,
+        "deletion_count": assessment.deletion_count,
+        "deletion_fraction": assessment.deletion_fraction,
+        "protected_deletions": list(assessment.protected_deletions),
+        "protected_violations": list(assessment.protected_violations),
+        "scope_violations": list(assessment.scope_violations),
+        "reasons": list(assessment.reasons),
+        "contains_secrets": False,
+    }
+
+
+def write_reconvergence_evidence(
+    output: Path,
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
+    trusted_root_approvals: Sequence[str] | None,
+) -> None:
+    evidence = reconvergence_evidence(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        assessment=assessment,
+        max_deletions=max_deletions,
+        max_deleted_fraction=max_deleted_fraction,
+        scope_enforced=scope_enforced,
+        trusted_root_approvals=trusted_root_approvals,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _validate_changed_path(value: object, *, name: str) -> str:
@@ -499,6 +610,19 @@ def _git_lines(
     return tuple(completed.stdout.splitlines())
 
 
+def _git_commit_id(
+    revision: str,
+    *,
+    cwd: str | Path | None = None,
+) -> str:
+    if type(revision) is not str:
+        raise TypeError("Git revision must be exact text")
+    lines = _git_lines("rev-parse", "--verify", f"{revision}^{{commit}}", cwd=cwd)
+    if len(lines) != 1:
+        raise ValueError("Git revision did not resolve to exactly one commit")
+    return _exact_git_object_id(lines[0], field="resolved revision")
+
+
 def _git_is_ancestor(
     base: str,
     head: str,
@@ -574,6 +698,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-deletions", type=int, default=50)
     parser.add_argument("--max-deleted-fraction", type=float, default=0.35)
     parser.add_argument(
+        "--evidence-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional machine-readable evidence path. The trusted-base guard "
+            "writes exact resolved base/head identities and PASS/FAIL before exit."
+        ),
+    )
+    parser.add_argument(
         "--trusted-root-approval",
         action="append",
         default=None,
@@ -595,14 +728,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    base_sha = _git_commit_id(args.base)
+    head_sha = _git_commit_id(args.head)
     assessment = assess_git_revisions(
-        args.base,
-        args.head,
+        base_sha,
+        head_sha,
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=args.allowed_scope,
         trusted_root_approvals=args.trusted_root_approval,
     )
+    if args.evidence_output is not None:
+        write_reconvergence_evidence(
+            args.evidence_output,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            assessment=assessment,
+            max_deletions=args.max_deletions,
+            max_deleted_fraction=args.max_deleted_fraction,
+            scope_enforced=args.allowed_scope is not None,
+            trusted_root_approvals=args.trusted_root_approval,
+        )
     print(
         "Reconvergence tree guard: "
         f"base_is_ancestor={str(assessment.base_is_ancestor).lower()} "

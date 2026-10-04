@@ -104,11 +104,17 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
-            reader_capabilities_before = len(root_authority._READER_CAPABILITIES)
+            gc.collect()
+            reader_capabilities_before = set(root_authority._READER_CAPABILITIES)
             book = durable(store, artifacts)
+            reader_capabilities_with_book = set(root_authority._READER_CAPABILITIES)
             self.assertEqual(
-                len(root_authority._READER_CAPABILITIES),
-                reader_capabilities_before + 1,
+                reader_capabilities_with_book - reader_capabilities_before,
+                {next(iter(reader_capabilities_with_book - reader_capabilities_before))},
+            )
+            self.assertEqual(
+                len(reader_capabilities_with_book),
+                len(reader_capabilities_before) + 1,
             )
 
             book_ref = weakref.ref(book)
@@ -124,7 +130,7 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             self.assertIsNone(store_ref())
             self.assertIsNone(artifacts_ref())
             self.assertEqual(
-                len(root_authority._READER_CAPABILITIES),
+                set(root_authority._READER_CAPABILITIES),
                 reader_capabilities_before,
             )
 

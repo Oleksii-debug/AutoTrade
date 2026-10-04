@@ -6,11 +6,13 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.simulation_session as simulation_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.authority import AuthoritativeRiskSnapshot, AuthorityConflict
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.risk import RiskPolicy
@@ -19,6 +21,7 @@ from mvp.autotrade_mvp.simulation_session import (
     run_autonomous_simulation, ACCOUNT, PROVIDER, ENVIRONMENT, INSTRUMENT,
 )
 from mvp.autotrade_mvp.zero_network import deny_python_network
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 NOW = "2026-10-03T00:00:00Z"
 PRICES = ["100", "101", "103", "102", "100", "100", "101", "103"]
@@ -53,6 +56,134 @@ class AutonomousSimulationTests(unittest.TestCase):
                 self.assertIn("resolved_risk_policy", evidence)
                 self.assertTrue(evidence["evidence_refs"]["MARKET"].startswith("valuation:sha256:"))
                 self.assertEqual(evidence["resolved_risk_policy"]["resolved_journal_sequence_cut"], evidence["journal_sequence_cut"])
+
+    def test_sell_proceeds_require_authenticated_settlement_before_reuse(self):
+        prices = ["100", "101", "103", "90", "110", "120", "121"]
+        with TemporaryDirectory() as d:
+            with patch.object(simulation_module, "INITIAL_CASH", Decimal("150")):
+                result = run(d, prices)
+
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(result["new_outbound_requests"], 3)
+            decisions = result["decisions"]
+            self.assertEqual(decisions[2]["decision"], "BUY")
+            self.assertEqual(decisions[2]["status"], "FILLED")
+            self.assertEqual(decisions[3]["decision"], "REDUCE")
+            self.assertEqual(decisions[3]["status"], "FILLED")
+
+            # Episode 6 has a BUY signal, but the SELL receivable is still
+            # awaiting provider settlement evidence. Trade-date cash therefore
+            # cannot become allocation/admission capital.
+            self.assertEqual(decisions[5]["decision"], "NO_TRADE")
+            self.assertIsNone(decisions[5]["order_id"])
+
+            # The deterministic SIMULATION provider evidence becomes available
+            # before episode 7. Only then may the same capital fund a new BUY.
+            self.assertEqual(decisions[6]["decision"], "BUY")
+            self.assertEqual(decisions[6]["status"], "FILLED")
+            self.assertIsNotNone(decisions[6]["order_id"])
+
+            store = JournalStore(Path(d) / "journal.sqlite3")
+            artifacts = ArtifactStore(Path(d) / "artifacts")
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                evidence_artifact_root=Path(d) / "artifacts",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(len(settlements.obligations), 3)
+            self.assertEqual(len(settlements.settled_obligation_evidence), 2)
+            self.assertTrue(
+                all(
+                    evidence.evidence_ref.startswith("artifact:")
+                    for evidence in settlements.settled_obligation_evidence.values()
+                )
+            )
+            pending = [
+                item
+                for item in settlements.obligations
+                if item.obligation_id not in settlements.settled_obligation_evidence
+            ]
+            self.assertEqual(len(pending), 1)
+            self.assertLess(pending[0].amount, 0)
+
+    def test_pending_settlement_survives_restart_without_early_capital_release(self):
+        prices = ["100", "101", "103", "90", "110", "120", "121"]
+        with TemporaryDirectory() as d:
+            with patch.object(simulation_module, "INITIAL_CASH", Decimal("150")):
+                first = run(d, prices, stop_after_episodes=4)
+                self.assertEqual(first["status"], "PAUSED")
+                self.assertEqual(first["new_outbound_requests"], 2)
+
+                before_evidence = run(d, prices, stop_after_episodes=6)
+                self.assertEqual(before_evidence["status"], "PAUSED")
+                self.assertEqual(before_evidence["new_outbound_requests"], 0)
+                self.assertEqual(before_evidence["decisions"][5]["decision"], "NO_TRADE")
+                self.assertIsNone(before_evidence["decisions"][5]["order_id"])
+
+                after_evidence = run(d, prices)
+                self.assertEqual(after_evidence["status"], "COMPLETED")
+                self.assertEqual(after_evidence["new_outbound_requests"], 1)
+                self.assertEqual(after_evidence["decisions"][6]["status"], "FILLED")
+
+                replay = run(d, prices)
+                self.assertEqual(replay["status"], "COMPLETED")
+                self.assertEqual(replay["new_outbound_requests"], 0)
+                self.assertEqual(replay["decisions"], after_evidence["decisions"])
+
+            store = JournalStore(Path(d) / "journal.sqlite3")
+            settlement_events = store.load_events_by_aggregate_type("settlement_book")
+            self.assertEqual(
+                [event["event_type"] for event in settlement_events],
+                [
+                    "SettlementObligationsRegistered",
+                    "SettlementObligationsRegistered",
+                    "SettlementEvidenceApplied",
+                    "SettlementEvidenceApplied",
+                    "SettlementObligationsRegistered",
+                ],
+            )
+
+    def test_completed_replay_rejects_missing_settlement_completion_artifact(self):
+        prices = ["100", "101", "103", "90", "110", "120", "121"]
+        with TemporaryDirectory() as d:
+            with patch.object(simulation_module, "INITIAL_CASH", Decimal("150")):
+                result = run(d, prices)
+                self.assertEqual(result["status"], "COMPLETED")
+
+                store = JournalStore(Path(d) / "journal.sqlite3")
+                artifacts = ArtifactStore(Path(d) / "artifacts")
+                settlements = DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=ENVIRONMENT,
+                    evidence_artifact_root=Path(d) / "artifacts",
+                    evidence_artifact_store=artifacts,
+                )
+                evidence = next(iter(settlements.settled_obligation_evidence.values()))
+                artifact_id = (
+                    evidence.evidence_ref.removeprefix("artifact:").split("@", 1)[0]
+                )
+                artifacts._manifest_path(artifact_id).unlink()
+                before_submissions = store.load_events_by_aggregate_type(
+                    "submission_attempt"
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "artifact verification failed",
+                ):
+                    run(d, prices)
+
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("submission_attempt"),
+                    before_submissions,
+                )
 
     def test_consecutive_buy_signals_do_not_add_duplicate_exposure(self):
         with TemporaryDirectory() as d:

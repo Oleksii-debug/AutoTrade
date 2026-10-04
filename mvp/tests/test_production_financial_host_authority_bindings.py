@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from threading import Condition
 import unittest
 
+from mvp.autotrade_mvp import production_host
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
@@ -19,8 +20,7 @@ class _FenceStub:
 class ProductionFinancialHostAuthorityBindingTests(unittest.TestCase):
     def _host(self, directory: str) -> ProductionHostRuntime:
         journal = JournalStore(Path(directory) / "journal.sqlite3")
-        host = object.__new__(ProductionHostRuntime)
-        host.config = ProductionHostConfig(
+        config = ProductionHostConfig(
             journal_path=journal.path,
             account_id="acct",
             environment="PAPER",
@@ -29,22 +29,44 @@ class ProductionFinancialHostAuthorityBindingTests(unittest.TestCase):
             bind_port=19081,
             public_origin="http://127.0.0.1:19081",
         )
-        host.journal = journal
-        host.store_identity = journal.store_identity
-        host._lifecycle_condition = Condition()
-        host._serve_state = "IDLE"
-        host._instance_fence = _FenceStub()
-        return host
+        return ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=object(),
+            server=object(),
+            instance_fence=_FenceStub(),
+            admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
+        )
 
-    def test_host_identity_mutation_invalidates_retained_dispatcher_before_callbacks(self):
+    def _replace_bound_config(
+        self,
+        host: ProductionHostRuntime,
+        config: ProductionHostConfig,
+    ) -> None:
+        with production_host._RUNTIME_CONFIG_BINDINGS_LOCK:
+            production_host._RUNTIME_CONFIG_BINDINGS[host] = config
+
+    def test_internal_host_identity_retarget_invalidates_dispatcher_before_callbacks(self):
         with TemporaryDirectory() as directory:
             host = self._host(directory)
             runtime = compose_financial_authority(host)
             dispatcher = runtime.financial_dispatcher
             authority_calls = []
             wire_calls = []
-
-            object.__setattr__(host.config, "host_id", "host-retargeted")
+            current = host.config
+            self._replace_bound_config(
+                host,
+                ProductionHostConfig(
+                    journal_path=current.journal_path,
+                    account_id=current.account_id,
+                    environment=current.environment,
+                    host_id="host-retargeted",
+                    bind_host=current.bind_host,
+                    bind_port=current.bind_port,
+                    public_origin=current.public_origin,
+                ),
+            )
 
             with self.assertRaisesRegex(
                 PermissionError,
@@ -63,6 +85,42 @@ class ProductionFinancialHostAuthorityBindingTests(unittest.TestCase):
 
             self.assertEqual(authority_calls, [])
             self.assertEqual(wire_calls, [])
+
+    def test_detached_public_config_mutation_does_not_retarget_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            exposed = runtime.config
+            object.__setattr__(exposed, "host_id", "host-retargeted")
+            object.__setattr__(exposed, "environment", "LIVE")
+            object.__setattr__(exposed, "account_id", "other")
+
+            self.assertFalse(runtime.takeover_required)
+            self.assertEqual(runtime.config.host_id, "host-a")
+            self.assertEqual(runtime.config.environment, "PAPER")
+            self.assertEqual(runtime.config.account_id, "acct")
+            self.assertEqual(runtime.recovery_controller.owner.owner_id, "host-a")
+
+    def test_equivalent_internal_config_replacement_preserves_semantic_authority(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            runtime = compose_financial_authority(host)
+            current = host.config
+            self._replace_bound_config(
+                host,
+                ProductionHostConfig(
+                    journal_path=current.journal_path,
+                    account_id=current.account_id,
+                    environment=current.environment,
+                    host_id=current.host_id,
+                    bind_host=current.bind_host,
+                    bind_port=current.bind_port,
+                    public_origin=current.public_origin,
+                ),
+            )
+
+            self.assertFalse(runtime.takeover_required)
+            self.assertEqual(runtime.config.host_id, "host-a")
 
     def test_host_journal_retarget_invalidates_retained_dispatcher_before_callbacks(self):
         with TemporaryDirectory() as directory:
@@ -104,27 +162,6 @@ class ProductionFinancialHostAuthorityBindingTests(unittest.TestCase):
             with self.assertRaises(AttributeError):
                 runtime.recovery_controller = replacement
             self.assertIsNot(runtime.recovery_controller, replacement)
-
-    def test_equivalent_config_object_replacement_fails_closed(self):
-        with TemporaryDirectory() as directory:
-            host = self._host(directory)
-            runtime = compose_financial_authority(host)
-            original = host.config
-            host.config = ProductionHostConfig(
-                journal_path=original.journal_path,
-                account_id=original.account_id,
-                environment=original.environment,
-                host_id=original.host_id,
-                bind_host=original.bind_host,
-                bind_port=original.bind_port,
-                public_origin=original.public_origin,
-            )
-
-            with self.assertRaisesRegex(
-                PermissionError,
-                "config authority changed",
-            ):
-                _ = runtime.takeover_required
 
     def test_lifecycle_condition_retarget_fails_closed(self):
         with TemporaryDirectory() as directory:

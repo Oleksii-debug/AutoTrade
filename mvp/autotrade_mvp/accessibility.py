@@ -95,6 +95,8 @@ def format_accessible_status(
         lines.extend([
             f"Episode: {_value(status, 'episode_id')}",
             f"Session outcome: {_value(status, 'session_status')}",
+            *([f"Autonomous episodes: {status['completed_episodes']} of {status['total_episodes']}",
+               f"Model mode: {status.get('mode', 'Unavailable')}"] if 'completed_episodes' in status else []),
             f"Cash (USD): {_value(status, 'cash')}",
             f"Position (shares): {_value(status, 'position')}",
             f"Journal sequence: {_value(status, 'journal_sequence')}",
@@ -107,6 +109,8 @@ def format_accessible_status(
                 lines.append(f"Reserved {resource}: {amount}; state: {item['state']}")
         if state == "awaiting_order_reconciliation":
             lines.append("Action required: confirm the terminal order state; a reconciled fill does not confirm order completion")
+        if status.get("session_status") == "BLOCKED":
+            lines.append(f"Blocked reason: {_value(status, 'reason')}")
 
     if economic_report is not None:
         lines.extend(
@@ -121,6 +125,18 @@ def format_accessible_status(
         )
         if economic_report.get("valuation_status") == "MARK_UNAVAILABLE":
             lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
+        if isinstance(economic_report.get("cash_buckets"), dict):
+            buckets = economic_report["cash_buckets"]
+            lines.extend([
+                f"Гроші на рахунку ({buckets['currency']}): {buckets['account_cash']}",
+                f"Розраховані кошти: {buckets['settled_cash']}",
+                f"Нерозраховані надходження: {buckets['unsettled_receivable']}",
+                f"Нерозраховані зобов'язання: {buckets['unsettled_payable']}",
+                f"Зарезервовані кошти: {buckets['reserved_cash']}",
+                f"Реально доступні кошти: {buckets['available_cash']}",
+                f"Реалізований прибуток/збиток: {economic_report['realized_pnl']}",
+                f"Нереалізований прибуток/збиток: {economic_report['unrealized_pnl']}",
+            ])
 
     lines.append("Economic edge: unproven")
     return "\n".join(lines)

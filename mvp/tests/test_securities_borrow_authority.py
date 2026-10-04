@@ -614,7 +614,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(reservations.version, 0)
 
-    def test_active_recall_blocks_new_short_but_not_cash_funded_cover(self):
+    def test_active_recall_checkpoint_blocks_admission_until_consistent_reconciliation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = _authority(store)
@@ -626,7 +626,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             )
             key = _borrow_key()
 
-            with self.assertRaisesRegex(ValueError, "blocked"):
+            with self.assertRaisesRegex(ValueError, "complete consistent reconciliation"):
                 _admit_short(
                     authority,
                     reservations,
@@ -646,45 +646,45 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 context=cover_context,
                 risk_policy=cover_policy,
             )
-            cover = authority.admit(
-                command_id="cover-command",
-                idempotency_key="cover-idem",
-                admission_id="cover-admission",
-                policy_id="borrow-policy",
-                intent_id="cover-intent",
-                intent_hash="sha256:" + ("c" * 64),
-                account_id=ACCOUNT_ID,
-                environment=ENVIRONMENT,
-                instrument_id=INSTRUMENT_ID,
-                instrument_version=1,
-                action="ORDER.SUBMIT",
-                notional="100",
-                capability_snapshot_id="borrow-capability-1",
-                risk_intent=RiskIntent.create(
-                    symbol="ABC",
-                    side="BUY",
-                    quantity="10",
-                    price="10",
-                    expected_state_version=1,
-                    instrument_type="EQUITY",
-                ),
-                risk_context=cover_context,
-                risk_policy=cover_policy,
-                risk_valid_until="2026-09-25T05:03:00Z",
-                reservation_book=reservations,
-                reservation_id="cover-reservation",
-                reservation_requirements={"CASH:USD": "100"},
-                reservation_available={"CASH:USD": "10000"},
-                reservation_checkpoint_event_id=checkpoint["event_id"],
-                reservation_provider_id=PROVIDER_ID,
-                reservation_max_age_seconds="60",
-                now=NOW,
-                risk_reducing=True,
-            )
-            self.assertEqual(cover.outcome, "ADMITTED")
+            with self.assertRaisesRegex(ValueError, "complete consistent reconciliation"):
+                cover = authority.admit(
+                    command_id="cover-command",
+                    idempotency_key="cover-idem",
+                    admission_id="cover-admission",
+                    policy_id="borrow-policy",
+                    intent_id="cover-intent",
+                    intent_hash="sha256:" + ("c" * 64),
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    capability_snapshot_id="borrow-capability-1",
+                    risk_intent=RiskIntent.create(
+                        symbol="ABC",
+                        side="BUY",
+                        quantity="10",
+                        price="10",
+                        expected_state_version=1,
+                        instrument_type="EQUITY",
+                    ),
+                    risk_context=cover_context,
+                    risk_policy=cover_policy,
+                    risk_valid_until="2026-09-25T05:03:00Z",
+                    reservation_book=reservations,
+                    reservation_id="cover-reservation",
+                    reservation_requirements={"CASH:USD": "100"},
+                    reservation_available={"CASH:USD": "10000"},
+                    reservation_checkpoint_event_id=checkpoint["event_id"],
+                    reservation_provider_id=PROVIDER_ID,
+                    reservation_max_age_seconds="60",
+                    now=NOW,
+                    risk_reducing=True,
+                )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
-                Decimal("100"),
+                Decimal("0"),
             )
 
     def test_provider_local_borrow_mismatch_is_durable_scoped_blocker(self):
@@ -701,7 +701,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 Decimal("-1"),
             )
             self.assertIn(key, result.blocking_resources)
-            self.assertTrue(result.complete)
+            self.assertFalse(result.complete)
 
             checkpoint = record_reconciliation_checkpoint(
                 store,
@@ -716,7 +716,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 checkpoint["payload"]["borrow_differences"],
                 {key: "-1"},
             )
-            with self.assertRaisesRegex(ValueError, "blocked"):
+            with self.assertRaisesRegex(ValueError, "complete consistent reconciliation"):
                 load_account_resource_availability_evidence(
                     store,
                     checkpoint_event_id=checkpoint["event_id"],

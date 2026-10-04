@@ -1,8 +1,11 @@
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedOrder,
@@ -11,6 +14,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_BINDING = "c" * 64
 
 
 def model(**overrides):
@@ -27,6 +31,13 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_projection=ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="ABC@v1",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -84,10 +95,29 @@ class ExecutionRealismTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
             model(fee_rate=HostileDecimal("0.001"))
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum=HostileDecimal("0.01"),
+                instrument_metadata_binding=INSTRUMENT_BINDING,
+            )
         self.assertEqual(HostileDecimal.finite_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
             order(order_id=HostileText("sim-1"))
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_metadata_binding is required",
+        ):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum="0.01",
+                instrument_metadata_binding=HostileText("c" * 64),
+            )
         self.assertEqual(HostileText.strip_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
@@ -147,6 +177,18 @@ class ExecutionRealismTests(unittest.TestCase):
         object.__setattr__(mutated_model, "latency_ms", -1)
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
             simulate_execution(order(), exact_observation, mutated_model)
+
+        nested_authority_model = model()
+        object.__setattr__(
+            nested_authority_model.price_projection,
+            "instrument_version",
+            "XYZ@v1",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_version must match",
+        ):
+            simulate_execution(order(), exact_observation, nested_authority_model)
 
         injected_order = order()
         object.__setattr__(injected_order, "shadow_authority", "forged")
@@ -226,10 +268,112 @@ class ExecutionRealismTests(unittest.TestCase):
         result = simulate_execution(order(), top(), model())
         # Quantity 10 / volume 100 = 10% participation, i.e. 40% of the
         # configured 25% max. Impact = 4 bps; slippage = 5 bps.
-        expected = Decimal("101") * (Decimal("1") + Decimal("9") / Decimal("10000"))
+        # Exact raw projection is 101.0909; BUY rounds adversely to the next 0.01 tick.
+        expected = Decimal("101.10")
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, expected)
-        self.assertEqual(result.fee, Decimal("10") * expected * Decimal("0.001"))
+        self.assertEqual(result.fee, Decimal("1.011"))
+
+    def test_market_projection_is_invariant_to_ambient_decimal_context(self):
+        def execute(*, side, precision, rounding):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                return simulate_execution(
+                    order(side=side, quantity="10"),
+                    top(available_volume="30"),
+                    model(max_participation="0.5"),
+                )
+
+        for side in ("BUY", "SELL"):
+            low_floor = execute(side=side, precision=6, rounding=ROUND_FLOOR)
+            low_ceiling = execute(side=side, precision=6, rounding=ROUND_CEILING)
+            high_precision = execute(side=side, precision=80, rounding=ROUND_CEILING)
+            self.assertEqual(low_floor, low_ceiling)
+            self.assertEqual(low_floor, high_precision)
+            self.assertEqual(low_floor.fill_price % Decimal("0.01"), Decimal("0"))
+            if side == "BUY":
+                self.assertGreaterEqual(low_floor.fill_price, Decimal("101"))
+            else:
+                self.assertLessEqual(low_floor.fill_price, Decimal("99"))
+
+    def test_market_execution_rejects_off_grid_reference_before_projection(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "market reference price is not aligned to authoritative price quantum",
+        ):
+            simulate_execution(order(), top(ask="101.005"), model())
+
+    def test_market_execution_fails_closed_without_matching_projection_authority(self):
+        for observation in (
+            top(),
+            top(market_time="2026-09-24T10:00:00.050000Z"),
+            top(available_volume="0"),
+        ):
+            with self.subTest(observation=observation):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "requires authoritative price projection policy",
+                ):
+                    simulate_execution(
+                        order(),
+                        observation,
+                        model(price_projection=None),
+                    )
+
+        mismatched = ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="XYZ@v2",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_version must match",
+        ):
+            simulate_execution(order(), top(), model(price_projection=mismatched))
+
+    def test_projection_policy_can_be_issued_from_canonical_instrument_version(self):
+        instrument = InstrumentVersion(
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            version=1,
+            provider_id="simulated",
+            venue_id="simulated-venue",
+            provider_symbol="ABC",
+            asset_class="CASH_EQUITY",
+            base_currency="ABC",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="share",
+            contract_multiplier="1",
+            price_tick="0.05",
+            quantity_step="1",
+            minimum_quantity="1",
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        policy = ExecutionPriceProjectionPolicy.from_instrument(instrument)
+        self.assertEqual(policy.instrument_version, f"{instrument.instrument_id}@1")
+        self.assertEqual(policy.price_quantum, Decimal("0.05"))
+        self.assertEqual(
+            policy.instrument_metadata_binding,
+            instrument.metadata_evidence_binding().removeprefix("sha256:"),
+        )
+
+    def test_projection_policy_changes_model_fingerprint(self):
+        base = model()
+        changed = model(
+            price_projection=ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum="0.05",
+                instrument_metadata_binding=INSTRUMENT_BINDING,
+            )
+        )
+        self.assertNotEqual(base.fingerprint, changed.fingerprint)
 
     def test_limit_execution_is_invariant_to_ambient_decimal_context(self):
         def execute(*, precision, rounding):
@@ -430,7 +574,8 @@ class ExecutionRealismTests(unittest.TestCase):
                 bar_half_spread_bps="5",
             ),
         )
-        self.assertEqual(result.fill_price, Decimal("90") * (Decimal("1") - Decimal("15") / Decimal("10000")))
+        # Raw adverse SELL projection is 89.865; FLOOR to the 0.01 tick is worse.
+        self.assertEqual(result.fill_price, Decimal("89.86"))
         self.assertIn("intrabar queue", " ".join(result.warnings))
 
     def test_base_scenario_cannot_hide_optimistic_cost_multiplier(self):

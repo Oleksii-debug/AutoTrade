@@ -9,19 +9,23 @@ replay evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
 from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
+from .instruments import InstrumentVersion, _detached_instrument_version
 from .execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
+    _detached_dataclass_input,
     simulate_execution,
 )
 
@@ -42,9 +46,12 @@ _PURPOSES = {"RESEARCH", "REPLAY", "PROMOTION"}
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ExecutionQualificationError(f"{name} is required")
-    return value.strip()
+    text = value.strip()
+    if not text:
+        raise ExecutionQualificationError(f"{name} is required")
+    return text
 
 
 def _uuid(value: object, *, name: str) -> str:
@@ -134,6 +141,7 @@ def validate_execution_qualification(
     qualification: ExecutionModelQualification,
     asset_class: str,
     instrument_version: str,
+    instrument: InstrumentVersion,
     protocol_sha256: str,
     artifact_store: ArtifactStore,
     evidence_artifact_id: str,
@@ -141,11 +149,21 @@ def validate_execution_qualification(
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
 
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
-    if not isinstance(qualification, ExecutionModelQualification):
-        raise TypeError("qualification must be ExecutionModelQualification")
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(model) is not ExecutionModel:
+        raise TypeError("model must be exact ExecutionModel")
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
+    if type(qualification) is not ExecutionModelQualification:
+        raise TypeError("qualification must be exact ExecutionModelQualification")
+    qualification_values = {}
+    for field in fields(ExecutionModelQualification):
+        value = getattr(qualification, field.name)
+        if value is not None and type(value) is not str:
+            raise TypeError(
+                f"qualification.{field.name} must be exact str"
+            )
+        qualification_values[field.name] = value
+    qualification = ExecutionModelQualification(**qualification_values)
+    if type(artifact_store) is not ArtifactStore:
         raise TypeError("artifact_store must be the canonical ArtifactStore")
 
     normalized_asset = _text(asset_class, name="asset_class").upper()
@@ -154,6 +172,15 @@ def validate_execution_qualification(
     normalized_instrument = _text(
         instrument_version,
         name="instrument_version",
+    )
+    if type(instrument) is not InstrumentVersion:
+        raise TypeError("instrument must be exact InstrumentVersion")
+    detached_instrument = _detached_instrument_version(instrument)
+    authoritative_instrument = (
+        f"{detached_instrument.instrument_id}@{detached_instrument.version}"
+    )
+    authoritative_projection = ExecutionPriceProjectionPolicy.from_instrument(
+        detached_instrument
     )
     normalized_purpose = _text(purpose, name="purpose").upper()
     if normalized_purpose not in _PURPOSES:
@@ -165,17 +192,11 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest = artifact_store.load_manifest(
-            normalized_evidence_artifact_id
+        evidence_manifest, evidence_bytes = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            normalized_evidence_artifact_id,
         )
-        if evidence_manifest.get("manifest_hash") is None:
-            raise ExecutionQualificationError(
-                "execution evidence manifest lacks integrity binding"
-            )
-        artifact_store.read_bytes(normalized_evidence_artifact_id)
-    except ExecutionQualificationError:
-        raise
-    except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
+    except (FileNotFoundError, ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
         raise ExecutionQualificationError(
             "execution evidence artifact cannot be verified"
         ) from error
@@ -184,8 +205,16 @@ def validate_execution_qualification(
         evidence_manifest.get("sha256"),
         name="resolved evidence sha256",
     )
+    if sha256(evidence_bytes).hexdigest() != resolved_evidence:
+        raise ExecutionQualificationError(
+            "execution evidence bytes differ from authenticated manifest"
+        )
 
     failures: list[str] = []
+    if normalized_instrument != authoritative_instrument:
+        failures.append("instrument_authority")
+    if model.price_projection != authoritative_projection:
+        failures.append("price_projection_authority")
     if qualification.asset_class != normalized_asset:
         failures.append("asset_class")
     if qualification.data_fidelity != model.data_fidelity:
@@ -226,6 +255,7 @@ def simulate_qualified_execution(
     observation: LiquidityObservation,
     model: ExecutionModel,
     qualification: ExecutionModelQualification,
+    instrument: InstrumentVersion,
     asset_class: str,
     protocol_sha256: str,
     artifact_store: ArtifactStore,
@@ -238,16 +268,20 @@ def simulate_qualified_execution(
     no provider credentials, admission, confirmation or live trading authority.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
+    order = _detached_dataclass_input(order, SimulatedOrder, name="order")
+    observation = _detached_dataclass_input(
+        observation,
+        LiquidityObservation,
+        name="observation",
+    )
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
 
     validate_execution_qualification(
         model=model,
         qualification=qualification,
         asset_class=asset_class,
         instrument_version=order.instrument_version,
+        instrument=instrument,
         protocol_sha256=protocol_sha256,
         artifact_store=artifact_store,
         evidence_artifact_id=evidence_artifact_id,

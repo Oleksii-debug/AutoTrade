@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.execution_oracle import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     ExecutionRealismError,
     LiquidityObservation,
     SimulatedExecution,
@@ -17,6 +18,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_BINDING = "c" * 64
 
 
 def model(**overrides):
@@ -32,6 +34,13 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_projection=ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="ABC@v1",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -235,6 +244,75 @@ class ExecutionOracleTests(unittest.TestCase):
         m = model()
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
+    def test_oracle_requires_market_projection_authority_before_result_checks(self):
+        o, q, valid_model = order(), observation(), model()
+        result = simulate_execution(o, q, valid_model)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires authoritative price projection policy",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=model(price_projection=None),
+                result=result,
+            )
+
+    def test_oracle_market_projection_is_invariant_to_ambient_decimal_context(self):
+        o = order(quantity="10")
+        q = observation(available_volume="30")
+        m = model(max_participation="0.5")
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+    def test_oracle_rejects_off_grid_market_reference(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "market reference price is not aligned to authoritative price quantum",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=observation(ask="101.005"),
+                model=m,
+                result=result,
+            )
+
+    def test_oracle_rejects_market_price_that_differs_from_adverse_tick_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, fill_price=result.fill_price + Decimal("0.01"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently projected adverse tick bound",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
 
     def test_oracle_limit_arithmetic_is_invariant_to_ambient_decimal_context(self):
         o = order(

@@ -45,6 +45,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("CanonicalApiRoot", text)
         self.assertIn("AllowsWebMessageCommandAuthority => false", text)
         self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsServiceWorkers => false", text)
         self.assertIn("AllowsDownloads => false", text)
         self.assertIn("AllowsNewWindow(Uri target) => false", text)
         self.assertNotIn("Authorization", text)

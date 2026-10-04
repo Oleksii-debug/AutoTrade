@@ -578,12 +578,46 @@
       : Object.freeze({node: last, offset: last.data.length});
   }
 
+  function rowForSelectionEndpoint(body, endpoint) {
+    return [...body.rows].find(
+      (candidate) => candidate.dataset.selectionKey === endpoint.rowKey &&
+        (endpoint.rowText === null || candidate.textContent === endpoint.rowText)) || null;
+  }
+
+  function revealBookmarkedTablePage(body, bookmark) {
+    if (bookmark === null) return;
+    const tool = toolForBody(body.id);
+    const filter = tool === null ? null : byId(tool.filterId);
+    if (tool === null || !filter) return;
+
+    const rows = filterableRows(body);
+    const anchorRow = rowForSelectionEndpoint(body, bookmark.anchor);
+    const focusRow = rowForSelectionEndpoint(body, bookmark.focus);
+    if (anchorRow === null || focusRow === null) return;
+
+    ensureTableHostOrder(rows);
+    const query = normalizedTableQuery(filter.value);
+    const ordered = orderedTableRows(tool, rows, tableSortMode(tool));
+    const matching = ordered.filter(
+      (row) => query === "" || tableSearchText(row).includes(query));
+    const anchorIndex = matching.indexOf(anchorRow);
+    const focusIndex = matching.indexOf(focusRow);
+    if (anchorIndex < 0 || focusIndex < 0) return;
+
+    const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);
+    const focusPage = Math.floor(focusIndex / TABLE_PAGE_SIZE);
+    if (anchorPage !== focusPage) return;
+
+    const view = tableViewFor(tool);
+    if (view.page === anchorPage) return;
+    view.page = anchorPage;
+    applyTableFilter(tool, {announce: false});
+  }
+
   function restoreTableSelection(body, bookmark) {
     if (bookmark === null) return;
     const findPoint = (endpoint) => {
-      const row = [...body.rows].find(
-        (candidate) => candidate.dataset.selectionKey === endpoint.rowKey &&
-          (endpoint.rowText === null || candidate.textContent === endpoint.rowText));
+      const row = rowForSelectionEndpoint(body, endpoint);
       if (!row || row.hidden) return null;
       const cell = row.cells[endpoint.cellIndex];
       return cell ? textPointAtOffset(cell, endpoint.textOffset) : null;
@@ -620,6 +654,7 @@
   function preserveTableSelection(body, enabled, render) {
     const bookmark = enabled ? captureTableSelection(body) : null;
     render();
+    revealBookmarkedTablePage(body, bookmark);
     restoreTableSelection(body, bookmark);
   }
 

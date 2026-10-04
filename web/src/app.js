@@ -1098,9 +1098,14 @@
     row.children[3].textContent = projectionText(payload);
     body.prepend(row);
 
-    while (body.children.length > 100) {
-      body.lastElementChild.remove();
-    }
+    const retained = filterableRows(body)
+      .filter((candidate) => candidate.dataset.hostEventCursor !== undefined)
+      .sort((left, right) => {
+        const a = BigInt(left.dataset.hostEventCursor);
+        const b = BigInt(right.dataset.hostEventCursor);
+        return a === b ? 0 : (a > b ? -1 : 1);
+      });
+    for (const expired of retained.slice(100)) expired.remove();
     reapplyTableFilter("event-history-body");
   }
 

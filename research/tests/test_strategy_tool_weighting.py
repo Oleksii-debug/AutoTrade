@@ -21,7 +21,7 @@ from research.autotrade_research.strategies.tool_weighting import (
 )
 
 
-BUILD = "4b0d25c006892753463aa2c43be0cde8e365e8d7"
+BUILD = "a74a02582afd0c6155bbbcf3d07aac3eca65f590"
 POPULATION_PROTOCOL = "sha256:" + "9" * 64
 METRICS = "sha256:" + "8" * 64
 
@@ -676,6 +676,112 @@ class StrategyToolWeightingTests(unittest.TestCase):
                 in result.weights["crypto::bull::3600"].values()
             )
         )
+
+
+    def test_mutated_section20_trading_authority_cannot_be_cleaned(self):
+        p = policy()
+        strategy = p.registered_strategies[0]
+        protocol = coverage_protocol(strategy)
+        assessment = coverage_assessment(protocol)
+        object.__setattr__(
+            assessment,
+            "grants_trading_authority",
+            True,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot grant trading authority",
+        ):
+            evidence(
+                strategy,
+                "bull",
+                "0.03",
+                protocol=protocol,
+                assessment=assessment,
+            )
+
+    def test_mutated_section20_strategy_comparison_claim_cannot_be_cleaned(self):
+        p = policy()
+        strategy = p.registered_strategies[0]
+        protocol = coverage_protocol(strategy)
+        assessment = coverage_assessment(protocol)
+        object.__setattr__(
+            assessment,
+            "strategy_comparison_status",
+            "ESTABLISHED",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_comparison_status must remain NOT_ESTABLISHED",
+        ):
+            evidence(
+                strategy,
+                "bull",
+                "0.03",
+                protocol=protocol,
+                assessment=assessment,
+            )
+
+    def test_hostile_evidence_sequence_is_rejected_before_iteration(self):
+        p = policy()
+        touched = {"count": 0}
+
+        class HostileSequence:
+            def __iter__(self):
+                touched["count"] += 1
+                raise AssertionError("hostile iterator executed")
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            assess_strategy_tools(p, HostileSequence())
+        self.assertEqual(touched["count"], 0)
+
+    def test_hostile_policy_sequence_is_rejected_before_iteration(self):
+        touched = {"count": 0}
+
+        class HostileSequence:
+            def __iter__(self):
+                touched["count"] += 1
+                raise AssertionError("hostile iterator executed")
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            StrategyToolPolicy.create(
+                policy_id="section21-hostile",
+                exact_build_sha=BUILD,
+                minimum_practical_advantage="0.01",
+                registered_strategies=HostileSequence(),
+                required_cells=(
+                    StrategyToolCell("crypto", "bull", 3600),
+                ),
+            )
+        self.assertEqual(touched["count"], 0)
+
+    def test_mutated_gate_mapping_is_rejected_before_callbacks(self):
+        p = policy()
+        strategy = p.registered_strategies[0]
+        touched = {"count": 0}
+
+        class HostileDict(dict):
+            def items(self):
+                touched["count"] += 1
+                raise AssertionError("hostile mapping executed")
+
+        scientific_gate = gate()
+        object.__setattr__(
+            scientific_gate,
+            "checks",
+            HostileDict({"semantic_owner_evidence": "PASS"}),
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "checks must remain an exact dict or mapping proxy",
+        ):
+            evidence(
+                strategy,
+                "bull",
+                "0.03",
+                gate_value=scientific_gate,
+            )
+        self.assertEqual(touched["count"], 0)
 
 
 if __name__ == "__main__":

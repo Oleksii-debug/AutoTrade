@@ -16,7 +16,11 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from mvp.autotrade_mvp.product_runtime import build_product, restore_product_backup
+from mvp.autotrade_mvp.product_runtime import build_product, restore_product_backup, source_revision
+from mvp.autotrade_mvp.windows_host_session import (
+    desktop_session_credential_target,
+    persist_desktop_owner_session,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_action
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
@@ -28,17 +32,27 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ProductClient:
-    def __init__(self, directory):
+    def __init__(self, directory, *, desktop_session_sink=lambda **_kwargs: None, auto_pair=True):
         probe = socket.socket(); probe.bind(('127.0.0.1', 0))
         self.port = probe.getsockname()[1]; probe.close()
         self.origin = f'http://127.0.0.1:{self.port}'
-        self.runtime, url = build_product(directory, port=self.port)
+        self.runtime, url = build_product(
+            directory,
+            port=self.port,
+            desktop_session_sink=desktop_session_sink,
+        )
         self.worker = Thread(target=self.runtime.serve_forever)
         self.worker.start()
         self.cookie = None
-        response, data, headers = self.request('POST', '/api/v1/session', {'pairing_code': url.split('#pair=')[1]})
-        assert response == 200, (response, data)
-        self.cookie = headers['Set-Cookie'].split(';')[0]
+        self.pairing_code = url.split('#pair=')[1]
+        if auto_pair:
+            response, data, headers = self.request(
+                'POST',
+                '/api/v1/session',
+                {'pairing_code': self.pairing_code},
+            )
+            assert response == 200, (response, data)
+            self.cookie = headers['Set-Cookie'].split(';')[0]
 
     def request(self, method, path, payload=None):
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=30)
@@ -355,6 +369,140 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(recovered['remaining_uncertainty'], [])
             finally:
                 client.close()
+
+
+    def test_pairing_exports_exact_browser_session_to_native_sink(self):
+        with TemporaryDirectory() as directory:
+            captured = []
+
+            def sink(**values):
+                captured.append(values)
+
+            client = ProductClient(directory, desktop_session_sink=sink)
+            try:
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(captured[0]['origin'], client.origin)
+                self.assertEqual(captured[0]['actor'], 'local-owner')
+                self.assertEqual(
+                    client.cookie,
+                    'AutoTradeSession=' + captured[0]['token'],
+                )
+            finally:
+                client.close()
+
+    def test_pairing_store_failure_revokes_token_and_allows_exact_code_retry(self):
+        with TemporaryDirectory() as directory:
+            captured = []
+
+            def fail_once(**values):
+                captured.append(values)
+                if len(captured) == 1:
+                    raise OSError('simulated credential-manager failure')
+
+            client = ProductClient(
+                directory,
+                desktop_session_sink=fail_once,
+                auto_pair=False,
+            )
+            try:
+                status, payload, _ = client.request(
+                    'POST',
+                    '/api/v1/session',
+                    {'pairing_code': client.pairing_code},
+                )
+                self.assertEqual(status, 503)
+                self.assertEqual(payload['error'], 'DESKTOP_SESSION_STORE_FAILED')
+
+                status, payload, headers = client.request(
+                    'POST',
+                    '/api/v1/session',
+                    {'pairing_code': client.pairing_code},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(payload['status'], 'PAIRED')
+                client.cookie = headers['Set-Cookie'].split(';')[0]
+                self.assertEqual(len(captured), 2)
+                self.assertNotEqual(captured[0]['token'], captured[1]['token'])
+                self.assertEqual(
+                    client.cookie,
+                    'AutoTradeSession=' + captured[1]['token'],
+                )
+            finally:
+                client.close()
+
+    def test_desktop_session_target_matches_native_contract(self):
+        self.assertEqual(
+            desktop_session_credential_target('http://127.0.0.1:8765'),
+            'AutoTrade.HostSession:http://127.0.0.1:8765',
+        )
+        for origin in (
+            'https://127.0.0.1:8765',
+            'http://localhost:8765',
+            'http://127.0.0.1:8765/',
+            'http://127.0.0.1',
+            'http://127.0.0.1:8765/path',
+        ):
+            with self.subTest(origin=origin):
+                with self.assertRaises(ValueError):
+                    desktop_session_credential_target(origin)
+
+    def test_windows_session_persistence_passes_exact_owner_material_to_os_writer(self):
+        with patch(
+            'mvp.autotrade_mvp.windows_host_session._running_on_windows',
+            return_value=True,
+        ), patch(
+            'mvp.autotrade_mvp.windows_host_session._write_windows_generic_credential'
+        ) as writer:
+            target = persist_desktop_owner_session(
+                origin='http://127.0.0.1:8765',
+                actor='local-owner',
+                token='session-token-123',
+            )
+        self.assertEqual(
+            target,
+            'AutoTrade.HostSession:http://127.0.0.1:8765',
+        )
+        writer.assert_called_once_with(
+            target='AutoTrade.HostSession:http://127.0.0.1:8765',
+            actor='local-owner',
+            token='session-token-123',
+        )
+
+    def test_installed_bundle_source_revision_does_not_require_git_checkout(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'bundle-manifest.json').write_text(
+                json.dumps({'source_sha': 'a' * 40}),
+                encoding='utf-8',
+            )
+            with patch(
+                'mvp.autotrade_mvp.product_runtime.ROOT',
+                root,
+            ), patch(
+                'mvp.autotrade_mvp.product_runtime.subprocess.check_output',
+                side_effect=AssertionError('Git must not be consulted'),
+            ):
+                self.assertEqual(source_revision(), 'a' * 40)
+
+    def test_invalid_installed_bundle_source_revision_fails_closed_before_git(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'bundle-manifest.json').write_text(
+                json.dumps({'source_sha': 'A' * 40}),
+                encoding='utf-8',
+            )
+            with patch(
+                'mvp.autotrade_mvp.product_runtime.ROOT',
+                root,
+            ), patch(
+                'mvp.autotrade_mvp.product_runtime.subprocess.check_output',
+                side_effect=AssertionError('Git must not mask invalid bundle identity'),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    'bundle manifest source revision',
+                ):
+                    source_revision()
 
     def test_second_host_cannot_own_same_product(self):
         with TemporaryDirectory() as directory:

@@ -29,9 +29,11 @@ paths:
                   maxLength: 128
       responses:
         "200":
-          description: Local owner paired; credential is cookie-only
+          description: Local owner paired; browser receives an HttpOnly cookie and the Windows ZERO launcher stores the same short-lived session in current-user Credential Manager for the native safety shell
         "403":
           description: Pairing rejected
+        "503":
+          description: Windows current-user session handoff failed; the minted bearer session is revoked and the pairing code remains retryable
   /api/v1/state:
     get:
       operationId: getState

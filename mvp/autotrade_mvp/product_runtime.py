@@ -31,6 +31,7 @@ from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
 from .simulation_status import inspect_canonical_simulation
 from .simulation_commands import _protocol
 from .windows_secrets import DpapiCurrentUserProtector, ProtectedCredentialVault
+from .windows_host_session import persist_desktop_owner_session
 
 ROOT = Path(__file__).resolve().parents[2]
 PRICES = ['100', '101', '103', '102', '100', '100', '101', '103']
@@ -44,11 +45,52 @@ class _NoProviderSecrets:
         raise PermissionError('provider credentials are unavailable in ZERO')
 
 
+def _canonical_source_revision(value, *, source):
+    if (
+        type(value) is not str
+        or len(value) != 40
+        or any(character not in '0123456789abcdef' for character in value)
+    ):
+        raise RuntimeError(f'{source} source revision must be exact lowercase 40-hex')
+    return value
+
+
 def source_revision():
     marker = ROOT / 'SOURCE_REVISION'
     if marker.is_file():
-        return marker.read_text().strip()
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        return _canonical_source_revision(
+            marker.read_text(encoding='utf-8').strip(),
+            source='SOURCE_REVISION',
+        )
+
+    # Deterministic Windows bundles already carry their exact source SHA in the
+    # bundle manifest. This is reproducibility identity only; release
+    # authenticity remains owned by the separate qualification/signing gates.
+    bundle_manifest = ROOT / 'bundle-manifest.json'
+    if bundle_manifest.is_file():
+        try:
+            manifest = json.loads(bundle_manifest.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError('bundle source revision manifest is unreadable') from error
+        if type(manifest) is not dict:
+            raise RuntimeError('bundle source revision manifest must be an object')
+        return _canonical_source_revision(
+            manifest.get('source_sha'),
+            source='bundle manifest',
+        )
+
+    try:
+        revision = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            'source revision is unavailable outside an exact bundle or Git checkout'
+        ) from error
+    return _canonical_source_revision(revision, source='Git')
 
 
 def web_bundle():
@@ -61,9 +103,20 @@ def web_bundle():
 
 
 class ProviderFreeApplication(EmbeddedWebHostApplication):
-    def __init__(self, journal, *, state_dir, pairing_code, **kwargs):
+    def __init__(
+        self,
+        journal,
+        *,
+        state_dir,
+        pairing_code,
+        desktop_session_sink,
+        **kwargs,
+    ):
         self.state_dir = state_dir
         self._pairing_code = pairing_code
+        if not callable(desktop_session_sink):
+            raise TypeError('desktop_session_sink must be callable')
+        self._desktop_session_sink = desktop_session_sink
         # Bootstrap only one no-trade observation before command admission. The
         # empty-journal ownership rule remains intact and no order is sent.
         if not journal.load_events_by_aggregate_type('canonical_autonomous_simulation'):
@@ -98,6 +151,22 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                     raise ValueError()
                 session = self._boundary.create_session(subject='local-owner', role='OWNER',
                     origin=self._origin, ttl_seconds=3600)
+                try:
+                    self._desktop_session_sink(
+                        origin=self._origin,
+                        actor='local-owner',
+                        token=session.token,
+                    )
+                except Exception:
+                    # Do not leave an unreported bearer alive when the protected
+                    # current-user handoff to the native safety shell failed.
+                    self._boundary.revoke_session(session.token)
+                    return TransportResponse(
+                        503,
+                        'application/json',
+                        b'{"error":"DESKTOP_SESSION_STORE_FAILED"}',
+                        (('Cache-Control', 'no-store'),),
+                    )
                 self._pairing_code = None
                 return TransportResponse(200, 'application/json', b'{"status":"PAIRED"}',
                     (('Set-Cookie', 'AutoTradeSession=' + session.token + '; HttpOnly; SameSite=Strict; Path=/api/v1; Max-Age=3600'),
@@ -117,7 +186,7 @@ def cookie_principal(headers, origin):
     return HostPrincipal('local-owner', token, public_session_reference(token))
 
 
-def build_product(data_dir, *, port=8765):
+def build_product(data_dir, *, port=8765, desktop_session_sink=None):
     data = Path(data_dir).resolve()
     state = data / 'state'
     state.mkdir(parents=True, exist_ok=True)
@@ -165,8 +234,20 @@ def build_product(data_dir, *, port=8765):
 
     config = ProductionHostConfig(state / 'journal.sqlite3', ACCOUNT, ENVIRONMENT,
         'local-simulation', '127.0.0.1', port, origin)
+    session_sink = (
+        persist_desktop_owner_session
+        if desktop_session_sink is None
+        else desktop_session_sink
+    )
+    if not callable(session_sink):
+        raise TypeError('desktop_session_sink must be callable')
     runtime = build_production_host(config, security_boundary=boundary, principal_resolver=cookie_principal,
-        snapshot_provider=snapshot, application_factory=partial(ProviderFreeApplication, state_dir=state, pairing_code=pairing))
+        snapshot_provider=snapshot, application_factory=partial(
+            ProviderFreeApplication,
+            state_dir=state,
+            pairing_code=pairing,
+            desktop_session_sink=session_sink,
+        ))
     return runtime, origin + '/#pair=' + pairing
 
 

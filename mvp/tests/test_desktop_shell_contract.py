@@ -8,6 +8,7 @@ XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
+AUTHENTICATED_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
 OPENAPI = ROOT / "contracts" / "openapi" / "host-api.yaml"
@@ -276,6 +277,27 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("No durable block of new exposure has been confirmed", client)
         self.assertNotIn("WITHDRAW", client.upper())
         self.assertNotIn("TRANSFER", client.upper())
+
+    def test_default_zero_host_uses_same_current_user_pairing_target_as_launcher(self):
+        client = AUTHENTICATED_CLIENT.read_text(encoding="utf-8")
+        self.assertIn(
+            'new Uri("http://127.0.0.1:8765/", UriKind.Absolute)',
+            client,
+        )
+        self.assertIn(
+            "WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(uri)",
+            client,
+        )
+        self.assertIn(
+            'Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI")',
+            client,
+        )
+        self.assertIn(
+            'Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET")',
+            client,
+        )
+        self.assertIn("UseCookies = false", client)
+        self.assertIn("AllowAutoRedirect = false", client)
 
     def test_windows_ci_builds_the_actual_desktop_project(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

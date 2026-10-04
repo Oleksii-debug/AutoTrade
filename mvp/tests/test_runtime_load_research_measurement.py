@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from mvp.autotrade_mvp import runtime_load_research_measurement as research_measurement_module
 from mvp.autotrade_mvp.journal_taxonomy import (
     QUALIFICATION_NON_FINANCIAL,
     require_journal_aggregate_descriptor,
@@ -250,6 +251,124 @@ class RuntimeLoadResearchMeasurementTests(unittest.TestCase):
                 "RuntimeQualificationResearchInterferenceMeasured",
                 event_types,
             )
+
+    def test_research_callback_cannot_rebind_post_callback_decoder(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            original_decoder = research_measurement_module._decode_sample
+
+            def mutate_decoder() -> None:
+                research_measurement_module._decode_sample = lambda **_kwargs: None
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "authority changed during callback: _decode_sample",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=mutate_decoder,
+                    )
+            finally:
+                research_measurement_module._decode_sample = original_decoder
+
+    def test_research_callback_cannot_mutate_decoder_executable_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            decoder = research_measurement_module._decode_sample
+            original_code = decoder.__code__
+
+            def mutate_decoder_code() -> None:
+                decoder.__code__ = (lambda **_kwargs: None).__code__
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "executable authority changed during callback: _decode_sample",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=mutate_decoder_code,
+                    )
+            finally:
+                decoder.__code__ = original_code
+
+    def test_research_callback_cannot_rebind_digest_transitive_dependency(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            digest_namespace = research_measurement_module.payload_digest.__globals__
+            original_canonical_json = digest_namespace["canonical_json"]
+
+            def mutate_digest_dependency() -> None:
+                digest_namespace["canonical_json"] = lambda _value: "{}"
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "transitive global authority changed during callback: canonical_json",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=mutate_digest_dependency,
+                    )
+            finally:
+                digest_namespace["canonical_json"] = original_canonical_json
+
+    def test_research_callback_cannot_retarget_store_instance(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            original_path = store.path
+
+            def retarget_store() -> None:
+                store.path = Path(root) / "alternate-runtime-load.sqlite"
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "JournalStore instance state changed during callback: path",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=retarget_store,
+                    )
+            finally:
+                store.path = original_path
 
     def test_provider_free_evaluator_uses_only_durable_metric_series_and_stays_inconclusive(self):
         with tempfile.TemporaryDirectory() as root:

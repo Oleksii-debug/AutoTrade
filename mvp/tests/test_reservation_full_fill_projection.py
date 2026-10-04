@@ -1,6 +1,10 @@
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import (
     POST_BUST_HOLD_STATE,
     ReservationBook,
@@ -95,6 +99,106 @@ class ReservationFullFillProjectionTests(unittest.TestCase):
         self.assertEqual(terminal.state, "FILLED")
         self.assertEqual(terminal.consumed["CASH:USD"], Decimal("100"))
         self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+
+    def test_durable_terminal_prepare_replays_historical_consume_without_rewrite(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="account-1",
+            )
+            book.reserve(
+                command_id="reserve-1",
+                idempotency_key="reserve-1",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            book.consume(
+                command_id="legacy-consume",
+                idempotency_key="legacy-fill-component",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "100"},
+            )
+
+            plan = book.prepare_consume_and_mark_filled_mutation(
+                event_key="new-terminal-attempt",
+                idempotency_key="legacy-fill-component",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "100"},
+                order_fill_event_id="00000000-0000-0000-0000-000000000001",
+                order_fill_payload_hash="sha256:" + "1" * 64,
+                order_fill_snapshot_digest="sha256:" + "2" * 64,
+                order_fill_mutation_hash="sha256:" + "3" * 64,
+                order_fill_provider_id="SIMULATED",
+                order_fill_client_order_id="order-1",
+                order_fill_fill_id="fill-1",
+                order_fill_provider_execution_id="execution-1",
+                committed_at="2026-10-04T20:10:00Z",
+            )
+
+            self.assertTrue(plan.already_committed)
+            self.assertIsNone(plan.envelope)
+            self.assertEqual(
+                plan.request,
+                {
+                    "reservation_id": "reservation-1",
+                    "usage": {"CASH:USD": "100"},
+                },
+            )
+            self.assertEqual(plan.snapshot.state, "WORKING")
+            self.assertEqual(
+                plan.snapshot.consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                book.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
+
+    def test_durable_terminal_replay_rejects_missing_oms_fill_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="account-1",
+            )
+            book.reserve(
+                command_id="reserve-1",
+                idempotency_key="reserve-1",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            plan = book.prepare_consume_and_mark_filled_mutation(
+                event_key="forged-terminal",
+                idempotency_key="forged-terminal",
+                reservation_id="reservation-1",
+                usage={"CASH:USD": "100"},
+                order_fill_event_id="00000000-0000-0000-0000-000000000001",
+                order_fill_payload_hash="sha256:" + "1" * 64,
+                order_fill_snapshot_digest="sha256:" + "2" * 64,
+                order_fill_mutation_hash="sha256:" + "3" * 64,
+                order_fill_provider_id="SIMULATED",
+                order_fill_client_order_id="order-1",
+                order_fill_fill_id="fill-1",
+                order_fill_provider_execution_id="execution-1",
+                committed_at="2026-10-04T20:10:00Z",
+            )
+            self.assertEqual(plan.snapshot.state, "FILLED")
+            self.assertEqual(book.get("reservation-1").state, "WORKING")
+            self.assertIsNotNone(plan.envelope)
+
+            store.append_event(plan.envelope)
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "referenced durable OMS fill event",
+            ):
+                book.refresh()
 
     def test_busted_terminal_can_refill_and_terminalize_again(self):
         book = ReservationBook()

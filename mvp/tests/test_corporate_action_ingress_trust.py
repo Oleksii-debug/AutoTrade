@@ -61,10 +61,10 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
             self._event(source_sequence=hostile_one)
 
     def test_numeric_payload_is_bounded_before_stringification(self):
-        oversized = Decimal("1e100000")
+        oversized_decimal = Decimal("1e100000")
         with self.assertRaisesRegex(ValueError, "resource envelope"):
             self._event(
-                payload={"per_share": oversized, "currency": "USD"},
+                payload={"per_share": oversized_decimal, "currency": "USD"},
             )
 
         with self.assertRaisesRegex(ValueError, "resource envelope"):
@@ -75,8 +75,14 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
                 kind="CASH_DIVIDEND",
                 effective_date=date(2026, 1, 2),
                 source_revision="revision-1",
-                payload={"per_share": oversized, "currency": "USD"},
+                payload={"per_share": oversized_decimal, "currency": "USD"},
                 source_sequence=0,
+            )
+
+        oversized_int = 10 ** 5000
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            self._event(
+                payload={"per_share": oversized_int, "currency": "USD"},
             )
 
     def test_financing_days_reject_integer_subclasses(self):

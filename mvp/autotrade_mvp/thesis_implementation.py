@@ -127,6 +127,7 @@ class MarketThesis:
     as_of: datetime
     horizon_end: datetime
     required_notional: Decimal
+    notional_currency: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "thesis_id", _text(self.thesis_id, name="thesis_id"))
@@ -149,6 +150,11 @@ class MarketThesis:
         if required <= 0:
             raise ThesisImplementationError("required_notional must be positive")
         object.__setattr__(self, "required_notional", required)
+        object.__setattr__(
+            self,
+            "notional_currency",
+            _text(self.notional_currency, name="notional_currency").upper(),
+        )
 
 
 @dataclass(frozen=True)
@@ -218,6 +224,7 @@ class ImplementationCandidate:
     leverage_ratio: Decimal
     liquidation_risk: Decimal
     liquidity_capacity: Decimal
+    liquidity_currency: str
     tradable_until: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -236,6 +243,11 @@ class ImplementationCandidate:
             self,
             "instrument_version",
             _instrument_version_ref(self.instrument_version),
+        )
+        object.__setattr__(
+            self,
+            "liquidity_currency",
+            _text(self.liquidity_currency, name="liquidity_currency").upper(),
         )
         direction = _text(
             self.exposure_direction,
@@ -381,6 +393,7 @@ def _detach_thesis(value: object) -> MarketThesis:
         as_of=value.as_of,
         horizon_end=value.horizon_end,
         required_notional=value.required_notional,
+        notional_currency=value.notional_currency,
     )
 
 
@@ -417,6 +430,7 @@ def _detach_candidate(value: object) -> ImplementationCandidate:
         leverage_ratio=value.leverage_ratio,
         liquidation_risk=value.liquidation_risk,
         liquidity_capacity=value.liquidity_capacity,
+        liquidity_currency=value.liquidity_currency,
         tradable_until=value.tradable_until,
     )
 
@@ -447,12 +461,15 @@ def _rejection_reasons(
         and candidate.tradable_until <= thesis.horizon_end
     ):
         reasons.append("HORIZON_NOT_COVERED")
-    required_capacity = max(
-        thesis.required_notional,
-        policy.min_liquidity_capacity,
-    )
-    if candidate.liquidity_capacity < required_capacity:
-        reasons.append("INSUFFICIENT_LIQUIDITY_CAPACITY")
+    if candidate.liquidity_currency != thesis.notional_currency:
+        reasons.append("LIQUIDITY_CURRENCY_MISMATCH")
+    else:
+        required_capacity = max(
+            thesis.required_notional,
+            policy.min_liquidity_capacity,
+        )
+        if candidate.liquidity_capacity < required_capacity:
+            reasons.append("INSUFFICIENT_LIQUIDITY_CAPACITY")
     if candidate.total_cost_rate > policy.max_total_cost_rate:
         reasons.append("TOTAL_COST_LIMIT")
     if candidate.leverage_ratio > policy.max_leverage_ratio:

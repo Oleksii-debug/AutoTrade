@@ -1408,8 +1408,12 @@ class ReturnThresholdBaseline:
 
     def propose(self, *, symbol: str, decision_time: datetime) -> DeterministicProposal:
         descriptor = _validate_threshold_strategy_configuration(self)
-        state_history, _state_seen = _readmit_threshold_strategy_state(self)
         name = _text(symbol, name="symbol")
+        state_history, _state_seen = _readmit_threshold_strategy_state(
+            self,
+            retained_symbol=name,
+            include_all_seen=False,
+        )
         cutoff = _time(decision_time, name="decision_time")
         history = state_history.get(name, ())
         eligible = [item for item in history if item.available_at <= cutoff]
@@ -1746,24 +1750,37 @@ def _validate_threshold_strategy_configuration(
 
 def _readmit_threshold_strategy_state(
     strategy: ReturnThresholdBaseline,
+    *,
+    retained_symbol: str | None = None,
+    include_all_seen: bool = True,
 ) -> tuple[
     dict[str, tuple[CausalObservation, ...]],
     dict[str, CausalObservation],
 ]:
     if type(strategy._history) is not dict or type(strategy._observations_by_id) is not dict:
         raise ValueError("strategy state containers are invalid")
+    if type(include_all_seen) is not bool:
+        raise TypeError("include_all_seen must be a built-in bool")
+    if retained_symbol is not None:
+        retained_symbol = _text(retained_symbol, name="retained_symbol")
 
     seen: dict[str, CausalObservation] = {}
-    for event_id, raw_observation in strategy._observations_by_id.items():
-        canonical_event_id = _text(event_id, name="seen event_id")
-        observation = _readmit_causal_observation(raw_observation)
-        if canonical_event_id != event_id or observation.event_id != event_id:
-            raise ValueError("seen-event key does not match observation event_id")
-        seen[event_id] = observation
+    if include_all_seen:
+        for event_id, raw_observation in strategy._observations_by_id.items():
+            canonical_event_id = _text(event_id, name="seen event_id")
+            observation = _readmit_causal_observation(raw_observation)
+            if canonical_event_id != event_id or observation.event_id != event_id:
+                raise ValueError("seen-event key does not match observation event_id")
+            seen[event_id] = observation
 
     history: dict[str, tuple[CausalObservation, ...]] = {}
     retained_ids: set[str] = set()
-    for symbol, raw_rows in strategy._history.items():
+    items = (
+        ((retained_symbol, strategy._history.get(retained_symbol, [])),)
+        if retained_symbol is not None
+        else strategy._history.items()
+    )
+    for symbol, raw_rows in items:
         canonical_symbol = _text(symbol, name="history symbol")
         if canonical_symbol != symbol:
             raise ValueError("history symbol key is not canonical")
@@ -1781,6 +1798,16 @@ def _readmit_threshold_strategy_state(
                 raise ValueError("retained history contains duplicate event_id")
             retained_ids.add(observation.event_id)
             seen_observation = seen.get(observation.event_id)
+            if seen_observation is None:
+                raw_seen = strategy._observations_by_id.get(observation.event_id)
+                if raw_seen is not None:
+                    seen_observation = _readmit_causal_observation(raw_seen)
+                    if seen_observation.event_id != observation.event_id:
+                        raise ValueError(
+                            "seen-event key does not match observation event_id"
+                        )
+                    if include_all_seen:
+                        seen[observation.event_id] = seen_observation
             if seen_observation is None or seen_observation != observation:
                 raise ValueError(
                     "retained history is not backed by identical seen-event state"
@@ -1903,8 +1930,9 @@ def run_registered_baseline(
     descriptor = _validate_threshold_strategy_configuration(strategy)
     if descriptor is None:
         raise ValueError("registered runner requires a registered strategy descriptor")
-    history, seen = _readmit_threshold_strategy_state(strategy)
-    if seen or any(history.values()):
+    if type(strategy._history) is not dict or type(strategy._observations_by_id) is not dict:
+        raise ValueError("strategy state containers are invalid")
+    if strategy._observations_by_id or strategy._history:
         raise ValueError("registered runner requires pristine strategy state")
     pristine_snapshot = strategy.snapshot()
     if type(observations) not in (list, tuple):

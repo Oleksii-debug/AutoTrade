@@ -2452,6 +2452,58 @@ class DeterministicStrategyTests(unittest.TestCase):
 
 
 
+
+    def test_propose_validates_only_retained_cut_while_snapshot_validates_full_seen_state(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        rows = [obs(i, str(100 + i)) for i in range(5)]
+        for item in rows:
+            strategy.ingest(item, simulation_time=item.available_at)
+        self.assertEqual(
+            [item.event_id for item in strategy._history["AAA"]],
+            ["event-3", "event-4"],
+        )
+        object.__setattr__(
+            strategy._observations_by_id["event-0"],
+            "price",
+            Decimal("0"),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=4),
+        )
+        self.assertEqual(proposal.evidence_event_ids, ("event-3", "event-4"))
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.snapshot()
+
+    def test_propose_does_not_scan_unrelated_symbol_history(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        a0, a1 = obs(0, "100"), obs(1, "102")
+        for item in (a0, a1):
+            strategy.ingest(item, simulation_time=item.available_at)
+        other = CausalObservation.create(
+            event_id="other-0",
+            symbol="BBB",
+            available_at=BASE,
+            price="50",
+        )
+        strategy.ingest(other, simulation_time=BASE)
+        object.__setattr__(
+            strategy._history["BBB"][0],
+            "price",
+            Decimal("0"),
+        )
+        proposal = strategy.propose(
+            symbol="AAA",
+            decision_time=BASE + timedelta(minutes=1),
+        )
+        self.assertEqual(proposal.action, "BUY")
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.snapshot()
+
     def test_strategy_constructor_detaches_descriptor_from_caller_mutation(self):
         descriptor = self.descriptor()
         strategy = ReturnThresholdBaseline(

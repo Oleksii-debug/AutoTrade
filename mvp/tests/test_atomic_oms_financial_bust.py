@@ -260,6 +260,135 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
             self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
 
+    def test_provider_fill_facade_rejects_polymorphic_evidence_before_field_access(self):
+        class HostileProjectedFill(ProjectedFillEvidence):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile initial projected-fill field access")
+                return super().__getattribute__(name)
+
+        class HostileProviderFill(ProviderFillEvidence):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile initial provider-fill field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, reservations = books(store)
+            projected, provider = evidence()
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "projected_fill must be exact ProjectedFillEvidence",
+            ):
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="hostile-initial-projected",
+                    idempotency_key="hostile-initial-projected",
+                    reservation_id="reservation-never-read",
+                    projected_fill=object.__new__(HostileProjectedFill),
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            self.assertEqual(HostileProjectedFill.field_reads, 0)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "provider_fill must be exact ProviderFillEvidence",
+            ):
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="hostile-initial-provider",
+                    idempotency_key="hostile-initial-provider",
+                    reservation_id="reservation-never-read",
+                    projected_fill=projected,
+                    provider_fill=object.__new__(HostileProviderFill),
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            self.assertEqual(HostileProviderFill.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
+
+    def test_provider_fill_facade_rejects_polymorphic_text_before_callbacks(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile provider-fill text callback")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile provider-fill text callback")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, reservations = books(store)
+            projected, provider = evidence()
+
+            with self.assertRaisesRegex(ValueError, "expected_instrument"):
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="hostile-initial-text",
+                    idempotency_key="hostile-initial-text",
+                    reservation_id="reservation-never-read",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument=HostileText("ABC"),
+                    settlement_currency="USD",
+                )
+            self.assertEqual(touched, [])
+            self.assertEqual(economics.transactions, ())
+
+    def test_provider_fill_correction_facade_rejects_polymorphic_evidence_first(self):
+        class HostileProjectedFill(ProjectedFillEvidence):
+            field_reads = 0
+
+            def __getattribute__(self, name):
+                if name not in {"field_reads", "__class__"}:
+                    type(self).field_reads += 1
+                    raise AssertionError("hostile correction projected-fill field access")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _orders, economics, reservations = books(store)
+            _projected, provider = evidence()
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "original_projected_fill must be exact ProjectedFillEvidence",
+            ):
+                accounting_impl.commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    None,
+                    reservation_book=reservations,
+                    reservation_id="reservation-never-read",
+                    command_id="hostile-correction",
+                    idempotency_key="hostile-correction",
+                    original_projected_fill=object.__new__(HostileProjectedFill),
+                    original_provider_fill=provider,
+                    corrected_projected_fill=_projected,
+                    corrected_provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at=WHEN,
+                    settlement_obligations=(),
+                )
+            self.assertEqual(HostileProjectedFill.field_reads, 0)
+            self.assertEqual(economics.transactions, ())
+
     def test_provider_fill_binding_rejects_polymorphic_plan_before_field_access(self):
         class HostilePlan(ProviderFillFinancialPlan):
             field_reads = 0

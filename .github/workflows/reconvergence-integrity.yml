@@ -122,7 +122,15 @@ jobs:
             test -n "${scope}"
             args+=(--trusted-root-approval "${scope}")
           done < "${APPROVED_SCOPE_FILE}"
+          args+=(--evidence-output "artifacts/reconvergence-integrity.json")
           python -m control.tools.reconvergence_integrity "${args[@]}"
+      - name: Upload exact-head reconvergence evidence
+        if: always() && github.event_name == 'pull_request_target'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconvergence-integrity-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: artifacts/reconvergence-integrity.json
+          if-no-files-found: error
       - name: Run trusted guard regression tests
         run: >-
           python -m unittest

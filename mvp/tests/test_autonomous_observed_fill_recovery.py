@@ -11,7 +11,11 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import simulation_session as session
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
+from mvp.autotrade_mvp.accounting import (
+    AccountingConflict,
+    book_external_cash_flow,
+)
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
@@ -354,6 +358,67 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
             self.assertEqual(str(economics.cash("USD")), "1001")
             self.assertEqual(
                 str(economics.position(session.INSTRUMENT)), "0"
+            )
+
+
+    def test_writer_race_before_order_plan_cannot_adopt_newer_cut(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                session,
+                "commit_order_fill_with_reservation_consumption",
+                side_effect=RuntimeError("crash"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run(directory, PRICES[:3])
+
+            store = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            original_prepare = (
+                DurableOrderBookProjection.prepare_record_fill_mutation
+            )
+            injected = False
+
+            def race(book, *args, **kwargs):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    economics.append(
+                        book_external_cash_flow(
+                            transaction_id="pre-order-plan-race",
+                            cause_event_id="pre-order-plan-race",
+                            currency="USD",
+                            amount="1",
+                        )
+                    )
+                return original_prepare(book, *args, **kwargs)
+
+            with patch.object(
+                DurableOrderBookProjection,
+                "prepare_record_fill_mutation",
+                race,
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "validated recovery cut",
+                ):
+                    run(directory, PRICES[:3])
+
+            refreshed = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            self.assertEqual(str(refreshed.cash("USD")), "1001")
+            self.assertEqual(
+                str(refreshed.position(session.INSTRUMENT)), "0"
             )
 
 

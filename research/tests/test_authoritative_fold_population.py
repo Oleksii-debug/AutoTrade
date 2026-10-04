@@ -989,5 +989,115 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
             )
 
 
+    def test_authoritative_scalar_subclasses_fail_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        class HostileInt(int):
+            def __int__(self):
+                callbacks.append("int")
+                raise AssertionError("hostile integer callback executed")
+
+            def __str__(self):
+                callbacks.append("str")
+                raise AssertionError("hostile integer callback executed")
+
+            def __lt__(self, other):
+                callbacks.append("lt")
+                raise AssertionError("hostile integer callback executed")
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile tuple callback executed")
+
+        with self.assertRaisesRegex(ValueError, "exact text"):
+            HistoricalFeatureInputSpec(
+                spec_id=HostileText("hostile"),
+                payload_value_field="close",
+                window_count=2,
+                event_kinds=("BAR",),
+            )
+        with self.assertRaisesRegex(ValueError, "integer >= 2"):
+            HistoricalFeatureInputSpec(
+                spec_id="safe",
+                payload_value_field="close",
+                window_count=HostileInt(2),
+                event_kinds=("BAR",),
+            )
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            HistoricalFeatureInputSpec(
+                spec_id="safe",
+                payload_value_field="close",
+                window_count=2,
+                event_kinds=HostileTuple(("BAR",)),
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_vintage_identity_and_cutoff_subclasses_fail_before_callbacks(self):
+        rows = self._base_events()
+        manifest_digest = self._register(rows)
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        class HostileInt(int):
+            def __int__(self):
+                callbacks.append("int")
+                raise AssertionError("hostile integer callback executed")
+
+            def __str__(self):
+                callbacks.append("str")
+                raise AssertionError("hostile integer callback executed")
+
+            def __lt__(self, other):
+                callbacks.append("lt")
+                raise AssertionError("hostile integer callback executed")
+
+        class HostileDateTime(datetime):
+            def astimezone(self, *args, **kwargs):
+                callbacks.append("astimezone")
+                raise AssertionError("hostile datetime callback executed")
+
+        with self.assertRaisesRegex(HistoricalDataError, "exact text"):
+            self.registry.resolve_market_population(
+                HostileText(self.dataset_id),
+                1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                cutoff=BASE + timedelta(days=3),
+            )
+        with self.assertRaisesRegex(HistoricalDataError, "canonical integer"):
+            self.registry.resolve_market_population(
+                self.dataset_id,
+                HostileInt(1),
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                cutoff=BASE + timedelta(days=3),
+            )
+        hostile_cutoff = HostileDateTime(
+            2026,
+            1,
+            4,
+            tzinfo=timezone.utc,
+        )
+        with self.assertRaisesRegex(HistoricalDataError, "exact datetime"):
+            self.registry.resolve_market_population(
+                self.dataset_id,
+                1,
+                manifest_digest=manifest_digest,
+                artifact_store=self.artifacts,
+                cutoff=hostile_cutoff,
+            )
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

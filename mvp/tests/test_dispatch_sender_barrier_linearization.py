@@ -2,6 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.dispatch as dispatch_module
 from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
@@ -306,6 +307,75 @@ class DispatchSenderBarrierLinearizationTests(unittest.TestCase):
             self.assertEqual(
                 [event["event_type"] for event in events],
                 ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+    def test_callback_global_retarget_cannot_replace_captured_journal_cut_authority(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner-a",
+                owner_epoch=1,
+            )
+            original_sequence = dispatch_module._CANONICAL_JOURNAL_CURRENT_SEQUENCE
+            original_commit = dispatch_module._CANONICAL_JOURNAL_COMMIT_COMMAND
+            forged_sequence_called = False
+            forged_commit_called = False
+            outbound = 0
+
+            def forged_sequence(_store):
+                nonlocal forged_sequence_called
+                forged_sequence_called = True
+                raise AssertionError("retargeted journal sequence callable executed")
+
+            def forged_commit(*_args, **_kwargs):
+                nonlocal forged_commit_called
+                forged_commit_called = True
+                raise AssertionError("retargeted journal commit callable executed")
+
+            def barrier_clock():
+                dispatch_module._CANONICAL_JOURNAL_CURRENT_SEQUENCE = forged_sequence
+                return NOW
+
+            def sender_check(_owner, _epoch):
+                dispatch_module._CANONICAL_JOURNAL_COMMIT_COMMAND = forged_commit
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"ok": True}
+
+            try:
+                outcome = dispatcher.dispatch(
+                    attempt_id="callback-global-retarget",
+                    intent_id="intent-callback-global-retarget",
+                    intent_hash="hash-callback-global-retarget",
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now=NOW,
+                    authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    final_barrier_clock=barrier_clock,
+                    sender_check=sender_check,
+                )
+            finally:
+                dispatch_module._CANONICAL_JOURNAL_CURRENT_SEQUENCE = original_sequence
+                dispatch_module._CANONICAL_JOURNAL_COMMIT_COMMAND = original_commit
+
+            self.assertFalse(forged_sequence_called)
+            self.assertFalse(forged_commit_called)
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outbound, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("callback-global-retarget"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
             )
 
     def test_committed_sending_barrier_replay_cannot_authorize_second_send(self):

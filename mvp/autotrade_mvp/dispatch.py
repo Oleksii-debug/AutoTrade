@@ -635,6 +635,7 @@ class GuardedDispatcher:
         payload: dict[str, Any],
         now: str,
         expected_journal_sequence: int | None = None,
+        _journal_commit_command: Callable[..., object] | None = None,
     ):
         store = self._journal_store_authority()
         envelope = _envelope(
@@ -654,7 +655,12 @@ class GuardedDispatcher:
                 envelope,
                 outbox_topic="autotrade.submission.events",
             )
-        _, inserted, appended = _CANONICAL_JOURNAL_COMMIT_COMMAND(
+        commit_command = (
+            _CANONICAL_JOURNAL_COMMIT_COMMAND
+            if _journal_commit_command is None
+            else _journal_commit_command
+        )
+        _, inserted, appended = commit_command(
             store,
             command_id=envelope["event_id"],
             actor=f"dispatcher:{self.scope_key}",
@@ -782,6 +788,13 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
+        # Capture the installed journal-cut callables before any caller callback
+        # can execute. final_barrier_clock, sender_check and authority_check are
+        # intentionally caller-controlled seams; none may redirect the CAS
+        # primitive used later by the irreversible send barrier.
+        journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+        journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
+
         for value, name in (
             (attempt_id, "attempt_id"),
             (intent_id, "intent_id"),
@@ -950,7 +963,7 @@ class GuardedDispatcher:
             # recovery-owner/takeover predicate: any intervening journal write
             # fails closed instead of leaving a check->send race.
             store = self._journal_store_authority()
-            barrier_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(store)
+            barrier_journal_sequence = journal_current_sequence(store)
 
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
@@ -1023,6 +1036,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                     expected_journal_sequence=barrier_journal_sequence,
+                    _journal_commit_command=journal_commit_command,
                 )
             except ValueError as error:
                 reason = "journal_changed_during_final_send_validation"

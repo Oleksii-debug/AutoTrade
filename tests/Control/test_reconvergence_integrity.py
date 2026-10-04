@@ -361,6 +361,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             "owned\\file.py",
             "owned/line\nfeed.py",
             "owned/tab\tfile.py",
+            "owned/control\x1fchar.py",
+            "owned/delete\x7fchar.py",
         ):
             with self.subTest(path=path):
                 with self.assertRaises(ValueError):
@@ -490,6 +492,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                     protected_head,
                     "--allowed-scope",
                     "control/tools",
+                    "--allowed-scope-head",
+                    protected_head,
                 ],
                 cwd=root,
                 env=env,

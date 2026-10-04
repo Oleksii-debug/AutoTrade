@@ -87,7 +87,7 @@ _NAME_STATUS_RE = re.compile(
 def _validated_repo_path(value: str, *, name: str) -> str:
     if type(value) is not str or not value:
         raise ValueError(f"{name} must be a non-empty exact string")
-    if any(character in value for character in ("\x00", "\n", "\r", "\t")):
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError(f"{name} contains a forbidden control character")
     if value.startswith("/") or "\\" in value:
         raise ValueError(f"{name} must be a canonical repository-relative path")
@@ -640,15 +640,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
 
-    assessment = assess_git_revisions(
-        args.base,
-        args.head,
-        max_deletions=args.max_deletions,
-        max_deleted_fraction=args.max_deleted_fraction,
-        allowed_scopes=allowed_scopes,
-        allowed_scope_head=args.allowed_scope_head,
-        cwd=args.repo,
-    )
+    try:
+        assessment = assess_git_revisions(
+            args.base,
+            args.head,
+            max_deletions=args.max_deletions,
+            max_deleted_fraction=args.max_deleted_fraction,
+            allowed_scopes=allowed_scopes,
+            allowed_scope_head=args.allowed_scope_head,
+            cwd=args.repo,
+        )
+    except (ValueError, TypeError, subprocess.CalledProcessError) as error:
+        print(f"BLOCKED: {error}")
+        return 2
     print(
         "Reconvergence tree guard: "
         f"base_is_ancestor={str(assessment.base_is_ancestor).lower()} "

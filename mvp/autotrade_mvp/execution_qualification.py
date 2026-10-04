@@ -35,9 +35,10 @@ class ExecutionQualificationError(ValueError):
 
 
 _ASSET_CLASSES = {
-    "SPOT",
-    "MARGIN",
-    "EQUITY",
+    "CASH_EQUITY",
+    "FUND",
+    "FX",
+    "CRYPTO_SPOT",
     "FUTURE",
     "PERPETUAL",
     "OPTION",
@@ -213,6 +214,8 @@ def validate_execution_qualification(
     failures: list[str] = []
     if normalized_instrument != authoritative_instrument:
         failures.append("instrument_authority")
+    if normalized_asset != detached_instrument.asset_class:
+        failures.append("instrument_asset_class")
     if model.price_projection != authoritative_projection:
         failures.append("price_projection_authority")
     if qualification.asset_class != normalized_asset:

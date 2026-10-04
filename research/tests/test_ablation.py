@@ -1687,6 +1687,18 @@ class AblationTests(unittest.TestCase):
                     value_unit="USD",
                 )
 
+            wrong_rule = publish(
+                "77777777-7777-4777-8777-777777777778",
+                {**base, "rule_id": "caller-selected-rule-v9"},
+            )
+            with self.assertRaisesRegex(ValueError, "rule is unsupported"):
+                ablation_module._load_registered_projection_descriptor(
+                    store,
+                    wrong_rule,
+                    projection_kind="UTILITY",
+                    value_unit="USD",
+                )
+
             wrong_unit = publish(
                 "77777777-7777-4777-8777-777777777774",
                 {**base, "value_unit": "EUR"},

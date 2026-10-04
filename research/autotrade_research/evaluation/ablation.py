@@ -1152,6 +1152,11 @@ _REQUIRED_ABLATION_COST_COMPONENTS = (
     "tax_estimate",
 )
 
+_ABLATION_PROJECTION_RULE = {
+    "UTILITY": "reconciled-outcome-net-value-v1",
+    "COST": "complete-after-cost-attribution-v1",
+}
+
 
 @dataclass(frozen=True)
 class RegisteredAblationProjectionDescriptor:
@@ -1251,6 +1256,8 @@ def _load_registered_projection_descriptor(
     if payload.get("owner_authority") != expected_owner:
         raise ValueError("registered ablation projection owner authority mismatch")
     rule_id = _canonical_identity_text(payload.get("rule_id"), "projection rule_id")
+    if rule_id != _ABLATION_PROJECTION_RULE[projection_kind]:
+        raise ValueError("registered ablation projection rule is unsupported")
     raw_components = payload.get("cost_components")
     if type(raw_components) is not list or any(
         type(item) is not str for item in raw_components

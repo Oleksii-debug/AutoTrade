@@ -195,6 +195,20 @@ public sealed class EmergencyCommandUncertainException : Exception
 }
 
 /// <summary>
+/// The authenticated host is reachable but cannot currently expose one
+/// coherent journal-cut snapshot. No durable state is carried by this exception.
+/// </summary>
+public sealed class EmergencySnapshotBusyException : Exception
+{
+    public EmergencySnapshotBusyException()
+        : base(
+            "The authenticated host is reachable, but one coherent state snapshot "
+            + "is temporarily unavailable. Retry without treating prior state as current.")
+    {
+    }
+}
+
+/// <summary>
 /// Authenticated client for the one canonical versioned host API. It contains no
 /// provider credentials, financial logic, or alternate command authority.
 /// </summary>
@@ -687,7 +701,34 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
-        response.EnsureSuccessStatusCode();
+        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+        {
+            JsonElement unavailable = await ReadObjectAsync(
+                response,
+                cancellationToken);
+            bool exactSnapshotBusy =
+                unavailable.EnumerateObject().Count() == 2
+                && unavailable.TryGetProperty("error", out JsonElement error)
+                && error.ValueKind == JsonValueKind.String
+                && string.Equals(
+                    error.GetString(),
+                    "SNAPSHOT_BUSY",
+                    StringComparison.Ordinal)
+                && unavailable.TryGetProperty(
+                    "retryable",
+                    out JsonElement retryable)
+                && retryable.ValueKind == JsonValueKind.True;
+            if (exactSnapshotBusy)
+            {
+                throw new EmergencySnapshotBusyException();
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+        else
+        {
+            response.EnsureSuccessStatusCode();
+        }
 
         JsonElement value = await ReadObjectAsync(response, cancellationToken);
         string hostId = RequiredString(value, "host_id");

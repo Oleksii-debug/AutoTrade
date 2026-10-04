@@ -64,20 +64,14 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("public string SessionToken => _session.Token;", runtime)
         self.assertNotIn("public string CookieToken =>", runtime)
         self.assertIn("core.CookieManager.DeleteAllCookies();", code)
-        self.assertIn(
-            "CoreWebView2BrowsingDataKinds.ServiceWorkers",
-            code,
-        )
+        self.assertIn("CoreWebView2BrowsingDataKinds.ServiceWorkers", code)
         self.assertIn("core.AddWebResourceRequestedFilter(", code)
         self.assertIn("CoreWebView2WebResourceContext.All", code)
         self.assertIn("CoreWebView2WebResourceRequestSourceKinds.All", code)
         self.assertIn("core.WebResourceRequested += (_, e) =>", code)
         self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
         self.assertIn("e.Request.Method,", code)
-        self.assertIn(
-            '"AutoTrade-Session " + _ownedRuntime.SessionToken',
-            code,
-        )
+        self.assertIn('"AutoTrade-Session " + _ownedRuntime.SessionToken', code)
         self.assertIn(
             'e.Request.Headers.SetHeader("X-AutoTrade-Actor", "local-owner");',
             code,
@@ -210,6 +204,44 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("if (!IsLoaded)", handler)
         self.assertGreaterEqual(code.count("HostStatusAnnouncement,"), 2)
         self.assertGreaterEqual(code.count("EmergencyResult,"), 6)
+
+    def test_snapshot_busy_is_retryable_without_fabricating_disconnect(self):
+        client = AUTHENTICATED_CLIENT.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("public sealed class EmergencySnapshotBusyException", client)
+        self.assertIn("HttpStatusCode.ServiceUnavailable", client)
+        self.assertIn('"SNAPSHOT_BUSY"', client)
+        self.assertIn("retryable.ValueKind == JsonValueKind.True", client)
+        self.assertIn("throw new EmergencySnapshotBusyException();", client)
+
+        refresh = code[code.index("private async Task RefreshHostStatusAsync"):
+                       code.index("private void ApplySnapshotBusyStatus")]
+        busy_catch = refresh.index("catch (EmergencySnapshotBusyException)")
+        generic_catch = refresh.index("catch (Exception)", busy_catch)
+        self.assertLess(busy_catch, generic_catch)
+        self.assertIn("ApplySnapshotBusyStatus(", refresh[busy_catch:generic_catch])
+
+        busy = code[code.index("private void ApplySnapshotBusyStatus"):
+                    code.index("private void ApplyHostStatus")]
+        self.assertIn("_lastKnownConnectedStatus", busy)
+        self.assertIn("(stale)", busy)
+        self.assertIn("temporarily busy", busy)
+        self.assertIn("Retry is safe.", busy)
+        self.assertNotIn("EmergencyHostStatus.Disconnected(", busy)
+
+    def test_emergency_snapshot_busy_is_before_send_and_not_uncertain_acceptance(self):
+        code = CODE.read_text(encoding="utf-8")
+        action = code[code.index("private async void BlockNewExposure_Click"):]
+        busy = action.index("catch (EmergencySnapshotBusyException)")
+        uncertain = action.index("catch (EmergencyCommandUncertainException", busy)
+        generic = action.index("catch (Exception)", uncertain)
+        self.assertLess(busy, uncertain)
+        self.assertLess(uncertain, generic)
+        busy_body = action[busy:uncertain]
+        self.assertIn("No emergency command was created or sent", busy_body)
+        self.assertIn("no durable block has been confirmed", busy_body)
+        self.assertIn("Retry the same Block new exposure action", busy_body)
+        self.assertNotIn("uncertain.CommandId", busy_body)
 
     def test_failed_refresh_preserves_last_known_values_as_stale(self):
         code = CODE.read_text(encoding="utf-8")

@@ -228,6 +228,11 @@ public partial class MainWindow : Window
         {
             return;
         }
+        catch (EmergencySnapshotBusyException)
+        {
+            ApplySnapshotBusyStatus(
+                announce || _announceHostRefreshCompletion);
+        }
         catch (Exception)
         {
             ApplyHostStatus(
@@ -252,6 +257,48 @@ public partial class MainWindow : Window
             {
                 RefreshStatusButton.Focus();
             }
+        }
+    }
+
+    private void ApplySnapshotBusyStatus(bool announce)
+    {
+        bool announceTransition =
+            _lastDisplayedFreshness != HostDisplayFreshness.Stale;
+        const string message =
+            "Host is responding, but one coherent state snapshot is temporarily busy. "
+            + "No new host evidence was accepted.";
+
+        if (_lastKnownConnectedStatus is { } lastConnected)
+        {
+            HostValue.Text = $"{lastConnected.HostId} (stale)";
+            AccountValue.Text = $"{lastConnected.AccountId} (stale)";
+            EnvironmentValue.Text = $"{lastConnected.Environment} (stale)";
+            StateVersionValue.Text = $"{lastConnected.StateVersion} (stale)";
+            LastEvidenceValue.Text =
+                $"{lastConnected.ObservedAtUtc:O} (stale)";
+            ConnectionStatus.Text =
+                message
+                + " Last known host values remain visible only as stale evidence.";
+        }
+        else
+        {
+            HostValue.Text = "Unavailable";
+            AccountValue.Text = "Unavailable";
+            EnvironmentValue.Text = "Unavailable";
+            StateVersionValue.Text = "Unavailable";
+            LastEvidenceValue.Text = "Unavailable";
+            ConnectionStatus.Text =
+                message
+                + " No canonical host snapshot has been accepted yet.";
+        }
+
+        _lastDisplayedFreshness = HostDisplayFreshness.Stale;
+        if (announce || announceTransition)
+        {
+            SetLiveRegionText(
+                HostStatusAnnouncement,
+                $"{ConnectionStatus.Text} Retry is safe. "
+                + "No cancellation, flattening, or provider outcome is implied.");
         }
     }
 
@@ -474,6 +521,15 @@ public partial class MainWindow : Window
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
             return;
+        }
+        catch (EmergencySnapshotBusyException)
+        {
+            EmergencyOperationValue.Text = "Unavailable";
+            SetLiveRegionText(
+                EmergencyResult,
+                "The host is responding, but one coherent state snapshot is temporarily busy. "
+                + "No emergency command was created or sent, and no durable block has been confirmed. "
+                + "Retry the same Block new exposure action after the snapshot becomes available.");
         }
         catch (EmergencyCommandUncertainException uncertain)
         {

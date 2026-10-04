@@ -1646,7 +1646,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         payload = json.loads(plan.plan_json)
         self.assertEqual(
             payload["migration_evidence"]["reverse_evidence_sha256"],
-            "sha256:" + "e" * 64,
+            migration.reverse_evidence_sha256,
         )
         self.assertEqual(
             payload["rollback"]["mode"],

@@ -23,8 +23,9 @@ crash-resumable takeover issuer before a financial dispatcher is available.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from .dispatch import AuthorityCheck, DispatchOutcome, SenderCheck, TransportSend
 from .production_host import (
@@ -49,6 +50,8 @@ class _HostFinancialAuthority:
     config: ProductionHostConfig
     journal: object
     store_identity: object
+    application: object
+    security_boundary: object
     lifecycle_condition: object
     instance_fence: object
     environment: str
@@ -74,10 +77,18 @@ def _capture_host_financial_authority(
     store_identity = host.store_identity
     if journal.store_identity != store_identity:
         raise PermissionError("production host journal identity is inconsistent")
+    application = host.application
+    security_boundary = getattr(application, "security_boundary", None)
+    if not callable(getattr(security_boundary, "lease_for_execution", None)):
+        raise PermissionError(
+            "production host application lacks credential lease authority"
+        )
     return _HostFinancialAuthority(
         config=config,
         journal=journal,
         store_identity=store_identity,
+        application=application,
+        security_boundary=security_boundary,
         lifecycle_condition=host._lifecycle_condition,
         instance_fence=host._instance_fence,
         environment=config.environment,
@@ -111,6 +122,13 @@ def _require_host_financial_authority(
         or authority.journal.store_identity != authority.store_identity
     ):
         raise PermissionError("production host journal generation changed")
+    if host.application is not authority.application:
+        raise PermissionError("production host application authority changed")
+    if (
+        getattr(authority.application, "security_boundary", None)
+        is not authority.security_boundary
+    ):
+        raise PermissionError("production host security authority changed")
     if host._lifecycle_condition is not authority.lifecycle_condition:
         raise PermissionError("production host lifecycle authority changed")
     if host._instance_fence is not authority.instance_fence:
@@ -356,6 +374,63 @@ class FinancialProductionHostRuntime:
                 authority,
             )
             return result
+
+    @contextmanager
+    def lease_provider_trade_secret(
+        self,
+        token: str,
+        *,
+        origin: str,
+        handle: PersistentCredentialHandle,
+        execution_identity: str,
+        provider: str,
+        provider_environment: str | None = None,
+    ) -> Iterator[str]:
+        """Lease one TRADE secret under the same host-lifetime cut as dispatch."""
+
+        host = self.__host
+        authority = self.__host_authority
+        with authority.lifecycle_condition:
+            _require_host_financial_authority(host, authority)
+            if (
+                host._serve_state in _STOPPING_STATES
+                or authority.instance_fence.released
+            ):
+                raise PermissionError(
+                    "production host lifetime no longer permits credential use"
+                )
+            owner = self.__recovery_controller.owner
+            if owner is None:
+                raise PermissionError("production recovery owner is unavailable")
+            if execution_identity != owner.owner_id:
+                raise PermissionError(
+                    "credential execution identity does not match recovery owner"
+                )
+            if origin != authority.config.public_origin:
+                raise PermissionError(
+                    "credential origin does not match production host"
+                )
+            if type(provider) is not str or not provider.strip():
+                raise ValueError("provider must be exact non-empty text")
+            # Early validation prevents plaintext TRADE material from being
+            # resolved while RECOVERING/takeover-source-only. GuardedDispatcher
+            # validates the same owner again at the terminal send barrier.
+            self.__recovery_controller.validate_sender(
+                owner.owner_id,
+                owner.epoch,
+            )
+            with authority.security_boundary.lease_for_execution(
+                token,
+                origin=origin,
+                handle=handle,
+                execution_identity=execution_identity,
+                account_id=authority.account_id,
+                provider=provider,
+                environment=authority.environment,
+                purpose="TRADE",
+                provider_environment=provider_environment,
+            ) as plaintext:
+                yield plaintext
 
     def serve_forever(self, *, poll_interval: float = 0.5) -> None:
         _require_host_financial_authority(self.__host, self.__host_authority)

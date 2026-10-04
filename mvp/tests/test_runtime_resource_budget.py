@@ -314,6 +314,7 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 min_financial_samples=count,
                 min_research_samples=1,
             )
+            durable_backlog = store.pending_outbox_count()
             observation = RuntimeLoadObservation.create(
                 scenario_id="journal-wiring-ci",
                 spec_digest=budget_spec.digest,
@@ -323,21 +324,32 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 expected_financial_events=count,
                 recovered_financial_events=len(recovered),
                 financial_latency_us=latencies,
-                financial_staleness_us=[0] * count,
-                research_interference_us=[0],
-                reconnect_backlog_remaining=0,
+                # This wiring probe does not measure provider/exchange freshness
+                # or research contention.  Empty series preserve those missing
+                # authorities instead of manufacturing favorable zero samples.
+                financial_staleness_us=(),
+                research_interference_us=(),
+                reconnect_backlog_remaining=durable_backlog,
                 declared_duration_us=60_000_000,
                 observed_duration_us=campaign_duration_us,
                 recovered_financial_event_ids=recovered_ids,
                 financial_latency_event_ids=recovered_ids,
-                financial_staleness_event_ids=recovered_ids,
+                financial_staleness_event_ids=(),
             )
             decision = evaluate_runtime_budget(
                 budget_spec,
                 observation,
             )
             self.assertEqual(len(store.pending_outbox(limit=100)), count)
-            self.assertEqual(decision.status, "PASS")
+            self.assertEqual(durable_backlog, count)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertNotIn("financial_event_loss", decision.reasons)
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
+            self.assertIn("insufficient_staleness_samples", decision.reasons)
+            self.assertIn(
+                "insufficient_research_interference_samples",
+                decision.reasons,
+            )
 
 
 if __name__ == "__main__":

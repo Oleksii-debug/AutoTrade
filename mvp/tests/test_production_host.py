@@ -126,6 +126,37 @@ class ProductionHostCompositionTests(unittest.TestCase):
                 runtime.close()
             fence.release.assert_called_once_with()
 
+    def test_runtime_config_reads_return_detached_canonical_snapshots(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+            application = Mock()
+            server = Mock()
+            patches = self._composition_patches(
+                application=application,
+                server=server,
+            )
+            with patches[0], patches[1], patches[2], patches[3]:
+                runtime = build_production_host(
+                    config,
+                    security_boundary=self.DummySecurityBoundary(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+            try:
+                exposed = runtime.config
+                object.__setattr__(exposed, "environment", "LIVE")
+                object.__setattr__(exposed, "account_id", "retargeted")
+                object.__setattr__(exposed, "host_id", "forged-host")
+
+                current = runtime.config
+                self.assertEqual(current.environment, "PAPER")
+                self.assertEqual(current.account_id, "paper-account")
+                self.assertEqual(current.host_id, "host-a")
+                self.assertIsNot(current, exposed)
+                self.assertIsNot(current, config)
+            finally:
+                runtime.close()
+
     def test_resource_lock_failure_constructs_no_financial_or_listener_components(self):
         with TemporaryDirectory() as directory:
             config = self._config(directory)

@@ -352,17 +352,26 @@ class AuthenticatedHostApplication:
         # individually valid reads. Pin the global append-only journal cut
         # across both the durable Host projection and the product projector so
         # cash/risk/orders/jobs cannot be assembled from different moments.
-        journal_cut = self._journal.current_journal_sequence()
-        durable = self.store.snapshot()
-        projected = self._snapshot_provider(
-            MappingProxyType(dict(durable)),
-            SnapshotPrincipal(
-                actor=principal.actor,
-                session=principal.session,
-                role=authenticated_role,
-            ),
-        )
-        if self._journal.current_journal_sequence() != journal_cut:
+        #
+        # A concurrent append does not make the request itself invalid. Retry a
+        # small bounded number of times on a fresh cut so normal write traffic
+        # cannot starve the operator UI after one harmless race. Every candidate
+        # is still discarded unless the journal remains unchanged for the whole
+        # projection; persistent churn therefore continues to fail closed.
+        for _snapshot_attempt in range(4):
+            journal_cut = self._journal.current_journal_sequence()
+            durable = self.store.snapshot()
+            projected = self._snapshot_provider(
+                MappingProxyType(dict(durable)),
+                SnapshotPrincipal(
+                    actor=principal.actor,
+                    session=principal.session,
+                    role=authenticated_role,
+                ),
+            )
+            if self._journal.current_journal_sequence() == journal_cut:
+                break
+        else:
             raise ValueError("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")

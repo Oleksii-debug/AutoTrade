@@ -922,7 +922,10 @@ def _source_anchor(dataset: CausalDataset, profile: BlindingProfile) -> datetime
         raise TypeError("profile must be exact BlindingProfile")
     if not dataset.events:
         raise BlindingError("blinded replay requires at least one causal event")
-    return min(event.event_time for event in dataset.events)
+    # Must match blind_dataset(): a later-available correction may carry an
+    # older event_time but cannot retroactively move the clock origin visible
+    # to an already-published strategy prefix.
+    return dataset.events[0].event_time
 
 
 @dataclass(frozen=True, slots=True)

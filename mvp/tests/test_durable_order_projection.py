@@ -89,6 +89,129 @@ def provider_evidence(
 
 
 class DurableOrderProjectionTests(unittest.TestCase):
+    def test_journal_store_subclass_is_rejected_before_virtual_reads(self):
+        class DerivedJournalStore(JournalStore):
+            def load_events(self, *_args, **_kwargs):
+                raise AssertionError("derived journal reader must not run")
+
+        with TemporaryDirectory() as directory:
+            store = DerivedJournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical JournalStore",
+            ):
+                durable(store)
+
+    def test_journal_instance_method_shadow_fails_closed_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            store.load_events = lambda *_args, **_kwargs: []
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "JournalStore authority is invalid",
+            ):
+                book.create_order(
+                    event_key="journal-shadow",
+                    client_order_id="journal-shadow",
+                    instrument="ABC",
+                    side="BUY",
+                    requested_quantity="1",
+                    committed_at=T0,
+                )
+
+    def test_journal_retarget_to_another_exact_store_generation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            selected = JournalStore(f"{directory}/selected.sqlite3")
+            other = JournalStore(f"{directory}/other.sqlite3")
+            book = durable(selected)
+            book.store = other
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "JournalStore generation changed",
+            ):
+                book.create_order(
+                    event_key="journal-retarget",
+                    client_order_id="journal-retarget",
+                    instrument="ABC",
+                    side="BUY",
+                    requested_quantity="1",
+                    committed_at=T0,
+                )
+            self.assertEqual(
+                selected.load_events("order_projection_book", book.aggregate_id),
+                [],
+            )
+            self.assertEqual(
+                other.load_events("order_projection_book", book.aggregate_id),
+                [],
+            )
+
+    def test_public_journal_method_rebinding_cannot_redirect_durable_order_state(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+
+            with (
+                patch.object(
+                    JournalStore,
+                    "load_events",
+                    side_effect=AssertionError("public journal reader must not run"),
+                ),
+                patch.object(
+                    JournalStore,
+                    "next_aggregate_version",
+                    side_effect=AssertionError("public journal versioner must not run"),
+                ),
+                patch.object(
+                    JournalStore,
+                    "append_event",
+                    side_effect=AssertionError("public journal writer must not run"),
+                ),
+            ):
+                created = book.create_order(
+                    event_key="journal-pinned-methods",
+                    client_order_id="journal-pinned-methods",
+                    instrument="ABC",
+                    side="BUY",
+                    requested_quantity="1",
+                    committed_at=T0,
+                )
+
+            self.assertTrue(created.inserted)
+            self.assertEqual(created.snapshot.state, "CREATED")
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                1,
+            )
+
+    def test_journal_module_binding_replacement_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            forged_reader = Mock(return_value=[])
+
+            with patch.object(
+                durable_order_projection_module,
+                "_CANONICAL_JOURNAL_LOAD_EVENTS",
+                forged_reader,
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "JournalStore authority changed",
+                ):
+                    book.create_order(
+                        event_key="journal-module-retarget",
+                        client_order_id="journal-module-retarget",
+                        instrument="ABC",
+                        side="BUY",
+                        requested_quantity="1",
+                        committed_at=T0,
+                    )
+            forged_reader.assert_not_called()
+
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

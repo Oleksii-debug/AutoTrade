@@ -547,16 +547,22 @@ def persist_autonomous_runtime_checkpoint(
     return checkpoint
 
 
-def verify_autonomous_runtime_checkpoint(
+def preflight_autonomous_runtime_checkpoint(
     root: str | Path,
-    store: JournalStore,
     *,
     protocol: Mapping[str, object],
-    completed: Sequence[Mapping[str, object]],
+    completed_episodes: int,
 ) -> CompositeReplayCheckpoint:
-    if not completed:
+    """Reject missing, malformed or causally stale checkpoint bytes before restore.
+
+    This phase deliberately does not claim current financial/component equality;
+    owner-specific projections are allowed to emit their more precise diagnoses
+    before the later full common-cut verification.
+    """
+
+    if type(completed_episodes) is not int or completed_episodes < 1:
         raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint verification requires completed episodes"
+            "runtime checkpoint preflight requires completed episodes"
         )
     path = checkpoint_path(root)
     try:
@@ -572,13 +578,7 @@ def verify_autonomous_runtime_checkpoint(
             "persisted autonomous runtime checkpoint is invalid"
         ) from error
 
-    replay = _replay(protocol, completed_episodes=len(completed))
-    authority, verifier = _authority(
-        store=store,
-        protocol=protocol,
-        completed=completed,
-        replay=replay,
-    )
+    replay = _replay(protocol, completed_episodes=completed_episodes)
     build_sha, protocol_ref = _expected_identity(protocol)
     if (
         checkpoint.replay != replay.checkpoint()
@@ -588,6 +588,33 @@ def verify_autonomous_runtime_checkpoint(
         raise AutonomousRuntimeCheckpointError(
             "persisted autonomous runtime checkpoint identity differs from durable state"
         )
+    return checkpoint
+
+
+def verify_autonomous_runtime_checkpoint(
+    root: str | Path,
+    store: JournalStore,
+    *,
+    protocol: Mapping[str, object],
+    completed: Sequence[Mapping[str, object]],
+) -> CompositeReplayCheckpoint:
+    if not completed:
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint verification requires completed episodes"
+        )
+    checkpoint = preflight_autonomous_runtime_checkpoint(
+        root,
+        protocol=protocol,
+        completed_episodes=len(completed),
+    )
+    replay = _replay(protocol, completed_episodes=len(completed))
+    authority, verifier = _authority(
+        store=store,
+        protocol=protocol,
+        completed=completed,
+        replay=replay,
+    )
+    build_sha, protocol_ref = _expected_identity(protocol)
     try:
         resumed = resume_from_composite_checkpoint(
             _events(protocol),

@@ -149,19 +149,32 @@ def _report_lower_bound(
 
 
 def _digest(value: str, field: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+    if type(value) is not str or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field} must be canonical sha256:<64 lowercase hex>")
     return value
 
 
+def _identity_text(value: object, field: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a non-empty string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field} must be a non-empty string")
+    return normalized
+
+
 def _utc(value: datetime, field: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ValueError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # Scientific/economic evidence timestamps are authority-bearing UtcInstant
+    # values. Reject caller-controlled datetime/tzinfo subclasses before any
+    # virtual method can run, and reject non-UTC offsets rather than silently
+    # normalizing them into a canonical-looking timestamp.
+    if type(value) is not datetime:
+        raise TypeError(f"{field} must use exact built-in datetime")
+    if value.tzinfo is None or type(value.tzinfo) is not timezone:
+        raise ValueError(f"{field} must be canonical timezone-aware UTC")
+    if value.utcoffset() != timezone.utc.utcoffset(value):
+        raise ValueError(f"{field} must be canonical timezone-aware UTC")
+    return value.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -176,10 +189,11 @@ class CausalInputEvidence:
 
     def __post_init__(self) -> None:
         for field_name in ("evidence_id", "component_id"):
-            value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{field_name} must be a non-empty string")
-            object.__setattr__(self, field_name, value.strip())
+            object.__setattr__(
+                self,
+                field_name,
+                _identity_text(getattr(self, field_name), field_name),
+            )
         object.__setattr__(
             self,
             "content_digest",
@@ -191,17 +205,10 @@ class CausalInputEvidence:
             _utc(self.available_utc, "available_utc"),
         )
         if self.syndication_group is not None:
-            if (
-                not isinstance(self.syndication_group, str)
-                or not self.syndication_group.strip()
-            ):
-                raise ValueError(
-                    "syndication_group must be None or a non-empty string"
-                )
             object.__setattr__(
                 self,
                 "syndication_group",
-                self.syndication_group.strip(),
+                _identity_text(self.syndication_group, "syndication_group"),
             )
 
 
@@ -222,22 +229,26 @@ class AblationOutcome:
     input_evidence: tuple[CausalInputEvidence, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.case_id, str) or not self.case_id.strip():
-            raise ValueError("case_id must be a non-empty string")
-        object.__setattr__(self, "case_id", self.case_id.strip())
+        object.__setattr__(
+            self,
+            "case_id",
+            _identity_text(self.case_id, "case_id"),
+        )
         population_unit = self.population_unit_id
         if population_unit is None:
             population_unit = self.case_id
-        if not isinstance(population_unit, str) or not population_unit.strip():
-            raise ValueError("population_unit_id must be a non-empty string")
-        object.__setattr__(self, "population_unit_id", population_unit.strip())
+        object.__setattr__(
+            self,
+            "population_unit_id",
+            _identity_text(population_unit, "population_unit_id"),
+        )
         object.__setattr__(
             self,
             "input_fingerprint",
             _digest(self.input_fingerprint, "input_fingerprint"),
         )
-        if self.variant not in {"FULL", "ABLATED"}:
-            raise ValueError("variant must be FULL or ABLATED")
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be exact FULL or ABLATED text")
         if (
             not isinstance(self.elapsed_ms, int)
             or isinstance(self.elapsed_ms, bool)
@@ -247,11 +258,12 @@ class AblationOutcome:
             raise TypeError("elapsed_ms and deadline_ms must be integers")
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
-        if not isinstance(self.components, tuple):
-            raise TypeError("components must be an immutable tuple")
-        if any(not isinstance(item, str) or not item.strip() for item in self.components):
-            raise ValueError("component identities must be non-empty strings")
-        normalized_components = tuple(item.strip() for item in self.components)
+        if type(self.components) is not tuple:
+            raise TypeError("components must be an exact immutable tuple")
+        normalized_components = tuple(
+            _identity_text(item, "component identity")
+            for item in self.components
+        )
         if len(normalized_components) != len(set(normalized_components)):
             raise ValueError("components must use deduplicated canonical identities")
         object.__setattr__(self, "components", normalized_components)
@@ -281,11 +293,11 @@ class AblationOutcome:
         if not isinstance(self.input_evidence, tuple):
             raise TypeError("input_evidence must be an immutable tuple")
         if any(
-            not isinstance(item, CausalInputEvidence)
+            type(item) is not CausalInputEvidence
             for item in self.input_evidence
         ):
             raise TypeError(
-                "input_evidence entries must be CausalInputEvidence"
+                "input_evidence entries must be exact CausalInputEvidence"
             )
         evidence_ids = [item.evidence_id for item in self.input_evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
@@ -323,9 +335,13 @@ class AblationPair:
     ablated: AblationOutcome
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_component, str) or not self.target_component.strip():
-            raise ValueError("target_component is required")
-        object.__setattr__(self, "target_component", self.target_component.strip())
+        object.__setattr__(
+            self,
+            "target_component",
+            _identity_text(self.target_component, "target_component"),
+        )
+        if type(self.full) is not AblationOutcome or type(self.ablated) is not AblationOutcome:
+            raise TypeError("pair outcomes must be exact AblationOutcome values")
         if self.full.variant != "FULL" or self.ablated.variant != "ABLATED":
             raise ValueError("pair must contain FULL and ABLATED outcomes")
         if self.full.case_id != self.ablated.case_id:

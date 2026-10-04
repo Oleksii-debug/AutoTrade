@@ -896,7 +896,7 @@ class AblationEvidenceBundle:
             "target_component",
             _identity_text(self.target_component, "target_component"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         object.__setattr__(
             self,
@@ -1124,8 +1124,8 @@ _ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
 
 
 def _parse_utc_text(value: object, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise ValueError(f"{field} must be canonical UTC text")
+    if type(value) is not str or not value.endswith("Z"):
+        raise ValueError(f"{field} must be exact canonical UTC text")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
@@ -1154,15 +1154,13 @@ class CanonicalAblationOutcomeEvidence:
 
     def __post_init__(self) -> None:
         for name in ("case_id", "population_unit_id"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} is required")
-            canonical = value.strip()
-            if canonical != value:
-                raise ValueError(f"{name} must use canonical text")
-            object.__setattr__(self, name, canonical)
-        if self.variant not in {"FULL", "ABLATED"}:
-            raise ValueError("variant must be FULL or ABLATED")
+            object.__setattr__(
+                self,
+                name,
+                _identity_text(getattr(self, name), name),
+            )
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise ValueError("variant must be exact FULL or ABLATED text")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
         if cost < 0:
@@ -1173,7 +1171,7 @@ class CanonicalAblationOutcomeEvidence:
             "outcome_available_utc",
             _utc(self.outcome_available_utc, "outcome_available_utc"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         for name in (
             "utility_evidence_digest",
@@ -1211,7 +1209,7 @@ class RegisteredAblationPopulation:
             "stopping_rule_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         registered = _utc(self.registered_at_utc, "registered_at_utc")
         cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
@@ -1219,15 +1217,14 @@ class RegisteredAblationPopulation:
             raise ValueError("evaluation cutoff cannot precede population registration")
         object.__setattr__(self, "registered_at_utc", registered)
         object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
-        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
-            raise ValueError("population_unit_ids must be a non-empty immutable tuple")
+        if type(self.population_unit_ids) is not tuple or not self.population_unit_ids:
+            raise ValueError(
+                "population_unit_ids must be a non-empty exact immutable tuple"
+            )
         normalized = tuple(
-            value.strip()
+            _identity_text(value, "population_unit_id")
             for value in self.population_unit_ids
-            if isinstance(value, str) and value.strip()
         )
-        if len(normalized) != len(self.population_unit_ids):
-            raise ValueError("population_unit_ids must contain canonical non-empty strings")
         if tuple(sorted(normalized)) != normalized:
             raise ValueError("population_unit_ids must be sorted canonically")
         if len(set(normalized)) != len(normalized):
@@ -1439,18 +1436,16 @@ def _make_ablation_qualification_authority_init(register_policy_binding):
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
-        if not isinstance(protocol_id, str) or not protocol_id.strip():
-            raise ValueError("protocol_id is required")
-        if not isinstance(protocol_hash, str):
-            raise TypeError("protocol_hash must be text")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be exact ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be exact ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be exact ArtifactStore")
+        protocol_id = _identity_text(protocol_id, "protocol_id")
+        protocol_hash = _digest(protocol_hash, "protocol_hash")
         if (
-            not isinstance(source_revision, str)
+            type(source_revision) is not str
             or _GIT_SHA.fullmatch(source_revision) is None
         ):
             raise ValueError(
@@ -1483,8 +1478,8 @@ def _make_ablation_qualification_authority_init(register_policy_binding):
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
-        self.protocol_id = protocol_id.strip()
-        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
+        self.protocol_id = protocol_id
+        self.protocol_hash = protocol_hash
         self.source_revision = source_revision
         self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
         self.granted_permissions = set(normalized_permissions)

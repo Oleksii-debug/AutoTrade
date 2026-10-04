@@ -591,6 +591,76 @@ class AblationTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
 
+    def test_qualification_evidence_and_authority_reject_hostile_subtypes_before_callbacks(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+            def endswith(self, *args, **kwargs):
+                calls.append("endswith")
+                raise AssertionError("hostile endswith executed")
+
+        with self.assertRaisesRegex(ValueError, "case_id"):
+            CanonicalAblationOutcomeEvidence(
+                case_id=HostileText("case"),
+                variant="FULL",
+                population_unit_id="unit",
+                utility=Decimal("1"),
+                cost=Decimal("0"),
+                outcome_available_utc=CUT + timedelta(hours=1),
+                source_revision="9" * 40,
+                utility_evidence_digest=FINGERPRINT_B,
+                cost_evidence_digest=FINGERPRINT_C,
+                evidence_digest=FINGERPRINT_D,
+            )
+        with self.assertRaisesRegex(ValueError, "population_unit_id"):
+            RegisteredAblationPopulation(
+                protocol_digest=FINGERPRINT_A,
+                population_digest=FINGERPRINT_D,
+                stopping_rule_digest=FINGERPRINT_C,
+                source_revision="9" * 40,
+                registered_at_utc=CUT - timedelta(days=1),
+                evaluation_cutoff_utc=CUT + timedelta(hours=2),
+                population_unit_ids=(HostileText("unit"),),
+            )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+
+            class DerivedRegistry(ScientificRegistry):
+                pass
+
+            derived_registry = DerivedRegistry(root / "derived-science.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=derived_registry,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id="protocol",
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="9" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions={"RESEARCH"},
+                )
+            with self.assertRaisesRegex(ValueError, "protocol_id"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id=HostileText("protocol"),
+                    protocol_hash=FINGERPRINT_A,
+                    source_revision="9" * 40,
+                    causal_cutoff=CUT,
+                    granted_permissions={"RESEARCH"},
+                )
+        self.assertEqual(calls, [])
+
     def test_pair_rejects_noncanonical_outcome_type_before_field_access(self):
         calls = []
 

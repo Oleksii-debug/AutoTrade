@@ -8,7 +8,7 @@ import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
-from research.autotrade_research.data.vintages import HistoricalVintageRegistry
+from autotrade_research.data.vintages import HistoricalVintageRegistry
 
 from research.autotrade_research.learning.champion import (
     CandidateApproval,

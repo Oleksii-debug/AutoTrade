@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    _canonical_journal_authority_snapshot,
+    submission_attempt_aggregate_id,
+)
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
@@ -149,7 +152,16 @@ class RecoveryController:
         if not isinstance(owner_scope, str) or not owner_scope.strip():
             raise ValueError("owner_scope is required")
         self._owner_store = owner_store
+        if owner_store is None:
+            self._owner_store_path = None
+            self._owner_store_identity = None
+        else:
+            (
+                self._owner_store_path,
+                self._owner_store_identity,
+            ) = _canonical_journal_authority_snapshot(owner_store)
         self._owner_scope = owner_scope.strip()
+        self._owner_scope_authority = self._owner_scope
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
         self.reason_codes: set[str] = set()
@@ -171,17 +183,50 @@ class RecoveryController:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    def _canonical_owner_scope(self) -> str:
+        """Return only the exact owner scope selected at construction."""
+
+        scope = self._owner_scope
+        authority = self._owner_scope_authority
+        if (
+            type(scope) is not str
+            or type(authority) is not str
+            or scope != authority
+        ):
+            raise PermissionError("recovery owner scope authority changed")
+        return authority
+
+    def _canonical_owner_store(self) -> JournalStore | None:
+        """Return only the exact pinned JournalStore generation selected at construction."""
+
+        self._canonical_owner_scope()
+        store = self._owner_store
+        if store is None:
+            if self._owner_store_path is not None or self._owner_store_identity is not None:
+                raise PermissionError("recovery owner journal authority changed")
+            return None
+        path, identity = _canonical_journal_authority_snapshot(store)
+        if (
+            self._owner_store_path is None
+            or self._owner_store_identity is None
+            or path != self._owner_store_path
+            or identity != self._owner_store_identity
+        ):
+            raise PermissionError("recovery owner journal authority changed")
+        return store
+
     @property
     def owner_scope(self) -> str:
         """Canonical durable owner scope used by this recovery controller."""
 
-        return self._owner_scope
+        return self._canonical_owner_scope()
 
     @property
     def durable_owner_store_path(self) -> Path | None:
         """Return the exact journal path backing sender fencing, if durable."""
 
-        return None if self._owner_store is None else self._owner_store.path
+        store = self._canonical_owner_store()
+        return None if store is None else store.path
 
     def durable_owner_chain(self) -> tuple[OwnerFence, ...]:
         """Read and validate the complete monotonic sender-fence chain.
@@ -190,11 +235,14 @@ class RecoveryController:
         changes sender ownership.
         """
 
-        if self._owner_store is None:
+        owner_scope = self._canonical_owner_scope()
+        store = self._canonical_owner_store()
+        if store is None:
             return ()
-        events = self._owner_store.load_events(
+        events = JournalStore.load_events(
+            store,
             self._OWNER_AGGREGATE_TYPE,
-            self._owner_scope,
+            owner_scope,
         )
         chain: list[OwnerFence] = []
         for expected_epoch, event in enumerate(events, start=1):
@@ -241,8 +289,15 @@ class RecoveryController:
         chain = self.durable_owner_chain()
         return chain[-1] if chain else None
 
-    def _append_durable_owner(self, owner: OwnerFence) -> None:
-        if self._owner_store is None:
+    def _append_durable_owner(
+        self,
+        owner: OwnerFence,
+        *,
+        expected_journal_sequence: int | None = None,
+    ) -> None:
+        owner_scope = self._canonical_owner_scope()
+        store = self._canonical_owner_store()
+        if store is None:
             return
         payload = {
             "owner_id": owner.owner_id,
@@ -252,24 +307,27 @@ class RecoveryController:
             uuid5(
                 NAMESPACE_URL,
                 "https://recovery.autotrade.local/"
-                f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
+                f"{owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        self._owner_store.append_event(
+        JournalStore.append_event(
+            store,
             {
                 "event_id": event_id,
                 "event_type": self._OWNER_EVENT_TYPE,
                 "aggregate_type": self._OWNER_AGGREGATE_TYPE,
-                "aggregate_id": self._owner_scope,
+                "aggregate_id": owner_scope,
                 "aggregate_version": str(owner.epoch),
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": self._now(),
-            }
+            },
+            expected_journal_sequence=expected_journal_sequence,
         )
 
     def _require_current_durable_owner(self) -> None:
-        if self._owner_store is None or self.owner is None:
+        store = self._canonical_owner_store()
+        if store is None or self.owner is None:
             return
         durable = self._latest_durable_owner()
         if durable != self.owner:
@@ -319,9 +377,11 @@ class RecoveryController:
         journal after process restart, before READY can be established.
         """
 
-        if self._owner_store is None or ":" not in self._owner_scope:
+        owner_scope = self._canonical_owner_scope()
+        store = self._canonical_owner_store()
+        if store is None or ":" not in owner_scope:
             return
-        environment, account_id = self._owner_scope.split(":", 1)
+        environment, account_id = owner_scope.split(":", 1)
         if environment.strip().upper() not in {
             "REPLAY", "SIMULATION", "PAPER", "LIVE"
         }:
@@ -491,7 +551,8 @@ class RecoveryController:
         explicit opaque blocker instead of being silently forgotten.
         """
 
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             raise PermissionError(
                 "Durable submission recovery requires a journal-backed controller"
             )
@@ -499,8 +560,9 @@ class RecoveryController:
             environment,
             account_id,
         )
-        events = self._owner_store.load_events_by_aggregate_type(
-            "submission_attempt"
+        events = JournalStore.load_events_by_aggregate_type(
+            store,
+            "submission_attempt",
         )
         grouped: dict[str, list[dict[str, object]]] = {}
         for event in events:
@@ -628,7 +690,8 @@ class RecoveryController:
 
         if self.owner is None:
             raise RuntimeError("No active owner")
-        if self._owner_store is None:
+        store = self._canonical_owner_store()
+        if store is None:
             raise PermissionError(
                 "Journal-issued reconciliation requires a durable owner store"
             )
@@ -639,7 +702,7 @@ class RecoveryController:
             )
 
         checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
+            store,
             reconciliation_id=reconciliation_id,
             provider_id=provider_id,
             account_id=account_id,
@@ -831,7 +894,7 @@ class RecoveryController:
         if self.owner is None:
             raise RuntimeError("No active owner")
         self._require_current_durable_owner()
-        if self._owner_store is not None:
+        if self._canonical_owner_store() is not None:
             raise PermissionError(
                 "Durable recovery requires a journal-issued reconciliation checkpoint"
             )
@@ -969,7 +1032,7 @@ class RecoveryController:
             raise TypeError("reconciled must be a boolean")
         if normalized_owner == self.owner.owner_id:
             raise ValueError("New owner must differ from current owner")
-        if self._owner_store is not None:
+        if self._canonical_owner_store() is not None:
             raise PermissionError(
                 "Durable owner transfer requires independently issued takeover evidence"
             )

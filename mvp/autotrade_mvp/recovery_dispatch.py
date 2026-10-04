@@ -58,6 +58,32 @@ _CANONICAL_PAYLOAD_DIGEST = payload_digest
 _CANONICAL_PAYLOAD_DIGEST_CODE = payload_digest.__code__
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _TAKEOVER_SOURCE_ATTR = "_autotrade_takeover_source_owner"
+_RECOVERY_CLASS_OWNED_NAMES = frozenset(
+    name for base in RecoveryController.__mro__ for name in base.__dict__
+)
+
+
+def _require_recovery_instance_authority(
+    recovery: RecoveryController,
+) -> dict[str, object]:
+    """Reject per-instance shadows of canonical recovery executable authority.
+
+    ``RecoveryIssuedDispatcher`` intentionally retains exact class functions for
+    the final send cut, but those functions call other RecoveryController
+    methods through ``self``. A caller must therefore not be able to install a
+    same-named instance attribute that diverts one of those internal calls after
+    dispatcher issuance. Mutable recovery state remains ordinary instance data;
+    only names owned by the RecoveryController class hierarchy are forbidden.
+    """
+
+    if type(recovery) is not RecoveryController:
+        raise PermissionError("recovery controller authority changed")
+    state = vars(recovery)
+    if _RECOVERY_CLASS_OWNED_NAMES.intersection(state):
+        raise PermissionError(
+            "recovery controller instance state shadows canonical authority"
+        )
+    return state
 
 
 def _require_executable_authority() -> None:
@@ -143,7 +169,7 @@ def _takeover_source_owner(recovery: RecoveryController) -> OwnerFence | None:
     state directly so rebinding this convenience reader cannot relax authority.
     """
 
-    state = vars(recovery)
+    state = _require_recovery_instance_authority(recovery)
     source = state.get(_TAKEOVER_SOURCE_ATTR)
     if source is None:
         return None
@@ -166,12 +192,12 @@ def mark_recovery_takeover_source(
         raise TypeError("recovery must be exact RecoveryController")
     if type(source) is not OwnerFence:
         raise TypeError("source must be exact OwnerFence")
+    state = _require_recovery_instance_authority(recovery)
     if recovery.owner is not source and recovery.owner != source:
         raise PermissionError("takeover source is not the attached recovery owner")
     chain = recovery.durable_owner_chain()
     if not chain or chain[-1] != source:
         raise PermissionError("takeover source is not the current durable owner")
-    state = vars(recovery)
     existing = state.get(_TAKEOVER_SOURCE_ATTR)
     if existing is not None:
         if type(existing) is not OwnerFence:
@@ -204,7 +230,7 @@ def activate_recovery_takeover_target(
         raise TypeError("recovery must be exact RecoveryController")
     if type(source) is not OwnerFence or type(target) is not OwnerFence:
         raise TypeError("source and target must be exact OwnerFence values")
-    state = vars(recovery)
+    state = _require_recovery_instance_authority(recovery)
     marked_source = state.get(_TAKEOVER_SOURCE_ATTR)
     if marked_source is None:
         raise PermissionError("recovery controller is not attached takeover-only")
@@ -285,10 +311,11 @@ class RecoveryIssuedDispatcher:
         if type(owner.epoch) is not int or owner.epoch < 1:
             raise PermissionError("recovery owner epoch is not a positive exact integer")
         _require_executable_authority()
+        recovery_state = _require_recovery_instance_authority(recovery)
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
-        source = vars(recovery).get(_TAKEOVER_SOURCE_ATTR)
+        source = recovery_state.get(_TAKEOVER_SOURCE_ATTR)
         if source is not None:
             if type(source) is not OwnerFence:
                 raise PermissionError("takeover source owner authority changed")
@@ -354,8 +381,7 @@ class RecoveryIssuedDispatcher:
     def _require_issued_authority(self) -> None:
         if type(self) is not RecoveryIssuedDispatcher:
             raise PermissionError("recovery-issued dispatcher type changed")
-        if type(self.__recovery) is not RecoveryController:
-            raise PermissionError("recovery controller authority changed")
+        recovery_state = _require_recovery_instance_authority(self.__recovery)
         if type(self.__store) is not JournalStore:
             raise PermissionError("submission journal authority changed")
         if type(self.__owner) is not OwnerFence:
@@ -375,7 +401,13 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
-        source = vars(self.__recovery).get(_TAKEOVER_SOURCE_ATTR)
+        if recovery_state.get("_owner_store") is not self.__store:
+            raise PermissionError("recovery owner journal binding changed")
+        recovery_scope = recovery_state.get("_owner_scope")
+        expected_scope = f"{self.__environment}:{self.__account_id}"
+        if type(recovery_scope) is not str or recovery_scope != expected_scope:
+            raise PermissionError("recovery owner scope binding changed")
+        source = recovery_state.get(_TAKEOVER_SOURCE_ATTR)
         if source is not None:
             if type(source) is not OwnerFence:
                 raise PermissionError("takeover source owner authority changed")
@@ -621,7 +653,7 @@ def build_recovery_issued_dispatcher(
     normalized_environment, normalized_account, expected_scope = _scope(
         environment, account_id
     )
-    state = vars(recovery)
+    state = _require_recovery_instance_authority(recovery)
     if state.get("_owner_store") is not store:
         raise PermissionError(
             "dispatcher JournalStore must be the exact recovery owner store"

@@ -561,11 +561,33 @@ def _latest_effectful_submission_sequence(
             raise DurableTakeoverError(
                 "SubmissionPrepared payload is invalid"
             )
+        effectful = any(
+            event.get("event_type") in _EFFECTFUL_SUBMISSION_EVENTS
+            for event in events
+        )
+        durable_environment = payload.get("environment")
+        durable_account = payload.get("account_id")
         if (
-            str(payload.get("environment", "")).strip().upper()
-            != environment
-            or str(payload.get("account_id", "")).strip()
-            != account_id
+            type(durable_environment) is not str
+            or durable_environment not in {
+                "REPLAY",
+                "SIMULATION",
+                "PAPER",
+                "LIVE",
+            }
+            or durable_environment != durable_environment.strip().upper()
+            or type(durable_account) is not str
+            or not durable_account
+            or durable_account != durable_account.strip()
+        ):
+            if effectful:
+                raise DurableTakeoverError(
+                    "effectful SubmissionPrepared durable scope is invalid"
+                )
+            continue
+        if (
+            durable_environment != environment
+            or durable_account != account_id
         ):
             continue
         for event in events:
@@ -691,12 +713,17 @@ def _common_inputs(
         raise DurableTakeoverError(
             "takeover provider does not match credential"
         )
-    store = vars(controller).get("_owner_store")
+    try:
+        store = controller._canonical_owner_store()
+        owner_scope = controller.owner_scope
+    except PermissionError as error:
+        raise DurableTakeoverError(
+            "recovery owner journal or scope authority changed"
+        ) from error
     if type(store) is not JournalStore:
         raise DurableTakeoverError(
             "durable takeover requires canonical JournalStore"
         )
-    owner_scope = controller.owner_scope
     if owner_scope != f"{handle.environment}:{handle.account_id}":
         raise DurableTakeoverError(
             "recovery owner scope does not match credential"
@@ -1014,10 +1041,14 @@ def execute_durable_takeover(
             )
 
     # Phase 3: old credential is durably inactive; now reacquire the same sender
-    # gate, rescan ambiguity, and atomically advance durable sender authority.
+    # gate, rescan ambiguity, and advance durable sender authority only if the
+    # complete validation interval still ends on the exact JournalStore cut.
     with takeover_authority_window(
         store, owner_scope=owner_scope
     ) as lease:
+        owner_validation_journal_sequence = JournalStore.current_journal_sequence(
+            store
+        )
         pending = _pending_for_scope(
             store, owner_scope=owner_scope
         )
@@ -1046,6 +1077,22 @@ def execute_durable_takeover(
         if controller.unresolved_attempts:
             raise DurableTakeoverError(
                 "takeover commit is blocked by durable submission uncertainty"
+            )
+        started_effectful_sequence = started_payload.get(
+            "latest_effectful_submission_sequence"
+        )
+        current_effectful_sequence = _latest_effectful_submission_sequence(
+            store,
+            environment=handle.environment,
+            account_id=handle.account_id,
+        )
+        if (
+            type(started_effectful_sequence) is not int
+            or started_effectful_sequence < 0
+            or current_effectful_sequence != started_effectful_sequence
+        ):
+            raise DurableTakeoverError(
+                "durable submission state changed after takeover freeze"
             )
 
         evidence_payload = events[1]["payload"]
@@ -1090,7 +1137,17 @@ def execute_durable_takeover(
 
         durable_owner = controller._latest_durable_owner()
         if durable_owner == source:
-            controller._append_durable_owner(target)
+            try:
+                controller._append_durable_owner(
+                    target,
+                    expected_journal_sequence=(
+                        owner_validation_journal_sequence
+                    ),
+                )
+            except ValueError as error:
+                raise DurableTakeoverError(
+                    "journal changed during takeover owner validation"
+                ) from error
             durable_owner = controller._latest_durable_owner()
         if durable_owner != target:
             raise DurableTakeoverError(

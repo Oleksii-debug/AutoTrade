@@ -912,17 +912,14 @@ def provider_fills_from_execution_frame(
     for report in frame.reports:
         if report.exec_type != "trade":
             continue
-        if (
-            report.exec_id is None
-            or report.symbol is None
-            or report.side is None
-            or report.last_qty is None
-            or report.last_price is None
-            or report.event_time is None
-            or not report.fees
-        ):
+        if not report.trade_economics_complete:
             raise KrakenSpotStreamError(
                 "Kraken trade report is incomplete at provider-fill bridge"
+            )
+        if not report.fees:
+            raise KrakenSpotStreamError(
+                "Kraken trade fee array is empty; canonical provider fill "
+                "fee currency is unproven"
             )
 
         instrument = instruments.get(report.symbol)

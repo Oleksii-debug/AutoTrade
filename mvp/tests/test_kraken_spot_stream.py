@@ -602,6 +602,37 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
             )
 
+
+    def test_provider_fill_bridge_rejects_reported_empty_fee_array_without_currency(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=48,
+                reports=[
+                    {
+                        "order_id": "O-ZERO-FEE-BRIDGE",
+                        "cl_ord_id": "client-zero-fee",
+                        "exec_id": "E-ZERO-FEE-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "fees": [],
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        self.assertTrue(frame.reports[0].trade_economics_complete)
+        self.assertTrue(frame.reports[0].fees_reported)
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "fee array is empty.*fee currency is unproven",
+        ):
+            provider_fills_from_execution_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
         huge_integer = b"9" * 1000
         raw_sequence = (

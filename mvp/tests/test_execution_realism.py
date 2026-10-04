@@ -1,9 +1,11 @@
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
+    MARKET_PRICE_PROJECTION_POLICY_ID,
+    MARKET_PRICE_PROJECTION_POLICY_VERSION,
     LiquidityObservation,
     SimulatedOrder,
     simulate_execution,
@@ -27,6 +29,11 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256="b" * 64,
+        price_projection_policy_id=MARKET_PRICE_PROJECTION_POLICY_ID,
+        price_projection_policy_version=MARKET_PRICE_PROJECTION_POLICY_VERSION,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -602,6 +609,104 @@ class ExecutionRealismTests(unittest.TestCase):
                 model(data_fidelity="BAR", latency_ms=0),
             )
 
+
+
+    def test_market_projection_requires_complete_declared_price_grid_authority(self):
+        missing = model(
+            price_quantum=None,
+            price_grid_instrument_version=None,
+            price_grid_evidence_sha256=None,
+            price_projection_policy_id=None,
+            price_projection_policy_version=None,
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "requires explicit price-grid projection authority",
+        ):
+            simulate_execution(order(), top(), missing)
+
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "declared atomically",
+        ):
+            model(price_grid_evidence_sha256=None)
+
+    def test_market_projection_rejects_wrong_instrument_and_unknown_policy(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "must exactly match order instrument_version",
+        ):
+            simulate_execution(
+                order(),
+                top(),
+                model(price_grid_instrument_version="XYZ@v1"),
+            )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "unsupported MARKET price projection policy",
+        ):
+            simulate_execution(
+                order(),
+                top(),
+                model(price_projection_policy_version="2"),
+            )
+
+    def test_market_projection_quantizes_adversely_by_side(self):
+        buy = simulate_execution(order(), top(), model())
+        self.assertEqual(buy.fill_price, Decimal("101.10"))
+
+        sell = simulate_execution(
+            order(side="SELL"),
+            top(),
+            model(),
+        )
+        self.assertEqual(sell.fill_price, Decimal("98.91"))
+
+    def test_market_projection_is_invariant_to_nonterminating_decimal_context(self):
+        o = order(quantity="1", lot_size="1")
+        q = top(available_volume="3")
+        m = model(max_participation="0.5")
+        observed = []
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = simulate_execution(o, q, m)
+                observed.append(
+                    (
+                        result.fill_price,
+                        result.fee,
+                        result.model_fingerprint,
+                    )
+                )
+        self.assertTrue(all(value == observed[0] for value in observed))
+        self.assertEqual(observed[0][0], Decimal("101.12"))
+        self.assertEqual(observed[0][1], Decimal("0.10112"))
+
+    def test_price_grid_authority_is_bound_into_model_fingerprint(self):
+        base = model()
+        self.assertNotEqual(
+            base.fingerprint,
+            model(price_quantum="0.05").fingerprint,
+        )
+        self.assertNotEqual(
+            base.fingerprint,
+            model(price_grid_evidence_sha256="c" * 64).fingerprint,
+        )
+        self.assertNotEqual(
+            base.fingerprint,
+            model(price_projection_policy_version="2").fingerprint,
+        )
+
+    def test_price_quantum_uses_shared_decimal_resource_envelope(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(price_quantum="9" * 257)
 
 if __name__ == "__main__":
     unittest.main()

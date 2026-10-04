@@ -71,7 +71,16 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             generation=1,
         )
 
-    def _sender_and_request(self, runtime, wire):
+    def _sender_and_request(
+        self,
+        runtime,
+        wire,
+        *,
+        credential_handle=None,
+        quota_gate=None,
+        clock_millis=None,
+        clock_utc=None,
+    ):
         capability = write_capability(
             family="LINEAR_DERIVATIVES",
             position_mode="HEDGE",
@@ -113,13 +122,155 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             provider_environment="TESTNET",
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
-            credential_handle=self._handle(),
+            credential_handle=credential_handle or self._handle(),
             session_token="session-1",
-            clock_millis=lambda: 1_700_000_000_000,
-            clock_utc=lambda: READ_AT,
+            clock_millis=clock_millis or (lambda: 1_700_000_000_000),
+            clock_utc=clock_utc or (lambda: READ_AT),
+            quota_gate=quota_gate,
             wire_client=wire,
         )
         return intent_id, sender, guarded_order_projection(request)
+
+    def test_callback_time_policy_retarget_is_rejected_before_signing(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            from mvp.autotrade_mvp.provider_transport import BYBIT_V5_ENDPOINT_POLICIES
+
+            policy = BYBIT_V5_ENDPOINT_POLICIES["TESTNET"]
+            original_base_url = policy.base_url
+            original_allowed_hosts = policy.allowed_hosts
+            clock_utc_calls = []
+
+            def quota_gate(*_args):
+                object.__setattr__(policy, "base_url", "https://evil.example")
+                object.__setattr__(
+                    policy,
+                    "allowed_hosts",
+                    frozenset({"evil.example"}),
+                )
+
+            def clock_utc():
+                clock_utc_calls.append("called")
+                if len(clock_utc_calls) >= 2:
+                    object.__setattr__(policy, "base_url", original_base_url)
+                    object.__setattr__(
+                        policy,
+                        "allowed_hosts",
+                        original_allowed_hosts,
+                    )
+                return READ_AT
+
+            intent_id, sender, request = self._sender_and_request(
+                runtime,
+                wire,
+                quota_gate=quota_gate,
+                clock_utc=clock_utc,
+            )
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            lease_calls = []
+            final_guard_calls = []
+
+            @contextmanager
+            def fake_lease(_self, token, **kwargs):
+                lease_calls.append((token, kwargs))
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "provider policy values changed",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: final_guard_calls.append("called"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+                object.__setattr__(policy, "base_url", original_base_url)
+                object.__setattr__(
+                    policy,
+                    "allowed_hosts",
+                    original_allowed_hosts,
+                )
+
+            self.assertEqual(len(lease_calls), 1)
+            self.assertEqual(final_guard_calls, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_post_sign_callback_authority_mutation_is_rechecked_before_wire(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            handle = self._handle()
+            clock_utc_calls = []
+
+            def clock_utc():
+                clock_utc_calls.append("called")
+                if len(clock_utc_calls) == 2:
+                    object.__setattr__(handle, "generation", 2)
+                return READ_AT
+
+            intent_id, sender, request = self._sender_and_request(
+                runtime,
+                wire,
+                credential_handle=handle,
+                clock_utc=clock_utc,
+            )
+            client_order_id = stable_client_order_id(
+                "BYBIT",
+                intent_id,
+                environment="PAPER",
+                account_id="account-1",
+                max_length=36,
+                client_id_format="TOKEN",
+            )
+            lease_calls = []
+            final_guard_calls = []
+
+            @contextmanager
+            def fake_lease(_self, token, **kwargs):
+                lease_calls.append((token, kwargs))
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "credential handle changed after composition",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: final_guard_calls.append("called"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+
+            self.assertEqual(len(lease_calls), 1)
+            self.assertEqual(final_guard_calls, ["called"])
+            self.assertEqual(wire.requests, [])
 
     def test_recovering_host_may_sign_but_cannot_cross_durable_sender_fence(self) -> None:
         plaintext = json.dumps(

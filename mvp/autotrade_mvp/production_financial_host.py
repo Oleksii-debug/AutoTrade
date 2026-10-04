@@ -29,6 +29,16 @@ from .recovery import OwnerFence, RecoveryController
 from .security import SecurityBoundary
 
 
+# Capture the canonical class implementation once at module import.  The
+# production runtime exposes its RecoveryController for reconciliation and
+# takeover orchestration, so resolving ``instance.validate_sender`` on every
+# dispatch would let later instance-attribute replacement retarget the final
+# sender authority callback.  This is trusted-process composition provenance,
+# not a Python sandbox; the point is that callers cannot replace the callback
+# selected by this product composition seam.
+_CANONICAL_VALIDATE_SENDER = RecoveryController.validate_sender
+
+
 class HostLifetimeProviderSecretResolver:
     """Canonical provider-secret lease seam bounded by one host lifetime.
 
@@ -150,6 +160,10 @@ class HostLifetimeGuardedDispatcher:
 
         self._dispatcher = dispatcher
         self._recovery_controller = recovery_controller
+        self._sender_check = _CANONICAL_VALIDATE_SENDER.__get__(
+            recovery_controller,
+            RecoveryController,
+        )
         self._condition = Condition()
         self._accepting = True
         self._active = 0
@@ -177,7 +191,7 @@ class HostLifetimeGuardedDispatcher:
             self._active += 1
         try:
             return self._dispatcher.dispatch(
-                sender_check=self._recovery_controller.validate_sender,
+                sender_check=self._sender_check,
                 **kwargs,
             )
         finally:

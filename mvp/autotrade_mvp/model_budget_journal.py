@@ -32,13 +32,15 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
 
 def _environment(value: str) -> str:
-    normalized = value.strip().upper() if isinstance(value, str) else ""
+    if type(value) is not str:
+        raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
+    normalized = value.strip().upper()
     if normalized not in _ENVIRONMENTS:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
     return normalized
@@ -58,14 +60,17 @@ def _reservation_context(
     """
     if values is None:
         return None
-    if not isinstance(values, Mapping):
-        raise TypeError("reservation_context must be a mapping")
+    if type(values) is not dict:
+        raise TypeError("reservation_context must be an exact dict")
+    snapshot = dict.copy(values)
     normalized: dict[str, str] = {}
-    for raw_key, raw_value in values.items():
+    for raw_key, raw_value in snapshot.items():
+        if type(raw_key) is not str:
+            raise TypeError("reservation_context keys must be text")
         key = _text(raw_key, name="reservation_context key")
         if raw_key != key:
             raise ValueError("reservation_context keys must be canonical text")
-        if not isinstance(raw_value, str):
+        if type(raw_value) is not str:
             raise TypeError("reservation_context values must be text")
         value = _text(raw_value, name=f"reservation_context[{key}]")
         if raw_value != value:
@@ -405,12 +410,12 @@ class DurableModelBudget:
         descriptors: tuple[ModelDescriptor, ...],
         reservation_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(policy, RoutingPolicy):
-            raise TypeError("policy must be RoutingPolicy")
-        if not isinstance(request, ModelRequest):
-            raise TypeError("request must be ModelRequest")
-        if not all(isinstance(item, ModelDescriptor) for item in descriptors):
-            raise TypeError("descriptors must contain ModelDescriptor values")
+        if type(policy) is not RoutingPolicy:
+            raise TypeError("policy must be exact RoutingPolicy")
+        if type(request) is not ModelRequest:
+            raise TypeError("request must be exact ModelRequest")
+        if not all(type(item) is ModelDescriptor for item in descriptors):
+            raise TypeError("descriptors must contain exact ModelDescriptor values")
         material = {
             "policy": {
                 "mode": policy.mode.value,

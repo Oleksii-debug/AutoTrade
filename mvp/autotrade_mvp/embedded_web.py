@@ -316,8 +316,40 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
     def __init__(self, *args, web_bundle: ImmutableWebAssetBundle, **kwargs) -> None:
         if type(web_bundle) is not ImmutableWebAssetBundle:
             raise TypeError("web_bundle must be an exact ImmutableWebAssetBundle")
+        # Re-admit the manifest plus exact immutable bytes and then detach
+        # transport state from every caller-owned bundle/asset object. Frozen
+        # dataclasses can still be rewritten with object.__setattr__; serving
+        # directly from those aliases would let post-admission mutation replace
+        # trusted JS/CSS/HTML under an already accepted bundle identity.
+        candidate_assets = web_bundle.assets
+        if type(candidate_assets) is not tuple or not candidate_assets:
+            raise TypeError("web_bundle assets must remain an exact non-empty tuple")
+        asset_bodies: dict[str, bytes] = {}
+        for candidate in candidate_assets:
+            if type(candidate) is not ImmutableWebAsset:
+                raise TypeError("web_bundle assets must remain exact ImmutableWebAsset values")
+            path = candidate.path
+            body = candidate.body
+            if type(path) is not str or type(body) is not bytes:
+                raise TypeError("web_bundle asset identity/bytes changed after validation")
+            if path in asset_bodies:
+                raise ValueError("web_bundle asset paths changed after validation")
+            asset_bodies[path] = body
+
+        sealed_bundle = load_immutable_web_bundle(
+            web_bundle.manifest_bytes,
+            asset_bodies,
+        )
+        sealed_routes: dict[str, tuple[bytes, str, str]] = {
+            path: (asset.body, asset.sha256_hex, asset.content_type)
+            for path, asset in sealed_bundle._routes.items()
+        }
+
         super().__init__(*args, **kwargs)
-        self.web_bundle = web_bundle
+        self._web_routes = MappingProxyType(sealed_routes)
+        self._web_bundle_sha256 = sealed_bundle.bundle_sha256
+        self._web_source_revision = sealed_bundle.source_revision
+        self._web_host_api_contract_version = sealed_bundle.host_api_contract_version
 
     @staticmethod
     def _casefold_header_values(
@@ -347,7 +379,7 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
                 method=method, target=target, headers=headers, body=body
             )
 
-        asset = self.web_bundle.asset_for_path(parsed.path)
+        asset = self._web_routes.get(parsed.path)
         if asset is None:
             return super().dispatch(
                 method=method, target=target, headers=headers, body=body
@@ -380,10 +412,11 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
         except (TypeError, ValueError):
             return _static_error(400, "INVALID_STATIC_REQUEST")
 
+        asset_body, asset_sha256_hex, asset_content_type = asset
         return TransportResponse(
             status=200,
-            content_type=asset.content_type,
-            body=asset.body,
+            content_type=asset_content_type,
+            body=asset_body,
             headers=(
                 ("Cache-Control", "no-store"),
                 ("Content-Security-Policy", _CSP),
@@ -391,12 +424,12 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
                 ("Referrer-Policy", "no-referrer"),
                 ("X-Frame-Options", "DENY"),
                 ("X-Content-Type-Options", "nosniff"),
-                ("X-AutoTrade-Web-Bundle", self.web_bundle.bundle_sha256),
-                ("X-AutoTrade-Source-Revision", self.web_bundle.source_revision),
+                ("X-AutoTrade-Web-Bundle", self._web_bundle_sha256),
+                ("X-AutoTrade-Source-Revision", self._web_source_revision),
                 (
                     "X-AutoTrade-Host-Api-Contract",
-                    self.web_bundle.host_api_contract_version,
+                    self._web_host_api_contract_version,
                 ),
-                ("ETag", '"sha256-' + asset.sha256_hex + '"'),
+                ("ETag", '"sha256-' + asset_sha256_hex + '"'),
             ),
         )

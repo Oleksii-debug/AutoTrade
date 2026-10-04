@@ -378,6 +378,54 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     payload={"metric": "0.02"},
                 )
 
+    def test_locked_holdout_vintage_must_cover_full_forward_period(self):
+        cases = (
+            (
+                "late-start",
+                {
+                    "from": "2026-01-02T00:00:00Z",
+                    "to": "2026-06-30T23:59:59Z",
+                },
+            ),
+            (
+                "early-end",
+                {
+                    "from": "2026-01-01T00:00:00Z",
+                    "to": "2026-06-29T23:59:59Z",
+                },
+            ),
+        )
+        for token, coverage in cases:
+            with self.subTest(token=token), TemporaryDirectory() as directory:
+                root = Path(directory)
+                science = ScientificRegistry(root / "science.sqlite3")
+                registered = science.register_protocol(protocol())
+                vintages = HistoricalVintageRegistry(root / "historical-vintages")
+                manifest = _vintage_manifest(token)
+                manifest["coverage"] = coverage
+                vintages.commit(manifest)
+
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "does not cover protocol forward_period",
+                ):
+                    science.preregister_locked_holdout(
+                        registered.protocol_id,
+                        vintage_registry=vintages,
+                        dataset_id=manifest["dataset_id"],
+                        dataset_version=1,
+                    )
+
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "lacks preregistered physical locked holdout",
+                ):
+                    science.locked_holdout_registration(registered.protocol_id)
+                self.assertEqual(
+                    science.completeness(registered.protocol_id)["recorded_trials"],
+                    0,
+                )
+
     def test_trial_admission_requires_physical_holdout_preregistered_first(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "science.sqlite3"

@@ -269,7 +269,7 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                 target.__code__,
                 target.__defaults__,
                 kwdefaults,
-                None if kwdefaults is None else tuple_for(sorted_for(kwdefaults.items())),
+                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
             )
         )
         namespace = target.__globals__
@@ -569,7 +569,7 @@ def measure_declared_financial_operation(
                 or function.__kwdefaults__ is not kwdefaults
                 or (
                     kwdefaults is not None
-                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
                 )
             ):
                 raise error_type(
@@ -622,7 +622,7 @@ def measure_declared_financial_operation(
                 or function.__kwdefaults__ is not kwdefaults
                 or (
                     kwdefaults is not None
-                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
                 )
             ):
                 raise error_type(
@@ -642,7 +642,7 @@ def measure_declared_financial_operation(
                 or function.__kwdefaults__ is not kwdefaults
                 or (
                     kwdefaults is not None
-                    and tuple(sorted(kwdefaults.items())) != kwdefault_items
+                    and tuple_for(sorted_for(kwdefaults.items())) != kwdefault_items
                 )
             ):
                 raise error_type(

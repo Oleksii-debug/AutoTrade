@@ -18,10 +18,13 @@ from typing import Mapping, Sequence
 
 from .exact_decimal import (
     ExactDecimalError,
+    exact_multiply,
+    exact_sum,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
     parse_bounded_json_number_token,
 )
+from .reconciliation import ProviderFillEvidence
 
 
 class KrakenSpotStreamError(ValueError):
@@ -161,6 +164,53 @@ class KrakenSpotExecutionsSubscriptionBinding:
             raise KrakenSpotStreamError(
                 "Kraken subscription binding evidence_ref is invalid"
             )
+
+
+def _snapshot_subscription_binding(
+    binding: KrakenSpotExecutionsSubscriptionBinding,
+) -> KrakenSpotExecutionsSubscriptionBinding:
+    """Rebuild caller-owned binding into canonical inert local state."""
+
+    if type(binding) is not KrakenSpotExecutionsSubscriptionBinding:
+        raise TypeError(
+            "subscription_binding must be "
+            "KrakenSpotExecutionsSubscriptionBinding"
+        )
+    account_id = object.__getattribute__(binding, "account_id")
+    environment = object.__getattribute__(binding, "environment")
+    connection_generation = object.__getattribute__(
+        binding,
+        "connection_generation",
+    )
+    req_id = object.__getattribute__(binding, "req_id")
+    profile_items = object.__getattribute__(binding, "profile_items")
+    evidence_ref = object.__getattribute__(binding, "evidence_ref")
+
+    canonical = KrakenSpotExecutionsSubscriptionBinding.create(
+        account_id=account_id,
+        environment=environment,
+        connection_generation=connection_generation,
+        req_id=req_id,
+    )
+    if type(profile_items) is not tuple or any(
+        type(item) is not tuple
+        or len(item) != 2
+        or type(item[0]) is not str
+        or type(item[1]) not in {str, bool}
+        for item in profile_items
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription binding profile state is not canonical"
+        )
+    if profile_items != canonical.profile_items:
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription profile is not canonical"
+        )
+    if type(evidence_ref) is not str or evidence_ref != canonical.evidence_ref:
+        raise KrakenSpotStreamError(
+            "Kraken subscription binding evidence_ref is invalid"
+        )
+    return canonical
 
 
 _ALLOWED_FRAME_TYPES = frozenset({"snapshot", "update"})
@@ -310,20 +360,16 @@ class KrakenSpotExecutionsSubscriptionAck:
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if type(self.subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
-            raise TypeError(
-                "subscription_binding must be "
-                "KrakenSpotExecutionsSubscriptionBinding"
-            )
+        binding = _snapshot_subscription_binding(self.subscription_binding)
         if (
-            self.subscription_binding.account_id != self.account_id
-            or self.subscription_binding.environment != self.environment
-            or self.subscription_binding.connection_generation
-            != self.connection_generation
+            binding.account_id != self.account_id
+            or binding.environment != self.environment
+            or binding.connection_generation != self.connection_generation
         ):
             raise KrakenSpotStreamError(
                 "Kraken subscription binding scope mismatch"
             )
+        object.__setattr__(self, "subscription_binding", binding)
         if type(self.response_bytes) is not bytes:
             raise TypeError("response_bytes must be bytes")
         if self.maxratecount is not None and (
@@ -364,6 +410,9 @@ def parse_executions_subscription_ack(
             "subscription_binding must be "
             "KrakenSpotExecutionsSubscriptionBinding"
         )
+    subscription_binding = _snapshot_subscription_binding(
+        subscription_binding
+    )
     raw = _decode_exact_json(response_bytes)
     allowed_root = {
         "method",
@@ -657,7 +706,6 @@ class KrakenSpotExecutionReport:
             and self.last_qty is not None
             and self.last_price is not None
             and self.cost is not None
-            and self.trade_id is not None
             and self.fees_reported
         )
 
@@ -873,6 +921,159 @@ def parse_execution_frame(
     )
 
 
+def _snapshot_execution_frame(
+    frame: KrakenSpotExecutionFrame,
+) -> KrakenSpotExecutionFrame:
+    """Reparse exact bytes so parsed caller state cannot outlive its evidence."""
+
+    if type(frame) is not KrakenSpotExecutionFrame:
+        raise TypeError("frame must be exact KrakenSpotExecutionFrame")
+    return parse_execution_frame(
+        object.__getattribute__(frame, "response_bytes"),
+        account_id=object.__getattribute__(frame, "account_id"),
+        connection_generation=object.__getattribute__(
+            frame,
+            "connection_generation",
+        ),
+        environment=object.__getattribute__(frame, "environment"),
+    )
+
+
+def _provider_fills_from_execution_frame(
+    frame: object,
+    *,
+    instrument_versions: dict[str, str],
+    fee_currency_by_symbol: dict[str, str],
+) -> tuple[ProviderFillEvidence, ...]:
+    """Translate exact Kraken trade reports into canonical reconciliation fills.
+
+    This pure bridge owns no durable state and grants no readiness. Canonical
+    reconciliation/provider-fill accounting remains the execution-identity and
+    financial authority.
+    """
+
+    if type(frame) is not KrakenSpotExecutionFrame:
+        raise TypeError("frame must be exact KrakenSpotExecutionFrame")
+    frame = _snapshot_execution_frame(frame)
+    if type(instrument_versions) is not dict:
+        raise TypeError("instrument_versions must be an exact dict")
+    if type(fee_currency_by_symbol) is not dict:
+        raise TypeError("fee_currency_by_symbol must be an exact dict")
+
+    instruments: dict[str, str] = {}
+    for raw_symbol, raw_instrument in instrument_versions.items():
+        symbol = _canonical_text(
+            raw_symbol,
+            name="instrument_versions symbol",
+        )
+        instrument = _canonical_text(
+            raw_instrument,
+            name=f"instrument_versions[{symbol}]",
+        )
+        if symbol in instruments and instruments[symbol] != instrument:
+            raise KrakenSpotStreamError(
+                "instrument_versions contains conflicting symbol mappings"
+            )
+        instruments[symbol] = instrument
+
+    fee_currencies: dict[str, str] = {}
+    for raw_symbol, raw_currency in fee_currency_by_symbol.items():
+        symbol = _canonical_text(
+            raw_symbol,
+            name="fee_currency_by_symbol symbol",
+        )
+        currency = _canonical_text(
+            raw_currency,
+            name=f"fee_currency_by_symbol[{symbol}]",
+        ).upper()
+        fee_currencies[symbol] = currency
+
+    fills: list[ProviderFillEvidence] = []
+    for report in frame.reports:
+        if report.exec_type != "trade":
+            continue
+        if not report.trade_economics_complete:
+            raise KrakenSpotStreamError(
+                "Kraken trade report is incomplete at provider-fill bridge"
+            )
+        expected_fee_currency = fee_currencies.get(report.symbol)
+        if expected_fee_currency is None:
+            raise KrakenSpotStreamError(
+                "missing evidenced fee currency for Kraken executions symbol: "
+                + report.symbol
+            )
+
+        if report.margin_borrow is not False:
+            raise KrakenSpotStreamError(
+                "Kraken trade cannot bridge to canonical cash fill unless "
+                "margin_borrow=false is provider-evidenced"
+            )
+        try:
+            expected_cost = exact_multiply(
+                report.last_qty,
+                report.last_price,
+            )
+        except ExactDecimalError as error:
+            raise KrakenSpotStreamError(
+                "Kraken trade cost cross-check exceeds exact resource authority"
+            ) from error
+        if report.cost != expected_cost:
+            raise KrakenSpotStreamError(
+                "Kraken trade cost differs from exact last_qty * last_price; "
+                "canonical provider fill cannot discard provider cost"
+            )
+
+        instrument = instruments.get(report.symbol)
+        if instrument is None:
+            raise KrakenSpotStreamError(
+                f"unmapped Kraken executions symbol: {report.symbol}"
+            )
+
+        fee_assets = {
+            _canonical_text(fee.asset, name="fee.asset").upper()
+            for fee in report.fees
+        }
+        if any(asset != expected_fee_currency for asset in fee_assets):
+            raise KrakenSpotStreamError(
+                "Kraken execution fee asset disagrees with evidenced fee currency"
+            )
+        try:
+            fee_amount = (
+                exact_sum(fee.quantity for fee in report.fees)
+                if report.fees
+                else Decimal("0")
+            )
+        except ExactDecimalError as error:
+            raise KrakenSpotStreamError(
+                "Kraken execution fee aggregation exceeds exact resource authority"
+            ) from error
+
+        try:
+            fills.append(
+                ProviderFillEvidence.create(
+                    provider_id="KRAKEN",
+                    account_id=frame.account_id,
+                    environment=frame.environment,
+                    provider_execution_id=report.exec_id,
+                    client_order_id=report.client_order_id,
+                    instrument=instrument,
+                    quantity=report.last_qty,
+                    price=report.last_price,
+                    fee_amount=fee_amount,
+                    fee_currency=expected_fee_currency,
+                    trade_time=report.event_time,
+                    side=report.side.upper(),
+                    evidence_refs=(frame.evidence_ref,),
+                )
+            )
+        except (TypeError, ValueError) as error:
+            raise KrakenSpotStreamError(
+                "Kraken trade report cannot form canonical provider fill evidence"
+            ) from error
+
+    return tuple(fills)
+
+
 @dataclass(frozen=True)
 class KrakenSpotRestCrosscheckPlan:
     """Deterministic REST work required before stream recovery can be trusted."""
@@ -1033,6 +1234,16 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken subscription acknowledgement is out of phase"
             )
+        binding = _snapshot_subscription_binding(
+            object.__getattribute__(
+                acknowledgement,
+                "subscription_binding",
+            )
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            object.__getattribute__(acknowledgement, "response_bytes"),
+            subscription_binding=binding,
+        )
         if (
             acknowledgement.account_id != self.account_id
             or acknowledgement.environment != self.environment
@@ -1098,7 +1309,8 @@ class KrakenSpotExecutionStreamRecovery:
     def apply_frame(self, frame: KrakenSpotExecutionFrame) -> None:
         """Consume one frame while keeping reconciliation as the READY authority."""
 
-        self._require_scope(frame)
+        if type(frame) is not KrakenSpotExecutionFrame:
+            raise TypeError("frame must be KrakenSpotExecutionFrame")
         if self.phase == self.DISCONNECTED:
             raise KrakenSpotStreamError(
                 "Kraken stream frame received while disconnected"
@@ -1111,6 +1323,8 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken stream requires subscription acknowledgement before data"
             )
+        frame = _snapshot_execution_frame(frame)
+        self._require_scope(frame)
 
         if self.phase == self.AWAITING_SNAPSHOT:
             if frame.frame_type != "snapshot":
@@ -1219,6 +1433,41 @@ class KrakenSpotExecutionStreamRecovery:
             query_order_chunks=chunks,
             evidence_refs=tuple(self._crosscheck_evidence_refs),
         )
+
+    def buffered_provider_fills(
+        self,
+        *,
+        instrument_versions: dict[str, str],
+        fee_currency_by_symbol: dict[str, str],
+    ) -> tuple[ProviderFillEvidence, ...]:
+        """Return fills only from updates admitted by this recovery sequence.
+
+        These remain provider observations for canonical reconciliation. They do
+        not grant READY or bypass the required REST cross-check.
+        """
+
+        if self.phase != self.REST_RECONCILIATION_REQUIRED:
+            raise KrakenSpotStreamError(
+                "Kraken buffered provider fills require gap-free stream "
+                "recovery awaiting REST reconciliation"
+            )
+        if type(instrument_versions) is not dict:
+            raise TypeError("instrument_versions must be an exact dict")
+        if type(fee_currency_by_symbol) is not dict:
+            raise TypeError("fee_currency_by_symbol must be an exact dict")
+        instrument_snapshot = dict.copy(instrument_versions)
+        fee_currency_snapshot = dict.copy(fee_currency_by_symbol)
+
+        fills: list[ProviderFillEvidence] = []
+        for frame in self._buffered_updates:
+            fills.extend(
+                _provider_fills_from_execution_frame(
+                    frame,
+                    instrument_versions=instrument_snapshot,
+                    fee_currency_by_symbol=fee_currency_snapshot,
+                )
+            )
+        return tuple(fills)
 
     def evidence(self) -> KrakenSpotStreamRecoveryEvidence:
         """Return an immutable, explicitly non-READY reconciliation handoff."""

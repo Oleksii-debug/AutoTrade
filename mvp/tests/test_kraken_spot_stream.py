@@ -2,6 +2,8 @@ import hashlib
 import unittest
 from decimal import Decimal
 
+from mvp.autotrade_mvp.reconciliation import reconcile_account
+
 from mvp.autotrade_mvp.kraken_spot_stream import (
     KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION,
     KrakenSpotExecutionsSubscriptionBinding,
@@ -109,6 +111,61 @@ def subscription_binding(
 
 
 class KrakenSpotExecutionFrameTests(unittest.TestCase):
+    def provider_fills_from_admitted_frame(
+        self,
+        frame,
+        *,
+        instrument_versions,
+        fee_currency_by_symbol=None,
+    ):
+        if frame.frame_type != "update" or frame.sequence < 1:
+            raise AssertionError("test helper requires an update with positive sequence")
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id=frame.account_id,
+            environment=frame.environment,
+        )
+        generation = recovery.begin_connection()
+        self.assertEqual(generation, frame.connection_generation)
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id=frame.account_id,
+            connection_generation=generation,
+            req_id=7,
+            environment=frame.environment,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=frame.sequence - 1,
+                    reports=[
+                        {
+                            "order_id": "O-ADMISSION-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id=frame.account_id,
+                connection_generation=generation,
+                environment=frame.environment,
+            )
+        )
+        recovery.apply_frame(frame)
+        return recovery.buffered_provider_fills(
+            instrument_versions=instrument_versions,
+            fee_currency_by_symbol=(
+                {"BTC/USD": "USD"}
+                if fee_currency_by_symbol is None
+                else fee_currency_by_symbol
+            ),
+        )
+
     def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
         touched: list[str] = []
 
@@ -133,6 +190,52 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 account_id="spot-live-1",
                 connection_generation=HostileInt(1),
                 req_id=7,
+            )
+        self.assertEqual(touched, [])
+
+    def test_fill_bridge_rejects_polymorphic_mapping_before_callbacks(self):
+        touched: list[str] = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping iteration")
+
+            def get(self, *args, **kwargs):
+                touched.append("get")
+                raise AssertionError("hostile mapping lookup")
+
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=43,
+                reports=[
+                    {
+                        "order_id": "O-MAP-GUARD",
+                        "cl_ord_id": "client-map-guard",
+                        "exec_id": "E-MAP-GUARD",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        with self.assertRaisesRegex(TypeError, "instrument_versions must be an exact dict"):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions=HostileDict(
+                    {"BTC/USD": "CRYPTO:BTC-USD:v1"}
+                ),
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+        with self.assertRaisesRegex(TypeError, "fee_currency_by_symbol must be an exact dict"):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol=HostileDict({"BTC/USD": "USD"}),
             )
         self.assertEqual(touched, [])
 
@@ -283,16 +386,6 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 },
                 "cost",
             ),
-            (
-                {
-                    "order_id": "O-ID",
-                    "exec_id": "E-ID",
-                    "exec_type": "trade",
-                    "order_status": "partially_filled",
-                    "trade_id": None,
-                },
-                "trade_id",
-            ),
         )
         for report_input, missing_field in cases:
             with self.subTest(missing_field=missing_field):
@@ -303,6 +396,39 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 ).reports[0]
                 self.assertIsNone(getattr(report, missing_field))
                 self.assertFalse(report.trade_economics_complete)
+
+    def test_trade_id_is_optional_for_canonical_provider_fill_bridge(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=6,
+                reports=[
+                    {
+                        "order_id": "O-OPTIONAL-TRADE-ID",
+                        "cl_ord_id": "client-optional-trade-id",
+                        "exec_id": "E-OPTIONAL-TRADE-ID",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "trade_id": None,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        report = frame.reports[0]
+        self.assertIsNone(report.trade_id)
+        self.assertTrue(report.trade_economics_complete)
+
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+        self.assertEqual(fill.provider_execution_id, "E-OPTIONAL-TRADE-ID")
+        self.assertEqual(fill.client_order_id, "client-optional-trade-id")
+        self.assertEqual(fill.quantity, Decimal("1"))
+        self.assertEqual(fill.price, Decimal("25000"))
 
     def test_trade_frame_rejects_non_boolean_margin_flag_when_present(self):
         raw = (
@@ -477,6 +603,635 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(
             report.event_time,
             "2026-10-04T07:00:00+02:00",
+        )
+
+
+    def test_trade_frame_maps_to_existing_canonical_provider_fill_evidence(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=44,
+                reports=[
+                    {
+                        "order_id": "O-BRIDGE",
+                        "cl_ord_id": "client-bridge",
+                        "exec_id": "E-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "symbol": "BTC/USD",
+                        "side": "sell",
+                        "last_qty": 1,
+                        "last_price": 40000,
+                        "cost": 40000,
+                        "fees": [
+                            {"asset": "USD", "qty": 1},
+                            {"asset": "USD", "qty": 2},
+                        ],
+                        "timestamp": "2026-10-04T05:00:00.123456Z",
+                        "trade_id": 404,
+                        "margin_borrow": False,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        fills = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )
+
+        self.assertEqual(len(fills), 1)
+        fill = fills[0]
+        self.assertEqual(fill.provider_id, "KRAKEN")
+        self.assertEqual(fill.account_id, "spot-live-1")
+        self.assertEqual(fill.environment, "LIVE")
+        self.assertEqual(fill.provider_execution_id, "E-BRIDGE")
+        self.assertEqual(fill.client_order_id, "client-bridge")
+        self.assertEqual(fill.instrument, "CRYPTO:BTC-USD:v1")
+        self.assertEqual(fill.side, "SELL")
+        self.assertEqual(fill.quantity, Decimal("1"))
+        self.assertEqual(fill.price, Decimal("40000"))
+        self.assertEqual(fill.fee_amount, Decimal("3"))
+        self.assertEqual(fill.fee_currency, "USD")
+        self.assertEqual(fill.trade_time, "2026-10-04T05:00:00.123456Z")
+        self.assertEqual(fill.evidence_refs, (frame.evidence_ref,))
+
+    def test_provider_fill_bridge_preserves_negative_spot_maker_rebate(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=44,
+                reports=[
+                    {
+                        "order_id": "O-MAKER-REBATE",
+                        "cl_ord_id": "client-maker-rebate",
+                        "exec_id": "E-MAKER-REBATE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "symbol": "BTC/USD",
+                        "side": "buy",
+                        "last_qty": 1,
+                        "last_price": 25000,
+                        "cost": 25000,
+                        "fees": [{"asset": "USD", "qty": -1}],
+                        "timestamp": "2026-10-04T05:00:00Z",
+                        "trade_id": 403,
+                        "margin_borrow": False,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+
+        self.assertEqual(fill.fee_amount, Decimal("-1"))
+        self.assertEqual(fill.fee_currency, "USD")
+
+    def test_provider_fill_bridge_rejects_noncanonical_authority_map_keys(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=45,
+                reports=[
+                    {
+                        "order_id": "O-MAP-CANONICAL",
+                        "cl_ord_id": "client-map-canonical",
+                        "exec_id": "E-MAP-CANONICAL",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "instrument_versions symbol must be canonical text",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={
+                    " BTC/USD ": "CRYPTO:BTC-USD:v1",
+                },
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "fee_currency_by_symbol symbol must be canonical text",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={
+                    " BTC/USD ": "USD",
+                },
+            )
+
+    def test_provider_fill_bridge_ignores_status_only_reports(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=45,
+                reports=[
+                    {
+                        "order_id": "O-STATUS-ONLY",
+                        "exec_type": "status",
+                        "order_status": "new",
+                        "symbol": "BTC/USD",
+                        "side": "buy",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        self.assertEqual(
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            ),
+            (),
+        )
+
+    def test_provider_fill_bridge_rejects_unmapped_symbol_and_mixed_fee_assets(self):
+        base = {
+            "order_id": "O-BRIDGE-FAIL",
+            "cl_ord_id": "client-bridge-fail",
+            "exec_id": "E-BRIDGE-FAIL",
+            "exec_type": "trade",
+            "order_status": "partially_filled",
+            "symbol": "BTC/USD",
+            "side": "buy",
+        }
+        frame = parse_execution_frame(
+            frame_bytes(frame_type="update", sequence=46, reports=[base]),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "unmapped Kraken executions symbol",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={},
+            )
+
+        mixed = dict(base)
+        mixed["fees"] = [
+            {"asset": "USD", "qty": 1},
+            {"asset": "EUR", "qty": 1},
+        ]
+        mixed_frame = parse_execution_frame(
+            frame_bytes(frame_type="update", sequence=47, reports=[mixed]),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "fee asset disagrees with evidenced fee currency",
+        ):
+            self.provider_fills_from_admitted_frame(
+                mixed_frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
+
+    def test_provider_fill_bridge_uses_explicit_fee_currency_for_zero_fee_trade(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=48,
+                reports=[
+                    {
+                        "order_id": "O-ZERO-FEE-BRIDGE",
+                        "cl_ord_id": "client-zero-fee",
+                        "exec_id": "E-ZERO-FEE-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "fees": [],
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+        self.assertEqual(fill.fee_amount, Decimal("0"))
+        self.assertEqual(fill.fee_currency, "USD")
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "missing evidenced fee currency",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={},
+            )
+
+
+    def test_provider_fill_bridge_defers_execution_identity_to_canonical_reconciliation(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=49,
+                reports=[
+                    {
+                        "order_id": "O-CANONICAL-ID",
+                        "cl_ord_id": "client-canonical-id",
+                        "exec_id": "E-CANONICAL-ID",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+
+        result = reconcile_account(
+            provider_id="KRAKEN",
+            account_id="spot-live-1",
+            environment="LIVE",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(fill, fill),
+            coverage_start="2026-10-04T04:59:00Z",
+            coverage_end="2026-10-04T05:01:00Z",
+            pagination_complete=False,
+        )
+
+        self.assertEqual(
+            result.unexpected_execution_ids,
+            ("E-CANONICAL-ID",),
+        )
+
+    def test_canonical_reconciliation_rejects_changed_economics_for_same_stream_exec_id(self):
+        common = {
+            "order_id": "O-CANONICAL-CONFLICT",
+            "cl_ord_id": "client-canonical-conflict",
+            "exec_id": "E-CANONICAL-CONFLICT",
+            "exec_type": "trade",
+            "order_status": "partially_filled",
+        }
+        first = self.provider_fills_from_admitted_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=50,
+                    reports=[common],
+                ),
+                account_id="spot-live-1",
+                connection_generation=1,
+            ),
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+        changed = dict(common)
+        changed["last_price"] = 25001
+        changed["cost"] = 25001
+        second = self.provider_fills_from_admitted_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=51,
+                    reports=[changed],
+                ),
+                account_id="spot-live-1",
+                connection_generation=1,
+            ),
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+        )[0]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider execution id has conflicting observations",
+        ):
+            reconcile_account(
+                provider_id="KRAKEN",
+                account_id="spot-live-1",
+                environment="LIVE",
+                local_cash={},
+                provider_cash={},
+                local_positions={},
+                provider_positions={},
+                local_execution_ids=(),
+                provider_fills=(first, second),
+                coverage_start="2026-10-04T04:59:00Z",
+                coverage_end="2026-10-04T05:01:00Z",
+                pagination_complete=False,
+            )
+
+
+    def test_provider_fill_bridge_requires_proven_cash_semantics(self):
+        for margin_value in (None, True):
+            with self.subTest(margin_borrow=margin_value):
+                frame = parse_execution_frame(
+                    frame_bytes(
+                        frame_type="update",
+                        sequence=52,
+                        reports=[
+                            {
+                                "order_id": "O-MARGIN-BRIDGE",
+                                "cl_ord_id": "client-margin-bridge",
+                                "exec_id": "E-MARGIN-BRIDGE",
+                                "exec_type": "trade",
+                                "order_status": "partially_filled",
+                                "margin_borrow": margin_value,
+                            }
+                        ],
+                    ),
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                )
+                with self.assertRaisesRegex(
+                    KrakenSpotStreamError,
+                    "margin_borrow=false is provider-evidenced",
+                ):
+                    self.provider_fills_from_admitted_frame(
+                        frame,
+                        instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                    )
+
+    def test_provider_fill_bridge_rejects_cost_not_exactly_represented_by_qty_and_price(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=53,
+                reports=[
+                    {
+                        "order_id": "O-COST-BRIDGE",
+                        "cl_ord_id": "client-cost-bridge",
+                        "exec_id": "E-COST-BRIDGE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "last_qty": 2,
+                        "last_price": 25000,
+                        "cost": 49999,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            r"cost differs from exact last_qty \* last_price",
+        ):
+            self.provider_fills_from_admitted_frame(
+                frame,
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            )
+
+
+    def test_empty_fill_batch_still_validates_and_detaches_authority_maps(self):
+        touched: list[str] = []
+
+        class HostileDict(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("hostile mapping iteration")
+
+            def copy(self):
+                touched.append("copy")
+                raise AssertionError("hostile mapping copy")
+
+        recovery = KrakenSpotExecutionStreamRecovery(account_id="spot-live-1")
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=1,
+                    reports=[
+                        {
+                            "order_id": "O-EMPTY-BATCH",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+
+        with self.assertRaisesRegex(TypeError, "instrument_versions must be an exact dict"):
+            recovery.buffered_provider_fills(
+                instrument_versions=HostileDict(
+                    {"BTC/USD": "CRYPTO:BTC-USD:v1"}
+                ),
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+        with self.assertRaisesRegex(TypeError, "fee_currency_by_symbol must be an exact dict"):
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol=HostileDict({"BTC/USD": "USD"}),
+            )
+        self.assertEqual(touched, [])
+
+        self.assertEqual(
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            ),
+            (),
+        )
+
+    def test_provider_fill_extraction_requires_recovery_admission(self):
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        recovery.begin_connection()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "require gap-free stream recovery",
+        ):
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+
+    def test_sequence_gap_clears_fill_buffer_and_blocks_extraction(self):
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=1,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=2,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-TRADE",
+                            "exec_id": "E-GAP-TRADE",
+                            "exec_type": "trade",
+                            "order_status": "partially_filled",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        self.assertEqual(len(recovery.evidence().buffered_update_evidence_refs), 1)
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="update",
+                    sequence=4,
+                    reports=[
+                        {
+                            "order_id": "O-GAP-LATE",
+                            "exec_type": "status",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        self.assertEqual(recovery.evidence().buffered_update_evidence_refs, ())
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "require gap-free stream recovery",
+        ):
+            recovery.buffered_provider_fills(
+                instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
+            )
+
+
+    def test_admitted_fill_evidence_is_carried_into_required_rest_crosscheck(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=60,
+                reports=[
+                    {
+                        "order_id": "O-HANDOFF",
+                        "cl_ord_id": "client-handoff",
+                        "exec_id": "E-HANDOFF",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        recovery = KrakenSpotExecutionStreamRecovery(
+            account_id="spot-live-1",
+        )
+        generation = recovery.begin_connection()
+        binding = KrakenSpotExecutionsSubscriptionBinding.create(
+            account_id="spot-live-1",
+            connection_generation=generation,
+            req_id=7,
+        )
+        recovery.apply_subscription_ack(
+            parse_executions_subscription_ack(
+                ack_bytes(req_id=7),
+                subscription_binding=binding,
+            )
+        )
+        recovery.apply_frame(
+            parse_execution_frame(
+                frame_bytes(
+                    frame_type="snapshot",
+                    sequence=59,
+                    reports=[
+                        {
+                            "order_id": "O-HANDOFF-SNAPSHOT",
+                            "exec_type": "new",
+                            "order_status": "new",
+                        }
+                    ],
+                ),
+                account_id="spot-live-1",
+                connection_generation=generation,
+            )
+        )
+        recovery.apply_frame(frame)
+
+        fills = recovery.buffered_provider_fills(
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )
+        plan = recovery.rest_crosscheck_plan()
+        evidence = recovery.evidence()
+
+        self.assertEqual(len(fills), 1)
+        self.assertIn(fills[0].evidence_refs[0], plan.evidence_refs)
+        self.assertIn(fills[0].evidence_refs[0], evidence.buffered_update_evidence_refs)
+        self.assertFalse(plan.trading_ready)
+        self.assertFalse(evidence.trading_ready)
+        self.assertEqual(
+            evidence.phase,
+            KrakenSpotExecutionStreamRecovery.REST_RECONCILIATION_REQUIRED,
         )
 
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
@@ -793,6 +1548,135 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         reset = recovery.evidence()
         self.assertIsNone(reset.subscription_maxratecount)
         self.assertEqual(reset.subscription_warnings, ())
+
+    def test_ack_admission_reparses_exact_bytes_after_object_mutation(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        binding = subscription_binding(
+            connection_generation=generation,
+            req_id=77,
+        )
+        raw = (
+            b'{"method":"subscribe","req_id":77,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":240,"warnings":["schema change pending"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        object.__setattr__(acknowledgement, "maxratecount", 999999)
+        object.__setattr__(
+            acknowledgement,
+            "warnings",
+            ("caller-forged-warning",),
+        )
+        object.__setattr__(
+            acknowledgement,
+            "evidence_ref",
+            "provider-stream:sha256:" + "f" * 64,
+        )
+
+        recovery.apply_subscription_ack(acknowledgement)
+        evidence = recovery.evidence()
+
+        self.assertEqual(evidence.subscription_maxratecount, 240)
+        self.assertEqual(
+            evidence.subscription_warnings,
+            ("schema change pending",),
+        )
+        self.assertEqual(
+            evidence.subscription_ack_evidence_ref,
+            "provider-stream:sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+
+    def test_ack_admission_rejects_mutated_subscription_binding(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        acknowledgement = parse_executions_subscription_ack(
+            ack_bytes(req_id=77),
+            subscription_binding=subscription_binding(
+                connection_generation=generation,
+                req_id=77,
+            ),
+        )
+        object.__setattr__(
+            acknowledgement.subscription_binding,
+            "req_id",
+            78,
+        )
+
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "binding evidence_ref is invalid",
+        ):
+            recovery.apply_subscription_ack(acknowledgement)
+
+        self.assertEqual(
+            recovery.evidence().phase,
+            recovery.AWAITING_SUBSCRIPTION_ACK,
+        )
+
+    def test_buffered_fill_is_detached_from_mutated_caller_frame(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        self.acknowledge(recovery)
+        recovery.apply_frame(
+            self.parse(
+                recovery=recovery,
+                frame_type="snapshot",
+                sequence=1,
+                reports=[
+                    {
+                        "order_id": "O-SNAPSHOT",
+                        "exec_type": "new",
+                        "order_status": "new",
+                    }
+                ],
+            )
+        )
+        update = self.parse(
+            recovery=recovery,
+            frame_type="update",
+            sequence=2,
+            reports=[
+                {
+                    "order_id": "O-IMMUTABLE-BYTES",
+                    "cl_ord_id": "client-immutable-bytes",
+                    "exec_id": "E-IMMUTABLE-BYTES",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "last_qty": 2,
+                    "last_price": 25000,
+                    "cost": 50000,
+                }
+            ],
+        )
+        recovery.apply_frame(update)
+
+        caller_report = update.reports[0]
+        object.__setattr__(caller_report, "last_qty", Decimal("999"))
+        object.__setattr__(caller_report, "last_price", Decimal("1"))
+        object.__setattr__(caller_report, "cost", Decimal("999"))
+        object.__setattr__(caller_report, "exec_id", "E-FORGED-AFTER-ADMISSION")
+        object.__setattr__(update, "reports", (caller_report,))
+
+        fills = recovery.buffered_provider_fills(
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )
+
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].provider_execution_id, "E-IMMUTABLE-BYTES")
+        self.assertEqual(fills[0].quantity, Decimal("2"))
+        self.assertEqual(fills[0].price, Decimal("25000"))
+        self.assertEqual(
+            fills[0].evidence_refs,
+            (
+                "provider-stream:sha256:"
+                + hashlib.sha256(update.response_bytes).hexdigest(),
+            ),
+        )
 
     def test_generation_requires_fresh_snapshot_and_never_grants_ready(self):
         recovery = self.make_recovery()

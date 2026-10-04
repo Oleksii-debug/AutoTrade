@@ -18,6 +18,7 @@ import ssl
 from threading import Condition
 from typing import Callable
 
+from .dispatch import GuardedDispatcher
 from .host_network import PrincipalResolver, SnapshotProvider
 from .production_host import (
     ProductionHostConfig,
@@ -115,6 +116,83 @@ class HostLifetimeProviderSecretResolver:
                 self._condition.wait()
 
 
+class HostLifetimeGuardedDispatcher:
+    """Construction-bound provider sender for one recovery-owner generation.
+
+    Callers never supply a sender fence callback. The wrapper retains the exact
+    canonical GuardedDispatcher built from the production JournalStore and always
+    routes its terminal sender check through the RecoveryController that owns the
+    same durable account scope.
+    """
+
+    def __init__(
+        self,
+        dispatcher: GuardedDispatcher,
+        *,
+        recovery_controller: RecoveryController,
+        owner: OwnerFence,
+    ) -> None:
+        if not isinstance(dispatcher, GuardedDispatcher):
+            raise TypeError("dispatcher must be GuardedDispatcher")
+        if not isinstance(recovery_controller, RecoveryController):
+            raise TypeError("recovery_controller must be RecoveryController")
+        if not isinstance(owner, OwnerFence):
+            raise TypeError("owner must be OwnerFence")
+        if recovery_controller.owner != owner:
+            raise RuntimeError("dispatcher recovery owner is not current")
+        expected_scope = f"{dispatcher.environment}:{dispatcher.account_id}"
+        if recovery_controller.owner_scope != expected_scope:
+            raise RuntimeError("dispatcher recovery scope does not match provider scope")
+        if recovery_controller.durable_owner_store_path != dispatcher.store.path:
+            raise RuntimeError("dispatcher journal is not the durable recovery journal")
+        if dispatcher.owner_token != owner.owner_id or dispatcher.owner_epoch != owner.epoch:
+            raise RuntimeError("dispatcher sender identity does not match recovery owner")
+
+        self._dispatcher = dispatcher
+        self._recovery_controller = recovery_controller
+        self._condition = Condition()
+        self._accepting = True
+        self._active = 0
+
+    @property
+    def accepting(self) -> bool:
+        with self._condition:
+            return self._accepting
+
+    @property
+    def active_dispatches(self) -> int:
+        with self._condition:
+            return self._active
+
+    @property
+    def owner(self) -> OwnerFence:
+        return self._recovery_controller.owner  # type: ignore[return-value]
+
+    def dispatch(self, **kwargs):
+        if "sender_check" in kwargs:
+            raise TypeError("sender_check is construction-bound by the production host")
+        with self._condition:
+            if not self._accepting:
+                raise PermissionError("production host provider dispatch is closed")
+            self._active += 1
+        try:
+            return self._dispatcher.dispatch(
+                sender_check=self._recovery_controller.validate_sender,
+                **kwargs,
+            )
+        finally:
+            with self._condition:
+                self._active -= 1
+                if self._active == 0:
+                    self._condition.notify_all()
+
+    def stop_and_drain(self) -> None:
+        with self._condition:
+            self._accepting = False
+            while self._active:
+                self._condition.wait()
+
+
 class ProductionFinancialHostRuntime:
     """Own financial runtime authority strictly inside one host lifetime."""
 
@@ -125,6 +203,7 @@ class ProductionFinancialHostRuntime:
         recovery_controller: RecoveryController,
         owner: OwnerFence,
         provider_secret_resolver: HostLifetimeProviderSecretResolver,
+        dispatcher: HostLifetimeGuardedDispatcher,
     ) -> None:
         if not isinstance(host, ProductionHostRuntime):
             raise TypeError("host must be ProductionHostRuntime")
@@ -136,6 +215,8 @@ class ProductionFinancialHostRuntime:
             raise TypeError(
                 "provider_secret_resolver must be HostLifetimeProviderSecretResolver"
             )
+        if not isinstance(dispatcher, HostLifetimeGuardedDispatcher):
+            raise TypeError("dispatcher must be HostLifetimeGuardedDispatcher")
         if recovery_controller.owner != owner:
             raise RuntimeError("recovery owner is not current")
         if recovery_controller.durable_owner_store_path != host.journal.path:
@@ -149,6 +230,7 @@ class ProductionFinancialHostRuntime:
         self.recovery_controller = recovery_controller
         self.owner = owner
         self.provider_secret_resolver = provider_secret_resolver
+        self.dispatcher = dispatcher
 
     @property
     def config(self) -> ProductionHostConfig:
@@ -218,8 +300,18 @@ def build_production_financial_host(
             owner_store=host.journal,
             owner_scope=f"{config.environment}:{config.account_id}",
         )
+        core_dispatcher = GuardedDispatcher(
+            host.journal,
+            environment=config.environment,
+            account_id=config.account_id,
+            owner_token=config.host_id,
+            owner_epoch=1,
+        )
+        dispatcher_holder: list[HostLifetimeGuardedDispatcher] = []
 
         def finalize_financial_authority() -> None:
+            if dispatcher_holder:
+                dispatcher_holder[0].stop_and_drain()
             provider_secret_resolver.stop_and_drain()
             recovery.stop()
 
@@ -228,11 +320,18 @@ def build_production_financial_host(
         # successfully before listener/fence release.
         host.bind_terminal_finalizer(finalize_financial_authority)
         owner = recovery.start(config.host_id)
+        dispatcher = HostLifetimeGuardedDispatcher(
+            core_dispatcher,
+            recovery_controller=recovery,
+            owner=owner,
+        )
+        dispatcher_holder.append(dispatcher)
         return ProductionFinancialHostRuntime(
             host=host,
             recovery_controller=recovery,
             owner=owner,
             provider_secret_resolver=provider_secret_resolver,
+            dispatcher=dispatcher,
         )
     except BaseException:
         host.close()

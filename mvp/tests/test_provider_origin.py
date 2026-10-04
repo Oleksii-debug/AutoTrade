@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,7 +10,7 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_core import Surface, observe_authenticated_json_response
+from mvp.autotrade_mvp.provider_core import Surface
 from mvp.autotrade_mvp.provider_origin import (
     AuthenticatedReadResponseBinding,
     ProviderOriginError,
@@ -20,15 +21,11 @@ from mvp.autotrade_mvp.provider_origin import (
 )
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
-    BybitV5AuthenticatedReadSigner,
     BybitV5AuthenticatedReadTransport,
     UrllibJsonWireClient,
-    direct_authenticated_read_execution_receipt,
 )
-from mvp.autotrade_mvp.provider_route_reads import (
-    issue_terminal_qualified_provider_read_authority,
-    prepare_qualified_provider_read,
-)
+from mvp.autotrade_mvp.provider_route_reads import prepare_qualified_provider_read
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.test_provider_route_reads import ProviderRouteReadTests
 from mvp.tests.test_provider_selection import NOW
 
@@ -179,6 +176,14 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 prepare_direct.assert_not_called()
 
     def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
         with TemporaryDirectory() as directory:
             (
                 _fixture,
@@ -191,77 +196,50 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 binding,
             ) = self._route_fixture(directory)
             origin = self._origin(journal, directory)
-            attempt_id = origin.prepare_direct(
-                binding,
-                recorded_at=NOW,
-            )
-            terminal = issue_terminal_qualified_provider_read_authority(
-                route,
-                capabilities,
-                qualifications,
-                binding,
-                at=NOW,
-            )
-            request = BybitV5AuthenticatedReadSigner.sign(
-                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
-                query_binding=binding.query_binding,
-                credential_plaintext=(
-                    '{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}'
-                ),
-                timestamp_ms=1700000000000,
-            )
-            object.__setattr__(
-                request,
-                "_terminal_qualified_read_authority",
-                terminal,
-            )
-            object.__setattr__(
-                request,
-                "_terminal_authenticated_read_query_binding",
-                binding.query_binding,
-            )
-            object.__setattr__(
-                request,
-                "_terminal_authenticated_read_provider_environment",
-                "TESTNET",
-            )
-
             body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"10.25"}]}}'
+
             class Stream(BytesIO):
                 status = 200
 
             client = UrllibJsonWireClient(max_response_bytes=1024)
-            canonical_opener = client._opener
-            canonical_opener.open = lambda *_args, **_kwargs: Stream(body)
-            wire_response = client.send(request)
-            receipt = direct_authenticated_read_execution_receipt(wire_response)
-
-            neutral = observe_authenticated_json_response(
-                query_binding=binding.query_binding,
-                http_status=wire_response.http_status,
-                response_bytes=wire_response.body,
-                observed_at=NOW,
+            client._opener.open = lambda *_args, **_kwargs: Stream(body)
+            base = binding.query_binding
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-bybit-read",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-test-host",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: NOW,
+                wire_client=client,
             )
-            object.__setattr__(
-                neutral,
-                "_direct_authenticated_read_execution_receipt",
-                receipt,
-            )
-            object.__setattr__(
-                neutral,
-                "_direct_authenticated_read_response_bytes",
-                wire_response.body,
-            )
-            recorded = origin.record_direct_provider_origin_observation(
-                attempt_id,
-                binding,
-                provider_observation=neutral,
+            recorded = execute_direct_provider_origin_read(
+                origin=origin,
+                route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+                query_binding=binding,
+                transport=transport,
             )
             self.assertEqual(recorded.execution_class, "DIRECT_PROVIDER_WIRE")
             self.assertEqual(recorded.qualification_id, q1.qualification_id)
 
             restarted = self._origin(JournalStore(journal.path), directory)
-            recovered = restarted.load_response_binding(attempt_id, binding)
+            recovered = restarted.load_response_binding(recorded.attempt_id, binding)
             observation = observe_provider_origin_json_response(
                 response_binding=recovered,
                 query_binding=binding,

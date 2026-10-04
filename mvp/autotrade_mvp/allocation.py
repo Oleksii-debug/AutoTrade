@@ -1666,17 +1666,14 @@ _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 def _make_allocation_payload_sealer():
     """Create closure-private provenance for canonical frozen mapping nodes."""
 
-    registry: dict[int, tuple[weakref.ReferenceType, str]] = {}
+    registry: dict[int, tuple[weakref.ReferenceType, object, str]] = {}
 
     class SealedAllocationPayload:
-        __slots__ = ("_proxy", "__weakref__")
-
-        def __init__(self, proxy) -> None:
-            object.__setattr__(self, "_proxy", proxy)
-
-        @property
-        def proxy(self):
-            return self._proxy
+        # The owner is only a liveness anchor.  In particular it deliberately
+        # exposes no proxy property: the owner type is reachable through an
+        # evidence object's private owner tuple, and consulting a mutable class
+        # descriptor here would execute caller code inside provenance lookup.
+        __slots__ = ("__weakref__",)
 
         def __setattr__(self, name, value) -> None:
             raise AttributeError(
@@ -1689,9 +1686,9 @@ def _make_allocation_payload_sealer():
         entry = registry.get(id(value))
         if entry is None:
             return None
-        reference, canonical_json = entry
+        reference, registered_proxy, canonical_json = entry
         owner = reference()
-        if owner is None or owner.proxy is not value:
+        if owner is None or registered_proxy is not value:
             return None
         return owner, canonical_json
 
@@ -1711,7 +1708,7 @@ def _make_allocation_payload_sealer():
                 ensure_ascii=False,
                 allow_nan=False,
             )
-            owner = SealedAllocationPayload(proxy)
+            owner = SealedAllocationPayload()
             key = id(proxy)
 
             def cleanup(reference, *, key=key) -> None:
@@ -1719,7 +1716,11 @@ def _make_allocation_payload_sealer():
                 if entry is not None and entry[0] is reference:
                     registry.pop(key, None)
 
-            registry[key] = (weakref.ref(owner, cleanup), canonical_json)
+            # Keep the exact mappingproxy itself in the closure entry while
+            # the weak owner is alive.  This makes the identity check a plain
+            # built-in `is` comparison and prevents reachable owner-class
+            # descriptors from participating in trust use.
+            registry[key] = (weakref.ref(owner, cleanup), proxy, canonical_json)
             owners.append(owner)
             return proxy, tuple(owners)
         if type(value) is list:
@@ -1966,6 +1967,8 @@ def _verified_allocation_payload_owner(
     sealed = _sealed_lookup(payload)
     owners = object.__getattribute__(evidence, "_payload_owners")
     if sealed is None:
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    if type(owners) is not tuple:
         raise ValueError("allocation evidence payload provenance is not sealed")
     owner, canonical_json = sealed
     if not any(candidate is owner for candidate in owners):

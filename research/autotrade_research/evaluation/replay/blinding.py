@@ -174,6 +174,17 @@ def _sort_key(*, shuffle_key: str, experiment_id: str, namespace: str, raw: str)
     return sha256(material).digest()
 
 
+def _contains_identity(text: str, raw: str) -> bool:
+    folded = text.casefold()
+    needle = raw.casefold()
+    if len(needle) >= 3:
+        return needle in folded
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])",
+        folded,
+    ) is not None
+
+
 def _scan_payload(
     value: object,
     *,
@@ -185,11 +196,10 @@ def _scan_payload(
     if isinstance(value, Mapping):
         for key, child in value.items():
             child_path = path + (key,)
-            key_fold = key.casefold()
             for raw in raw_identities:
-                if raw and raw.casefold() in key_fold:
+                if raw and key.casefold() == raw.casefold():
                     raise BlindingError(
-                        f"payload key at {'.'.join(child_path)} contains a declared raw identity"
+                        f"payload key at {'.'.join(child_path)} is a declared raw identity"
                     )
             if _ABSOLUTE_DATE.search(key):
                 raise BlindingError(
@@ -216,9 +226,8 @@ def _scan_payload(
     if type(value) is not str:
         return
     if path not in identity_paths:
-        folded = value.casefold()
         for raw in raw_identities:
-            if raw and raw.casefold() in folded:
+            if raw and _contains_identity(value, raw):
                 raise BlindingError(
                     f"payload value at {'.'.join(path)} repeats a declared raw identity"
                 )
@@ -290,6 +299,8 @@ class BlindingProfile:
         object.__setattr__(self, "calendar_fields", calendars)
         if type(self.strict_text_scan) is not bool:
             raise TypeError("strict_text_scan must be an exact bool")
+        if self.strict_text_scan is not True:
+            raise BlindingError("strict_text_scan cannot be disabled for blinded replay")
         if self.price_scale_mode != _PRICE_SCALE_MODE:
             raise BlindingError(
                 "non-identity price scaling is unsupported without complete "
@@ -526,14 +537,18 @@ def blind_dataset(
     raw_identities = frozenset(
         raw for values in raw_by_namespace.values() for raw in values
     )
-    if profile.strict_text_scan:
-        for event in snapshot.events:
-            _scan_payload(
-                event.payload,
-                raw_identities=raw_identities,
-                identity_paths=identity_paths,
-                calendar_paths=calendar_paths,
-            )
+    for event in snapshot.events:
+        for raw in raw_identities:
+            if raw and _contains_identity(event.kind, raw):
+                raise BlindingError("event kind exposes a declared raw identity")
+        if _ABSOLUTE_DATE.search(event.kind):
+            raise BlindingError("event kind exposes an absolute calendar date")
+        _scan_payload(
+            event.payload,
+            raw_identities=raw_identities,
+            identity_paths=identity_paths,
+            calendar_paths=calendar_paths,
+        )
 
     identity_map: dict[tuple[str, str], str] = {}
     for namespace in sorted(raw_by_namespace):

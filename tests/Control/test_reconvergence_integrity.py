@@ -481,7 +481,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         )
         self.assertEqual(result.scope_violations, ())
 
-    def test_trust_root_approval_requires_separate_exact_full_changed_path_scope(self):
+    def test_optional_full_changed_path_scope_must_be_exact_when_supplied(self):
         guard_path = "control/tools/reconvergence_integrity.py"
         ordinary_path = "owned/change.py"
         changes = [
@@ -489,17 +489,14 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             Change(status="M", path=ordinary_path),
         ]
 
-        missing_scope = assess_reconvergence(
+        root_only = assess_reconvergence(
             base_paths=[guard_path, ordinary_path],
             changes=changes,
             trusted_root_approvals=(guard_path,),
         )
-        self.assertFalse(missing_scope.allowed)
-        self.assertEqual(missing_scope.protected_violations, ())
-        self.assertIn(
-            "trust-root evolution requires exact-head full mutation scope",
-            missing_scope.reasons,
-        )
+        self.assertTrue(root_only.allowed)
+        self.assertEqual(root_only.protected_violations, ())
+        self.assertEqual(root_only.scope_violations, ())
 
         broad_scope = assess_reconvergence(
             base_paths=[guard_path, ordinary_path],
@@ -510,7 +507,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertFalse(broad_scope.allowed)
         self.assertTrue(
             any(
-                "trust-root evolution requires exact changed-path scope" in reason
+                "trust-root evolution requires exact changed-path scope when "
+                "mutation scope is supplied" in reason
                 for reason in broad_scope.reasons
             )
         )

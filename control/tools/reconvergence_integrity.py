@@ -535,11 +535,11 @@ def assess_reconvergence(
                 + ", ".join(unused_root_approvals)
             )
 
-        if normalized_scopes is None:
-            trust_root_scope_reasons.append(
-                "trust-root evolution requires exact-head full mutation scope"
-            )
-        else:
+        # Trust-root approval is its own exact-head authority. The ordinary
+        # mutation-scope fence remains optional. When a trusted full mutation
+        # scope is supplied, however, require it to enumerate the exact changed
+        # path surface rather than silently broadening a root-evolution review.
+        if normalized_scopes is not None:
             approved_paths = set(normalized_scopes)
             missing_paths = sorted(touched_paths - approved_paths)
             extra_or_broad_paths = sorted(approved_paths - touched_paths)
@@ -552,7 +552,8 @@ def assess_reconvergence(
                         "extra-or-broad " + ", ".join(extra_or_broad_paths)
                     )
                 trust_root_scope_reasons.append(
-                    "trust-root evolution requires exact changed-path scope: "
+                    "trust-root evolution requires exact changed-path scope when "
+                    "mutation scope is supplied: "
                     + "; ".join(detail)
                 )
 

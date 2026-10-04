@@ -5,7 +5,10 @@ from io import BytesIO
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp.provider_origin import ProviderOriginError
+from mvp.autotrade_mvp.provider_origin import (
+    ProviderOriginError,
+    _require_direct_terminal_after_prepared_sequence,
+)
 from mvp.autotrade_mvp.provider_route_reads import (
     issue_terminal_qualified_provider_read_authority,
     terminal_qualified_provider_read_authority_snapshot,
@@ -23,6 +26,21 @@ from mvp.tests.test_provider_selection import NOW
 
 
 class ProviderOriginRecordAuthorityTests(unittest.TestCase):
+    def test_terminal_cut_cannot_precede_prepared_sequence(self):
+        prepared = {"journal_sequence": 7}
+        with self.assertRaisesRegex(
+            ProviderOriginError,
+            "predates durable Prepared",
+        ):
+            _require_direct_terminal_after_prepared_sequence(
+                prepared_event=prepared,
+                terminal_cut=6,
+            )
+        _require_direct_terminal_after_prepared_sequence(
+            prepared_event=prepared,
+            terminal_cut=7,
+        )
+
     def test_prepared_must_precede_direct_wire_even_for_canonical_receipt(self):
         """A real receipt minted before Prepared must never be relabelled as origin."""
 
@@ -115,15 +133,19 @@ class ProviderOriginRecordAuthorityTests(unittest.TestCase):
                 prepared["journal_sequence"],
             )
 
-            with self.assertRaisesRegex(
-                ProviderOriginError,
-                "durable Prepared|canonical execute",
+            for record in (
+                origin.record_direct_provider_origin_observation,
+                origin._record_provider_origin,
             ):
-                origin.record_direct_provider_origin_observation(
-                    attempt_id,
-                    binding,
-                    provider_observation=provider_observation,
-                )
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "durable Prepared|canonical execute",
+                ):
+                    record(
+                        attempt_id,
+                        binding,
+                        provider_observation=provider_observation,
+                    )
 
 
 if __name__ == "__main__":

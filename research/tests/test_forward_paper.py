@@ -812,5 +812,125 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertIn("evaluation_profile_hash_mismatch", mismatch.reasons)
 
 
+    def test_drawdown_hash_uses_semantic_decimal_identity(self):
+        frozen = self.protocol()
+        common = dict(
+            campaign_id=frozen.campaign_id,
+            exact_build_sha=frozen.exact_build_sha,
+            registered_at=frozen.registered_at,
+            starts_at=frozen.starts_at,
+            ends_at=frozen.ends_at,
+            minimum_predictions=frozen.minimum_predictions,
+            maximum_decision_latency_ms=frozen.maximum_decision_latency_ms,
+            required_provider_capabilities=frozen.required_provider_capabilities,
+            required_operational_cases=frozen.required_operational_cases,
+            required_regimes=frozen.required_regimes,
+            minimum_independent_decisions_per_regime=(
+                frozen.minimum_independent_decisions_per_regime
+            ),
+            required_simulation_limitations=frozen.required_simulation_limitations,
+            reporting_currency=frozen.reporting_currency,
+            evaluation_profile_hash=frozen.evaluation_profile_hash,
+        )
+        self.assertEqual(
+            forward_paper_protocol_hash(**common, maximum_drawdown="50.0"),
+            forward_paper_protocol_hash(**common, maximum_drawdown="50.00"),
+        )
+        self.assertEqual(
+            forward_paper_protocol_hash(**common, maximum_drawdown=Decimal("50")),
+            frozen.protocol_hash,
+        )
+
+    def test_reserved_item22_codes_cannot_satisfy_registration(self):
+        with self.assertRaisesRegex(ForwardPaperError, "UNSPECIFIED"):
+            self.protocol(required_regimes=("UNSPECIFIED",))
+        with self.assertRaisesRegex(ForwardPaperError, "UNSPECIFIED"):
+            self.protocol(required_simulation_limitations=("UNSPECIFIED",))
+
+    def test_unspecified_independence_key_is_invalid_for_registered_regime(self):
+        predictions = list(self.predictions())
+        first = predictions[0]
+        predictions[0] = SealedPrediction.create(
+            prediction_id=first.prediction_id,
+            provider_capability=first.provider_capability,
+            input_hash=first.input_hash,
+            proposal_hash=first.proposal_hash,
+            information_cutoff_at=first.information_cutoff_at,
+            sealed_at=first.sealed_at,
+            decision_deadline_at=first.decision_deadline_at,
+            outcome_horizon_end_at=first.outcome_horizon_end_at,
+            decision_latency_ms=first.decision_latency_ms,
+            regime=first.regime,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(predictions=predictions),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("independence_key_unspecified", result.reasons)
+
+    def test_economics_sequence_cannot_move_backwards_in_time(self):
+        rows = list(self.economics())
+        first = rows[0]
+        rows[0] = PaperDecisionEconomics.create(
+            prediction_id=first.prediction_id,
+            currency=first.currency,
+            sequence=first.sequence,
+            realized_at="2026-09-24T20:50:00Z",
+            gross_pnl=first.gross_pnl,
+            fees=first.fees,
+            spread_cost=first.spread_cost,
+            slippage_cost=first.slippage_cost,
+            net_pnl=first.net_pnl,
+            equity_before=first.equity_before,
+            equity_after=first.equity_after,
+            peak_equity_before=first.peak_equity_before,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_economics_time_regression", result.reasons)
+
+    def test_unregistered_simulation_limitation_prevents_complete_evidence(self):
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(
+                simulation_limitations=(
+                    "OFFICIAL_TEST_FILL_MODEL",
+                    "QUEUE_PRIORITY_UNOBSERVED",
+                    "LATENCY_EMULATION_COARSE",
+                )
+            ),
+        )
+        self.assertEqual(result.evidence_status, "INCONCLUSIVE")
+        self.assertIn(
+            "unregistered_simulation_limitation:LATENCY_EMULATION_COARSE",
+            result.reasons,
+        )
+
+    def test_per_decision_execution_costs_reconcile_to_reporting_ledger(self):
+        too_small = assess_forward_paper(
+            self.protocol(),
+            self.evidence(costs_by_currency={"USD": "1.99"}),
+        )
+        self.assertEqual(too_small.evidence_status, "INVALID")
+        self.assertIn(
+            "paper_execution_costs_exceed_cost_ledger",
+            too_small.reasons,
+        )
+
+        missing_currency = assess_forward_paper(
+            self.protocol(),
+            self.evidence(costs_by_currency={"EUR": "10"}),
+        )
+        self.assertEqual(missing_currency.evidence_status, "INCONCLUSIVE")
+        self.assertIn(
+            "reporting_currency_cost_ledger_missing",
+            missing_currency.reasons,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

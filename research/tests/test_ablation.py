@@ -2506,5 +2506,65 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(calls, [])
 
 
+    def test_bound_store_method_shadows_fail_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="method-shadow-preflight",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            cases = [
+                pair(
+                    "method-shadow-a",
+                    "2",
+                    population_unit="method-shadow-unit-a",
+                ),
+                pair(
+                    "method-shadow-b",
+                    "2",
+                    population_unit="method-shadow-unit-b",
+                ),
+            ]
+
+            for label, target, method_name in (
+                ("registry", science, "protocol_registration"),
+                ("memory", memory, "coverage_population_snapshot"),
+                ("artifact store", artifacts, "read_authenticated_snapshot"),
+            ):
+                calls: list[str] = []
+
+                def forbidden(*args, **kwargs):
+                    calls.append(method_name)
+                    raise AssertionError("shadowed canonical method executed")
+
+                setattr(target, method_name, forbidden)
+                try:
+                    result = evaluate_qualified_incremental_value(
+                        "agent",
+                        cases,
+                        authority=authority,
+                        minimum_pairs=2,
+                        required_lower_bound=Decimal("0"),
+                    )
+                finally:
+                    delattr(target, method_name)
+
+                self.assertEqual(
+                    result.reason,
+                    "registered_ablation_decision_policy_unavailable",
+                    label,
+                )
+                self.assertEqual(calls, [], label)
+
+
 if __name__ == "__main__":
     unittest.main()

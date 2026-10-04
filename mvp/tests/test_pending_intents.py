@@ -57,6 +57,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
         pending_id: str = "pending-order-1",
         quantity: str = "2",
         price: str = "101.25",
+        authority_action: str = "ORDER.SUBMIT",
+        notional: str = "202.50",
     ):
         return registry.register(
             pending_intent_id=pending_id,
@@ -66,6 +68,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
             authority_policy_version=3,
             instrument_id=INSTRUMENT_ID,
             instrument_version=9,
+            authority_action=authority_action,
+            notional=notional,
             risk_intent=PendingIntentAuthorityTests._intent(
                 quantity=quantity,
                 price=price,
@@ -91,6 +95,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
             )
 
             self.assertEqual(resolved, created)
+            self.assertEqual(resolved.authority_action, "ORDER.SUBMIT")
+            self.assertEqual(resolved.notional, Decimal("202.50"))
             self.assertEqual(resolved.risk_intent.quantity, Decimal("2"))
             self.assertEqual(resolved.risk_intent.price, Decimal("101.25"))
             self.assertTrue(resolved.intent_hash.startswith("sha256:"))
@@ -108,6 +114,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
                 authority_policy_version=3,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=9,
+                authority_action="ORDER.SUBMIT",
+                notional=Decimal("202.50"),
                 risk_intent=self._intent(),
                 registered_at=NOW.isoformat().replace("+00:00", "Z"),
                 expires_at=(NOW + timedelta(minutes=5)).isoformat().replace(
@@ -162,7 +170,7 @@ class PendingIntentAuthorityTests(unittest.TestCase):
                     at=NOW + timedelta(minutes=5),
                 )
 
-    def test_same_pending_id_cannot_rebind_economics(self) -> None:
+    def test_same_pending_id_cannot_rebind_economics_or_authority_scope(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             registry = DurablePendingIntentRegistry(store)
@@ -170,10 +178,18 @@ class PendingIntentAuthorityTests(unittest.TestCase):
             retried = self._register(registry)
             self.assertEqual(retried, original)
 
-            with self.assertRaisesRegex(PendingIntentError, "conflicting durable state"):
-                self._register(registry, quantity="3")
-            with self.assertRaisesRegex(PendingIntentError, "conflicting durable state"):
-                self._register(registry, price="101.26")
+            conflicting = (
+                {"quantity": "3"},
+                {"price": "101.26"},
+                {"authority_action": "ORDER.CANCEL"},
+                {"notional": "202.51"},
+            )
+            for changed in conflicting:
+                with self.subTest(changed=changed):
+                    with self.assertRaisesRegex(
+                        PendingIntentError, "conflicting durable state"
+                    ):
+                        self._register(registry, **changed)
 
             events = JournalStore.load_events(
                 store,
@@ -276,7 +292,7 @@ class PendingIntentAuthorityTests(unittest.TestCase):
                     policy_id="policy-1",
                     authority_policy_version=3,
                     at=NOW + timedelta(seconds=1),
-                    risk_intent=self._intent(quantity="999"),
+                    notional="999999",
                 )
 
     def test_mutated_risk_intent_is_rejected_before_journal_mutation(self) -> None:
@@ -296,6 +312,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
                     authority_policy_version=3,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=9,
+                    authority_action="ORDER.SUBMIT",
+                    notional="202.50",
                     risk_intent=intent,
                     registered_at=NOW,
                     expires_at=NOW + timedelta(minutes=5),
@@ -320,6 +338,8 @@ class PendingIntentAuthorityTests(unittest.TestCase):
                     authority_policy_version=3,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=9,
+                    authority_action="ORDER.SUBMIT",
+                    notional="202.50",
                     risk_intent=self._intent(),
                     registered_at=registered_at,
                     expires_at=NOW + timedelta(minutes=5),

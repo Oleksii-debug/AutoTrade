@@ -42,6 +42,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             ),
             reporting_currency="USD",
             maximum_drawdown="50",
+            evaluation_profile_hash=HASH_A,
         )
         values.update(overrides)
         values["protocol_hash"] = (
@@ -166,6 +167,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
                 "OFFICIAL_TEST_FILL_MODEL",
                 "QUEUE_PRIORITY_UNOBSERVED",
             ),
+            evaluation_profile_hash=HASH_A,
         )
         values.update(overrides)
         return ForwardPaperEvidence.create(**values)
@@ -213,6 +215,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             ),
             reporting_currency=frozen.reporting_currency,
             maximum_drawdown=frozen.maximum_drawdown,
+            evaluation_profile_hash=frozen.evaluation_profile_hash,
         )
         self.assertEqual(reordered_hash, frozen.protocol_hash)
 
@@ -458,6 +461,7 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_simulation_limitations=frozen.required_simulation_limitations,
             reporting_currency=frozen.reporting_currency,
             maximum_drawdown=frozen.maximum_drawdown,
+            evaluation_profile_hash=frozen.evaluation_profile_hash,
         )
         self.assertNotEqual(forward_paper_protocol_hash(**changed), frozen.protocol_hash)
 
@@ -477,7 +481,10 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             **values,
             protocol_hash=forward_paper_protocol_hash(**values),
         )
-        evidence = self.evidence(protocol_hash=protocol.protocol_hash)
+        evidence = self.evidence(
+            protocol_hash=protocol.protocol_hash,
+            evaluation_profile_hash=None,
+        )
         result = assess_forward_paper(protocol, evidence)
         self.assertEqual(result.evidence_status, "INCONCLUSIVE")
         self.assertIn("regime_coverage_not_registered", result.reasons)
@@ -786,6 +793,23 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         )
         self.assertEqual(result.evidence_status, "INVALID")
         self.assertIn("paper_equity_opening_peak_mismatch", result.reasons)
+
+
+    def test_frozen_evaluation_profile_is_required_and_exactly_bound(self):
+        protocol = self.protocol()
+        missing = assess_forward_paper(
+            protocol,
+            self.evidence(evaluation_profile_hash=None),
+        )
+        self.assertEqual(missing.evidence_status, "INCONCLUSIVE")
+        self.assertIn("evaluation_profile_evidence_missing", missing.reasons)
+
+        mismatch = assess_forward_paper(
+            protocol,
+            self.evidence(evaluation_profile_hash=HASH_B),
+        )
+        self.assertEqual(mismatch.evidence_status, "INVALID")
+        self.assertIn("evaluation_profile_hash_mismatch", mismatch.reasons)
 
 
 if __name__ == "__main__":

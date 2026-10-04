@@ -1414,6 +1414,22 @@ class AblationTests(unittest.TestCase):
                 protocol_payload,
                 protocol_id="11111111-1111-4111-8111-111111111111",
             )
+            attacker_science = ScientificRegistry(root / "attacker-science.sqlite3")
+            attacker_payload = {
+                **protocol_payload,
+                "minimum_practical_effect": "-999",
+                "ablation_decision_policy": {
+                    "schema_version": "1.0.0",
+                    "minimum_pairs": 2,
+                    "required_lower_bound": "-999",
+                    "uncertainty_multiplier": "0",
+                    "decision_rule": "exact-rational-d2-sample-variance-v1",
+                },
+            }
+            attacker_registration = attacker_science.register_protocol(
+                attacker_payload,
+                protocol_id="55555555-5555-4555-8555-555555555555",
+            )
             registered_at = datetime.fromisoformat(registration.created_at)
             self.assertIsNotNone(registered_at.tzinfo)
             registered_at = registered_at.astimezone(timezone.utc)
@@ -1516,6 +1532,45 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+
+            for field, forged_value in (
+                ("scientific_registry", attacker_science),
+                ("protocol_id", attacker_registration.protocol_id),
+                ("protocol_hash", attacker_registration.protocol_hash),
+            ):
+                tampered_authority = AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id=registration.protocol_id,
+                    protocol_hash=registration.protocol_hash,
+                    source_revision=source_revision,
+                    causal_cutoff=evaluation_cutoff,
+                    granted_permissions={"RESEARCH"},
+                    task="ablation-qualification",
+                    instrument_family="EQUITY",
+                )
+                object.__setattr__(
+                    tampered_authority,
+                    field,
+                    forged_value,
+                )
+                tampered = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=tampered_authority,
+                    minimum_pairs=999,
+                    required_lower_bound=Decimal("-999"),
+                    uncertainty_multiplier=Decimal("0"),
+                )
+                self.assertEqual(
+                    tampered.reason,
+                    "registered_ablation_decision_policy_unavailable",
+                    field,
+                )
+                self.assertEqual(tampered.required_lower_bound, Decimal("0"), field)
+                self.assertEqual(tampered.uncertainty_multiplier, Decimal("0"), field)
+
             result = evaluate_qualified_incremental_value(
                 "agent",
                 cases,

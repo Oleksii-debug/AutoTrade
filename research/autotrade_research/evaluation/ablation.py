@@ -19,7 +19,9 @@ from fractions import Fraction
 from hashlib import sha256
 import json
 import re
+from threading import RLock
 from typing import Iterable
+from weakref import ref as weakref_ref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -1215,6 +1217,74 @@ class RegisteredAblationPopulation:
             raise TypeError("complete must be a boolean")
 
 
+
+_ABLATION_AUTHORITY_POLICY_BINDING_LOCK = RLock()
+_ABLATION_AUTHORITY_POLICY_BINDINGS: dict[
+    int,
+    tuple[object, ScientificRegistry, str, str],
+] = {}
+
+
+def _register_ablation_authority_policy_binding(
+    authority: object,
+    *,
+    scientific_registry: ScientificRegistry,
+    protocol_id: str,
+    protocol_hash: str,
+) -> None:
+    """Freeze the construction-time registry/protocol binding outside the instance."""
+
+    if type(authority) is not AblationQualificationAuthority:
+        return
+    authority_id = id(authority)
+
+    def release(
+        reference: object,
+        *,
+        authority_id: int = authority_id,
+        bindings: dict[
+            int,
+            tuple[object, ScientificRegistry, str, str],
+        ] = _ABLATION_AUTHORITY_POLICY_BINDINGS,
+        lock: RLock = _ABLATION_AUTHORITY_POLICY_BINDING_LOCK,
+    ) -> None:
+        with lock:
+            current = bindings.get(authority_id)
+            if current is not None and current[0] is reference:
+                bindings.pop(authority_id, None)
+
+    reference = weakref_ref(authority, release)
+    with _ABLATION_AUTHORITY_POLICY_BINDING_LOCK:
+        existing = _ABLATION_AUTHORITY_POLICY_BINDINGS.get(authority_id)
+        if existing is not None and existing[0]() is authority:
+            raise RuntimeError("ablation qualification authority policy binding already exists")
+        if existing is not None and existing[0]() is not None:
+            raise RuntimeError("ablation qualification authority identity collision")
+        _ABLATION_AUTHORITY_POLICY_BINDINGS[authority_id] = (
+            reference,
+            scientific_registry,
+            protocol_id,
+            protocol_hash,
+        )
+
+
+def _issued_ablation_authority_policy_binding(
+    authority: object,
+) -> tuple[ScientificRegistry, str, str]:
+    """Return only the externally frozen binding for one live issued authority."""
+
+    if type(authority) is not AblationQualificationAuthority:
+        raise ProtocolViolation("ablation qualification authority type is invalid")
+    authority_id = id(authority)
+    with _ABLATION_AUTHORITY_POLICY_BINDING_LOCK:
+        bound = _ABLATION_AUTHORITY_POLICY_BINDINGS.get(authority_id)
+        if bound is None or bound[0]() is not authority:
+            raise ProtocolViolation(
+                "ablation qualification authority was not issued by the canonical constructor"
+            )
+        return bound[1], bound[2], bound[3]
+
+
 class AblationQualificationAuthority:
     """Resolve qualification evidence only through canonical persistent authorities.
 
@@ -1262,6 +1332,12 @@ class AblationQualificationAuthority:
         self.granted_permissions = set(granted_permissions)
         self.task = task
         self.instrument_family = instrument_family
+        _register_ablation_authority_policy_binding(
+            self,
+            scientific_registry=scientific_registry,
+            protocol_id=self.protocol_id,
+            protocol_hash=self.protocol_hash,
+        )
 
     def _load_outcome(
         self,
@@ -1433,48 +1509,57 @@ class AblationQualificationAuthority:
         return population, outcomes
 
 
-_ABLATION_AUTHORITY_STATE_FIELDS = frozenset(
-    {
-        "scientific_registry",
-        "experience_memory",
-        "artifact_store",
-        "protocol_id",
-        "protocol_hash",
-        "source_revision",
-        "causal_cutoff",
-        "granted_permissions",
-        "task",
-        "instrument_family",
-    }
-)
-
-
 def _registered_policy_context(
     authority: object,
 ) -> tuple[ScientificRegistry, str, str]:
-    """Read only the exact registry/protocol binding from an issued authority.
+    """Resolve the exact registry/protocol binding from independent lifetime state.
 
-    This is deliberately narrower than outcome/economic resolution.  Until
-    utility/cost projection owners are available, policy preflight may select
-    the preregistered decision geometry but must not read candidate outcomes.
+    The public instance remains useful for the later outcome/population resolver,
+    but it is not the issuance authority for preregistered scientific policy.
+    Post-construction rebinding therefore fails closed instead of selecting a
+    different protocol or registry.
     """
 
-    if type(authority) is not AblationQualificationAuthority:
-        raise ProtocolViolation("ablation qualification authority type is invalid")
+    scientific_registry, protocol_id, protocol_hash = (
+        _issued_ablation_authority_policy_binding(authority)
+    )
     try:
-        state = object.__getattribute__(authority, "__dict__")
+        current_registry = object.__getattribute__(
+            authority,
+            "scientific_registry",
+        )
+        current_protocol_id = object.__getattribute__(
+            authority,
+            "protocol_id",
+        )
+        current_protocol_hash = object.__getattribute__(
+            authority,
+            "protocol_hash",
+        )
     except AttributeError as error:
         raise ProtocolViolation(
             "ablation qualification authority state is unavailable"
         ) from error
-    if type(state) is not dict or set(state) != _ABLATION_AUTHORITY_STATE_FIELDS:
+
+    if current_registry is not scientific_registry:
         raise ProtocolViolation(
-            "ablation qualification authority state is unavailable"
+            "ablation qualification authority registry binding changed after issuance"
+        )
+    if (
+        type(current_protocol_id) is not str
+        or current_protocol_id != protocol_id
+    ):
+        raise ProtocolViolation(
+            "ablation qualification authority protocol_id binding changed after issuance"
+        )
+    if (
+        type(current_protocol_hash) is not str
+        or current_protocol_hash != protocol_hash
+    ):
+        raise ProtocolViolation(
+            "ablation qualification authority protocol_hash binding changed after issuance"
         )
 
-    scientific_registry = state["scientific_registry"]
-    protocol_id = state["protocol_id"]
-    protocol_hash = state["protocol_hash"]
     if type(scientific_registry) is not ScientificRegistry:
         raise ProtocolViolation(
             "ablation qualification authority registry is not canonical"

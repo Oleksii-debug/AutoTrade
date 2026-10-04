@@ -1335,9 +1335,63 @@ def _risk_input_fingerprint(
     return sha256(encoded).hexdigest()
 
 
-def risk_decision_fingerprint(decision: RiskDecision) -> str:
+def _validate_risk_decision_shape(decision: RiskDecision) -> None:
+    """Reject caller-controlled subclasses before risk evidence is fingerprinted."""
+
     if type(decision) is not RiskDecision:
         raise TypeError("decision must be an exact RiskDecision")
+    if type(decision.admitted) is not bool:
+        raise TypeError("risk decision admitted must be an exact boolean")
+    for name in (
+        "resulting_position",
+        "gross_leverage",
+        "net_leverage",
+        "worst_stress_loss",
+    ):
+        if type(getattr(decision, name)) is not Decimal:
+            raise TypeError(f"risk decision {name} must be an exact Decimal")
+    if type(decision.input_fingerprint) is not str:
+        raise TypeError("risk decision input_fingerprint must be an exact string")
+    if type(decision.rules) is not tuple:
+        raise TypeError("risk decision rules must be an exact tuple")
+    for item in decision.rules:
+        if type(item) is not RiskRuleResult:
+            raise TypeError("risk decision rules must contain exact RiskRuleResult values")
+        if (
+            type(item.rule) is not str
+            or type(item.passed) is not bool
+            or type(item.observed) is not str
+            or type(item.limit) is not str
+            or type(item.reason) is not str
+        ):
+            raise TypeError("risk decision rule fields must use exact scalar types")
+    for name in (
+        "arithmetic_policy_id",
+        "decision_id",
+        "intent_hash",
+        "capability_snapshot_id",
+        "authoritative_risk_snapshot_id",
+        "evaluated_at",
+        "valid_until",
+    ):
+        value = getattr(decision, name)
+        if value is not None and type(value) is not str:
+            raise TypeError(f"risk decision {name} must be an exact string or None")
+    for name in ("state_version", "policy_version", "reservation_version"):
+        value = getattr(decision, name)
+        if value is not None and type(value) is not int:
+            raise TypeError(f"risk decision {name} must be an exact integer or None")
+    if (
+        decision.reservation_requirements is not None
+        and type(decision.reservation_requirements) is not tuple
+    ):
+        raise TypeError(
+            "risk decision reservation_requirements must be an exact tuple or None"
+        )
+
+
+def risk_decision_fingerprint(decision: RiskDecision) -> str:
+    _validate_risk_decision_shape(decision)
     payload = {
         "admitted": decision.admitted,
         "resulting_position": _canonical_decimal_text(decision.resulting_position),
@@ -1441,8 +1495,7 @@ def bind_risk_decision(
 ) -> RiskDecision:
     """Bind a deterministic risk result to immutable admission evidence."""
 
-    if type(decision) is not RiskDecision:
-        raise TypeError("decision must be an exact RiskDecision")
+    _validate_risk_decision_shape(decision)
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
         raise ValueError(
             "risk decision must use the current exact arithmetic policy"
@@ -1502,8 +1555,7 @@ def bind_risk_decision(
 
 
 def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
-    if type(decision) is not RiskDecision:
-        raise TypeError("risk_decision must be an exact RiskDecision")
+    _validate_risk_decision_shape(decision)
     if decision.decision_id is None:
         raise ValueError("risk_decision must be bound before admission")
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:

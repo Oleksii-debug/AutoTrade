@@ -537,6 +537,120 @@ class RiskExactArithmeticTests(unittest.TestCase):
             )
         self.assertEqual(HostileText.calls, 0)
 
+    def test_binding_rejects_hostile_arithmetic_policy_id_before_comparison(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+        touched = []
+
+        class HostileText(str):
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile policy equality")
+
+            def __ne__(self, other):
+                touched.append("ne")
+                raise AssertionError("hostile policy inequality")
+
+        hostile = type(raw)(
+            **{
+                **vars(raw),
+                "arithmetic_policy_id": HostileText(RISK_ARITHMETIC_POLICY_ID),
+            }
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "arithmetic_policy_id must be an exact string",
+        ):
+            bind_risk_decision(
+                hostile,
+                intent_hash="intent",
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-03T20:00:00+00:00",
+                valid_until="2026-10-03T20:01:00+00:00",
+            )
+        self.assertEqual(touched, [])
+
+    def test_fingerprint_rejects_hostile_rules_container_before_iteration(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+        touched = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile rules iteration")
+
+        hostile = type(raw)(
+            **{
+                **vars(raw),
+                "rules": HostileTuple(raw.rules),
+            }
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "rules must be an exact tuple",
+        ):
+            risk_decision_fingerprint(hostile)
+        self.assertEqual(touched, [])
+
+    def test_fingerprint_rejects_hostile_rule_before_field_reads(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+        touched = []
+        base_rule = raw.rules[0]
+
+        class HostileRule(type(base_rule)):
+            def __getattribute__(self, name):
+                if name in {"rule", "passed", "observed", "limit", "reason"}:
+                    touched.append(name)
+                    raise AssertionError("hostile rule field read")
+                return super().__getattribute__(name)
+
+        hostile_rule = HostileRule(**vars(base_rule))
+        hostile = type(raw)(
+            **{
+                **vars(raw),
+                "rules": (hostile_rule,),
+            }
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact RiskRuleResult",
+        ):
+            risk_decision_fingerprint(hostile)
+        self.assertEqual(touched, [])
+
     def test_input_fingerprint_binds_arithmetic_policy_identity(self):
         intent = RiskIntent.create(
             symbol="ABC",

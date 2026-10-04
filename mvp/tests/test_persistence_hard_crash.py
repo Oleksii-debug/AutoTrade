@@ -464,5 +464,166 @@ class HardCrashPersistenceTests(unittest.TestCase):
             self.assertEqual(len(reopened.pending_outbox()), 1)
 
 
+    def test_projection_checkpoint_process_exit_after_commit_is_recoverable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"kind": "fill", "quantity": "1"}
+                envelope = {
+                    "event_id": "evt-hard-crash",
+                    "event_type": "ExecutionFillObserved",
+                    "aggregate_type": "account",
+                    "aggregate_id": "paper-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+                store.append_event(envelope)
+
+                original_connect = store._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(82)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashAfterCommit(connection)
+
+                store._connect = crashing_connect
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 82)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(checkpoint["aggregate_version"], 1)
+            self.assertEqual(checkpoint["state"], {"net_quantity": "1"})
+            self.assertFalse(
+                reopened.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            )
+
+    def test_global_checkpoint_process_exit_after_commit_is_recoverable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"kind": "fill", "quantity": "1"}
+                envelope = {
+                    "event_id": "evt-hard-crash",
+                    "event_type": "ExecutionFillObserved",
+                    "aggregate_type": "account",
+                    "aggregate_id": "paper-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+                store.append_event(envelope)
+
+                original_connect = store._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(83)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashAfterCommit(connection)
+
+                store._connect = crashing_connect
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"paper-1": "1"},
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 83)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_global_projection_checkpoint(
+                projection_name="portfolio"
+            )
+            self.assertEqual(checkpoint["journal_sequence"], 1)
+            self.assertEqual(checkpoint["state"], {"paper-1": "1"})
+            self.assertFalse(
+                reopened.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"paper-1": "1"},
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

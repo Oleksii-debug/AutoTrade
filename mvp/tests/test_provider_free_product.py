@@ -17,7 +17,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.product_runtime import build_product, restore_product_backup
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.simulation_commands import _protocol, resolve_simulation_action
 from mvp.autotrade_mvp.simulation_session import ACCOUNT, ENVIRONMENT, PROVIDER, INSTRUMENT
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -158,6 +159,68 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
+
+    def test_simulation_receipt_replay_requires_exact_canonical_envelope(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                store = client.runtime.journal
+                protocol = _protocol(store)
+                state = client.state()['portfolio']['status']
+                command_id = str(uuid4())
+                payload = {
+                    'schema_version': 1,
+                    'command_id': command_id,
+                    'account_id': ACCOUNT,
+                    'environment': ENVIRONMENT,
+                    'protocol_digest': payload_digest(protocol),
+                    'stop_after_episodes': 1,
+                }
+                result = {
+                    'status': 'PAUSED',
+                    'completed_episodes': 1,
+                    'cash': state['cash'],
+                    'position': state['position'],
+                    'protocol_digest': payload['protocol_digest'],
+                    'economic_edge_status': 'INCONCLUSIVE',
+                }
+                body = {
+                    'action': 'START_SIMULATION',
+                    'command_payload_hash': payload_digest(payload),
+                    'result': result,
+                }
+                timestamp = protocol['start_time']
+                forged = {
+                    'event_id': str(uuid4()),
+                    'event_type': 'NotSimulationOperatorCompleted',
+                    'schema_version': '1.0.0',
+                    'aggregate_type': 'simulation_operator_receipt',
+                    'aggregate_id': command_id,
+                    'aggregate_version': '1',
+                    'host_id': 'local-simulation',
+                    'owner_epoch': '1',
+                    'environment': 'SIMULATION',
+                    'occurred_at': timestamp,
+                    'observed_at': timestamp,
+                    'committed_at': timestamp,
+                    'correlation_id': command_id,
+                    'causation_id': None,
+                    'payload': body,
+                    'payload_hash': payload_digest(body),
+                    'evidence_refs': [],
+                }
+                store.append_event(forged)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    'receipt envelope identity differs',
+                ):
+                    resolve_simulation_action(
+                        store,
+                        'START_SIMULATION',
+                        payload,
+                    )
+            finally:
+                client.close()
 
     def test_simulation_receipt_is_cas_bound_to_verified_journal_cut(self):
         with TemporaryDirectory() as directory:

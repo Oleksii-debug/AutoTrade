@@ -58,17 +58,106 @@ def validate_simulation_payload(action, payload, digest, account, environment):
 
 def resolve_simulation_action(journal, action, payload):
     from .operator_authority_commands import AuthorityExecutionResult
+    from .exact_decimal import canonical_decimal_text, parse_bounded_exact_decimal
     events = journal.load_events(_RECEIPT_TYPE, payload['command_id'])
     if not events:
         return None
     if len(events) != 1:
         raise ValueError('simulation receipt history differs')
     event = events[0]
+    expected_event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            'autotrade:simulation-receipt:' + payload['command_id'],
+        )
+    )
+    if (
+        event.get('event_id') != expected_event_id
+        or event.get('event_type') != 'SimulationOperatorCompleted'
+        or event.get('aggregate_type') != _RECEIPT_TYPE
+        or event.get('aggregate_id') != payload['command_id']
+        or event.get('aggregate_version') != 1
+        or event.get('host_id') != 'local-simulation'
+        or event.get('owner_epoch') != '1'
+        or event.get('environment') != 'SIMULATION'
+        or event.get('correlation_id') != payload['command_id']
+        or event.get('causation_id') is not None
+        or event.get('evidence_refs') != []
+        or event.get('occurred_at') != event.get('observed_at')
+        or event.get('observed_at') != event.get('committed_at')
+    ):
+        raise ValueError('simulation receipt envelope identity differs')
+    body = event.get('payload')
+    if type(body) is not dict or set(body) != {
+        'action',
+        'command_payload_hash',
+        'result',
+    }:
+        raise ValueError('simulation receipt payload schema differs')
     expected = {'action': action, 'command_payload_hash': payload_digest(payload)}
-    if any(event['payload'].get(k) != v for k, v in expected.items()):
+    if any(body.get(k) != v for k, v in expected.items()):
         raise ValueError('simulation receipt conflicts with command')
+    result = body.get('result')
+    if type(result) is not dict:
+        raise ValueError('simulation receipt result is malformed')
+
+    if action == 'BACKUP_SIMULATION':
+        if (
+            set(result) != {
+                'backup_id',
+                'manifest_digest',
+                'status',
+                'restore_trading_gate',
+            }
+            or result.get('backup_id') != payload['command_id']
+            or result.get('status') != 'VERIFIED'
+            or result.get('restore_trading_gate') != 'RECONCILIATION_REQUIRED'
+        ):
+            raise ValueError('simulation backup receipt result differs')
+        digest = result.get('manifest_digest')
+        if (
+            type(digest) is not str
+            or len(digest) != 71
+            or not digest.startswith('sha256:')
+            or any(character not in '0123456789abcdef' for character in digest[7:])
+        ):
+            raise ValueError('simulation backup receipt manifest digest is invalid')
+    else:
+        protocol = _protocol(journal)
+        total = len(protocol['prices'])
+        target = (
+            total
+            if payload['stop_after_episodes'] is None
+            else payload['stop_after_episodes']
+        )
+        required = {
+            'status',
+            'completed_episodes',
+            'cash',
+            'position',
+            'protocol_digest',
+            'economic_edge_status',
+        }
+        completed = result.get('completed_episodes')
+        if (
+            set(result) != required
+            or type(completed) is not int
+            or completed < target
+            or completed > total
+            or result.get('status')
+            != ('COMPLETED' if completed == total else 'PAUSED')
+            or result.get('protocol_digest') != payload['protocol_digest']
+            or result.get('economic_edge_status') != 'INCONCLUSIVE'
+        ):
+            raise ValueError('simulation lifecycle receipt result differs')
+        for field in ('cash', 'position'):
+            value = result.get(field)
+            parsed = parse_bounded_exact_decimal(value)
+            if canonical_decimal_text(parsed) != value:
+                raise ValueError('simulation lifecycle receipt money is not canonical')
+
     return AuthorityExecutionResult((event['event_id'],), ({'kind': 'simulation-lifecycle',
-        'event_id': event['event_id'], 'action': action, 'result': event['payload']['result']},))
+        'event_id': event['event_id'], 'action': action, 'result': result},))
 
 
 def execute_simulation_action(journal, action, payload, accepted_at):

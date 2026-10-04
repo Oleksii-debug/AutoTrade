@@ -75,6 +75,59 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(ProtocolConflict, "immutable"):
                 registry.register_protocol(changed, protocol_id=protocol_id)
 
+    def test_stored_protocol_integrity_is_rechecked_before_every_authority_use(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            registry = ScientificRegistry(path)
+            registered = registry.register_protocol(protocol())
+
+            # Model storage corruption or a legacy/manual writer that bypassed the
+            # append-only trigger.  The original protocol hash must remain the
+            # authority; the altered trial budget may not be consumed anywhere.
+            with sqlite3.connect(path) as connection:
+                connection.execute("DROP TRIGGER protocols_no_update")
+                cursor = connection.execute(
+                    "UPDATE protocols SET payload_json="
+                    "REPLACE(payload_json, ?, ?) WHERE protocol_id=?",
+                    (
+                        '"trial_budget":2',
+                        '"trial_budget":3',
+                        registered.protocol_id,
+                    ),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            for operation in (
+                lambda: registry.protocol_registration(registered.protocol_id),
+                lambda: registry.completeness(registered.protocol_id),
+                lambda: registry.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-consume-corrupt-budget"},
+                ),
+                lambda: registry.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="corrupt-protocol-holdout",
+                    holdout_identity=holdout_identity(),
+                    result={"score": "0.1"},
+                ),
+            ):
+                with self.subTest(operation=operation):
+                    with self.assertRaisesRegex(
+                        ProtocolViolation,
+                        "registered protocol integrity mismatch",
+                    ):
+                        operation()
+
+            self.assertEqual(
+                registry.holdout_access_count(
+                    registered.protocol_id,
+                    "corrupt-protocol-holdout",
+                ),
+                0,
+            )
+
     def test_binary_float_is_rejected_from_frozen_scientific_evidence(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

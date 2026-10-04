@@ -1414,6 +1414,7 @@ def _install_direct_authenticated_read_execution_authority():
         int,
         tuple[
             weakref.ReferenceType,
+            weakref.ReferenceType,
             tuple[str, str, str, str, int, str, object],
         ],
     ] = {}
@@ -1511,7 +1512,11 @@ def _install_direct_authenticated_read_execution_authority():
             values,
         ):
             object.__setattr__(receipt, field_name, field_value)
-        receipts[id(receipt)] = (weakref.ref(receipt), values)
+        receipts[id(receipt)] = (
+            weakref.ref(receipt),
+            weakref.ref(response),
+            values,
+        )
         object.__setattr__(
             response,
             "_direct_authenticated_read_execution_receipt",
@@ -1521,7 +1526,7 @@ def _install_direct_authenticated_read_execution_authority():
 
     def snapshot(
         receipt: object,
-    ) -> tuple[str, str, str, str, int, str, object]:
+    ) -> tuple[str, str, str, str, int, str, object, object | None]:
         if type(receipt) is not DirectAuthenticatedReadExecutionReceipt:
             raise ProviderTransportError(
                 "canonical direct authenticated-read execution receipt is required"
@@ -1532,7 +1537,7 @@ def _install_direct_authenticated_read_execution_authority():
             raise ProviderTransportError(
                 "direct authenticated-read receipt construction authority is unavailable"
             )
-        values = state[1]
+        values = state[2]
         if (
             receipt.transport_identity,
             receipt.network_policy_identity,
@@ -1545,7 +1550,7 @@ def _install_direct_authenticated_read_execution_authority():
             raise ProviderTransportError(
                 "direct authenticated-read receipt changed after wire execution"
             )
-        return values
+        return (*values, state[1]())
 
     return register_client, require_client, mint, snapshot
 
@@ -1604,6 +1609,10 @@ def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
             None,
         )
         values = snapshot_impl(receipt)
+        if values[7] is not response:
+            raise ProviderTransportError(
+                "direct authenticated-read receipt is not bound to exact response"
+            )
         if (
             values[4] != response.http_status
             or values[5] != "sha256:" + sha256(response.body).hexdigest()

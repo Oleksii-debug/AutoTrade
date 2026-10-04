@@ -84,8 +84,8 @@ class Section17BlindedReplayTests(unittest.TestCase):
         result = self.blind(dataset(event("btc-2024-03-12-kraken")))
         item = result.events[0]
         self.assertEqual(item.event_id, "Event 000001")
-        self.assertEqual(item.payload["instrument_id"], "Instrument 001")
-        self.assertEqual(item.payload["provider_id"], "Provider 001")
+        self.assertRegex(item.payload["instrument_id"], r"^Instrument [0-9A-F]{64}$")
+        self.assertRegex(item.payload["provider_id"], r"^Provider [0-9A-F]{64}$")
         self.assertEqual(item.event_time_us, 0)
         self.assertEqual(item.available_at_us, 0)
         text = json.dumps(
@@ -877,8 +877,46 @@ class Section17BlindedReplayTests(unittest.TestCase):
             "training_cutoff_uncertainty",
         ):
             self.assertFalse(hasattr(view, name), name)
-        self.assertEqual(view.events[0].payload["instrument_id"], "Instrument 001")
-        self.assertEqual(view.events[0].payload["provider_id"], "Provider 001")
+        self.assertRegex(view.events[0].payload["instrument_id"], r"^Instrument [0-9A-F]{64}$")
+        self.assertRegex(view.events[0].payload["provider_id"], r"^Provider [0-9A-F]{64}$")
+
+    def test_visible_prefix_is_invariant_to_unseen_future_identity_and_calendar(self):
+        base = dataset(
+            event(
+                "visible",
+                instrument="BTC-USD",
+                provider="Kraken",
+                available_at="2024-03-12T10:00:00Z",
+            )
+        )
+        extended = dataset(
+            event(
+                "visible",
+                instrument="BTC-USD",
+                provider="Kraken",
+                available_at="2024-03-12T10:00:00Z",
+            ),
+            event(
+                "future",
+                instrument="FUTURE-9",
+                provider="FutureProvider",
+                available_at="2024-03-13T10:00:00Z",
+                sequence=2,
+                payload_extra={"expiry": "2020-01-01"},
+            ),
+        )
+        p = profile(calendars=(CalendarField(("expiry",)),))
+        first = self.blind(base, experiment_id="prefix-invariance", profile=p)
+        second = self.blind(
+            extended, experiment_id="prefix-invariance", profile=p
+        )
+        self.assertEqual(first.events[0], second.events[0])
+        self.assertEqual(
+            first.events[0].payload["instrument_id"],
+            second.events[0].payload["instrument_id"],
+        )
+        self.assertEqual(first.events[0].event_time_us, 0)
+        self.assertEqual(second.events[0].event_time_us, 0)
 
     def test_string_subclass_cannot_bypass_payload_identity_leak_scan(self):
         callbacks = []

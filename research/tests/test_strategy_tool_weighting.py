@@ -568,21 +568,26 @@ class StrategyToolWeightingTests(unittest.TestCase):
             )
         )
 
-    def test_policy_requires_two_distinct_families_per_cell(self):
-        first = descriptor("MOMENTUM", "a")
-        second = descriptor("MOMENTUM", "b")
-        with self.assertRaisesRegex(
-            StrategyToolWeightingError,
-            "two distinct",
-        ):
-            policy(strategies=(first, second))
+    def test_policy_allows_one_evidence_bound_strategy_tool(self):
+        only = descriptor("MOMENTUM", "a")
+        p = policy(
+            strategies=(only,),
+            cells=(StrategyToolCell("crypto", "bull", 3600),),
+        )
+        row = evidence(only, "bull", "0.03", net="0.04")
+        result = assess_strategy_tools(p, (row,))
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(
+            result.weights["crypto::bull::3600"][only.fingerprint],
+            ExactWeight(1, 1),
+        )
 
-    def test_policy_rejects_horizon_without_two_comparable_families(self):
-        first = descriptor("FIBONACCI", "a", horizon=3600)
+    def test_policy_rejects_cell_without_any_eligible_strategy(self):
+        first = descriptor("FIBONACCI", "a", horizon=60)
         second = descriptor("MOMENTUM", "b", horizon=60)
         with self.assertRaisesRegex(
             StrategyToolWeightingError,
-            "two distinct",
+            "at least one registered strategy",
         ):
             policy(
                 strategies=(first, second),

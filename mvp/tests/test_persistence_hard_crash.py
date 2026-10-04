@@ -625,5 +625,86 @@ class HardCrashPersistenceTests(unittest.TestCase):
             )
 
 
+    def test_result_only_command_process_exit_after_commit_retries_idempotently(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(84)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashAfterCommit(connection)
+
+                store._connect = crashing_connect
+                store.record_command(
+                    actor="crash-test",
+                    environment="SIMULATION",
+                    command_id="cmd-result-only",
+                    idempotency_key="key-result-only",
+                    request={"action": "STATUS"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 84)
+
+            reopened = JournalStore(path)
+            self.assertEqual(
+                reopened.whole_store_state_cut(),
+                {
+                    "journal_sequence": 0,
+                    "counts": {
+                        "events": 0,
+                        "outbox": 0,
+                        "command_dedupe": 1,
+                        "projection_checkpoints": 0,
+                        "global_projection_checkpoints": 0,
+                    },
+                },
+            )
+            saved, inserted = reopened.record_command(
+                actor="crash-test",
+                environment="SIMULATION",
+                command_id="cmd-result-only-retry",
+                idempotency_key="key-result-only",
+                request={"action": "STATUS"},
+                result={"status": "IGNORED"},
+                state_version=2,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
+
 if __name__ == "__main__":
     unittest.main()

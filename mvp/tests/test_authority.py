@@ -434,6 +434,18 @@ class AuthorityTests(unittest.TestCase):
                 notional="100",
                 expires_at="2026-09-24T23:00:00Z",
             )
+            authority.add_confirmation(
+                confirmation_id="other-legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
             reservations = DurableReservationBook(
                 store,
                 environment="SIMULATION",
@@ -463,6 +475,11 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 result.reason,
                 "confirmation_financial_binding_missing",
+            )
+            self.assertIsNone(result.confirmation_id)
+            self.assertEqual(
+                result.requested_confirmation_id,
+                "legacy-confirmation",
             )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
@@ -511,6 +528,57 @@ class AuthorityTests(unittest.TestCase):
                 Decimal("0"),
             )
 
+            changed_confirmation = dict(kwargs)
+            changed_confirmation["confirmation_id"] = (
+                "other-legacy-confirmation"
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "another financial command",
+            ):
+                authority.admit(
+                    reservation_book=reservations,
+                    **changed_confirmation,
+                )
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                authority_event_count,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                ),
+                risk_event_count,
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
+            )
+
+            restarted = authority_service(store)
+            restored = restarted._admissions[result.admission_id]
+            self.assertIsNone(restored.confirmation_id)
+            self.assertEqual(
+                restored.requested_confirmation_id,
+                "legacy-confirmation",
+            )
+            historical = (
+                restarted._validate_historical_financial_retry_evidence(
+                    restored,
+                    restarted._policies[item.policy_id],
+                )
+            )
+            self.assertEqual(
+                historical["decision_id"],
+                result.risk_decision_id,
+            )
+
     def test_durable_financial_binding_rejects_legacy_confirmation(self):
         service = AuthorityService()
         item = policy()
@@ -529,12 +597,34 @@ class AuthorityTests(unittest.TestCase):
         )
 
         confirmation = service._confirmations["legacy-durable-confirmation"]
+        record = AdmissionRecord(
+            admission_id="legacy-durable-admission",
+            policy_id=item.policy_id,
+            intent_hash="legacy-durable-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=InstrumentVersionIdentity(
+                INSTRUMENT_ID,
+                1,
+            ),
+            action="ORDER.SUBMIT",
+            notional=Decimal("100"),
+            risk_reducing=False,
+            state_version=1,
+            authority_epoch=0,
+            outcome="ADMITTED",
+            admitted_at="2026-09-24T18:00:00Z",
+            confirmation_id="legacy-durable-confirmation",
+            reason="admitted",
+            request_fingerprint="0" * 64,
+        )
         with self.assertRaisesRegex(
             AuthorityConflict,
             "lacks financial binding",
         ):
             authority_module._validate_confirmation_financial_binding(
                 confirmation=confirmation,
+                record=record,
                 authority_policy_version=item.version,
                 durable_risk_intent={},
                 authoritative_risk_snapshot={},

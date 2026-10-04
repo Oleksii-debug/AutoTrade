@@ -73,7 +73,7 @@ _OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
 _OWNER_AGGREGATE_ID = "canonical"
 _BOOTSTRAP_CONTRACT = "canonical-simulation-bootstrap-v1"
 
-_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@3"
+_SIMULATION_PROTOCOL_VERSION = "canonical-simulation@4"
 _SIMULATION_EPOCH = "2026-09-30T12:00:00Z"
 _STRATEGY_ID = "moving-average"
 _STRATEGY_VERSION = "1"
@@ -191,6 +191,12 @@ def _simulation_protocol_document(*, fault_after_send: bool) -> dict[str, object
             "fee_rate": canonical_decimal_text(FEE_RATE),
             "provider_protocol": _PROVIDER_PROTOCOL,
             "economic_protocol": _ECONOMIC_PROTOCOL,
+        },
+        "settlement_policy": {
+            "rule_id": _SIMULATION_SETTLEMENT_RULE_ID,
+            "rule_version": _SIMULATION_SETTLEMENT_RULE_VERSION,
+            "contractual_cycle": "SAME_DAY",
+            "provider_evidence_delay_seconds": _SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS,
         },
         "risk_policy": _canonical_risk_policy_document(),
         "authority_protocols": {
@@ -1331,7 +1337,22 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             )},
         )
 
-    authority = AuthorityService(store, risk_authority_resolver=resolve_risk)
+    artifacts = ArtifactStore(root / "artifacts")
+    settlements = DurableSettlementBook(
+        store,
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_environment=ENVIRONMENT,
+        evidence_artifact_root=root / "artifacts",
+        evidence_artifact_store=artifacts,
+    )
+    authority = AuthorityService(
+        store,
+        risk_authority_resolver=resolve_risk,
+        settlement_book=settlements,
+        economic_book=economic,
+    )
     policy_id = _uuid("policy", episode_id)
     authority.register_policy(AuthorityPolicy.create(
         policy_id=policy_id, account_id=ACCOUNT, environments={ENVIRONMENT},
@@ -1341,7 +1362,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     ), simulation_time=timestamp)
     reservations = DurableReservationBook(
         store, environment=ENVIRONMENT, account_id=ACCOUNT,
-        resolution_artifact_store=ArtifactStore(root / "artifacts"),
+        resolution_artifact_store=artifacts,
         resolution_artifact_root=root / "artifacts",
     )
     amount, required = buy_requirements
@@ -1435,20 +1456,47 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         raise ValueError("acknowledgement is not a fill; reconciliation required")
     fill = fills[0]
     fee = fill["fees"][0]
+    fill_transaction = book_equity_fill(
+        transaction_id=_uuid("fill-transaction", episode_id),
+        cause_event_id=fill["provider_execution_id"],
+        instrument=fill["instrument_version"],
+        settlement_currency="USD",
+        side=fill["side"],
+        quantity=fill["last_quantity"]["value"],
+        price=fill["last_price"],
+        fee=fee["amount"],
+        fee_currency=fee["currency"],
+        economic_effective_at=fill["trade_time"],
+        economic_order_key=f"provider:{PROVIDER}:execution:{fill['provider_execution_id']}",
+        observed_at=fill["receipt_time"],
+    )
+    trade_point = datetime.fromisoformat(
+        fill["trade_time"].replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    settlement_date = date.fromisoformat(fill["settlement_date"])
+    settlement_rule = _simulation_settlement_rule(
+        artifacts,
+        trade_date=trade_point.date(),
+        settlement_date=settlement_date,
+    )
+    settlement_obligation = equity_cash_obligation_from_transaction(
+        fill_transaction,
+        obligation_id=_uuid("settlement-obligation", episode_id),
+        instrument=INSTRUMENT,
+        settlement_currency="USD",
+        settlement_date=settlement_date,
+        rule_binding=settlement_rule,
+    )
     commit_economic_batch_with_reservation_consumption(
         economic, reservations,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
         reservation_id=_uuid("reservation", episode_id),
         usage={"CASH:USD": required_text},
-        transactions=(book_equity_fill(
-            transaction_id=_uuid("fill-transaction", episode_id),
-            cause_event_id=fill["provider_execution_id"],
-            instrument=fill["instrument_version"], settlement_currency="USD",
-            side=fill["side"], quantity=fill["last_quantity"]["value"],
-            price=fill["last_price"], fee=fee["amount"],
-            fee_currency=fee["currency"],
-        ),), committed_at=timestamp,
+        transactions=(fill_transaction,),
+        committed_at=timestamp,
+        settlement_book=settlements,
+        settlement_obligations=(settlement_obligation,),
     )
     reconciled, _ = _reconcile(
         provider, economic, timestamp, fill=fill, client_order_id=dispatch.client_order_id,

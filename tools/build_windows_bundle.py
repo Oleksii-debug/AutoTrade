@@ -573,9 +573,31 @@ def _load_composition(
         raise BundleError(
             "composition schema_compatibility must contain exactly minimum and maximum"
         )
+    schema_minimum = _required_text(
+        schema_range["minimum"],
+        name="schema minimum",
+    )
+    schema_maximum = _required_text(
+        schema_range["maximum"],
+        name="schema maximum",
+    )
+    minimum_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", schema_minimum)
+    maximum_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+|x)", schema_maximum)
+    if minimum_match is None:
+        raise BundleError("schema minimum must use major.minor.patch")
+    if maximum_match is None:
+        raise BundleError("schema maximum must use major.minor.patch or major.minor.x")
+    minimum_key = tuple(int(part) for part in minimum_match.groups())
+    maximum_prefix = tuple(int(part) for part in maximum_match.groups()[:2])
+    maximum_patch = maximum_match.group(3)
+    if maximum_patch == "x":
+        if maximum_prefix < minimum_key[:2]:
+            raise BundleError("schema compatibility maximum precedes minimum")
+    elif (*maximum_prefix, int(maximum_patch)) < minimum_key:
+        raise BundleError("schema compatibility maximum precedes minimum")
     normalized_schema_range = {
-        "minimum": _required_text(schema_range["minimum"], name="schema minimum"),
-        "maximum": _required_text(schema_range["maximum"], name="schema maximum"),
+        "minimum": schema_minimum,
+        "maximum": schema_maximum,
     }
 
     runtime = value["runtime"]

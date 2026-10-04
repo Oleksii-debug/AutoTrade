@@ -3227,6 +3227,8 @@ def revalidate_evidence_bound_allocation(
     _verify_evidence_code=getattr(_verified_allocation_payload_owner, "__code__", None),
     _evidence_valid_at=_allocation_evidence_valid_at,
     _evidence_valid_at_code=getattr(_allocation_evidence_valid_at, "__code__", None),
+    _result_type=EvidenceBoundObjectiveAllocationResult,
+    _policy_type=AllocationPolicy,
     _getattribute=object.__getattribute__,
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
@@ -3263,69 +3265,69 @@ def revalidate_evidence_bound_allocation(
             "allocation admission evidence verifier executable changed after binding"
         )
 
-    if type(result) is not EvidenceBoundObjectiveAllocationResult:
+    if type(result) is not _result_type:
         raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
-    if type(current_policy) is not AllocationPolicy:
+    if type(current_policy) is not _policy_type:
         raise TypeError("current_policy must be exact AllocationPolicy")
     normalized_environment = _text(environment, name="allocation environment").upper()
-    if normalized_environment != result.environment:
+    if normalized_environment != _getattribute(result, "environment"):
         raise ValueError("allocation result environment does not match authority environment")
     point_instant = _instant(as_of, name="allocation revalidation time")
     decision_instant = _instant(
-        result.decision_time,
+        _getattribute(result, "decision_time"),
         name="allocation proposal decision_time",
     )
     if point_instant < decision_instant:
         raise ValueError("allocation revalidation time precedes proposal decision_time")
     point = point_instant.isoformat().replace("+00:00", "Z")
-    if _text(current_policy_version, name="current_policy_version") != result.policy_version:
+    if _text(current_policy_version, name="current_policy_version") != _getattribute(result, "policy_version"):
         raise ValueError("policy version changed after allocation proposal")
-    if _allocation_policy_digest(current_policy) != result.policy_config_digest:
+    if _allocation_policy_digest(current_policy) != _getattribute(result, "policy_config_digest"):
         raise ValueError("allocation policy configuration changed after proposal")
     if (
         _objective_search_config_digest(current_max_candidate_sets)
-        != result.objective_search_config_digest
+        != _getattribute(result, "objective_search_config_digest")
     ):
         raise ValueError("objective search configuration changed after proposal")
-    if _text(current_provider_id, name="current_provider_id") != result.provider_id:
+    if _text(current_provider_id, name="current_provider_id") != _getattribute(result, "provider_id"):
         raise ValueError("provider identity changed after allocation proposal")
     if _normalize_current_scope_mapping(
         current_instrument_versions,
         name="current_instrument_versions",
-    ) != result.instrument_versions:
+    ) != _getattribute(result, "instrument_versions"):
         raise ValueError("instrument version scope changed after allocation proposal")
     if _normalize_current_scope_mapping(
         current_capability_snapshot_ids,
         name="current_capability_snapshot_ids",
-    ) != result.capability_snapshot_ids:
+    ) != _getattribute(result, "capability_snapshot_ids"):
         raise ValueError("capability snapshot scope changed after allocation proposal")
-    if _text(current_account_id, name="current_account_id") != result.account_id:
+    if _text(current_account_id, name="current_account_id") != _getattribute(result, "account_id"):
         raise ValueError("account identity does not match allocation proposal")
     if _text(
         current_account_snapshot_id,
         name="current_account_snapshot_id",
-    ) != result.account_snapshot_id:
+    ) != _getattribute(result, "account_snapshot_id"):
         raise ValueError("account snapshot identity advanced after allocation proposal")
     if _text(
         current_reconciliation_run_id,
         name="current_reconciliation_run_id",
-    ) != result.reconciliation_run_id:
+    ) != _getattribute(result, "reconciliation_run_id"):
         raise ValueError("reconciliation identity advanced after allocation proposal")
     if _text(
         current_reservation_state_digest,
         name="current_reservation_state_digest",
-    ) != result.reservation_state_digest:
+    ) != _getattribute(result, "reservation_state_digest"):
         raise ValueError("reservation state digest changed after allocation proposal")
     for name, actual, expected in (
         (
             "account state version",
             current_account_state_version,
-            result.account_state_version,
+            _getattribute(result, "account_state_version"),
         ),
         (
             "reservation state version",
             current_reservation_state_version,
-            result.reservation_state_version,
+            _getattribute(result, "reservation_state_version"),
         ),
     ):
         if type(actual) is not int or actual < 0:
@@ -3333,7 +3335,7 @@ def revalidate_evidence_bound_allocation(
         if actual != expected:
             raise ValueError(f"{name} advanced after allocation proposal")
 
-    for evidence_id, digest in result.evidence_refs:
+    for evidence_id, digest in _getattribute(result, "evidence_refs"):
         evidence = resolved_evidence.get(evidence_id)
         if type(evidence) is not _evidence_type:
             raise ValueError(f"allocation evidence {evidence_id} no longer resolves")
@@ -3342,30 +3344,30 @@ def revalidate_evidence_bound_allocation(
         evidence_environment = _getattribute(evidence, "environment")
         if evidence_digest != digest:
             raise ValueError(f"allocation evidence {evidence_id} changed after proposal")
-        if evidence_environment != result.environment:
+        if evidence_environment != _getattribute(result, "environment"):
             raise ValueError(f"allocation evidence {evidence_id} environment changed")
         if not _evidence_valid_at(evidence, point):
             raise ValueError(f"allocation evidence {evidence_id} is stale at admission")
 
     expected_digest = _allocation_decision_digest(
-        result.objective,
-        evidence_refs=result.evidence_refs,
-        environment=result.environment,
-        policy_version=result.policy_version,
-        policy_config_digest=result.policy_config_digest,
-        objective_search_config_digest=result.objective_search_config_digest,
-        decision_time=result.decision_time,
-        provider_id=result.provider_id,
-        account_id=result.account_id,
-        instrument_versions=result.instrument_versions,
-        capability_snapshot_ids=result.capability_snapshot_ids,
-        account_snapshot_id=result.account_snapshot_id,
-        reconciliation_run_id=result.reconciliation_run_id,
-        account_state_version=result.account_state_version,
-        reservation_state_version=result.reservation_state_version,
-        reservation_state_digest=result.reservation_state_digest,
-        base_currency=result.base_currency,
+        _getattribute(result, "objective"),
+        evidence_refs=_getattribute(result, "evidence_refs"),
+        environment=_getattribute(result, "environment"),
+        policy_version=_getattribute(result, "policy_version"),
+        policy_config_digest=_getattribute(result, "policy_config_digest"),
+        objective_search_config_digest=_getattribute(result, "objective_search_config_digest"),
+        decision_time=_getattribute(result, "decision_time"),
+        provider_id=_getattribute(result, "provider_id"),
+        account_id=_getattribute(result, "account_id"),
+        instrument_versions=_getattribute(result, "instrument_versions"),
+        capability_snapshot_ids=_getattribute(result, "capability_snapshot_ids"),
+        account_snapshot_id=_getattribute(result, "account_snapshot_id"),
+        reconciliation_run_id=_getattribute(result, "reconciliation_run_id"),
+        account_state_version=_getattribute(result, "account_state_version"),
+        reservation_state_version=_getattribute(result, "reservation_state_version"),
+        reservation_state_digest=_getattribute(result, "reservation_state_digest"),
+        base_currency=_getattribute(result, "base_currency"),
     )
-    if expected_digest != result.decision_digest:
+    if expected_digest != _getattribute(result, "decision_digest"):
         raise ValueError("allocation decision digest does not match result content")
     return True

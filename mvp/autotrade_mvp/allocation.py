@@ -1669,7 +1669,6 @@ _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 def _make_allocation_payload_sealer(
     _json_dumps=json.dumps,
     _json_dumps_code=getattr(json.dumps, "__code__", None),
-    _json_dumps_globals=getattr(json.dumps, "__globals__", None),
     _json_encoder=json.JSONEncoder,
     _json_encoder_init=json.JSONEncoder.__init__,
     _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
@@ -1680,6 +1679,12 @@ def _make_allocation_payload_sealer(
     _json_encoder_iterencode=json.JSONEncoder.iterencode,
     _json_encoder_iterencode_code=getattr(json.JSONEncoder.iterencode, "__code__", None),
     _json_encoder_globals=getattr(json.JSONEncoder.iterencode, "__globals__", None),
+    _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
+        "encode_basestring"
+    ),
+    _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
+        "c_make_encoder"
+    ),
     _json_make_iterencode=json.JSONEncoder.iterencode.__globals__.get(
         "_make_iterencode"
     ),
@@ -1729,8 +1734,6 @@ def _make_allocation_payload_sealer(
             encoder_type_dict = type.__getattribute__(_json_encoder, "__dict__")
             if (
                 getattr(_json_dumps, "__code__", None) is not _json_dumps_code
-                or type(_json_dumps_globals) is not dict
-                or dict.get(_json_dumps_globals, "JSONEncoder") is not _json_encoder
                 or encoder_type_dict.get("__init__") is not _json_encoder_init
                 or getattr(_json_encoder_init, "__code__", None)
                 is not _json_encoder_init_code
@@ -1746,20 +1749,27 @@ def _make_allocation_payload_sealer(
                 or getattr(_json_encoder_iterencode, "__globals__", None)
                 is not _json_encoder_globals
                 or type(_json_encoder_globals) is not dict
+                or dict.get(_json_encoder_globals, "encode_basestring")
+                is not _json_encode_basestring
+                or dict.get(_json_encoder_globals, "c_make_encoder")
+                is not _json_c_make_encoder
                 or dict.get(_json_encoder_globals, "_make_iterencode")
                 is not _json_make_iterencode
                 or getattr(_json_make_iterencode, "__code__", None)
                 is not _json_make_iterencode_code
             ):
                 raise ValueError(
-                    "allocation evidence serializer authority changed after binding"
-                )
-            canonical_json = _json_dumps(
+                         canonical_json = _json_dumps(
                 value,
-                sort_keys=True,
-                separators=(",", ":"),
+                skipkeys=False,
                 ensure_ascii=False,
+                check_circular=True,
                 allow_nan=False,
+                cls=_json_encoder,
+                indent=None,
+                separators=(",", ":"),
+                default=None,
+                sort_keys=True,
             )
             owner = SealedAllocationPayload()
             key = id(proxy)
@@ -1798,13 +1808,11 @@ del _make_allocation_payload_sealer
 def _canonical_evidence_value(
     value,
     _sealed_lookup=_registered_allocation_payload,
-    _json_loads=json.loads,
-    _json_loads_code=getattr(json.loads, "__code__", None),
-    _json_loads_globals=getattr(json.loads, "__globals__", None),
     _json_decoder=json.JSONDecoder,
     _json_default_decoder=json.loads.__globals__.get("_default_decoder"),
     _json_decoder_decode=json.JSONDecoder.decode,
     _json_decoder_decode_code=getattr(json.JSONDecoder.decode, "__code__", None),
+    _json_decoder_decode_defaults=json.JSONDecoder.decode.__defaults__,
     _json_decoder_raw_decode=json.JSONDecoder.raw_decode,
     _json_decoder_raw_decode_code=getattr(
         json.JSONDecoder.raw_decode,
@@ -1866,12 +1874,7 @@ def _canonical_evidence_value(
                 "__dict__",
             )
             if (
-                getattr(_json_loads, "__code__", None) is not _json_loads_code
-                or type(_json_loads_globals) is not dict
-                or dict.get(_json_loads_globals, "_default_decoder")
-                is not _json_default_decoder
-                or dict.get(_json_loads_globals, "JSONDecoder") is not _json_decoder
-                or type(_json_default_decoder) is not _json_decoder
+                type(_json_default_decoder) is not _json_decoder
                 or "decode" in default_decoder_dict
                 or "raw_decode" in default_decoder_dict
                 or dict.get(default_decoder_dict, "scan_once")
@@ -1879,6 +1882,8 @@ def _canonical_evidence_value(
                 or decoder_type_dict.get("decode") is not _json_decoder_decode
                 or getattr(_json_decoder_decode, "__code__", None)
                 is not _json_decoder_decode_code
+                or getattr(_json_decoder_decode, "__defaults__", None)
+                is not _json_decoder_decode_defaults
                 or decoder_type_dict.get("raw_decode")
                 is not _json_decoder_raw_decode
                 or getattr(_json_decoder_raw_decode, "__code__", None)
@@ -1887,7 +1892,10 @@ def _canonical_evidence_value(
                 raise ValueError(
                     "allocation evidence decoder authority changed after binding"
                 )
-            decoded = _json_loads(canonical_json)
+            decoded = _json_decoder_decode(
+                _json_default_decoder,
+                canonical_json,
+            )
             if type(decoded) is not dict:
                 raise RuntimeError("sealed allocation payload provenance is invalid")
             return decoded
@@ -1905,7 +1913,6 @@ def _canonical_evidence_json(
     _canonicalize=_canonical_evidence_value,
     _json_dumps_code=getattr(json.dumps, "__code__", None),
     _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
-    _json_dumps_globals=getattr(json.dumps, "__globals__", None),
     _json_encoder=json.JSONEncoder,
     _json_encoder_init=json.JSONEncoder.__init__,
     _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
@@ -1916,6 +1923,12 @@ def _canonical_evidence_json(
     _json_encoder_iterencode=json.JSONEncoder.iterencode,
     _json_encoder_iterencode_code=getattr(json.JSONEncoder.iterencode, "__code__", None),
     _json_encoder_globals=getattr(json.JSONEncoder.iterencode, "__globals__", None),
+    _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
+        "encode_basestring"
+    ),
+    _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
+        "c_make_encoder"
+    ),
     _json_make_iterencode=json.JSONEncoder.iterencode.__globals__.get(
         "_make_iterencode"
     ),
@@ -1934,9 +1947,7 @@ def _canonical_evidence_json(
             "allocation evidence canonicalizer executable changed after binding"
         )
     if (
-        type(_json_dumps_globals) is not dict
-        or dict.get(_json_dumps_globals, "JSONEncoder") is not _json_encoder
-        or encoder_type_dict.get("__init__") is not _json_encoder_init
+        encoder_type_dict.get("__init__") is not _json_encoder_init
         or getattr(_json_encoder_init, "__code__", None)
         is not _json_encoder_init_code
         or encoder_type_dict.get("default") is not _json_encoder_default
@@ -1951,21 +1962,29 @@ def _canonical_evidence_json(
         or getattr(_json_encoder_iterencode, "__globals__", None)
         is not _json_encoder_globals
         or type(_json_encoder_globals) is not dict
+        or dict.get(_json_encoder_globals, "encode_basestring")
+        is not _json_encode_basestring
+        or dict.get(_json_encoder_globals, "c_make_encoder")
+        is not _json_c_make_encoder
         or dict.get(_json_encoder_globals, "_make_iterencode")
         is not _json_make_iterencode
         or getattr(_json_make_iterencode, "__code__", None)
         is not _json_make_iterencode_code
     ):
         raise ValueError(
-            "allocation evidence serializer authority changed after binding"
-        )
-    return _json_dumps(
+            "    return _json_dumps(
         _canonicalize(value),
-        sort_keys=True,
-        separators=(",", ":"),
+        skipkeys=False,
         ensure_ascii=False,
+        check_circular=True,
         allow_nan=False,
+        cls=_json_encoder,
+        indent=None,
+        separators=(",", ":"),
+        default=None,
+        sort_keys=True,
     )
+
 
 
 def _allocation_evidence_digest(

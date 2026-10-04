@@ -435,7 +435,7 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
-    def test_json_encoder_binding_retarget_fails_before_callback(self):
+    def test_json_encoder_global_rebind_is_not_serialization_authority(self):
         evidence = self.evidence({"symbol": "AAA"})
         dumps_globals = allocation_module.json.dumps.__globals__
         original_encoder = dumps_globals["JSONEncoder"]
@@ -448,11 +448,10 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         dumps_globals["JSONEncoder"] = ForgedEncoder
         try:
-            with self.assertRaisesRegex(
-                ValueError,
-                "serializer authority changed after binding",
-            ):
-                allocation_module._allocation_payload_snapshot(evidence)
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
         finally:
             dumps_globals["JSONEncoder"] = original_encoder
 
@@ -480,7 +479,7 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
-    def test_json_default_decoder_retarget_fails_before_callback(self):
+    def test_json_default_decoder_global_rebind_is_not_decode_authority(self):
         evidence = self.evidence({"symbol": "AAA"})
         loads_globals = allocation_module.json.loads.__globals__
         original_decoder = loads_globals["_default_decoder"]
@@ -493,13 +492,56 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         loads_globals["_default_decoder"] = ForgedDecoder()
         try:
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            loads_globals["_default_decoder"] = original_decoder
+
+        self.assertEqual(touched, [])
+
+    def test_json_decoder_scanner_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        decoder = allocation_module.json.loads.__globals__["_default_decoder"]
+        original_scan_once = decoder.scan_once
+        touched = []
+
+        def forged_scan_once(*args, **kwargs):
+            touched.append("scan_once")
+            raise AssertionError("forged JSON scanner executed")
+
+        decoder.scan_once = forged_scan_once
+        try:
             with self.assertRaisesRegex(
                 ValueError,
                 "decoder authority changed after binding",
             ):
                 allocation_module._allocation_payload_snapshot(evidence)
         finally:
-            loads_globals["_default_decoder"] = original_decoder
+            decoder.scan_once = original_scan_once
+
+        self.assertEqual(touched, [])
+
+    def test_json_c_encoder_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_encoder = encoder_globals["c_make_encoder"]
+        touched = []
+
+        def forged_encoder(*args, **kwargs):
+            touched.append("c_make_encoder")
+            raise AssertionError("forged C encoder shim executed")
+
+        encoder_globals["c_make_encoder"] = forged_encoder
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["c_make_encoder"] = original_encoder
 
         self.assertEqual(touched, [])
 

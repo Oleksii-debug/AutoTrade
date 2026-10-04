@@ -406,8 +406,21 @@
       body: JSON.stringify(payload)
     });
     if (response.status !== 200 && response.status !== 409) {
+      let errorBody = null;
+      try {
+        const contentType = response.headers.get("Content-Type") || "";
+        if (contentType.includes("application/json")) {
+          errorBody = await response.json();
+        }
+      } catch {
+        errorBody = null;
+      }
       const error = new Error("Host command failed with status " + response.status);
       error.status = response.status;
+      if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody) &&
+          typeof errorBody.error === "string") {
+        error.code = errorBody.error;
+      }
       throw error;
     }
     return parseCommandResult(await response.json(), payload.command_id);
@@ -774,7 +787,8 @@
 
   function isCommandAuthRejection(error) {
     return error !== null && typeof error === "object" &&
-      (error.status === 401 || error.status === 403);
+      error.status === 403 &&
+      error.code === "AUTHENTICATION_OR_AUTHORIZATION_FAILED";
   }
 
   function reportSnapshotBusy() {

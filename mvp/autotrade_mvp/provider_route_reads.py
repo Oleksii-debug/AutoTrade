@@ -200,7 +200,7 @@ def _qualified_read_rule(
     endpoint: str,
     surface: Surface,
     permission_scope: str,
-) -> tuple[str, str, str, tuple[int, ...], str]:
+) -> tuple[str, str, str, str, tuple[int, ...], str]:
     semantics, semantics_digest = _route_semantics(qualification)
     claim_key, endpoint_rule_digest, rule = _qualified_read_endpoint_rule(
         provider_id=provider_id,
@@ -232,6 +232,7 @@ def _qualified_read_rule(
     ).hexdigest()
     return (
         semantics_digest,
+        endpoint_rule_digest,
         qualified_rule_digest,
         rule.data_entitlement,
         tuple(sorted(rule.success_statuses)),
@@ -244,6 +245,7 @@ class QualifiedProviderReadQueryBinding:
     query_binding: AuthenticatedReadQueryBinding
     qualification_id: str
     route_semantics_digest: str
+    endpoint_rule_digest: str
     qualified_route_rule_digest: str
     data_entitlement: str
     accepted_success_statuses: tuple[int, ...]
@@ -260,6 +262,7 @@ class QualifiedProviderReadQueryBinding:
         query_binding: AuthenticatedReadQueryBinding,
         qualification_id: str,
         route_semantics_digest: str,
+        endpoint_rule_digest: str,
         qualified_route_rule_digest: str,
         data_entitlement: str,
         accepted_success_statuses: tuple[int, ...],
@@ -280,6 +283,11 @@ class QualifiedProviderReadQueryBinding:
             raise ProviderRouteReadError("qualification_id is not canonical")
         if type(route_semantics_digest) is not str or _SHA_RE.fullmatch(route_semantics_digest) is None:
             raise ProviderRouteReadError("route_semantics_digest is not canonical")
+        if (
+            type(endpoint_rule_digest) is not str
+            or _SHA_RE.fullmatch(endpoint_rule_digest) is None
+        ):
+            raise ProviderRouteReadError("endpoint_rule_digest is not canonical")
         if (
             type(qualified_route_rule_digest) is not str
             or _SHA_RE.fullmatch(qualified_route_rule_digest) is None
@@ -317,6 +325,7 @@ class QualifiedProviderReadQueryBinding:
         object.__setattr__(self, "query_binding", query_binding)
         object.__setattr__(self, "qualification_id", qualification_id)
         object.__setattr__(self, "route_semantics_digest", route_semantics_digest)
+        object.__setattr__(self, "endpoint_rule_digest", endpoint_rule_digest)
         object.__setattr__(self, "qualified_route_rule_digest", qualified_route_rule_digest)
         object.__setattr__(self, "data_entitlement", data_entitlement)
         object.__setattr__(self, "accepted_success_statuses", accepted_success_statuses)
@@ -332,6 +341,7 @@ class QualifiedProviderReadQueryBinding:
             "base_query_digest": self.query_binding.query_digest,
             "qualification_id": self.qualification_id,
             "route_semantics_digest": self.route_semantics_digest,
+            "endpoint_rule_digest": self.endpoint_rule_digest,
             "qualified_route_rule_digest": self.qualified_route_rule_digest,
             "data_entitlement": self.data_entitlement,
             "accepted_success_statuses": list(self.accepted_success_statuses),
@@ -393,6 +403,10 @@ class QualifiedProviderResponseObservation:
     @property
     def route_semantics_digest(self) -> str:
         return self.query_binding.route_semantics_digest
+
+    @property
+    def endpoint_rule_digest(self) -> str:
+        return self.query_binding.endpoint_rule_digest
 
     @property
     def qualified_route_rule_digest(self) -> str:
@@ -492,6 +506,7 @@ def prepare_qualified_provider_read(
     )
     (
         route_semantics_digest,
+        endpoint_rule_digest,
         qualified_route_rule_digest,
         data_entitlement,
         accepted_success_statuses,
@@ -507,6 +522,7 @@ def prepare_qualified_provider_read(
         query_binding=base,
         qualification_id=route.qualification_id,
         route_semantics_digest=route_semantics_digest,
+        endpoint_rule_digest=endpoint_rule_digest,
         qualified_route_rule_digest=qualified_route_rule_digest,
         data_entitlement=data_entitlement,
         accepted_success_statuses=accepted_success_statuses,

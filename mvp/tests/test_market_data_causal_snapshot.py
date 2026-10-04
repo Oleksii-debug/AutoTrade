@@ -17,6 +17,7 @@ EVIDENCE = {
     "sha256": "sha256:" + "a" * 64,
     "observed_at": "2026-09-24T16:00:00Z",
 }
+TEST_ADAPTER_VERSION = "autotrade.market-causal-test@1"
 
 
 def at(second: int = 0) -> datetime:
@@ -67,6 +68,7 @@ def update(
         provider_id="provider-a",
         venue_id="venue-a",
         provider_symbol="ABC-USD",
+        adapter_version=TEST_ADAPTER_VERSION,
         kind=kind,
         source_event_at=source,
         available_at=available,
@@ -119,6 +121,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id=TextSubclass("provider-a"),
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=at(),
                 available_at=at(1),
@@ -138,6 +141,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=at(),
                 available_at=at(1),
@@ -157,6 +161,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=DatetimeSubclass(
                     2026, 9, 24, 16, 0, tzinfo=timezone.utc
@@ -322,6 +327,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
             provider_id="provider-a",
             venue_id="venue-a",
             provider_symbol="ABC-USD",
+            adapter_version=TEST_ADAPTER_VERSION,
             kind="BOOK_SNAPSHOT",
             source_event_at=at(),
             available_at=at(1),

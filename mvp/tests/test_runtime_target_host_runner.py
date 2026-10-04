@@ -326,6 +326,49 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
 
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_smuggle_equality_into_future_kwdefaults(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            marker = object()
+            equality_called = False
+
+            def financial_operation(*, authority_marker=marker) -> None:
+                _ = authority_marker
+                append_expected(journal, "fin-1")
+
+            kwdefaults = financial_operation.__kwdefaults__
+            self.assertIs(type(kwdefaults), dict)
+
+            class HostileValue:
+                def __eq__(self, other):
+                    nonlocal equality_called
+                    equality_called = True
+                    raise AssertionError("keyword-default equality callback executed")
+
+            def poison_kwdefault() -> None:
+                kwdefaults["authority_marker"] = HostileValue()
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "financial operation fin-1 executable authority changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": financial_operation},
+                        clock=clock,
+                        research=(("poison-kwdefault", poison_kwdefault),),
+                    )
+            finally:
+                kwdefaults["authority_marker"] = marker
+
+            self.assertFalse(equality_called)
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_research_callback_cannot_replace_terminal_budget_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

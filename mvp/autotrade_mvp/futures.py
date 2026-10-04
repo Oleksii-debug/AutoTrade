@@ -6,12 +6,13 @@ choose leverage or connect to a venue.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
@@ -130,12 +131,6 @@ class FuturesContract:
     settlement_method: Literal["CASH", "PHYSICAL"]
     price_base_currency: str | None = None
     canonical_instrument: InstrumentVersion | None = None
-    _lifecycle_authority_snapshot: tuple[str, str, datetime, datetime, datetime] = field(
-        init=False,
-        repr=False,
-        compare=False,
-    )
-
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
         payoff = _text(self.payoff, "payoff")
@@ -222,9 +217,8 @@ class FuturesContract:
                     "inverse price base currency conflicts with canonical InstrumentVersion"
                 )
 
-        object.__setattr__(
+        _futures_contract_lifecycle_initialize(
             self,
-            "_lifecycle_authority_snapshot",
             (
                 self.instrument,
                 self.settlement_method,
@@ -266,6 +260,66 @@ class FuturesContract:
             ),
             canonical_instrument=version,
         )
+
+
+def _install_futures_contract_lifecycle_authority():
+    """Keep construction-time lifecycle authority outside caller-writable state."""
+
+    authorities: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[str, str, datetime, datetime, datetime],
+        ],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _snapshot) in authorities.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    def initialize(
+        value: object,
+        snapshot: tuple[str, str, datetime, datetime, datetime],
+    ) -> None:
+        if type(value) is not FuturesContract:
+            raise FuturesError("lifecycle authority requires exact FuturesContract")
+        prune_dead()
+        if id(value) in authorities:
+            raise FuturesError("futures lifecycle authority is already established")
+        if type(snapshot) is not tuple or len(snapshot) != 5:
+            raise FuturesError("futures lifecycle authority snapshot is invalid")
+        authorities[id(value)] = (weakref.ref(value), snapshot)
+
+    def snapshot_for(
+        value: object,
+    ) -> tuple[str, str, datetime, datetime, datetime]:
+        if type(value) is not FuturesContract:
+            raise FuturesError("lifecycle authority requires exact FuturesContract")
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise FuturesError("futures lifecycle authority is not established")
+        value_ref, snapshot = entry
+        current = value_ref()
+        if current is value:
+            return snapshot
+        if current is None:
+            authorities.pop(id(value), None)
+            raise FuturesError("futures lifecycle authority is not established")
+        raise FuturesError("futures lifecycle authority identity collision")
+
+    return initialize, snapshot_for
+
+
+(
+    _futures_contract_lifecycle_initialize,
+    _futures_contract_lifecycle_snapshot_for,
+) = _install_futures_contract_lifecycle_authority()
 
 
 @dataclass(frozen=True)
@@ -949,7 +1003,7 @@ def lifecycle_gate(
                 "futures lifecycle contract no longer matches canonical InstrumentVersion"
             )
 
-    snapshot = contract._lifecycle_authority_snapshot
+    snapshot = _futures_contract_lifecycle_snapshot_for(contract)
     current_lifecycle = (
         contract.instrument,
         contract.settlement_method,

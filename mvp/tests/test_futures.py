@@ -767,6 +767,17 @@ class FuturesLifecycleTests(unittest.TestCase):
 
         object.__setattr__(contract, "settlement_method", "CASH")
         object.__setattr__(version, "settlement_method", "CASH")
+        object.__setattr__(
+            contract,
+            "_lifecycle_authority_snapshot",
+            (
+                contract.instrument,
+                contract.settlement_method,
+                contract.expiry,
+                contract.last_trade_at,
+                contract.delivery_cutoff,
+            ),
+        )
 
         with self.assertRaisesRegex(
             FuturesError, "no longer matches construction authority"
@@ -793,10 +804,45 @@ class FuturesLifecycleTests(unittest.TestCase):
         )
 
         object.__setattr__(contract, "settlement_method", "CASH")
+        object.__setattr__(
+            contract,
+            "_lifecycle_authority_snapshot",
+            (
+                contract.instrument,
+                contract.settlement_method,
+                contract.expiry,
+                contract.last_trade_at,
+                contract.delivery_cutoff,
+            ),
+        )
         with self.assertRaisesRegex(
             FuturesError, "no longer matches construction authority"
         ):
             lifecycle_gate(contract, utc(29, 12))
+
+    def test_forged_exact_contract_cannot_self_establish_lifecycle_authority(self):
+        forged = object.__new__(FuturesContract)
+        object.__setattr__(forged, "instrument", "forged")
+        object.__setattr__(forged, "settlement_method", "CASH")
+        object.__setattr__(forged, "expiry", utc(30, 21))
+        object.__setattr__(forged, "last_trade_at", utc(30, 20))
+        object.__setattr__(forged, "delivery_cutoff", utc(29, 12))
+        object.__setattr__(forged, "canonical_instrument", None)
+        object.__setattr__(
+            forged,
+            "_lifecycle_authority_snapshot",
+            (
+                forged.instrument,
+                forged.settlement_method,
+                forged.expiry,
+                forged.last_trade_at,
+                forged.delivery_cutoff,
+            ),
+        )
+        with self.assertRaisesRegex(
+            FuturesError, "lifecycle authority is not established"
+        ):
+            lifecycle_gate(forged, utc(29, 12))
 
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(

@@ -27,6 +27,11 @@ from .execution_realism import (
 )
 
 
+# Retain the installed canonical authenticated reader once. Later mutation of the
+# public ArtifactStore class attribute must not redirect this qualification boundary.
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
+
+
 class ExecutionQualificationError(ValueError):
     pass
 
@@ -168,7 +173,7 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest, evidence_bytes = ArtifactStore.read_authenticated_snapshot(
+        evidence_manifest, evidence_bytes = _CANONICAL_AUTHENTICATED_SNAPSHOT_READ(
             artifact_store,
             normalized_evidence_artifact_id,
         )

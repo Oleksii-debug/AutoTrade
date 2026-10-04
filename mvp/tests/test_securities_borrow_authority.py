@@ -558,6 +558,13 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             self.assertEqual(
                 authority.dispatch_allowed(
                     **dispatch_args,
+                    now="2026-09-25T05:01:15Z",
+                ),
+                (True, "allowed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
                     now="2026-09-25T05:01:30Z",
                 ),
                 (False, "borrow_recall_active"),
@@ -577,6 +584,20 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     effective_at="2026-09-25T05:01:40Z",
                     evidence_ref="provider:dispatch-recall-r2",
                 )
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:42Z",
+                ),
+                (False, "borrow_recall_active"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    **dispatch_args,
+                    now="2026-09-25T05:01:50Z",
+                ),
+                (True, "allowed"),
             )
             reloaded_projection = DurableBorrowRecallProjection(
                 store,

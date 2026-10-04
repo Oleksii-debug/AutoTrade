@@ -191,6 +191,7 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
                         role='OWNER',
                         origin=self._origin,
                         ttl_seconds=3600,
+                        idle_timeout_seconds=3600,
                     )
                     try:
                         self._desktop_session_sink(
@@ -223,10 +224,21 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
 
 def cookie_principal(headers, origin):
     del origin
+    raw_cookie = headers.get('cookie', '')
+    session_cookie_count = sum(
+        1
+        for part in raw_cookie.split(';')
+        if part.strip().partition('=')[0].strip() == 'AutoTradeSession'
+        and part.strip().partition('=')[1] == '='
+    )
+    if session_cookie_count > 1:
+        raise PermissionError('Ambiguous AutoTrade session cookie')
     cookie = SimpleCookie()
-    cookie.load(headers.get('cookie', ''))
+    cookie.load(raw_cookie)
     if 'AutoTradeSession' not in cookie:
         return header_principal_resolver(headers, 'local')
+    if session_cookie_count != 1:
+        raise PermissionError('Malformed AutoTrade session cookie')
     token = cookie['AutoTradeSession'].value
     return HostPrincipal('local-owner', token, public_session_reference(token))
 

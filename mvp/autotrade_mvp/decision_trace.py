@@ -345,7 +345,7 @@ class DecisionTraceStore:
         available_event_ids: Iterable[str],
         available_evidence_ids: Iterable[str],
     ) -> dict[str, Any]:
-        """Reconstruct a durable decision only when all linked evidence is available."""
+        """Validate a durable trace against caller-declared link availability."""
 
         if not isinstance(trace_id, str) or not trace_id.strip():
             raise ValueError("trace_id is required")
@@ -378,7 +378,7 @@ class DecisionTraceStore:
         available_event_ids: Iterable[str] | None = None,
         available_evidence_ids: Iterable[str] | None = None,
     ) -> str:
-        """Return a linear view that never presents unchecked links as verified evidence."""
+        """Return a linear view that never presents caller claims as verified evidence."""
 
         if (available_event_ids is None) != (available_evidence_ids is None):
             raise ValueError(
@@ -409,9 +409,10 @@ class DecisionTraceStore:
                 available_event_ids=available_event_ids,
                 available_evidence_ids=available_evidence_ids or (),
             )
-            evidence_status = "VERIFIED"
+            evidence_status = "UNVERIFIED"
             evidence_note = (
-                "All linked durable events and evidence were available at export time."
+                "Caller-declared linked evidence is complete, but no product-selected "
+                "durable evidence authority verified those identifiers."
             )
 
         lines = [

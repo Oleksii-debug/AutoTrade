@@ -122,6 +122,41 @@ def _build_impl_namespace_guard(
         raise TypeError("implementation namespace must be exact dict")
     if type(excluded_names) is not frozenset:
         raise TypeError("excluded_names must be exact frozenset")
+
+    def freeze_kwdefaults(value: object):
+        if value is None:
+            return None
+        if type(value) is not dict:
+            raise RuntimeError(
+                "trusted chronology implementation keyword defaults are non-canonical"
+            )
+        keys: list[str] = []
+        for key in value:
+            if type(key) is not str:
+                raise RuntimeError(
+                    "trusted chronology implementation keyword-default keys are non-canonical"
+                )
+            keys.append(key)
+        keys.sort()
+        return tuple((key, value[key]) for key in keys)
+
+    def kwdefaults_match(
+        value: object,
+        expected: tuple[tuple[str, object], ...] | None,
+    ) -> bool:
+        if expected is None:
+            return value is None
+        if type(value) is not dict:
+            return False
+        keys: list[str] = []
+        for key in value:
+            if type(key) is not str:
+                return False
+            keys.append(key)
+        keys.sort()
+        if tuple(keys) != tuple(key for key, _expected in expected):
+            return False
+        return all(value[key] is expected_value for key, expected_value in expected)
     captured = tuple(
         (name, value)
         for name, value in namespace.items()
@@ -140,7 +175,7 @@ def _build_impl_namespace_guard(
             value,
             value.__code__,
             value.__defaults__,
-            None if value.__kwdefaults__ is None else dict(value.__kwdefaults__),
+            freeze_kwdefaults(value.__kwdefaults__),
             tuple(
                 (cell, cell.cell_contents)
                 for cell in (value.__closure__ or ())
@@ -180,15 +215,7 @@ def _build_impl_namespace_guard(
                     "trusted chronology implementation defaults changed: " + name
                 )
             current_kwdefaults = expected_function.__kwdefaults__
-            if expected_kwdefaults is None:
-                if current_kwdefaults is not None:
-                    raise RuntimeError(
-                        "trusted chronology implementation defaults changed: " + name
-                    )
-            elif (
-                type(current_kwdefaults) is not dict
-                or current_kwdefaults != expected_kwdefaults
-            ):
+            if not kwdefaults_match(current_kwdefaults, expected_kwdefaults):
                 raise RuntimeError(
                     "trusted chronology implementation defaults changed: " + name
                 )
@@ -219,6 +246,37 @@ def _build_external_function_graph_guard(*, root, label: str):
         raise TypeError("external parser root must be exact Python function")
     if type(label) is not str or not label:
         raise TypeError("external parser label must be exact non-empty text")
+
+    def freeze_kwdefaults(value: object):
+        if value is None:
+            return None
+        if type(value) is not dict:
+            raise RuntimeError(label + " keyword defaults are non-canonical")
+        keys: list[str] = []
+        for key in value:
+            if type(key) is not str:
+                raise RuntimeError(label + " keyword-default keys are non-canonical")
+            keys.append(key)
+        keys.sort()
+        return tuple((key, value[key]) for key in keys)
+
+    def kwdefaults_match(
+        value: object,
+        expected: tuple[tuple[str, object], ...] | None,
+    ) -> bool:
+        if expected is None:
+            return value is None
+        if type(value) is not dict:
+            return False
+        keys: list[str] = []
+        for key in value:
+            if type(key) is not str:
+                return False
+            keys.append(key)
+        keys.sort()
+        if tuple(keys) != tuple(key for key, _expected in expected):
+            return False
+        return all(value[key] is expected_value for key, expected_value in expected)
 
     module_name = root.__module__
     missing = object()
@@ -265,6 +323,10 @@ def _build_external_function_graph_guard(*, root, label: str):
                 global_bindings.append(
                     (dependency_namespace, dependency_name, expected_dependency)
                 )
+            if type(expected_dependency) is FunctionType:
+                capture_dependency_function(expected_dependency)
+            elif isinstance(expected_dependency, type):
+                capture_external_type(expected_dependency)
         for cell in function.__closure__ or ():
             cell_identity = id(cell)
             if cell_identity in seen_closures:
@@ -275,6 +337,21 @@ def _build_external_function_graph_guard(*, root, label: str):
             except ValueError:
                 expected_cell_value = missing
             closure_bindings.append((cell, expected_cell_value))
+
+    def capture_dependency_function(function: FunctionType) -> None:
+        identity = id(function)
+        if identity in seen_module_attribute_functions:
+            return
+        seen_module_attribute_functions.add(identity)
+        module_attribute_function_states.append(
+            (
+                function,
+                function.__code__,
+                function.__defaults__,
+                freeze_kwdefaults(function.__kwdefaults__),
+            )
+        )
+        capture_function_dependencies(function)
 
     def capture_external_type(cls: type) -> None:
         identity = id(cls)
@@ -294,9 +371,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                         function,
                         function.__code__,
                         function.__defaults__,
-                        None
-                        if function.__kwdefaults__ is None
-                        else dict(function.__kwdefaults__),
+                        freeze_kwdefaults(function.__kwdefaults__),
                     )
                 )
         external_type_states.append(
@@ -323,19 +398,8 @@ def _build_external_function_graph_guard(*, root, label: str):
             if key not in seen_module_attributes:
                 seen_module_attributes.add(key)
                 module_attribute_bindings.append((base, attribute_name, expected))
-            if type(expected) is FunctionType and id(expected) not in seen_module_attribute_functions:
-                seen_module_attribute_functions.add(id(expected))
-                capture_function_dependencies(expected)
-                module_attribute_function_states.append(
-                    (
-                        expected,
-                        expected.__code__,
-                        expected.__defaults__,
-                        None
-                        if expected.__kwdefaults__ is None
-                        else dict(expected.__kwdefaults__),
-                    )
-                )
+            if type(expected) is FunctionType:
+                capture_dependency_function(expected)
             elif isinstance(expected, type):
                 capture_external_type(expected)
 
@@ -351,9 +415,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                 function,
                 function.__code__,
                 function.__defaults__,
-                None
-                if function.__kwdefaults__ is None
-                else dict(function.__kwdefaults__),
+                freeze_kwdefaults(function.__kwdefaults__),
             )
         )
         capture_direct_module_attributes(function)
@@ -417,10 +479,7 @@ def _build_external_function_graph_guard(*, root, label: str):
             if function.__defaults__ is not defaults:
                 raise RuntimeError(label + " defaults changed")
             current_kwdefaults = function.__kwdefaults__
-            if kwdefaults is None:
-                if current_kwdefaults is not None:
-                    raise RuntimeError(label + " defaults changed")
-            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+            if not kwdefaults_match(current_kwdefaults, kwdefaults):
                 raise RuntimeError(label + " defaults changed")
         for namespace, name, expected in frozen_global_bindings:
             if namespace.get(name, missing) is not expected:
@@ -450,10 +509,7 @@ def _build_external_function_graph_guard(*, root, label: str):
             if function.__code__ is not code or function.__defaults__ is not defaults:
                 raise RuntimeError(label + " module function executable changed")
             current_kwdefaults = function.__kwdefaults__
-            if kwdefaults is None:
-                if current_kwdefaults is not None:
-                    raise RuntimeError(label + " module function defaults changed")
-            elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+            if not kwdefaults_match(current_kwdefaults, kwdefaults):
                 raise RuntimeError(label + " module function defaults changed")
         for cls, expected_names, expected_members, executable_states in frozen_external_type_states:
             current_namespace = cls.__dict__
@@ -481,16 +537,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                         + member_name
                     )
                 current_kwdefaults = function.__kwdefaults__
-                if kwdefaults is None:
-                    if current_kwdefaults is not None:
-                        raise RuntimeError(
-                            label
-                            + " external class defaults changed: "
-                            + class_label
-                            + "."
-                            + member_name
-                        )
-                elif type(current_kwdefaults) is not dict or current_kwdefaults != kwdefaults:
+                if not kwdefaults_match(current_kwdefaults, kwdefaults):
                     raise RuntimeError(
                         label
                         + " external class defaults changed: "

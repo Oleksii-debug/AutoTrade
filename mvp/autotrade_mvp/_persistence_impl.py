@@ -1106,18 +1106,27 @@ class JournalStore:
         if type(limit) is not int or limit < 1 or limit > 100000:
             raise ValueError("limit must be between 1 and 100000")
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT event_id, event_type, aggregate_type, aggregate_id,
-                       aggregate_version, payload_json, payload_hash, committed_at,
-                       envelope_json, envelope_hash, journal_sequence
-                FROM events
-                WHERE journal_sequence > ?
-                ORDER BY journal_sequence
-                LIMIT ?
-                """,
-                (after_sequence, limit),
-            ).fetchall()
+            connection.execute("BEGIN")
+            try:
+                current = self._journal_sequence_value(connection)
+                if after_sequence > current:
+                    raise ValueError("after_sequence cannot be ahead of the journal")
+                rows = connection.execute(
+                    """
+                    SELECT event_id, event_type, aggregate_type, aggregate_id,
+                           aggregate_version, payload_json, payload_hash, committed_at,
+                           envelope_json, envelope_hash, journal_sequence
+                    FROM events
+                    WHERE journal_sequence > ?
+                    ORDER BY journal_sequence
+                    LIMIT ?
+                    """,
+                    (after_sequence, limit),
+                ).fetchall()
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
         decoded = [self._decode_event_row(row) for row in rows]
         expected = after_sequence + 1
         for event in decoded:
@@ -1597,23 +1606,30 @@ class JournalStore:
         )
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT aggregate_version, state_json, state_hash, updated_at
-                FROM projection_checkpoints
-                WHERE projection_name = ?
-                  AND aggregate_type = ?
-                  AND aggregate_id = ?
-                """,
-                (projection_name, aggregate_type, aggregate_id),
-            ).fetchone()
-            if row is None:
-                return None
-            journal_version = self._aggregate_version_value(
-                connection,
-                aggregate_type,
-                aggregate_id,
-            )
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT aggregate_version, state_json, state_hash, updated_at
+                    FROM projection_checkpoints
+                    WHERE projection_name = ?
+                      AND aggregate_type = ?
+                      AND aggregate_id = ?
+                    """,
+                    (projection_name, aggregate_type, aggregate_id),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                journal_version = self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
         try:
             state = json.loads(row["state_json"])
@@ -1772,17 +1788,24 @@ class JournalStore:
 
         projection_name = self._require_text(projection_name, "projection_name")
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT journal_sequence, state_json, state_hash, updated_at
-                FROM global_projection_checkpoints
-                WHERE projection_name = ?
-                """,
-                (projection_name,),
-            ).fetchone()
-            if row is None:
-                return None
-            current = self._journal_sequence_value(connection)
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT journal_sequence, state_json, state_hash, updated_at
+                    FROM global_projection_checkpoints
+                    WHERE projection_name = ?
+                    """,
+                    (projection_name,),
+                ).fetchone()
+                if row is None:
+                    connection.commit()
+                    return None
+                current = self._journal_sequence_value(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
         try:
             state = json.loads(row["state_json"])

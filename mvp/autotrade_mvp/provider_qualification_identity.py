@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import re
+from uuid import UUID
 
 from .persistence import canonical_json
 from .provider_domain import ProviderFinancialScope
@@ -49,6 +50,23 @@ def _positive_int(value: object, *, name: str) -> int:
     return value
 
 
+def _optional_uuid(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    value = _text(value, name=name)
+    try:
+        canonical = str(UUID(value))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ProviderQualificationIdentityError(
+            f"{name} must be a canonical UUID or None"
+        ) from error
+    if canonical != value:
+        raise ProviderQualificationIdentityError(
+            f"{name} must be a canonical UUID or None"
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderQualificationIdentity:
     """Content identity that an accepted #1082 qualification record must seal."""
@@ -56,14 +74,19 @@ class ProviderQualificationIdentity:
     provider_scope: ProviderFinancialScope
     product_family: str
     adapter_source_git_sha: str
+    packaged_artifact_id: str | None
     packaged_artifact_digest: str
     campaign_id: str
     campaign_version: int
+    protocol_id: str
+    protocol_version: str
     required_case_policy_digest: str
     result_set_digest: str
     route_semantics_digest: str
     documentation_revision_digest: str
     evidence_set_digest: str
+    chronology_digest: str
+    lineage_digest: str
     attestation_digest: str
     trust_policy_digest: str
     issuer_identity_digest: str
@@ -88,6 +111,11 @@ class ProviderQualificationIdentity:
             )
         object.__setattr__(
             self,
+            "packaged_artifact_id",
+            _optional_uuid(self.packaged_artifact_id, name="packaged_artifact_id"),
+        )
+        object.__setattr__(
+            self,
             "campaign_id",
             _text(self.campaign_id, name="campaign_id"),
         )
@@ -96,6 +124,16 @@ class ProviderQualificationIdentity:
             "campaign_version",
             _positive_int(self.campaign_version, name="campaign_version"),
         )
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _text(self.protocol_id, name="protocol_id"),
+        )
+        object.__setattr__(
+            self,
+            "protocol_version",
+            _text(self.protocol_version, name="protocol_version"),
+        )
         for name in (
             "packaged_artifact_digest",
             "required_case_policy_digest",
@@ -103,6 +141,8 @@ class ProviderQualificationIdentity:
             "route_semantics_digest",
             "documentation_revision_digest",
             "evidence_set_digest",
+            "chronology_digest",
+            "lineage_digest",
             "attestation_digest",
             "trust_policy_digest",
             "issuer_identity_digest",
@@ -117,14 +157,19 @@ class ProviderQualificationIdentity:
             "provider_scope_digest": self.provider_scope.content_digest,
             "product_family": self.product_family,
             "adapter_source_git_sha": self.adapter_source_git_sha,
+            "packaged_artifact_id": self.packaged_artifact_id,
             "packaged_artifact_digest": self.packaged_artifact_digest,
             "campaign_id": self.campaign_id,
             "campaign_version": self.campaign_version,
+            "protocol_id": self.protocol_id,
+            "protocol_version": self.protocol_version,
             "required_case_policy_digest": self.required_case_policy_digest,
             "result_set_digest": self.result_set_digest,
             "route_semantics_digest": self.route_semantics_digest,
             "documentation_revision_digest": self.documentation_revision_digest,
             "evidence_set_digest": self.evidence_set_digest,
+            "chronology_digest": self.chronology_digest,
+            "lineage_digest": self.lineage_digest,
             "attestation_digest": self.attestation_digest,
             "trust_policy_digest": self.trust_policy_digest,
             "issuer_identity_digest": self.issuer_identity_digest,

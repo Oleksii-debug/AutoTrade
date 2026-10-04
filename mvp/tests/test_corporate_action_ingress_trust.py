@@ -266,6 +266,27 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "state"):
             settle_cash(hostile_state, "0")
 
+    def test_symbol_successor_rejects_huge_text_without_integer_conversion(self):
+        current = self._instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        book = CorporateActionBook(
+            self._state(),
+            instrument_version=current,
+            registry=registry,
+        )
+        event = CorporateEvent.create(
+            event_id="symbol-huge-version",
+            instrument_id=current.instrument_id,
+            instrument_version=current.version,
+            kind="SYMBOL_CHANGE",
+            effective_date=date(2026, 1, 2),
+            effective_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            source_revision="revision-symbol-huge",
+            payload={"successor_instrument_version": "9" * 5000},
+        )
+        with self.assertRaisesRegex(ValueError, "next instrument version"):
+            book.apply(event)
+
     def test_activation_instants_reject_datetime_subclasses_before_dispatch(self):
         class HostileDatetime(datetime):
             @property

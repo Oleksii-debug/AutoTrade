@@ -250,6 +250,7 @@ class RawMarketUpdate:
     revision: int
     payload: Mapping[str, Any]
     raw_evidence_ref: Mapping[str, object]
+    _identity_material: str
     source_sequence: int | None = None
     stream_generation: int | None = None
     sequence_stream: str | None = None
@@ -403,6 +404,34 @@ class NormalizedMarketEvent:
         except (ValueError, TypeError, AttributeError) as error:
             raise MarketDataError("event_id must be a UUID") from error
         adapter_version = _adapter_version(self.adapter_version)
+        identity_material = object.__getattribute__(self, "_identity_material")
+        if type(identity_material) is not str or not identity_material:
+            raise MarketDataError(
+                "normalized market event identity material is required"
+            )
+        if len(identity_material.encode("utf-8")) > 65_536:
+            raise MarketDataError(
+                "normalized market event identity material exceeds the resource envelope"
+            )
+        try:
+            identity_components = json.loads(identity_material)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise MarketDataError(
+                "normalized market event identity material is invalid"
+            ) from error
+        if (
+            type(identity_components) is not list
+            or len(identity_components) != 14
+            or type(identity_components[3]) is not str
+            or identity_components[3] != adapter_version
+        ):
+            raise MarketDataError(
+                "normalized market event adapter build differs from identity material"
+            )
+        if str(uuid5(NAMESPACE_URL, identity_material)) != event_id:
+            raise MarketDataError(
+                "event_id does not match normalized market event identity material"
+            )
         object.__setattr__(self, "event_id", event_id)
         object.__setattr__(self, "adapter_version", adapter_version)
         _bind(self, event_id, adapter_version)
@@ -2233,6 +2262,7 @@ class MarketNormalizer:
             payload_json=payload_json,
             quality_flags=tuple(sorted(flags)),
             raw_evidence_ref=update.raw_evidence_ref,
+            _identity_material=identity_material,
         )
         if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
             self._retain_book_event_identity(event, stream_key)

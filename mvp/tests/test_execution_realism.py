@@ -533,7 +533,8 @@ class ExecutionRealismTests(unittest.TestCase):
                 bar_half_spread_bps="5",
             ),
         )
-        self.assertEqual(result.fill_price, Decimal("90") * (Decimal("1") - Decimal("15") / Decimal("10000")))
+        # Raw adverse SELL projection is 89.865; FLOOR to the 0.01 tick is worse.
+        self.assertEqual(result.fill_price, Decimal("89.86"))
         self.assertIn("intrabar queue", " ".join(result.warnings))
 
     def test_base_scenario_cannot_hide_optimistic_cost_multiplier(self):

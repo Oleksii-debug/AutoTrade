@@ -880,6 +880,7 @@ def _provider_fills_from_execution_frame(
     frame: object,
     *,
     instrument_versions: Mapping[str, str],
+    fee_currency_by_symbol: Mapping[str, str],
 ) -> tuple[ProviderFillEvidence, ...]:
     """Translate exact Kraken trade reports into canonical reconciliation fills.
 
@@ -892,6 +893,8 @@ def _provider_fills_from_execution_frame(
         raise TypeError("frame must be exact KrakenSpotExecutionFrame")
     if not isinstance(instrument_versions, Mapping):
         raise TypeError("instrument_versions must be a mapping")
+    if not isinstance(fee_currency_by_symbol, Mapping):
+        raise TypeError("fee_currency_by_symbol must be a mapping")
 
     instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument in instrument_versions.items():
@@ -909,6 +912,18 @@ def _provider_fills_from_execution_frame(
             )
         instruments[symbol] = instrument
 
+    fee_currencies: dict[str, str] = {}
+    for raw_symbol, raw_currency in fee_currency_by_symbol.items():
+        symbol = _canonical_text(
+            raw_symbol,
+            name="fee_currency_by_symbol symbol",
+        )
+        currency = _canonical_text(
+            raw_currency,
+            name=f"fee_currency_by_symbol[{symbol}]",
+        ).upper()
+        fee_currencies[symbol] = currency
+
     fills: list[ProviderFillEvidence] = []
     for report in frame.reports:
         if report.exec_type != "trade":
@@ -917,10 +932,11 @@ def _provider_fills_from_execution_frame(
             raise KrakenSpotStreamError(
                 "Kraken trade report is incomplete at provider-fill bridge"
             )
-        if not report.fees:
+        expected_fee_currency = fee_currencies.get(report.symbol)
+        if expected_fee_currency is None:
             raise KrakenSpotStreamError(
-                "Kraken trade fee array is empty; canonical provider fill "
-                "fee currency is unproven"
+                "missing evidenced fee currency for Kraken executions symbol: "
+                + report.symbol
             )
 
         if report.margin_borrow is not False:
@@ -953,13 +969,16 @@ def _provider_fills_from_execution_frame(
             _canonical_text(fee.asset, name="fee.asset").upper()
             for fee in report.fees
         }
-        if len(fee_assets) != 1:
+        if any(asset != expected_fee_currency for asset in fee_assets):
             raise KrakenSpotStreamError(
-                "Kraken execution fees span multiple currencies; "
-                "canonical fill requires one fee currency"
+                "Kraken execution fee asset disagrees with evidenced fee currency"
             )
         try:
-            fee_amount = exact_sum(fee.quantity for fee in report.fees)
+            fee_amount = (
+                exact_sum(fee.quantity for fee in report.fees)
+                if report.fees
+                else Decimal("0")
+            )
         except ExactDecimalError as error:
             raise KrakenSpotStreamError(
                 "Kraken execution fee aggregation exceeds exact resource authority"
@@ -977,7 +996,7 @@ def _provider_fills_from_execution_frame(
                     quantity=report.last_qty,
                     price=report.last_price,
                     fee_amount=fee_amount,
-                    fee_currency=next(iter(fee_assets)),
+                    fee_currency=expected_fee_currency,
                     trade_time=report.event_time,
                     side=report.side.upper(),
                     evidence_refs=(frame.evidence_ref,),
@@ -1342,6 +1361,7 @@ class KrakenSpotExecutionStreamRecovery:
         self,
         *,
         instrument_versions: Mapping[str, str],
+        fee_currency_by_symbol: Mapping[str, str],
     ) -> tuple[ProviderFillEvidence, ...]:
         """Return fills only from updates admitted by this recovery sequence.
 
@@ -1360,6 +1380,7 @@ class KrakenSpotExecutionStreamRecovery:
                 _provider_fills_from_execution_frame(
                     frame,
                     instrument_versions=instrument_versions,
+                    fee_currency_by_symbol=fee_currency_by_symbol,
                 )
             )
         return tuple(fills)

@@ -116,6 +116,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         frame,
         *,
         instrument_versions,
+        fee_currency_by_symbol=None,
     ):
         if frame.frame_type != "update" or frame.sequence < 1:
             raise AssertionError("test helper requires an update with positive sequence")
@@ -158,6 +159,11 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         recovery.apply_frame(frame)
         return recovery.buffered_provider_fills(
             instrument_versions=instrument_versions,
+            fee_currency_by_symbol=(
+                {"BTC/USD": "USD"}
+                if fee_currency_by_symbol is None
+                else fee_currency_by_symbol
+            ),
         )
 
     def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
@@ -645,7 +651,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
-            "fees span multiple currencies",
+            "fee asset disagrees with evidenced fee currency",
         ):
             self.provider_fills_from_admitted_frame(
                 mixed_frame,
@@ -653,7 +659,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             )
 
 
-    def test_provider_fill_bridge_rejects_reported_empty_fee_array_without_currency(self):
+    def test_provider_fill_bridge_uses_explicit_fee_currency_for_zero_fee_trade(self):
         frame = parse_execution_frame(
             frame_bytes(
                 frame_type="update",
@@ -672,15 +678,22 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             account_id="spot-live-1",
             connection_generation=1,
         )
-        self.assertTrue(frame.reports[0].trade_economics_complete)
-        self.assertTrue(frame.reports[0].fees_reported)
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+        self.assertEqual(fill.fee_amount, Decimal("0"))
+        self.assertEqual(fill.fee_currency, "USD")
+
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
-            "fee array is empty.*fee currency is unproven",
+            "missing evidenced fee currency",
         ):
             self.provider_fills_from_admitted_frame(
                 frame,
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={},
             )
 
 
@@ -855,6 +868,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         ):
             recovery.buffered_provider_fills(
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
             )
 
     def test_sequence_gap_clears_fill_buffer_and_blocks_extraction(self):
@@ -933,6 +947,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         ):
             recovery.buffered_provider_fills(
                 instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+                fee_currency_by_symbol={"BTC/USD": "USD"},
             )
 
     def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):

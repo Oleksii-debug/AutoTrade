@@ -82,6 +82,49 @@ class RejectingInitializationJournal(JournalStore):
 
 
 class DurableModelBudgetTests(unittest.TestCase):
+    def test_clock_object_truthiness_is_never_consulted(self):
+        class Clock:
+            truth_calls = 0
+            call_count = 0
+
+            def __bool__(self):
+                type(self).truth_calls += 1
+                raise AssertionError("clock truthiness executed")
+
+            def __call__(self):
+                type(self).call_count += 1
+                return NOW
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            clock = Clock()
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="policy-clock",
+                ceiling="1",
+                environment="SIMULATION",
+                clock=clock,
+            )
+            self.assertEqual(Clock.truth_calls, 0)
+            self.assertGreaterEqual(Clock.call_count, 1)
+            self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
+
+    def test_non_callable_clock_fails_before_journal_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-bad-clock",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=object(),
+                )
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-bad-clock"),
+                [],
+            )
+
     def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:
             journal = RecordingJournalStore(Path(directory) / "journal.db")

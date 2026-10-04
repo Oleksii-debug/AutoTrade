@@ -3354,7 +3354,7 @@ class MarketNormalizationTests(unittest.TestCase):
             event.to_contract_dict()
         with self.assertRaisesRegex(
             MarketDataError,
-            "build identity cannot be rebound",
+            "adapter build differs from identity material",
         ):
             event.__post_init__()
 

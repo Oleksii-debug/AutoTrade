@@ -85,7 +85,14 @@ public partial class MainWindow : Window
         }
 
         _hostRefreshInProgress = true;
-        RefreshStatusButton.IsEnabled = false;
+        // Only an explicit keyboard/button invocation owns the button state.
+        // Periodic refresh must not disable a focusable control every ten
+        // seconds, because doing so can evict keyboard/NVDA focus.
+        bool manageRefreshButton = returnFocus;
+        if (manageRefreshButton)
+        {
+            RefreshStatusButton.IsEnabled = false;
+        }
 
         try
         {
@@ -105,7 +112,10 @@ public partial class MainWindow : Window
         }
         finally
         {
-            RefreshStatusButton.IsEnabled = true;
+            if (manageRefreshButton)
+            {
+                RefreshStatusButton.IsEnabled = true;
+            }
             _hostRefreshInProgress = false;
             if (returnFocus && IsLoaded)
             {

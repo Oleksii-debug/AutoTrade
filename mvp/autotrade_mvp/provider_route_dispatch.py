@@ -175,10 +175,14 @@ def _require_bound_route(
     )
 
 
-def _bound_submission_scope(
+def bind_selected_provider_route_submission_scope(
     route: SelectedProviderRoute,
     submission_scope: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    """Durably name the exact selected C/Q/build identity on one send attempt."""
+
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
     if submission_scope is None:
         result: dict[str, Any] = {}
     else:
@@ -349,5 +353,8 @@ def dispatch_selected_provider_route(
         client_id_format=client_id_format,
         final_barrier_clock=final_barrier_clock,
         sender_check=sender_check,
-        submission_scope=_bound_submission_scope(route, submission_scope),
+        submission_scope=bind_selected_provider_route_submission_scope(
+            route,
+            submission_scope,
+        ),
     )

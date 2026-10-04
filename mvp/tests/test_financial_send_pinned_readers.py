@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+import mvp.autotrade_mvp.financial_send_authority as financial_send_authority
 from mvp.autotrade_mvp.financial_send_authority import (
     _require_binding_matches_durable_admission,
 )
@@ -38,6 +40,9 @@ class FinancialSendPinnedReaderTests(unittest.TestCase):
         def unused_load_events(*_args):
             raise AssertionError("risk reader must not run after historical sentinel")
 
+        def unused_risk_payload(*_args, **_kwargs):
+            raise AssertionError("risk helper must not run after historical sentinel")
+
         with self.assertRaisesRegex(
             _PinnedHistoricalReaderUsed,
             "pinned historical reader executed",
@@ -47,6 +52,7 @@ class FinancialSendPinnedReaderTests(unittest.TestCase):
                 journal=journal,
                 historical_admission=pinned_historical,
                 load_events=unused_load_events,
+                risk_payload_function=unused_risk_payload,
                 admission_id="admission-1",
                 intent_hash="intent-hash-1",
                 action="CREATE",
@@ -55,8 +61,12 @@ class FinancialSendPinnedReaderTests(unittest.TestCase):
 
         self.assertEqual(callbacks["shadow"], 0)
 
-    def test_instance_shadow_cannot_replace_pinned_risk_event_reader(self):
-        callbacks = {"historical_shadow": 0, "journal_shadow": 0}
+    def test_instance_and_module_shadows_cannot_replace_pinned_risk_readers(self):
+        callbacks = {
+            "historical_shadow": 0,
+            "journal_shadow": 0,
+            "risk_helper_shadow": 0,
+        }
 
         class Service:
             pass
@@ -74,6 +84,10 @@ class FinancialSendPinnedReaderTests(unittest.TestCase):
         def shadow_load_events(_aggregate_type, _aggregate_id):
             callbacks["journal_shadow"] += 1
             raise AssertionError("instance journal shadow executed")
+
+        def shadow_risk_payload(*_args, **_kwargs):
+            callbacks["risk_helper_shadow"] += 1
+            raise AssertionError("module risk helper shadow executed")
 
         service.historical_admission = shadow_historical
         journal.load_events = shadow_load_events
@@ -113,23 +127,35 @@ class FinancialSendPinnedReaderTests(unittest.TestCase):
             self.assertEqual(aggregate_id, binding.risk_decision_id)
             raise _PinnedJournalReaderUsed("pinned journal reader executed")
 
-        with self.assertRaisesRegex(
-            _PinnedJournalReaderUsed,
-            "pinned journal reader executed",
+        def pinned_risk_payload(bound_journal, material, *, load_events):
+            self.assertIs(bound_journal, journal)
+            self.assertIs(material, binding)
+            return load_events(bound_journal, "risk_decision", material.risk_decision_id)
+
+        with patch.object(
+            financial_send_authority,
+            "_risk_payload",
+            shadow_risk_payload,
         ):
-            _require_binding_matches_durable_admission(
-                service=service,
-                journal=journal,
-                historical_admission=pinned_historical,
-                load_events=pinned_load_events,
-                admission_id="admission-1",
-                intent_hash="intent-hash-1",
-                action="CREATE",
-                binding=binding,
-            )
+            with self.assertRaisesRegex(
+                _PinnedJournalReaderUsed,
+                "pinned journal reader executed",
+            ):
+                _require_binding_matches_durable_admission(
+                    service=service,
+                    journal=journal,
+                    historical_admission=pinned_historical,
+                    load_events=pinned_load_events,
+                    risk_payload_function=pinned_risk_payload,
+                    admission_id="admission-1",
+                    intent_hash="intent-hash-1",
+                    action="CREATE",
+                    binding=binding,
+                )
 
         self.assertEqual(callbacks["historical_shadow"], 0)
         self.assertEqual(callbacks["journal_shadow"], 0)
+        self.assertEqual(callbacks["risk_helper_shadow"], 0)
 
 
 if __name__ == "__main__":

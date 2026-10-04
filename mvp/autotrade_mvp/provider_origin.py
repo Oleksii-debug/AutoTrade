@@ -1107,6 +1107,12 @@ def execute_qualified_provider_origin_read(
         network_policy_identity=_provider_network_policy_identity(transport),
         recorded_at=prepared_at,
     )
+    prepared_cut = origin._require_store().whole_store_state_cut()
+    prepared_sequence = prepared_cut.get("journal_sequence") if type(prepared_cut) is dict else None
+    if type(prepared_sequence) is not int or prepared_sequence < 1:
+        raise ProviderOriginError(
+            "provider-origin Prepared event lacks exact global journal cut"
+        )
     base = query_binding.query_binding
 
     def terminal_guard() -> QualifiedProviderReadQueryBinding:
@@ -1130,6 +1136,10 @@ def execute_qualified_provider_origin_read(
             permission_scope=base.permission_scope,
         )
         _require_same_terminal_qualified_authority(query_binding, terminal)
+        if terminal.authority_journal_sequence_cut < prepared_sequence:
+            raise ProviderOriginError(
+                "terminal provider-read Q/C authority predates durable Prepared event"
+            )
         return terminal
 
     observation = execute_with_receipt(
@@ -1148,6 +1158,10 @@ def execute_qualified_provider_origin_read(
         )
     terminal = receipt.get("terminal_authority")
     _require_same_terminal_qualified_authority(query_binding, terminal)
+    if terminal.authority_journal_sequence_cut < prepared_sequence:
+        raise ProviderOriginError(
+            "provider-origin receipt terminal authority predates durable Prepared event"
+        )
 
     return origin._record_provider_origin(
         attempt_id,

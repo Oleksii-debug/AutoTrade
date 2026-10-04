@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.financial_request_binding import FinancialRequestBindingMaterial
 from mvp.autotrade_mvp.financial_send_authority import (
@@ -10,6 +11,7 @@ from mvp.autotrade_mvp.financial_send_authority import (
     require_exact_bybit_financial_request,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
+from mvp.autotrade_mvp.production_bybit import ProductionBybitOrderSender
 
 
 RS = "risk-snapshot:sha256:" + "1" * 64
@@ -104,25 +106,72 @@ def binding():
     )
 
 
-class _RetargetingMapping(Mapping):
-    """Expose one mapping on first materialization and another on any later one."""
+class _HostileMapping(Mapping):
+    callbacks = 0
 
-    def __init__(self, first, later):
-        self._first = dict(first)
-        self._later = dict(later)
-        self._active = self._first
-        self.materializations = 0
+    def __init__(self, payload):
+        self._payload = dict(payload)
+
+    @classmethod
+    def reset(cls):
+        cls.callbacks = 0
 
     def __iter__(self):
-        self.materializations += 1
-        self._active = self._first if self.materializations == 1 else self._later
-        return iter(self._active)
+        type(self).callbacks += 1
+        raise AssertionError("hostile mapping iteration executed")
 
     def __len__(self):
-        return len(self._active)
+        type(self).callbacks += 1
+        raise AssertionError("hostile mapping length executed")
 
-    def __getitem__(self, key):
-        return self._active[key]
+    def __getitem__(self, _key):
+        type(self).callbacks += 1
+        raise AssertionError("hostile mapping lookup executed")
+
+
+class _HostileDict(dict):
+    callbacks = 0
+
+    @classmethod
+    def reset(cls):
+        cls.callbacks = 0
+
+    @classmethod
+    def _boom(cls):
+        cls.callbacks += 1
+        raise AssertionError("hostile dict callback executed")
+
+    def __iter__(self):
+        type(self)._boom()
+
+    def __getitem__(self, _key):
+        type(self)._boom()
+
+    def get(self, _key, _default=None):
+        type(self)._boom()
+
+    def items(self):
+        type(self)._boom()
+
+
+class _HostileText(str):
+    callbacks = 0
+
+    @classmethod
+    def reset(cls):
+        cls.callbacks = 0
+
+    def __str__(self):
+        type(self).callbacks += 1
+        raise AssertionError("hostile text callback executed")
+
+    def __eq__(self, _other):
+        type(self).callbacks += 1
+        raise AssertionError("hostile text callback executed")
+
+    def __hash__(self):
+        type(self).callbacks += 1
+        raise AssertionError("hostile text callback executed")
 
 
 class _AuthorityStub:
@@ -133,10 +182,13 @@ class _AuthorityStub:
 
 
 class _IssuerStub:
-    def __init__(self, runtime):
+    def __init__(self, runtime, *, before_guard=None):
         self.runtime = runtime
+        self.before_guard = before_guard
 
     def _dispatch_guard_for(self, _authority):
+        if self.before_guard is not None:
+            self.before_guard()
         return lambda _intent_hash, _now: (True, "allowed")
 
 
@@ -146,17 +198,17 @@ class _SenderStub:
         self.submission_scope = None
 
     def dispatch(self, **kwargs):
-        # Model the lower GuardedDispatcher materialization. If the bound sender
-        # leaks the original stateful Mapping, this observes its later state.
         self.request = dict(kwargs["request"])
         self.submission_scope = dict(kwargs["submission_scope"])
         return "sent"
 
 
-def _bound_sender_harness():
+def _bound_sender_harness(*, before_guard=None):
     runtime = object()
     lower = _SenderStub()
     bound = object.__new__(FinanciallyBoundBybitOrderSender)
+    stub_dispatch_function = _SenderStub.dispatch
+    stub_dispatch = lower.dispatch
     object.__setattr__(
         bound,
         "_FinanciallyBoundBybitOrderSender__sender",
@@ -164,8 +216,23 @@ def _bound_sender_harness():
     )
     object.__setattr__(
         bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch",
+        stub_dispatch,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch_function",
+        stub_dispatch_function,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch_code",
+        stub_dispatch_function.__code__,
+    )
+    object.__setattr__(
+        bound,
         "_FinanciallyBoundBybitOrderSender__issuer",
-        _IssuerStub(runtime),
+        _IssuerStub(runtime, before_guard=before_guard),
     )
     object.__setattr__(
         bound,
@@ -180,6 +247,36 @@ def _bound_sender_harness():
     return bound, lower
 
 
+def _executable_authority_shell():
+    sender = object()
+    function = ProductionBybitOrderSender.dispatch
+    bound_method = function.__get__(sender, ProductionBybitOrderSender)
+    bound = object.__new__(FinanciallyBoundBybitOrderSender)
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender",
+        sender,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch",
+        bound_method,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch_function",
+        function,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender_dispatch_code",
+        function.__code__,
+    )
+    return bound
+
+
+def _forged_sender_dispatch(*_args, **_kwargs):
+    raise AssertionError("forged sender dispatch executed")
 
 
 class ExactBybitFinancialRequestTests(unittest.TestCase):
@@ -258,50 +355,121 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 provider_environment="DEMO",
             )
 
-    def test_bound_sender_detaches_stateful_request_before_financial_check(self):
-        admitted, _ = exact_request()
-        retargeted = dict(admitted)
-        retargeted["account_id"] = "account-2"
-        stateful_request = _RetargetingMapping(admitted, retargeted)
-        bound, lower = _bound_sender_harness()
+    def test_mapping_request_is_rejected_without_callbacks(self):
+        _HostileMapping.reset()
+        hostile = _HostileMapping(exact_request()[0])
+        with self.assertRaisesRegex(TypeError, "request must be an exact dict"):
+            require_exact_bybit_financial_request(
+                binding(),
+                hostile,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_HostileMapping.callbacks, 0)
 
-        result = bound.dispatch(
-            authority=_AuthorityStub(binding()),
-            attempt_id="attempt-1",
-            intent_id="intent-1",
-            intent_hash="intent-hash-1",
-            request=stateful_request,
-            now="2026-10-04T04:30:00Z",
-            submission_scope=exact_scope(),
-        )
+    def test_request_dict_subclass_is_rejected_without_callbacks(self):
+        _HostileDict.reset()
+        hostile = _HostileDict(exact_request()[0])
+        with self.assertRaisesRegex(TypeError, "request must be an exact dict"):
+            require_exact_bybit_financial_request(
+                binding(),
+                hostile,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_HostileDict.callbacks, 0)
+
+    def test_nested_body_dict_subclass_is_rejected_without_callbacks(self):
+        request, _ = exact_request()
+        _HostileDict.reset()
+        request["body"] = _HostileDict(request["body"])
+        with self.assertRaisesRegex(
+            TypeError,
+            "request.body must contain exact JSON-domain values",
+        ):
+            require_exact_bybit_financial_request(
+                binding(),
+                request,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_HostileDict.callbacks, 0)
+
+    def test_submission_scope_dict_subclass_is_rejected_without_callbacks(self):
+        request, _ = exact_request()
+        _HostileDict.reset()
+        hostile_scope = _HostileDict(exact_scope())
+        with self.assertRaisesRegex(
+            TypeError,
+            "submission_scope must be an exact dict",
+        ):
+            require_exact_bybit_financial_request(
+                binding(),
+                request,
+                hostile_scope,
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_HostileDict.callbacks, 0)
+
+    def test_nested_text_subclass_is_rejected_without_callbacks(self):
+        request, _ = exact_request()
+        _HostileText.reset()
+        request["body"]["symbol"] = _HostileText("BTCUSDT")
+        with self.assertRaisesRegex(
+            TypeError,
+            "request.body.symbol must contain exact JSON-domain values",
+        ):
+            require_exact_bybit_financial_request(
+                binding(),
+                request,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_HostileText.callbacks, 0)
+
+    def test_bound_sender_detaches_exact_request_before_authority_callback(self):
+        request, _ = exact_request()
+
+        def retarget_original():
+            request["account_id"] = "account-2"
+
+        bound, lower = _bound_sender_harness(before_guard=retarget_original)
+        with patch.object(ProductionBybitOrderSender, "dispatch", _SenderStub.dispatch):
+            result = bound.dispatch(
+                authority=_AuthorityStub(binding()),
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                request=request,
+                now="2026-10-04T04:30:00Z",
+                submission_scope=exact_scope(),
+            )
 
         self.assertEqual(result, "sent")
-        self.assertEqual(stateful_request.materializations, 1)
+        self.assertEqual(request["account_id"], "account-2")
         self.assertEqual(lower.request["account_id"], "account-1")
 
-    def test_bound_sender_detaches_stateful_submission_scope_before_dispatch(self):
-        admitted_scope = exact_scope()
-        retargeted_scope = dict(admitted_scope)
-        retargeted_scope["provider_environment"] = "DEMO"
-        stateful_scope = _RetargetingMapping(admitted_scope, retargeted_scope)
-        bound, lower = _bound_sender_harness()
+    def test_bound_sender_detaches_exact_scope_before_authority_callback(self):
+        scope = exact_scope()
 
-        result = bound.dispatch(
-            authority=_AuthorityStub(binding()),
-            attempt_id="attempt-2",
-            intent_id="intent-1",
-            intent_hash="intent-hash-1",
-            request=exact_request()[0],
-            now="2026-10-04T04:30:00Z",
-            submission_scope=stateful_scope,
-        )
+        def retarget_original():
+            scope["provider_environment"] = "DEMO"
+
+        bound, lower = _bound_sender_harness(before_guard=retarget_original)
+        with patch.object(ProductionBybitOrderSender, "dispatch", _SenderStub.dispatch):
+            result = bound.dispatch(
+                authority=_AuthorityStub(binding()),
+                attempt_id="attempt-2",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                request=exact_request()[0],
+                now="2026-10-04T04:30:00Z",
+                submission_scope=scope,
+            )
 
         self.assertEqual(result, "sent")
-        self.assertEqual(stateful_scope.materializations, 1)
-        self.assertEqual(
-            lower.submission_scope["provider_environment"],
-            "TESTNET",
-        )
+        self.assertEqual(scope["provider_environment"], "DEMO")
+        self.assertEqual(lower.submission_scope["provider_environment"], "TESTNET")
 
     def test_direct_capability_construction_is_rejected(self):
         with self.assertRaisesRegex(
@@ -331,6 +499,38 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 _factory_token=module._CAPABILITY_FACTORY_TOKEN,
             )
+
+
+class BoundBybitExecutableAuthorityTests(unittest.TestCase):
+    def test_sender_dispatch_rebinding_fails_before_forged_executable(self):
+        bound = _executable_authority_shell()
+        calls = []
+
+        def forged(*_args, **_kwargs):
+            calls.append("forged")
+            raise AssertionError("forged sender dispatch executed")
+
+        with patch.object(ProductionBybitOrderSender, "dispatch", forged):
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "dispatch executable authority changed",
+            ):
+                bound._require_sender_dispatch_authority()
+        self.assertEqual(calls, [])
+
+    def test_sender_dispatch_same_function_code_mutation_fails_closed(self):
+        bound = _executable_authority_shell()
+        dispatch = ProductionBybitOrderSender.dispatch
+        original_code = dispatch.__code__
+        try:
+            dispatch.__code__ = _forged_sender_dispatch.__code__
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "dispatch executable authority code changed",
+            ):
+                bound._require_sender_dispatch_authority()
+        finally:
+            dispatch.__code__ = original_code
 
 
 if __name__ == "__main__":

@@ -286,6 +286,52 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertTrue(fence_release_reached.is_set())
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
 
+    def test_fresh_financial_host_blocks_paper_send_until_reconciled(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            result = runtime.dispatcher.dispatch(
+                attempt_id="fresh-host-send",
+                intent_id="intent-1",
+                intent_hash="hash-1",
+                provider="BYBIT",
+                request={},
+                now="2026-10-04T01:55:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(outbound, 0)
+            events = host.journal.load_events(
+                "submission_attempt",
+                runtime.dispatcher._dispatcher._aggregate_id("fresh-host-send"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
     def test_dispatcher_binds_sender_check_to_recovery_owner(self) -> None:
         with TemporaryDirectory() as root:
             config = self._config(root)

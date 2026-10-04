@@ -809,6 +809,111 @@ class DurableOrderProjectionTests(unittest.TestCase):
 
             self.assertEqual(acknowledged.snapshot.state, "WORKING")
 
+    def test_provider_evidence_store_public_binding_is_read_only(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            replacement = ArtifactStore(f"{directory}/replacement-artifacts")
+            with self.assertRaises(AttributeError):
+                book.evidence_artifact_store = replacement
+            self.assertIs(book.evidence_artifact_store, artifacts)
+
+    def test_provider_evidence_store_private_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-store-retarget",
+                client_order_id="store-retarget",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "store-retarget",
+                "provider_order_id": "provider-store-retarget",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            replacement = ArtifactStore(f"{directory}/replacement-artifacts")
+            book._evidence_artifact_store = replacement
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "namespace authority changed",
+            ):
+                book.acknowledge(
+                    event_key="ack-store-retarget",
+                    client_order_id="store-retarget",
+                    provider_order_id="provider-store-retarget",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+    def test_provider_evidence_store_fake_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-store-fake-retarget",
+                client_order_id="store-fake-retarget",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "store-fake-retarget",
+                "provider_order_id": "provider-store-fake-retarget",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            class FakeStore:
+                pass
+
+            book._evidence_artifact_store = FakeStore()
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "ArtifactStore authority changed",
+            ):
+                book.acknowledge(
+                    event_key="ack-store-fake-retarget",
+                    client_order_id="store-fake-retarget",
+                    provider_order_id="provider-store-fake-retarget",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
     def test_provider_evidence_store_subclass_is_rejected(self):
         class DerivedArtifactStore(ArtifactStore):
             pass

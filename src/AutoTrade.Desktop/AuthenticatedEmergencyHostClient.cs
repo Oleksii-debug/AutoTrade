@@ -1059,16 +1059,23 @@ internal static class DesktopHostClientFactory
     public static IEmergencyHostClient Create()
     {
         string? uriText = Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI");
-        string? credentialTarget =
-            Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET");
-        if (string.IsNullOrWhiteSpace(uriText)
-            || string.IsNullOrWhiteSpace(credentialTarget)
-            || !Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out Uri? uri))
+        Uri? uri;
+        if (string.IsNullOrWhiteSpace(uriText))
+        {
+            // The runnable ZERO launcher binds this exact loopback origin by
+            // default. No authority follows from the default: the client still
+            // requires the current user's paired Credential Manager token.
+            uri = new Uri("http://127.0.0.1:8765/", UriKind.Absolute);
+        }
+        else if (!Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out uri) || uri is null)
         {
             return new DisconnectedEmergencyHostClient(
-                "Authenticated host connection is not configured. "
-                + "Set the non-secret host URI and Windows Credential Manager target after pairing.");
+                "Authenticated host URI configuration is invalid. "
+                + "No durable emergency command can be issued until it is repaired.");
         }
+
+        string? credentialTarget =
+            Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET");
 
         try
         {
@@ -1081,7 +1088,10 @@ internal static class DesktopHostClientFactory
             {
                 Timeout = TimeSpan.FromSeconds(10),
             };
-            string canonicalCredentialTarget = credentialTarget.Trim();
+            string canonicalCredentialTarget =
+                string.IsNullOrWhiteSpace(credentialTarget)
+                    ? WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(uri)
+                    : credentialTarget.Trim();
             return new AuthenticatedEmergencyHostClient(
                 httpClient,
                 uri,

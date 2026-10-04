@@ -16,7 +16,7 @@ import ipaddress
 import json
 import re
 import ssl
-from threading import Lock
+from threading import Lock, BoundedSemaphore
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -65,6 +65,7 @@ _SINGLETON_REQUEST_HEADERS = (
     "Content-Length",
     "Content-Type",
     "Accept",
+    "Cookie",
 )
 
 
@@ -242,6 +243,7 @@ class AuthenticatedHostApplication:
         if not callable(snapshot_provider):
             raise TypeError("snapshot_provider must be callable")
         self.security_boundary = security_boundary
+        self._journal = journal
         self.host_id = host_id.strip()
         self.public_origin = _authenticated_origin(public_origin)
         self._principal_resolver = principal_resolver
@@ -279,7 +281,14 @@ class AuthenticatedHostApplication:
                     result = self.store.execute_authority_operation(operation_id)
                 except (TypeError, ValueError, OverflowError):
                     current = self.store.get_operation(operation_id)
-                    if current.phase in self.store.TERMINAL_PHASES:
+                    if (
+                        current.phase in self.store.TERMINAL_PHASES
+                        or current.phase == "UNKNOWN"
+                    ):
+                        # UNKNOWN is deliberately resumable, but the state
+                        # machine forbids UNKNOWN -> UNKNOWN rewrites. A repeated
+                        # recoverable execution fault must preserve the first
+                        # durable uncertainty rather than crash host startup.
                         result = current
                     else:
                         result = self.store.update_operation(
@@ -337,6 +346,11 @@ class AuthenticatedHostApplication:
         principal: HostPrincipal,
         authenticated_role: str,
     ) -> Mapping[str, object]:
+        # UiSnapshot is one operator observation, not a loose collection of
+        # individually valid reads. Pin the global append-only journal cut
+        # across both the durable Host projection and the product projector so
+        # cash/risk/orders/jobs cannot be assembled from different moments.
+        journal_cut = self._journal.current_journal_sequence()
         durable = self.store.snapshot()
         projected = self._snapshot_provider(
             MappingProxyType(dict(durable)),
@@ -346,6 +360,8 @@ class AuthenticatedHostApplication:
                 role=authenticated_role,
             ),
         )
+        if self._journal.current_journal_sequence() != journal_cut:
+            raise ValueError("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
         payload = dict(projected)
@@ -653,7 +669,8 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
-        self.send_header("X-Content-Type-Options", "nosniff")
+        if not any(name.lower() == "x-content-type-options" for name, _ in response.headers):
+            self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in response.headers:
             self.send_header(name, value)
         self.end_headers()
@@ -691,9 +708,13 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
         application: AuthenticatedHostApplication,
         *,
         tls_context: ssl.SSLContext | None = None,
+        max_concurrent_requests: int = 32,
     ) -> None:
         if not isinstance(application, AuthenticatedHostApplication):
             raise TypeError("application must be AuthenticatedHostApplication")
+        if type(max_concurrent_requests) is not int or not 1 <= max_concurrent_requests <= 1024:
+            raise ValueError("max_concurrent_requests must be a bounded positive integer")
+        self._request_slots = BoundedSemaphore(max_concurrent_requests)
         host, _ = server_address
         if tls_context is None and not _is_loopback_bind(host):
             raise ValueError("Plain HTTP host transport must bind to loopback only")
@@ -722,3 +743,44 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             # when startup recovery or TLS setup fails closed.
             self.server_close()
             raise
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            # Reject before parsing/admission. The client retains its exact
+            # command identity and may recover/retry it after backpressure.
+            body = b'{"error":"HOST_OVERLOADED","accepted":false}'
+            response = (b'HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\n'
+                b'Cache-Control: no-store\r\nRetry-After: 1\r\nConnection: close\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            try:
+                import socket
+                import time
+                request.settimeout(0.1)
+                request.sendall(response)
+                request.shutdown(socket.SHUT_WR)
+                # Leave the receive half open briefly while the client finishes
+                # its already-sent request. Closing with unread POST bytes can
+                # reset TCP and erase the explicit overload response.
+                deadline = time.monotonic() + 0.1
+                remaining = _MAX_BODY_BYTES + 65536
+                while remaining > 0 and time.monotonic() < deadline:
+                    chunk = request.recv(min(65536, remaining))
+                    if not chunk: break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            request.settimeout(10)
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()

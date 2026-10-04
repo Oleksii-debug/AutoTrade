@@ -8,7 +8,10 @@ XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
+AUTHENTICATED_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
+OPENAPI = ROOT / "contracts" / "openapi" / "host-api.yaml"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
@@ -18,8 +21,51 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        packages = project.findall(".//PackageReference")
+        self.assertEqual([(p.get("Include"), p.get("Version")) for p in packages],
+            [("Microsoft.Web.WebView2", "1.0.4191.47")])
+        self.assertIn("<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>", text)
         self.assertEqual(project.tag, "Project")
+
+    def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
+        text = WEB_POLICY.read_text(encoding="utf-8")
+        self.assertIn("AuthenticatedEmergencyHostClient.ValidateBaseUri", text)
+        self.assertIn("using AutoTrade.Contracts;", text)
+        self.assertIn('StatePath = "/" + HostApiRoutes.GetState', text)
+        self.assertIn('CommandPath = "/" + HostApiRoutes.SubmitCommand', text)
+        self.assertIn('EventPath = "/" + HostApiRoutes.StreamEvents', text)
+        self.assertIn("IsSameHostOrigin(target)", text)
+        self.assertIn("Guid.TryParseExact(operationId, \"D\"", text)
+        self.assertIn('parsedOperationId.ToString("D")', text)
+        self.assertIn("HostApiRoutes.GetOperation(RouteProbeOperationId)", text)
+        self.assertIn("BuildCanonicalOperationPrefix()", text)
+        self.assertNotIn('"/api/v1/operations/"', text)
+        self.assertIn("HasCanonicalEventQuery(target.Query)", text)
+        self.assertIn('const string prefix = "?after=";', text)
+        self.assertIn("value.Contains('&')", text)
+        self.assertNotIn("CanonicalApiRoot", text)
+        self.assertIn("AllowsWebMessageCommandAuthority => false", text)
+        self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsDownloads => false", text)
+        self.assertIn("AllowsNewWindow(Uri target) => false", text)
+        self.assertNotIn("Authorization", text)
+        self.assertNotIn("AutoTrade-Session", text)
+
+    def test_event_credential_query_grammar_is_pinned_to_openapi_after_parameter(self):
+        policy = WEB_POLICY.read_text(encoding="utf-8")
+        openapi = OPENAPI.read_text(encoding="utf-8")
+        event = openapi.split("  /api/v1/events:", 1)[1].split(
+            "  /api/v1/health:",
+            1,
+        )[0]
+        self.assertIn('const string prefix = "?after=";', policy)
+        self.assertIn("name: after", event)
+        self.assertIn("in: query", event)
+        self.assertIn("required: false", event)
+        self.assertIn(
+            "$ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence",
+            event,
+        )
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")
@@ -34,11 +80,11 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("private static void Main(string[] args)", app_text)
         self.assertLess(
             app_text.index("private static void Main(string[] args)"),
-            app_text.index("protected override void OnStartup"),
+            app_text.index("protected override async void OnStartup"),
         )
         main_body = app_text.split(
             "private static void Main(string[] args)", 1
-        )[1].split("protected override void OnStartup", 1)[0]
+        )[1].split("protected override async void OnStartup", 1)[0]
         self.assertIn("App app = new();", main_body)
         self.assertIn("app.InitializeComponent();", main_body)
         self.assertIn("app.Run();", main_body)
@@ -234,6 +280,27 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("No durable block of new exposure has been confirmed", client)
         self.assertNotIn("WITHDRAW", client.upper())
         self.assertNotIn("TRANSFER", client.upper())
+
+    def test_default_zero_host_uses_same_current_user_pairing_target_as_launcher(self):
+        client = AUTHENTICATED_CLIENT.read_text(encoding="utf-8")
+        self.assertIn(
+            'new Uri("http://127.0.0.1:8765/", UriKind.Absolute)',
+            client,
+        )
+        self.assertIn(
+            "WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(uri)",
+            client,
+        )
+        self.assertIn(
+            'Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI")',
+            client,
+        )
+        self.assertIn(
+            'Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET")',
+            client,
+        )
+        self.assertIn("UseCookies = false", client)
+        self.assertIn("AllowAutoRedirect = false", client)
 
     def test_windows_ci_builds_the_actual_desktop_project(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

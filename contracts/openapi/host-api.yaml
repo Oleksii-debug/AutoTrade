@@ -9,6 +9,31 @@ security:
   - AutoTradeSession: []
     AutoTradeActor: []
 paths:
+  /api/v1/session:
+    post:
+      operationId: pairLocalSession
+      security: []
+      description: Exchange one process-issued single-use local pairing code for an HttpOnly SameSite session. Available only in the provider-free launcher.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pairing_code]
+              properties:
+                pairing_code:
+                  type: string
+                  minLength: 32
+                  maxLength: 128
+      responses:
+        "200":
+          description: Local owner paired; browser receives an HttpOnly cookie and the Windows ZERO launcher stores the same short-lived session in current-user Credential Manager for the native safety shell
+        "403":
+          description: Pairing rejected
+        "503":
+          description: Windows current-user session handoff failed; the minted bearer session is revoked and the pairing code remains retryable
   /api/v1/state:
     get:
       operationId: getState
@@ -66,7 +91,7 @@ paths:
           name: after
           required: false
           schema:
-            type: string
+            $ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence
       responses:
         "200":
           description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot

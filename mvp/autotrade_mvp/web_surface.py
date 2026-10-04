@@ -7,13 +7,34 @@ It is an implementation foundation, not a claim of completed NVDA qualification.
 from __future__ import annotations
 
 from html import escape
+from math import isfinite
 from typing import Iterable, Mapping
+
+from ._generated_common_scalars import is_valid_common_scalar
 
 
 def _text(value: object, fallback: str = "Unavailable") -> str:
+    """Render only JSON-like scalars; malformed objects must not execute code."""
+
     if value is None:
         return fallback
-    return str(value)
+    if type(value) in {str, int, bool}:
+        return str(value)
+    if type(value) is float and isfinite(value):
+        return str(value)
+    return fallback
+
+
+def _has_exact_text_keys(value: object) -> bool:
+    """Inspect exact dict keys without invoking caller-owned key methods."""
+
+    return type(value) is dict and all(type(key) is str for key in value)
+
+
+def _canonical_sequence_text(value: object) -> str | None:
+    """Return the canonical host sequence representation or fail closed."""
+
+    return value if is_valid_common_scalar("Sequence", value) else None
 
 
 def _rows(items: Iterable[tuple[str, object]]) -> str:
@@ -24,14 +45,18 @@ def _rows(items: Iterable[tuple[str, object]]) -> str:
 
 
 def render_operation_list(operations: Mapping[str, object]) -> str:
+    if type(operations) is not dict:
+        return "<p>Operation state is unavailable because the state shape is malformed.</p>"
     if not operations:
         return "<p>No operations are currently recorded.</p>"
     parts = ["<ul>"]
-    for operation_id, phase in sorted(operations.items()):
+    for operation_id, phase in sorted(
+        operations.items(), key=lambda item: _text(item[0])
+    ):
         parts.append(
             "<li>"
-            f"<span class=\"operation-id\">{escape(str(operation_id))}</span>: "
-            f"<strong>{escape(str(phase))}</strong>"
+            f"<span class=\"operation-id\">{escape(_text(operation_id))}</span>: "
+            f"<strong>{escape(_text(phase))}</strong>"
             "</li>"
         )
     parts.append("</ul>")
@@ -47,16 +72,47 @@ def render_semantic_page(
 ) -> str:
     """Render a complete document that remains understandable without CSS or script."""
 
-    state_version = _text(snapshot.get("state_version"), "0")
-    event_cursor = _text(snapshot.get("event_cursor"), "0")
-    operations = snapshot.get("operations")
-    if not isinstance(operations, Mapping):
-        operations = {}
+    if not _has_exact_text_keys(snapshot):
+        snapshot = {}
 
-    safe_status_lines = [line for line in str(status_text).splitlines() if line.strip()]
+    canonical_state_version = _canonical_sequence_text(snapshot.get("state_version"))
+    canonical_event_cursor = _canonical_sequence_text(snapshot.get("event_cursor"))
+    state_version = canonical_state_version or "Unavailable"
+    event_cursor = canonical_event_cursor or "Unavailable"
+    operations = snapshot.get("operations")
+    if type(operations) is not dict:
+        operations = None
+
+    rendered_status_text = _text(status_text, "")
+    safe_status_lines = [
+        line for line in rendered_status_text.splitlines() if line.strip()
+    ]
+    if not safe_status_lines:
+        safe_status_lines = ["Status details are unavailable."]
     status_html = "".join(f"<p>{escape(line)}</p>" for line in safe_status_lines)
-    announcement_html = escape(str(announcement))
-    command_html = escape(str(command_message))
+    announcement_html = escape(_text(announcement, ""))
+    command_html = escape(_text(command_message, ""))
+
+    if canonical_state_version is None:
+        command_controls = (
+            "<p role=\"alert\">Commands are unavailable because the current "
+            "state version is malformed or unavailable. Refresh or recover state "
+            "before issuing a command.</p>"
+        )
+    else:
+        command_controls = (
+            "<form method=\"post\" action=\"/v1/commands-ui\">"
+            f"<input type=\"hidden\" name=\"expected_state_version\" value=\"{escape(canonical_state_version)}\">"
+            "<fieldset><legend>Choose a host command</legend>"
+            "<label for=\"action\">Action</label>"
+            "<select id=\"action\" name=\"action\" required>"
+            "<option value=\"PAUSE_NEW_RISK\">Pause new risk</option>"
+            "<option value=\"RESUME_AFTER_RECOVERY\">Request resume after recovery</option>"
+            "<option value=\"REFRESH_STATE\">Refresh state</option>"
+            "</select>"
+            "<button type=\"submit\">Submit command</button>"
+            "</fieldset></form>"
+        )
 
     return (
         "<!doctype html>"
@@ -82,17 +138,7 @@ def render_semantic_page(
         "<section aria-labelledby=\"commands-heading\">"
         "<h2 id=\"commands-heading\">Commands</h2>"
         "<p>Command acceptance does not mean financial completion.</p>"
-        "<form method=\"post\" action=\"/v1/commands-ui\">"
-        f"<input type=\"hidden\" name=\"expected_state_version\" value=\"{escape(state_version)}\">"
-        "<fieldset><legend>Choose a host command</legend>"
-        "<label for=\"action\">Action</label>"
-        "<select id=\"action\" name=\"action\" required>"
-        "<option value=\"PAUSE_NEW_RISK\">Pause new risk</option>"
-        "<option value=\"RESUME_AFTER_RECOVERY\">Request resume after recovery</option>"
-        "<option value=\"REFRESH_STATE\">Refresh state</option>"
-        "</select>"
-        "<button type=\"submit\">Submit command</button>"
-        "</fieldset></form>"
+        f"{command_controls}"
         f"<div role=\"alert\" aria-live=\"assertive\">{command_html}</div>"
         "</section>"
         "</main>"
@@ -104,12 +150,15 @@ def render_semantic_page(
 def command_result_message(result: Mapping[str, object]) -> str:
     """Plain-language command result for a live region."""
 
-    status = str(result.get("status", "UNKNOWN"))
+    if not _has_exact_text_keys(result):
+        return "Command result is unavailable because the result shape is malformed."
+
+    status = _text(result.get("status", "UNKNOWN"), "UNKNOWN")
     command_id = _text(result.get("command_id"), "unknown")
     operation_id = result.get("operation_id")
     reasons = result.get("reason_codes")
-    if isinstance(reasons, (list, tuple)):
-        reason_text = ", ".join(str(item) for item in reasons) or "none"
+    if type(reasons) in {list, tuple}:
+        reason_text = ", ".join(_text(item) for item in reasons) or "none"
     else:
         reason_text = "none"
 

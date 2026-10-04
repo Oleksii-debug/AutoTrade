@@ -2943,6 +2943,7 @@ class AuthorityService:
                     ),
                     evidence_artifact_store=self.evidence_artifact_store,
                     journal_sequence_cut=journal_sequence_cut,
+                    _historical_risk_event_id=risk_event["event_id"],
                 )
             )
         except (KeyError, TypeError, ValueError) as error:

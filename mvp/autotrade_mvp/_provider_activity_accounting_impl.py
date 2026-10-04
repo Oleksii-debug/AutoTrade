@@ -3130,6 +3130,7 @@ def commit_order_fill_with_reservation_consumption(
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
     provider_fill_binding: PreparedProviderFillBinding | None = None,
+    expected_journal_sequence: int | None = None,
 ) -> bool:
     """Compose one canonical OMS fill with its canonical financial effects.
 
@@ -3157,6 +3158,13 @@ def commit_order_fill_with_reservation_consumption(
         raise AccountingConflict(
             "PAPER/LIVE OMS fill financial composition must use "
             "the provider-evidence entrypoint"
+        )
+    if expected_journal_sequence is not None and (
+        type(expected_journal_sequence) is not int
+        or expected_journal_sequence < 0
+    ):
+        raise ValueError(
+            "expected_journal_sequence must be an exact non-negative integer"
         )
 
     if provider_fill_binding is not None:
@@ -3207,6 +3215,13 @@ def commit_order_fill_with_reservation_consumption(
         provider_revision=provider_revision,
         evidence_refs=order_evidence_refs,
     )
+    if (
+        expected_journal_sequence is not None
+        and plan.journal_sequence_cut != expected_journal_sequence
+    ):
+        raise AccountingConflict(
+            "journal sequence changed after validated recovery cut"
+        )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,
         reservation_book,

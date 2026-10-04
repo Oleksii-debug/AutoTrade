@@ -71,11 +71,7 @@ class ModelDescriptor:
             object.__setattr__(self, "revision", _identifier(self.revision, "revision"))
         if type(self.remote) is not bool:
             raise TypeError("remote must be boolean")
-        if (
-            not isinstance(self.latency_ms, int)
-            or isinstance(self.latency_ms, bool)
-            or self.latency_ms < 0
-        ):
+        if type(self.latency_ms) is not int or self.latency_ms < 0:
             raise ValueError("latency must be a non-negative integer")
         object.__setattr__(
             self,
@@ -126,8 +122,7 @@ class RoutingPolicy:
         if self.maximum_cost < 0:
             raise ValueError("maximum cost cannot be negative")
         if self.maximum_latency_ms is not None and (
-            not isinstance(self.maximum_latency_ms, int)
-            or isinstance(self.maximum_latency_ms, bool)
+            type(self.maximum_latency_ms) is not int
             or self.maximum_latency_ms < 0
         ):
             raise ValueError("maximum latency must be a non-negative integer")
@@ -180,6 +175,14 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _route_now(value: datetime | None) -> datetime:
+    if value is None:
+        return _now_utc()
+    if type(value) is not datetime or type(value.tzinfo) not in (timezone, ZoneInfo):
+        raise ValueError("now_utc must be an exact timezone-aware datetime")
+    return value
+
+
 def _dedupe_descriptors(descriptors: Iterable[ModelDescriptor]) -> dict[str, ModelDescriptor]:
     result: dict[str, ModelDescriptor] = {}
     for descriptor in descriptors:
@@ -202,9 +205,7 @@ def route_model(
 
     if type(policy) is not RoutingPolicy or type(request) is not ModelRequest:
         raise TypeError("routing requires exact RoutingPolicy and ModelRequest")
-    now = now_utc or _now_utc()
-    if now.tzinfo is None:
-        raise ValueError("now_utc must be timezone-aware")
+    now = _route_now(now_utc)
     if request.cancelled:
         return RouteDecision(RouteStatus.REJECTED, None, None, None, Decimal("0"), "request_cancelled")
     if now >= request.deadline_utc:

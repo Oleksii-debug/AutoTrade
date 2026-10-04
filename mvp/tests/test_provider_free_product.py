@@ -16,7 +16,12 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from mvp.autotrade_mvp.product_runtime import build_product, restore_product_backup, source_revision
+from mvp.autotrade_mvp.product_runtime import (
+    _launch_message,
+    build_product,
+    restore_product_backup,
+    source_revision,
+)
 from mvp.autotrade_mvp.windows_host_session import (
     desktop_session_credential_target,
     persist_desktop_owner_session,
@@ -378,6 +383,25 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
         self.assertIn(pairing, app)
         self.assertIn(scrub, app)
         self.assertLess(app.index(pairing), app.index(scrub))
+
+
+    def test_default_launcher_message_does_not_emit_pairing_secret(self):
+        launch_url = 'http://127.0.0.1:8765/#pair=one-time-owner-secret'
+        message = _launch_message(launch_url, no_browser=False)
+        self.assertIn('http://127.0.0.1:8765/', message)
+        self.assertNotIn('one-time-owner-secret', message)
+        self.assertNotIn('#pair=', message)
+        self.assertIn('opening the local browser', message)
+
+    def test_no_browser_launcher_explicitly_emits_one_time_manual_pairing_url(self):
+        launch_url = 'http://127.0.0.1:8765/#pair=manual-owner-secret'
+        message = _launch_message(launch_url, no_browser=True)
+        self.assertIn('one-time local secret', message)
+        self.assertIn(launch_url, message)
+
+    def test_launcher_message_rejects_missing_pairing_material(self):
+        with self.assertRaisesRegex(ValueError, 'pairing material'):
+            _launch_message('http://127.0.0.1:8765/', no_browser=False)
 
     def test_pairing_exports_exact_browser_session_to_native_sink(self):
         with TemporaryDirectory() as directory:

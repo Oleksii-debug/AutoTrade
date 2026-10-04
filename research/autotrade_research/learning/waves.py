@@ -539,7 +539,7 @@ class CandidateResolution:
     def __post_init__(self) -> None:
         action = _text(self.action, name="action")
         if action not in {
-            "HANDOFF_AUTO_PROMOTION_AUTHORITY",
+            "HANDOFF_TO_AUTO_PROMOTION_CHECK",
             "AWAITING_CONFIRMATION",
             "REJECTED",
             "CONTINUE_VALIDATION",
@@ -602,11 +602,11 @@ def resolve_candidate(
         action = "CONTINUE_VALIDATION"
         reasons.append("LEARNING_WAVE.EVALUATION_INCONCLUSIVE")
     elif wave.promotion_mode == "AUTO":
-        action = "HANDOFF_AUTO_PROMOTION_AUTHORITY"
-        reasons.append("LEARNING_WAVE.CANONICAL_APPROVAL_READY_FOR_AUTO_POLICY")
+        action = "HANDOFF_TO_AUTO_PROMOTION_CHECK"
+        reasons.append("LEARNING_WAVE.APPROVAL_OBJECT_READY_FOR_AUTO_PROMOTION_CHECK")
     else:
         action = "AWAITING_CONFIRMATION"
-        reasons.append("LEARNING_WAVE.CANONICAL_APPROVAL_READY_FOR_CONFIRMATION")
+        reasons.append("LEARNING_WAVE.APPROVAL_OBJECT_AWAITING_CONFIRMATION")
 
     payload = {
         "wave_id": wave.wave_id,

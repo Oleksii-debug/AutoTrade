@@ -72,6 +72,14 @@ def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
     )
 
 
+def _exact_utc_instant(value: datetime, *, name: str) -> datetime:
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise TypeError(
+            f"{name} must be an exact datetime with a fixed built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
+
+
 @dataclass(frozen=True)
 class CorporateActionFinancialResult:
     inserted: bool
@@ -129,12 +137,10 @@ def _canonical_entitlement_position_proof(
             "corporate-action entitlement requires exact economic effective cut"
         )
 
-    if (
-        not isinstance(activation_cut, datetime)
-        or activation_cut.tzinfo is None
-        or activation_cut.utcoffset() is None
-    ):
-        raise TypeError("activation_cut must be timezone-aware")
+    observed_cut = _exact_utc_instant(
+        activation_cut,
+        name="activation_cut",
+    )
     if (
         type(source_journal_sequence) is not int
         or source_journal_sequence < 0
@@ -142,7 +148,6 @@ def _canonical_entitlement_position_proof(
         raise TypeError(
             "source_journal_sequence must be a non-negative integer"
         )
-    observed_cut = activation_cut.astimezone(timezone.utc)
     symbol = version.provider_symbol
     position_account = f"POSITION:{symbol}"
     position_amounts: list[Decimal] = []
@@ -553,11 +558,11 @@ def commit_authoritative_corporate_action(
             "durable corporate-action accounting requires exact effective_at"
         )
 
-    cut = activation_at
-    if cut is not None:
-        if not isinstance(cut, datetime) or cut.tzinfo is None:
-            raise TypeError("activation_at must be timezone-aware")
-        cut = cut.astimezone(timezone.utc)
+    cut = (
+        None
+        if activation_at is None
+        else _exact_utc_instant(activation_at, name="activation_at")
+    )
     activation_cut = observed_at if observed_at >= effective_at else cut
 
     if activation_cut is None or activation_cut < effective_at:
@@ -778,4 +783,3 @@ def commit_authoritative_corporate_action(
         transaction_ids=tuple(item.transaction_id for item in transactions),
         economically_active=True,
     )
-

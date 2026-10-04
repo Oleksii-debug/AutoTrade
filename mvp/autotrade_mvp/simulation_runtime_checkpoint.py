@@ -15,6 +15,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from tempfile import mkstemp
 import threading
 from typing import Any, Mapping, Sequence
 
@@ -31,7 +32,6 @@ from .replay import (
 
 
 _CHECKPOINT_NAME = "autonomous-runtime-checkpoint.json"
-_CHECKPOINT_TMP_NAME = ".autonomous-runtime-checkpoint.tmp"
 _AUTHORITY_PREFIX = "autotrade-autonomous-runtime"
 _VERIFIER_ID = "autotrade-autonomous-runtime-verifier-v1"
 _SEAL_DOMAIN = b"AutoTrade/autonomous-runtime-checkpoint/v1\x00"
@@ -516,14 +516,23 @@ def persist_autonomous_runtime_checkpoint(
         completed=completed,
     )
     destination = checkpoint_path(root)
-    temporary = destination.with_name(_CHECKPOINT_TMP_NAME)
     data = checkpoint.to_canonical_json().encode("utf-8")
+    descriptor: int | None = None
+    temporary: Path | None = None
     try:
-        with open(temporary, "wb") as stream:
+        descriptor, raw_temporary = mkstemp(
+            prefix=".autonomous-runtime-checkpoint-",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        temporary = Path(raw_temporary)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
+        temporary = None
         try:
             directory_fd = os.open(
                 destination.parent,
@@ -537,13 +546,20 @@ def persist_autonomous_runtime_checkpoint(
             finally:
                 os.close(directory_fd)
     except OSError as error:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise AutonomousRuntimeCheckpointError(
             "autonomous runtime checkpoint could not be persisted"
         ) from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return checkpoint
 
 

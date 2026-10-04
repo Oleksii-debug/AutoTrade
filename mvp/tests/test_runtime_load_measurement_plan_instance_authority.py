@@ -26,10 +26,10 @@ def _spec() -> RuntimeBudgetSpec:
         release_sha=SHA,
         configuration_hash=HASH,
         host_fingerprint=HOST,
-        strategy_horizon_us=1_000,
-        max_p95_financial_latency_us=500,
-        max_financial_staleness_us=500,
-        max_research_interference_us=500,
+        strategy_horizon_us=2_000,
+        max_p95_financial_latency_us=2_000,
+        max_financial_staleness_us=2_000,
+        max_research_interference_us=2_000,
         min_financial_samples=1,
         min_research_samples=1,
     )
@@ -286,6 +286,40 @@ class RuntimeLoadMeasurementPlanInstanceAuthorityTests(unittest.TestCase):
                 )
 
             self._assert_no_latency_measurement(store)
+
+    def test_python313_frame_locals_cannot_replace_terminal_financial_clock(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _event("financial-frame-clock", 1)
+            plan = declare_runtime_event_plan(
+                store,
+                plan_id="frame-locals-clock-bypass",
+                spec=_spec(),
+                expected_events=(expected,),
+            )
+
+            def operation():
+                measurement_frame = _measurement_frame()
+                measurement_frame.f_locals["clock"] = lambda: 1_001
+                _append(store, expected)
+                return "financial-finished"
+
+            with patch(
+                "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                side_effect=(1_000, 1_001_000),
+            ):
+                result, sample = measure_declared_financial_operation(
+                    store,
+                    _spec(),
+                    plan_id=plan.plan_id,
+                    event_id=expected.event_id,
+                    operation=operation,
+                )
+
+            self.assertEqual(result, "financial-finished")
+            self.assertEqual(sample.monotonic_start_ns, 1_000)
+            self.assertEqual(sample.monotonic_end_ns, 1_001_000)
+            self.assertEqual(sample.latency_us, 1_000)
 
 
 if __name__ == "__main__":

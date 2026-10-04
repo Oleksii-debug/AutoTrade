@@ -11,6 +11,8 @@ from tools.dotnet_lock import (
     dotnet_lock_content_blockers,
     dotnet_locked_dependency_graph,
     dotnet_project_package_references,
+    dotnet_restore_command_tokens,
+    dotnet_restore_tokens_are_locked,
 )
 
 
@@ -47,6 +49,43 @@ def write_lock(project: Path, *, resolved: str = '1.0.4191.47', content_hash: ob
 
 
 class NugetLockGateCandidateTests(unittest.TestCase):
+    def test_restore_locked_mode_requires_exact_switch_or_property(self):
+        spoof = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj '
+            '-p:Fake=RestoreLockedMode=true'
+        )
+        self.assertFalse(dotnet_restore_tokens_are_locked(spoof))
+
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj --locked-mode'
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:RestoreLockedMode=true'
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:RestoreLockedMode=false'
+                )
+            )
+        )
+
+    def test_malformed_restore_command_fails_parsing(self):
+        with self.assertRaisesRegex(ValueError, 'malformed dotnet restore command'):
+            dotnet_restore_command_tokens(
+                'run: dotnet restore "src/App/App.csproj --locked-mode'
+            )
+
     def test_webview2_exact_lock_with_sha512_passes(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

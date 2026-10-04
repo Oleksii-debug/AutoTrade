@@ -3,11 +3,13 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.durable_provider_qualification import DurableProviderQualificationRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_qualification_authority import (
     _derive_accepted_provider_qualification,
@@ -30,7 +32,6 @@ from mvp.tests.test_provider_qualification_authority import (
     POLICY_ID,
     ROOT_ID,
     SOURCE_SHA,
-    _ProjectionOnlyRegistry,
     _artifact_id,
     _campaign_payload,
     _protocol,
@@ -119,6 +120,18 @@ def successor_spot_q(*, old_qualification_id: str, ordinal: int = 41):
 
 
 class ProviderRouteDispatchTests(unittest.TestCase):
+    def setUp(self):
+        # Keep the production exact-registry boundary intact. These unit tests
+        # bypass only external qualification proof verification while exercising
+        # the real DurableProviderQualificationRegistry type and currentness path.
+        self._qualification_auth_patch = patch.object(
+            DurableProviderQualificationRegistry,
+            "_authenticate_record",
+            new=lambda _registry, *, protocol_key, record, receipt: record,
+        )
+        self._qualification_auth_patch.start()
+        self.addCleanup(self._qualification_auth_patch.stop)
+
     def setup_route(self, directory: str):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
@@ -131,7 +144,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
             )
         )
         evidence_root = Path(directory) / "evidence"
-        qualifications = _ProjectionOnlyRegistry(
+        qualifications = DurableProviderQualificationRegistry(
             journal,
             evidence_store=ArtifactStore(evidence_root),
             evidence_root=evidence_root,
@@ -351,7 +364,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
     def test_dispatch_and_registries_must_share_exact_store_instance(self):
         with TemporaryDirectory() as directory:
             journal, capabilities, qualifications, route, dispatcher, _q1 = self.setup_route(directory)
-            other_q = _ProjectionOnlyRegistry(
+            other_q = DurableProviderQualificationRegistry(
                 JournalStore(Path(directory) / "journal.sqlite3"),
                 evidence_store=qualifications.evidence_store,
                 evidence_root=qualifications.evidence_root,

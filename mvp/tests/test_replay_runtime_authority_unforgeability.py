@@ -5,9 +5,12 @@ import unittest
 
 from mvp.autotrade_mvp.replay import (
     CausalReplay,
+    CompositeReplayCheckpoint,
+    ReplayCheckpoint,
     ReplayError,
     ReplayEvent,
     RuntimeStateAuthority,
+    RuntimeStateSnapshot,
     RuntimeStateVerifier,
     resume_from_composite_checkpoint,
 )
@@ -75,7 +78,135 @@ def _trusted_verifier():
     )
 
 
+class _HostileText(str):
+    def __new__(cls, value):
+        instance = super().__new__(cls, value)
+        instance.touched = False
+        return instance
+
+    def strip(self, *args, **kwargs):
+        self.touched = True
+        raise AssertionError("hostile text callback executed")
+
+    def __iter__(self):
+        self.touched = True
+        raise AssertionError("hostile text iteration executed")
+
+
+class _HostileComponents(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.touched = False
+
+    def copy(self):
+        self.touched = True
+        raise AssertionError("hostile component copy executed")
+
+    def items(self):
+        self.touched = True
+        raise AssertionError("hostile component iteration executed")
+
+    def __iter__(self):
+        self.touched = True
+        raise AssertionError("hostile component iteration executed")
+
+
 class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
+    def _checkpoint_value(self):
+        return ReplayCheckpoint(
+            dataset_digest="d" * 64,
+            cursor=0,
+            clock="2026-09-24T09:59:00Z",
+        )
+
+    def test_runtime_trust_text_rejects_subclass_before_callback(self):
+        hostile = _HostileText("runtime:hostile")
+        with self.assertRaisesRegex(ReplayError, "authority_id must be non-empty"):
+            RuntimeStateAuthority(
+                authority_id=hostile,
+                signer=_signer(_TRUSTED_SECRET),
+                cut_resolver=lambda: (
+                    "cut:unused",
+                    self._checkpoint_value(),
+                    _components(),
+                ),
+            )
+        self.assertFalse(hostile.touched)
+
+        hostile = _HostileText("runtime:hostile")
+        with self.assertRaisesRegex(ReplayError, "authority_id must be non-empty"):
+            RuntimeStateVerifier(
+                authority_id=hostile,
+                verifier_id="verifier:unused",
+                verify_signature=_signature_verifier(_TRUSTED_SECRET),
+            )
+        self.assertFalse(hostile.touched)
+
+    def test_runtime_component_container_rejects_subclass_before_callback(self):
+        hostile = _HostileComponents(_components())
+        snapshot = {
+            "cut_id": "cut:hostile-components",
+            "replay": self._checkpoint_value(),
+            "runtime_components": hostile,
+            "authority_id": "runtime:components",
+            "verifier_id": "verifier:components",
+            "authority_seal": "a" * 64,
+        }
+        with self.assertRaisesRegex(TypeError, "exact dictionary"):
+            RuntimeStateSnapshot(**snapshot)
+        self.assertFalse(hostile.touched)
+
+    def test_runtime_authority_resolver_cannot_dispatch_component_subclass(self):
+        hostile = _HostileComponents(_components())
+        replay = self._checkpoint_value()
+
+        def hostile_cut():
+            return "cut:resolver", replay, hostile
+
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:resolver-exact-ingress",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=hostile_cut,
+        )
+        with self.assertRaisesRegex(TypeError, "exact dictionary"):
+            RuntimeStateAuthority.capture(
+                authority,
+                verifier_id="verifier:resolver-exact-ingress",
+            )
+        self.assertFalse(hostile.touched)
+
+    def test_runtime_snapshot_rejects_replay_subclass_before_field_reads(self):
+        touched = []
+
+        class HostileReplayCheckpoint(ReplayCheckpoint):
+            def __getattribute__(self, name):
+                if name in {"dataset_digest", "cursor", "clock"}:
+                    touched.append(name)
+                return super().__getattribute__(name)
+
+        hostile = HostileReplayCheckpoint(
+            dataset_digest="e" * 64,
+            cursor=0,
+            clock="2026-09-24T09:59:00Z",
+        )
+        touched.clear()
+        with self.assertRaisesRegex(TypeError, "exact ReplayCheckpoint"):
+            RuntimeStateSnapshot(
+                cut_id="cut:hostile-replay",
+                replay=hostile,
+                runtime_components=_components(),
+                authority_id="runtime:hostile-replay",
+                verifier_id="verifier:hostile-replay",
+                authority_seal="a" * 64,
+            )
+        self.assertEqual(touched, [])
+
+    def test_composite_document_rejects_text_subclass_before_callback(self):
+        hostile = _HostileText("{}")
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            CompositeReplayCheckpoint.from_canonical_json(hostile)
+        self.assertFalse(hostile.touched)
+
     def test_public_self_authored_authority_cannot_mint_resume_truth(self):
         events = [
             _event(1, "2026-09-24T10:00:00Z", 1),

@@ -1470,12 +1470,17 @@ def _observe_authenticated_read_wire_response(
             "_direct_authenticated_read_execution_receipt",
             receipt,
         )
+        object.__setattr__(
+            observation,
+            "_direct_authenticated_read_response_bytes",
+            wire_response.body,
+        )
     return observation
 
 
-def provider_observation_direct_execution_receipt(
+def provider_observation_direct_execution_material(
     observation: ProviderResponseObservation,
-) -> DirectAuthenticatedReadExecutionReceipt:
+) -> tuple[DirectAuthenticatedReadExecutionReceipt, bytes]:
     if type(observation) is not ProviderResponseObservation:
         raise ProviderTransportError(
             "exact provider response observation is required"
@@ -1485,15 +1490,25 @@ def provider_observation_direct_execution_receipt(
         "_direct_authenticated_read_execution_receipt",
         None,
     )
+    raw = getattr(
+        observation,
+        "_direct_authenticated_read_response_bytes",
+        None,
+    )
     snapshot = direct_authenticated_read_execution_receipt_snapshot(receipt)
+    if type(raw) is not bytes or not raw:
+        raise ProviderTransportError(
+            "direct provider response bytes are unavailable"
+        )
     if (
         snapshot["http_status"] != observation.http_status
         or snapshot["response_sha256"] != observation.response_sha256
+        or snapshot["response_sha256"] != "sha256:" + sha256(raw).hexdigest()
     ):
         raise ProviderTransportError(
             "direct wire receipt differs from provider response observation"
         )
-    return receipt
+    return receipt, raw
 
 
 def _exact_trading_response(

@@ -166,6 +166,11 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            locked_identity = holdout_identity()
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=locked_identity,
+            )
 
             with self.assertRaisesRegex(
                 ProtocolViolation,
@@ -190,14 +195,23 @@ class ScientificRegistryTests(unittest.TestCase):
                 0,
             )
 
-            # The rejected attempt must roll back the holdout identity/alias too.
-            # Otherwise a pre-budget probe could poison the future legitimate
-            # locked evaluation even though no holdout access was recorded.
+            # The rejected attempt must roll back the display alias/access,
+            # while the physical identity remains the one frozen before trial 1.
             exhaust_trials(store, registered.protocol_id)
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "does not match the preregistered protocol holdout",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="fresh-after-premature-attempt",
+                    holdout_identity=holdout_identity(dataset_digit="b"),
+                    result={"score": "0.99"},
+                )
             admitted = store.register_evaluation(
                 registered.protocol_id,
                 holdout_id="holdout-premature",
-                holdout_identity=holdout_identity(dataset_digit="b"),
+                holdout_identity=locked_identity,
                 result={"score": "0.1"},
             )
             self.assertEqual(admitted["prior_access_count"], 0)
@@ -207,6 +221,10 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             rules_hash = store.completeness(
                 registered.protocol_id
             )["stopping_rules_hash"]

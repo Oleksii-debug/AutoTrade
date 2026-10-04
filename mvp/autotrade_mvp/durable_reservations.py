@@ -846,11 +846,28 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "idempotency_key was already used for a different reservation request"
                 )
+            matching_events = tuple(
+                event
+                for event in events
+                if isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("idempotency_key") == key
+                and event["payload"].get("operation") == "RESTORE_CONSUMPTION"
+            )
+            if len(matching_events) != 1:
+                raise ReservationConflict(
+                    "committed reservation restoration identity is ambiguous"
+                )
+            committed_event = matching_events[0]
+            committed_snapshot = committed_event["payload"].get("snapshot")
+            if committed_snapshot != existing[1]:
+                raise ReservationConflict(
+                    "committed reservation restoration snapshot authority changed"
+                )
             snapshot = candidate.get(request["reservation_id"])
             snapshot_value = _snapshot_payload(snapshot)
-            if snapshot_value != existing[1]:
+            if snapshot_value != committed_snapshot:
                 raise ReservationConflict(
-                    "committed reservation restoration snapshot does not match replayed state"
+                    "reservation changed after committed restoration; replay requires current authority"
                 )
             return PreparedReservationMutation(
                 snapshot=snapshot,
@@ -858,9 +875,7 @@ class DurableReservationBook:
                 envelope=None,
                 idempotency_key=key,
                 request=request,
-                aggregate_version=(
-                    0 if not events else int(events[-1]["aggregate_version"])
-                ),
+                aggregate_version=int(committed_event["aggregate_version"]),
                 already_committed=True,
             )
 

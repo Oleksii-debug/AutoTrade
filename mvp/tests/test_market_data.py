@@ -3327,6 +3327,39 @@ class MarketNormalizationTests(unittest.TestCase):
                     adapter_version=value,
                 )
 
+    def test_normalized_event_adapter_build_identity_cannot_be_rewritten(self):
+        event = MarketNormalizer(registry()).normalize(
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                sequence=70,
+                adapter_version=TEST_ADAPTER_VERSION,
+            )
+        )
+        original_contract = event.to_contract_dict()
+
+        object.__setattr__(
+            event,
+            "adapter_version",
+            "autotrade-test-market-adapter@2",
+        )
+
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "build identity changed after construction",
+        ):
+            event.to_contract_dict()
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "build identity cannot be rebound",
+        ):
+            event.__post_init__()
+
+        self.assertEqual(
+            original_contract["adapter_version"],
+            TEST_ADAPTER_VERSION,
+        )
+
     def test_adapter_build_is_part_of_deterministic_event_identity(self):
         first = MarketNormalizer(registry()).normalize(
             raw(

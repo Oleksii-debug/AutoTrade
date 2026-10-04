@@ -16,7 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
-from weakref import WeakKeyDictionary
+import weakref
 
 from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
@@ -200,12 +200,52 @@ class _DurableReservationStoreBinding:
 
 
 def _build_reservation_store_binding_accessors():
-    bindings: WeakKeyDictionary[object, _DurableReservationStoreBinding] = (
-        WeakKeyDictionary()
-    )
+    """Retain reservation composition in callback-free process state.
+
+    WeakKeyDictionary is intentionally avoided here. Its internal weakref
+    carries a caller-discoverable removal callback; manually invoking that
+    callback can erase a live trust binding and make reinitialization appear to
+    be first composition. Callback-free weakrefs plus identity checks preserve
+    fail-closed binding semantics while still allowing dead ids to be pruned.
+    """
+
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, _DurableReservationStoreBinding],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _binding) in bindings.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            bindings.pop(object_id, None)
+
+    def registered_binding(
+        value: object,
+    ) -> _DurableReservationStoreBinding | None:
+        entry = bindings.get(id(value))
+        if entry is None:
+            return None
+        value_ref, binding = entry
+        current = value_ref()
+        if current is value:
+            return binding
+        if current is None:
+            bindings.pop(id(value), None)
+            return None
+        raise ReservationConflict(
+            "durable reservation binding identity collision"
+        )
 
     def is_registered(value: object) -> bool:
-        return value in bindings
+        try:
+            prune_dead()
+            return registered_binding(value) is not None
+        except TypeError:
+            return False
 
     def initialize(
         value: object,
@@ -218,7 +258,8 @@ def _build_reservation_store_binding_accessors():
     ) -> None:
         if type(value) is not DurableReservationBook:
             raise TypeError("reservation book must be exact DurableReservationBook")
-        if value in bindings:
+        prune_dead()
+        if registered_binding(value) is not None:
             raise ReservationConflict(
                 "reservation store authority is already established"
             )
@@ -275,25 +316,32 @@ def _build_reservation_store_binding_accessors():
         object.__setattr__(value, "_book", ReservationBook())
         object.__setattr__(value, "_idempotency", {})
 
-        bindings[value] = _DurableReservationStoreBinding(
-            store=store,
-            store_identity=identity,
-            environment=normalized_environment,
-            account_id=normalized_account,
-            scope_id=scope_id,
-            resolution_artifact_store=resolution_artifact_store,
-            resolution_artifact_reader=reader,
+        object_id = id(value)
+        bindings[object_id] = (
+            weakref.ref(value),
+            _DurableReservationStoreBinding(
+                store=store,
+                store_identity=identity,
+                environment=normalized_environment,
+                account_id=normalized_account,
+                scope_id=scope_id,
+                resolution_artifact_store=resolution_artifact_store,
+                resolution_artifact_reader=reader,
+            ),
         )
         try:
             DurableReservationBook._reload(value)
         except Exception:
-            bindings.pop(value, None)
+            entry = bindings.get(object_id)
+            if entry is not None and entry[0]() is value:
+                bindings.pop(object_id, None)
             raise
 
     def require(value: object) -> tuple[JournalStore, object, str]:
         if type(value) is not DurableReservationBook:
             raise TypeError("reservation book must be exact DurableReservationBook")
-        binding = bindings.get(value)
+        prune_dead()
+        binding = registered_binding(value)
         if binding is None:
             raise ReservationConflict(
                 "durable reservation store authority is not established"

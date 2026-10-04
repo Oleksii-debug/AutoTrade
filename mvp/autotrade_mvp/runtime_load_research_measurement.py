@@ -925,7 +925,93 @@ def measure_declared_research_interference(
             raise error_type("research interference sample was already measured")
         pre_sequence = current_sequence(store)
         start_ns = clock()
-        result = operation()
+
+        verifier = require_post_callback_authority
+        verifier_code = verifier.__code__
+        verifier_defaults = verifier.__defaults__
+        verifier_kwdefaults = verifier.__kwdefaults__
+        verifier_closure_snapshot = tuple_for(
+            (cell, cell.cell_contents) for cell in verifier.__closure__ or ()
+        )
+        callback_continuation = (
+            verifier,
+            verifier_code,
+            verifier_defaults,
+            verifier_kwdefaults,
+            verifier_closure_snapshot,
+            clock,
+            start_ns,
+            type_for,
+            int_type,
+            error_type,
+            current_sequence,
+            store,
+            pre_sequence,
+            sample_schema_version,
+            plan_id_value,
+            plan_digest_value,
+            spec_digest_value,
+            financial_plan_id_value,
+            financial_plan_digest_value,
+            expected_sample_id,
+            expected_phase,
+            sample_event_type,
+            sample_aggregate_type,
+            measurement_id,
+            str_for,
+            expected_index,
+            payload_digest_for,
+            datetime_type,
+            timezone_type,
+            append_event,
+            get_event,
+            decode_sample,
+            plan,
+        )
+        callback_continuation, result = (callback_continuation, operation())
+        (
+            require_post_callback_authority,
+            verifier_code,
+            verifier_defaults,
+            verifier_kwdefaults,
+            verifier_closure_snapshot,
+            clock,
+            start_ns,
+            type_for,
+            int_type,
+            error_type,
+            current_sequence,
+            store,
+            pre_sequence,
+            sample_schema_version,
+            plan_id_value,
+            plan_digest_value,
+            spec_digest_value,
+            financial_plan_id_value,
+            financial_plan_digest_value,
+            expected_sample_id,
+            expected_phase,
+            sample_event_type,
+            sample_aggregate_type,
+            measurement_id,
+            str_for,
+            expected_index,
+            payload_digest_for,
+            datetime_type,
+            timezone_type,
+            append_event,
+            get_event,
+            decode_sample,
+            plan,
+        ) = callback_continuation
+        for cell, expected_value in verifier_closure_snapshot:
+            cell.cell_contents = expected_value
+        if (
+            require_post_callback_authority.__code__ is not verifier_code
+            or require_post_callback_authority.__defaults__ is not verifier_defaults
+            or require_post_callback_authority.__kwdefaults__ is not verifier_kwdefaults
+        ):
+            raise error_type("research measurement verifier authority changed during callback")
         require_post_callback_authority()
         end_ns = clock()
         if (

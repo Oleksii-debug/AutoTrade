@@ -1,6 +1,9 @@
 import unittest
 
-from mvp.autotrade_mvp.durable_order_projection import _canonical_evidence_refs
+from mvp.autotrade_mvp.durable_order_projection import (
+    _canonical_evidence_refs,
+    _text,
+)
 
 
 ARTIFACT_A = "11111111-1111-4111-8111-111111111111"
@@ -101,6 +104,18 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "keys must be exact strings"):
             _canonical_evidence_refs((raw,))
+        self.assertEqual(touched, [])
+
+    def test_general_oms_text_subclass_is_rejected_before_strip_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile OMS text normalization")
+
+        with self.assertRaisesRegex(TypeError, "provider_id must be exact text"):
+            _text(HostileText("PROVIDER-A"), name="provider_id")
         self.assertEqual(touched, [])
 
     def test_evidence_text_subclass_is_rejected_before_strip_dispatch(self):

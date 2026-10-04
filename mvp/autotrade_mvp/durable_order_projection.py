@@ -68,7 +68,9 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 

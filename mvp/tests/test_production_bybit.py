@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -281,6 +282,9 @@ class ProductionBybitTests(unittest.TestCase):
             sort_keys=True,
             separators=(",", ":"),
         )
+        raw_response = (
+            b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1"}}'
+        )
         with TemporaryDirectory() as root:
             runtime, boundary = self._runtime(
                 root,
@@ -322,9 +326,7 @@ class ProductionBybitTests(unittest.TestCase):
                 position_side="LONG",
                 position_idx=1,
             )
-            wire = _RecordingWire(
-                b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1"}}'
-            )
+            wire = _RecordingWire(raw_response)
             sender = build_production_bybit_order_sender(
                 runtime,
                 provider_environment="TESTNET",
@@ -338,7 +340,7 @@ class ProductionBybitTests(unittest.TestCase):
             )
 
             # Readiness qualification itself is owned by the reconciliation
-            # journal.  This integration test places the controller in the
+            # journal. This integration test places the controller in the
             # already-qualified state solely to exercise the composed send path.
             runtime.recovery_controller.provider_reconciled = True
             runtime.recovery_controller.reason_codes.clear()
@@ -362,6 +364,8 @@ class ProductionBybitTests(unittest.TestCase):
 
             self.assertEqual(outcome.status, "SENT")
             self.assertEqual(outcome.reason, "sent_confirmed")
+            self.assertEqual(outcome.response["retCode"], 0)
+            self.assertEqual(outcome.response["result"]["orderId"], "provider-1")
             self.assertEqual(len(wire.requests), 1)
             self.assertEqual(len(boundary.calls), 1)
             self.assertEqual(len(authority_calls), 2)
@@ -374,9 +378,10 @@ class ProductionBybitTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
             )
             self.assertEqual(events[-1]["payload"]["response_encoding"], "utf-8-json")
+            self.assertEqual(events[-1]["payload"]["response_text"], raw_response.decode("utf-8"))
             self.assertEqual(
                 events[-1]["payload"]["response_sha256"],
-                outcome.response_sha256 if hasattr(outcome, "response_sha256") else events[-1]["payload"]["response_sha256"],
+                "sha256:" + sha256(raw_response).hexdigest(),
             )
 
 

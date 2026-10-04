@@ -343,6 +343,27 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertTrue(exact_scope.allowed)
         self.assertEqual(exact_scope.protected_violations, ())
 
+    def test_rename_destination_cannot_replace_protected_path_without_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        change = Change(
+            status="R100",
+            previous_path="candidate.py",
+            path=sentinel,
+        )
+        blocked = assess_reconvergence(
+            base_paths=["candidate.py", "README.md"],
+            changes=[change],
+        )
+        authorized = assess_reconvergence(
+            base_paths=["candidate.py", "README.md"],
+            changes=[change],
+            allowed_scopes=("candidate.py", sentinel),
+        )
+
+        self.assertFalse(blocked.allowed)
+        self.assertIn("content change without exact authorization", blocked.reasons[0])
+        self.assertTrue(authorized.allowed)
+
     def test_change_validation_rejects_unsupported_status_and_noncanonical_path(self):
         with self.assertRaisesRegex(ValueError, "Unsupported Git name-status"):
             parse_name_status(["U\tREADME.md"])

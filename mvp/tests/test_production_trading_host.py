@@ -150,7 +150,7 @@ class ProductionTradingHostTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             runtime, host, _store = self._build_with_fake_host(Path(directory))
             retained_dispatcher = runtime.dispatcher
-            original_fence = host._instance_fence._fence
+            original_fence = host._instance_fence
             controller = runtime.recovery
             original_fence.on_release = lambda: self.assertIsNone(controller.owner)
 

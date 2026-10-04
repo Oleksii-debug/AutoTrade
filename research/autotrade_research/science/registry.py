@@ -992,6 +992,48 @@ class ScientificRegistry:
             created_at=row["created_at"],
         )
 
+    @contextmanager
+    def candidate_promotion_evidence_guard(
+        self,
+        *,
+        evaluation_id: str,
+        protocol_id: str,
+        protocol_hash: str,
+        result_hash: str,
+        candidate_id: str,
+        artifact_hash: str,
+        evaluation_status: str,
+        retention_passed: bool,
+        risk_passed: bool,
+        authority_scope_id: str,
+        evidence_valid_until: str,
+    ):
+        """Hold scientific writer authority through a dependent promotion commit.
+
+        Validation alone is not a commit fence: another process can otherwise
+        append holdout access after the untouched check and before ChampionRegistry
+        commits routing.  BEGIN IMMEDIATE serializes all ScientificRegistry writers
+        while ordinary WAL readers remain available.  The caller must keep this
+        context open until its dependent durable promotion commit is complete.
+        """
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            evidence = self.verify_candidate_promotion_evidence(
+                evaluation_id=evaluation_id,
+                protocol_id=protocol_id,
+                protocol_hash=protocol_hash,
+                result_hash=result_hash,
+                candidate_id=candidate_id,
+                artifact_hash=artifact_hash,
+                evaluation_status=evaluation_status,
+                retention_passed=retention_passed,
+                risk_passed=risk_passed,
+                authority_scope_id=authority_scope_id,
+                evidence_valid_until=evidence_valid_until,
+            )
+            yield evidence
+
     def verify_candidate_promotion_evidence(
         self,
         *,

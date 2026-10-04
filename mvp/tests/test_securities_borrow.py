@@ -1,7 +1,9 @@
 from dataclasses import replace
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from tempfile import TemporaryDirectory
+import gc
 import unittest
+import weakref
 
 from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -217,6 +219,27 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                 instrument_version=1,
                 evidence_artifact_store=artifact_store_for(self.store),
             )
+
+    def test_projection_binding_releases_artifact_authority_on_collection(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = artifact_store_for(store)
+            artifact_ref = weakref.ref(artifacts)
+            projection = DurableBorrowRecallProjection(
+                store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                evidence_artifact_store=artifacts,
+            )
+
+            del artifacts
+            del projection
+            gc.collect()
+
+            self.assertIsNone(artifact_ref())
 
     def test_projection_rejects_store_retarget_or_method_shadow_before_read(self):
         artifacts = artifact_store_for(self.store)

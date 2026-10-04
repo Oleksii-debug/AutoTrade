@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
+from mvp.autotrade_mvp.provider_transport import BYBIT_V5_ENDPOINT_POLICIES
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
@@ -140,8 +141,6 @@ class ProductionBybitBarrierTests(unittest.TestCase):
         with TemporaryDirectory() as root:
             runtime, _boundary = self._runtime(root)
             wire = _RecordingWire()
-            from mvp.autotrade_mvp.provider_transport import BYBIT_V5_ENDPOINT_POLICIES
-
             policy = BYBIT_V5_ENDPOINT_POLICIES["TESTNET"]
             original_base_url = policy.base_url
             original_allowed_hosts = policy.allowed_hosts

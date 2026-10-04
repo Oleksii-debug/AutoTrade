@@ -12,13 +12,21 @@ import autotrade_runtime.artifacts.durable_publish as durable_publish_module
 from tools.build_windows_bundle import (
     BundleError,
     WINDOWS_REPARSE_POINT,
+    _RELEASE_RUNTIME_REQUIRED,
     _has_windows_reparse_point,
     _windows_path_key,
     build_bundle,
 )
 
 
-SOURCE_SHA = "a" * 40
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_SHA = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPOSITORY_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 
 
 class DeterministicWindowsBundleTests(unittest.TestCase):
@@ -28,6 +36,10 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.staging = self.root / "staging"
         self.staging.mkdir()
+        # Release-mode tests now traverse the real exact-Git runtime stager.
+        # POSIX publication intentionally requires this nested authority parent
+        # to exist before it can publish descendant source-controlled leaves.
+        (self.staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
         (self.staging / "AutoTrade.exe").write_bytes(b"binary-placeholder")
         (self.staging / "contracts").mkdir()
         (self.staging / "contracts" / "baseline.json").write_text(
@@ -359,7 +371,7 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         composition = self.composition(source_sha=SOURCE_SHA.upper())
         with self.assertRaisesRegex(
             BundleError,
-            "composition source_sha must be an exact 40-character lowercase Git SHA",
+            "composition source_sha must be an exact lowercase Git object id",
         ):
             build_bundle(
                 staging=self.staging,
@@ -578,7 +590,8 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 "contracts/baseline.json",
                 "dependency-lock.json",
                 "sbom.spdx.json",
-            },
+            }
+            | {descriptor.path for descriptor in _RELEASE_RUNTIME_REQUIRED},
         )
 
         extra = self.staging / "debug.log"

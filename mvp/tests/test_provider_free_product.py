@@ -478,6 +478,14 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 with self.assertRaises(ValueError):
                     desktop_session_credential_target(origin)
 
+    def test_desktop_bearer_is_scoped_to_current_windows_logon_session(self):
+        module = (
+            ROOT / 'mvp' / 'autotrade_mvp' / 'windows_host_session.py'
+        ).read_text(encoding='utf-8')
+        self.assertIn('_CREDENTIAL_PERSIST_SESSION = 1', module)
+        self.assertIn('Persist=_CREDENTIAL_PERSIST_SESSION', module)
+        self.assertNotIn('_CREDENTIAL_PERSIST_LOCAL_MACHINE', module)
+
     def test_windows_session_persistence_passes_exact_owner_material_to_os_writer(self):
         with patch(
             'mvp.autotrade_mvp.windows_host_session._running_on_windows',

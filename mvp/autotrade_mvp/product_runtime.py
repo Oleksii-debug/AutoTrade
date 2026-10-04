@@ -8,7 +8,6 @@ import json
 from functools import partial
 from hashlib import sha256
 from http.cookies import SimpleCookie
-import json
 import os
 from pathlib import Path
 import secrets

@@ -122,6 +122,19 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('Target="{Binding ElementName=StateVersionValue}"', text)
         self.assertIn('Target="{Binding ElementName=LastEvidenceValue}"', text)
 
+    def test_emergency_outcome_is_copyable_without_losing_assertive_live_semantics(self):
+        text = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertNotIn('<TextBlock x:Name="EmergencyResult"', text)
+        self.assertIn('<TextBox x:Name="EmergencyResult"', text)
+        emergency = text.split('<TextBox x:Name="EmergencyResult"', 1)[1].split("/>", 1)[0]
+        self.assertIn('IsReadOnly="True"', emergency)
+        self.assertIn('IsReadOnlyCaretVisible="True"', emergency)
+        self.assertIn('AutomationProperties.Name="Emergency command result"', emergency)
+        self.assertIn('AutomationProperties.LiveSetting="Assertive"', emergency)
+        self.assertIn("Use standard selection and copy commands.", emergency)
+        self.assertIn("private void SetLiveRegionText(TextBox element, string text)", code)
+
     def test_status_refresh_is_keyboard_reachable_and_announced_without_focus_theft(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

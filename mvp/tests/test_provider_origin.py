@@ -74,10 +74,19 @@ class ProviderOriginJournalTests(unittest.TestCase):
         *,
         request_marker: str,
         terminal_cut_delta: int = 0,
+        canonical_prepared: bool = True,
     ):
         """Seed only the durable recovery state; this is not provider-wire proof."""
 
-        attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+        if canonical_prepared:
+            attempt_id = origin.prepare_direct(binding, recorded_at=NOW)
+        else:
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="InjectedAuthenticatedReadTransport:test-only",
+                network_policy_identity="sha256:" + "9" * 64,
+                recorded_at=NOW,
+            )
         prepared = JournalStore.load_events(
             journal,
             "qualified_authenticated_provider_read",
@@ -582,6 +591,47 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 ["AuthenticatedReadPrepared"],
             )
 
+    def test_prepared_claim_recovery_rejects_noncanonical_prepared_network(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                _capabilities,
+                _qualifications,
+                _route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[]}}'
+            attempt_id, _artifact_id = self._seed_direct_claim_artifact(
+                origin,
+                journal,
+                binding,
+                body,
+                request_marker="noncanonical-prepared-network",
+                canonical_prepared=False,
+            )
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "canonical Prepared network authority",
+            ):
+                restarted.recover_response_binding(attempt_id, binding)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+
     def test_prepared_claim_missing_artifact_fails_closed_until_exact_bytes_restored(self):
         """Recovery durability is tested without pretending a patched socket was real wire."""
 
@@ -696,7 +746,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 "observed_at": NOW.isoformat().replace("+00:00", "Z"),
                 "wire_request_sha256": "sha256:" + "4" * 64,
                 "wire_request_semantics_sha256": "sha256:" + "5" * 64,
-                "terminal_authority_journal_sequence_cut": 1,
+                "terminal_authority_journal_sequence_cut": 0,
                 "terminal_authority_verified_at": NOW.isoformat().replace("+00:00", "Z"),
             }
             provider_origin_module._claim_direct_wire_execution(journal, **kwargs)
@@ -713,6 +763,37 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     restarted,
                     **conflicting,
                 )
+
+    def test_direct_wire_claim_rejects_future_terminal_cut_before_append(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.sqlite3")
+            kwargs = {
+                "attempt_id": "provider-read:" + "c" * 32,
+                "qualified_query_digest": "sha256:" + "1" * 64,
+                "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+                "http_status": 200,
+                "response_sha256": "sha256:" + "3" * 64,
+                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                "wire_request_sha256": "sha256:" + "4" * 64,
+                "wire_request_semantics_sha256": "sha256:" + "5" * 64,
+                "terminal_authority_journal_sequence_cut": 1,
+                "terminal_authority_verified_at": NOW.isoformat().replace("+00:00", "Z"),
+            }
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "ahead of durable journal",
+            ):
+                provider_origin_module._claim_direct_wire_execution(
+                    journal,
+                    **kwargs,
+                )
+            self.assertEqual(
+                JournalStore.load_events_by_aggregate_type(
+                    journal,
+                    "qualified_authenticated_provider_wire_execution",
+                ),
+                [],
+            )
 
     def test_journal_never_embeds_provider_response_bytes(self):
         with TemporaryDirectory() as directory:

@@ -151,8 +151,24 @@ def _canonical_economic_report_is_readable(
     if total_fees < 0 or turnover < 0:
         return False
 
+    fill_count = _canonical_fill_count(
+        status.get("fills", {}),
+        expected_instrument=status.get("symbol"),
+    )
+    trade_count = report.get("trade_count")
+    if (
+        fill_count is None
+        or type(trade_count) is not int
+        or trade_count < 0
+        or trade_count != fill_count
+    ):
+        return False
+
     valuation_status = _safe_text(report.get("valuation_status"), "")
+    ending_position = matched_values["ending_position"]
     if valuation_status == "CASH_ONLY":
+        if ending_position != 0:
+            return False
         try:
             final_equity = parse_canonical_decimal_text(report.get("final_equity"))
             net_pnl = parse_canonical_decimal_text(report.get("net_pnl"))
@@ -167,11 +183,27 @@ def _canonical_economic_report_is_readable(
         ):
             return False
     elif valuation_status == "MARK_UNAVAILABLE":
-        if report.get("final_equity") is not None or report.get("net_pnl") is not None:
+        if (
+            ending_position == 0
+            or report.get("final_equity") is not None
+            or report.get("net_pnl") is not None
+        ):
             return False
     else:
         return False
     return True
+
+
+def _canonical_evidence_count(status: dict[str, Any]) -> str:
+    evidence_count = status.get("evidence_count")
+    if (
+        type(evidence_count) is int
+        and evidence_count >= 0
+        and str(evidence_count)
+        == _canonical_sequence_value(status, "journal_sequence", "")
+    ):
+        return str(evidence_count)
+    return "Unavailable"
 
 
 def _canonical_fill_count(
@@ -296,21 +328,9 @@ def format_accessible_status(
             f"Initial capital: {initial_capital}",
             "Recorded evidence items: "
             + (
-                str(status.get("evidence_count"))
-                if (
-                    state_format != "canonical_journal"
-                    or (
-                        type(status.get("evidence_count")) is int
-                        and status.get("evidence_count") >= 0
-                        and str(status.get("evidence_count"))
-                        == _canonical_sequence_value(
-                            status,
-                            "journal_sequence",
-                            "",
-                        )
-                    )
-                )
-                else "Unavailable"
+                _canonical_evidence_count(status)
+                if state_format == "canonical_journal"
+                else _value(status, "evidence_count", "0")
             ),
             f"Recorded fills: {recorded_fills}",
         ]

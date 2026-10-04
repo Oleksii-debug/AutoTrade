@@ -185,6 +185,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "net_pnl": "0",
                 "total_fees": "0",
                 "turnover": "0",
+                "trade_count": 0,
                 "reconciled": True,
                 "journal_sequence": "7",
             },
@@ -225,6 +226,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "net_pnl": None,
                 "total_fees": "1",
                 "turnover": "100",
+                "trade_count": 1,
                 "reconciled": True,
                 "journal_sequence": "8",
             },
@@ -313,6 +315,7 @@ class AccessibleStatusTests(unittest.TestCase):
                         "net_pnl": "0",
                         "total_fees": "0",
                         "turnover": "0",
+                        "trade_count": 0,
                         "reconciled": True,
                         "journal_sequence": report_sequence,
                     },
@@ -346,6 +349,7 @@ class AccessibleStatusTests(unittest.TestCase):
             "net_pnl": "0",
             "total_fees": "0",
             "turnover": "0",
+            "trade_count": 0,
             "reconciled": True,
             "journal_sequence": "11",
         }
@@ -394,6 +398,7 @@ class AccessibleStatusTests(unittest.TestCase):
             "net_pnl": "0",
             "total_fees": "0",
             "turnover": "0",
+            "trade_count": 0,
             "reconciled": True,
             "journal_sequence": "12",
         }
@@ -461,6 +466,7 @@ class AccessibleStatusTests(unittest.TestCase):
             "net_pnl": "0",
             "total_fees": "0",
             "turnover": "0",
+            "trade_count": 0,
             "reconciled": True,
             "journal_sequence": "14",
         }
@@ -550,12 +556,105 @@ class AccessibleStatusTests(unittest.TestCase):
             "net_pnl": "0",
             "total_fees": "0",
             "turnover": "0",
+            "trade_count": 0,
             "reconciled": False,
             "journal_sequence": "17",
         }
         text = format_accessible_status(status, report)
         self.assertIn("Economic reconciliation: not confirmed", text)
         self.assertIn("Final equity: Unavailable", text)
+
+    def test_canonical_economic_report_trade_count_matches_fill_evidence(self):
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "900",
+            "position": "1",
+            "journal_sequence": "18",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {
+                "fill-1": {
+                    "instrument": "SIM",
+                    "quantity": "1",
+                }
+            },
+            "active_reservations": [],
+        }
+        base_report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "900",
+            "ending_position": "1",
+            "valuation_status": "MARK_UNAVAILABLE",
+            "final_equity": None,
+            "net_pnl": None,
+            "total_fees": "1",
+            "turnover": "100",
+            "reconciled": True,
+            "journal_sequence": "18",
+        }
+        for trade_count in (None, True, 0, 2, "1"):
+            with self.subTest(trade_count=trade_count):
+                report = dict(base_report)
+                report["trade_count"] = trade_count
+                text = format_accessible_status(status, report)
+                self.assertIn("Economic reconciliation: not confirmed", text)
+                self.assertIn("Total fees: Unavailable", text)
+        report = dict(base_report)
+        report["trade_count"] = 1
+        text = format_accessible_status(status, report)
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn("Total fees: 1", text)
+
+    def test_canonical_valuation_regime_matches_position(self):
+        cash_status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "19",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "MARK_UNAVAILABLE",
+            "final_equity": None,
+            "net_pnl": None,
+            "total_fees": "0",
+            "turnover": "0",
+            "trade_count": 0,
+            "reconciled": True,
+            "journal_sequence": "19",
+        }
+        text = format_accessible_status(cash_status, report)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn("Total fees: Unavailable", text)
+
+    def test_legacy_missing_evidence_count_retains_zero_default(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+            }
+        )
+        self.assertIn("Recorded evidence items: 0", text)
 
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(

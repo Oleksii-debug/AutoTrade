@@ -1052,9 +1052,9 @@ def lifecycle_gate(
         )
 
     # Exact object shape and a construction snapshot establish integrity only.
-    # Lifecycle authorization must be re-selected from the composition-owned
-    # canonical registry on every gate invocation; a caller-authored exact
-    # InstrumentVersion cannot grant itself trading/lifecycle authority.
+    # This registry resolution is deliberately diagnostic: InstrumentRegistry
+    # construction is public, so the object supplied here does not by itself
+    # prove product/composition selection authority for opening exposure.
     if type(instrument_registry) is not InstrumentRegistry:
         raise FuturesError(
             "futures lifecycle requires exact canonical InstrumentRegistry"
@@ -1168,6 +1168,14 @@ def require_open_for_new_exposure(
     *,
     instrument_registry: InstrumentRegistry | None = None,
 ) -> None:
+    """Fail closed unless lifecycle blocks first or product authority is proven.
+
+    ``lifecycle_gate`` can validate an exact registry/version cut, but callers can
+    construct ``InstrumentRegistry`` themselves. Until the real order-admission
+    composition owns and re-resolves a selected registry authority, an ``OPEN``
+    diagnostic state is not permission to create financial exposure.
+    """
+
     state = lifecycle_gate(
         contract,
         at,
@@ -1175,3 +1183,7 @@ def require_open_for_new_exposure(
     )
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")
+    raise FuturesError(
+        "new futures exposure requires product-selected instrument registry "
+        "composition authority; caller-supplied InstrumentRegistry is diagnostic only"
+    )

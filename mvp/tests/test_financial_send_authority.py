@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+import copy
 from dataclasses import replace
 import unittest
 
@@ -6,6 +7,7 @@ from mvp.autotrade_mvp.financial_request_binding import FinancialRequestBindingM
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthority,
     FinancialSendAuthorityError,
+    FinancialSendAuthorityIssuer,
     FinanciallyBoundBybitOrderSender,
     require_exact_bybit_financial_request,
 )
@@ -146,16 +148,17 @@ class _SenderStub:
         self.submission_scope = None
 
     def dispatch(self, **kwargs):
-        # Model the lower GuardedDispatcher materialization. If the bound sender
-        # leaks the original stateful Mapping, this observes its later state.
         self.request = dict(kwargs["request"])
         self.submission_scope = dict(kwargs["submission_scope"])
         return "sent"
 
 
-def _bound_sender_harness():
+def _bound_sender_harness(*, executable_stub: bool = False):
+    from mvp.autotrade_mvp import financial_send_authority as module
+
     runtime = object()
     lower = _SenderStub()
+    issuer = _IssuerStub(runtime)
     bound = object.__new__(FinanciallyBoundBybitOrderSender)
     object.__setattr__(
         bound,
@@ -165,7 +168,7 @@ def _bound_sender_harness():
     object.__setattr__(
         bound,
         "_FinanciallyBoundBybitOrderSender__issuer",
-        _IssuerStub(runtime),
+        issuer,
     )
     object.__setattr__(
         bound,
@@ -177,9 +180,39 @@ def _bound_sender_harness():
         "_FinanciallyBoundBybitOrderSender__provider_environment",
         "TESTNET",
     )
+    issuer_guard = (
+        _IssuerStub._dispatch_guard_for
+        if executable_stub
+        else FinancialSendAuthorityIssuer._dispatch_guard_for
+    )
+    pins = {
+        "__issuer_guard_function": issuer_guard,
+        "__issuer_guard_code": issuer_guard.__code__,
+        "__request_guard_function": module.require_exact_bybit_financial_request,
+        "__request_guard_code": module.require_exact_bybit_financial_request.__code__,
+        "__snapshot_function": module._detached_mapping_snapshot,
+        "__snapshot_code": module._detached_mapping_snapshot.__code__,
+        "__mapping_digest_function": module._mapping_digest,
+        "__mapping_digest_code": module._mapping_digest.__code__,
+        "__exact_text_function": module._exact_text,
+        "__exact_text_code": module._exact_text.__code__,
+    }
+    for suffix, value in pins.items():
+        object.__setattr__(
+            bound,
+            f"_FinanciallyBoundBybitOrderSender{suffix}",
+            value,
+        )
     return bound, lower
 
 
+def _exercise_stub_bound_sender(bound, **kwargs):
+    original = FinanciallyBoundBybitOrderSender._require_composition_current
+    FinanciallyBoundBybitOrderSender._require_composition_current = lambda _self: None
+    try:
+        return bound.dispatch(**kwargs)
+    finally:
+        FinanciallyBoundBybitOrderSender._require_composition_current = original
 
 
 class ExactBybitFinancialRequestTests(unittest.TestCase):
@@ -263,9 +296,10 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
         retargeted = dict(admitted)
         retargeted["account_id"] = "account-2"
         stateful_request = _RetargetingMapping(admitted, retargeted)
-        bound, lower = _bound_sender_harness()
+        bound, lower = _bound_sender_harness(executable_stub=True)
 
-        result = bound.dispatch(
+        result = _exercise_stub_bound_sender(
+            bound,
             authority=_AuthorityStub(binding()),
             attempt_id="attempt-1",
             intent_id="intent-1",
@@ -284,9 +318,10 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
         retargeted_scope = dict(admitted_scope)
         retargeted_scope["provider_environment"] = "DEMO"
         stateful_scope = _RetargetingMapping(admitted_scope, retargeted_scope)
-        bound, lower = _bound_sender_harness()
+        bound, lower = _bound_sender_harness(executable_stub=True)
 
-        result = bound.dispatch(
+        result = _exercise_stub_bound_sender(
+            bound,
             authority=_AuthorityStub(binding()),
             attempt_id="attempt-2",
             intent_id="intent-1",
@@ -317,10 +352,13 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 action="TRADE",
             )
 
-    def test_importable_factory_token_cannot_inject_authority_callback(self):
+    def test_importable_capability_factory_token_is_not_a_minting_boundary(self):
         from mvp.autotrade_mvp import financial_send_authority as module
 
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "must be minted",
+        ):
             FinancialSendAuthority(
                 issuer_identity=object(),
                 binding=binding(),
@@ -328,9 +366,67 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 intent_id="intent-1",
                 intent_hash="intent-hash-1",
                 action="TRADE",
-                authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 _factory_token=module._CAPABILITY_FACTORY_TOKEN,
             )
+
+    def test_minted_shape_is_immutable_and_noncopyable(self):
+        authority = object.__new__(FinancialSendAuthority)
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__issuer_identity",
+            object(),
+        )
+        object.__setattr__(authority, "_FinancialSendAuthority__binding", binding())
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__admission_id",
+            "admission-1",
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__intent_id",
+            "intent-1",
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__intent_hash",
+            "intent-hash-1",
+        )
+        object.__setattr__(authority, "_FinancialSendAuthority__action", "TRADE")
+
+        with self.assertRaisesRegex(FinancialSendAuthorityError, "immutable"):
+            authority._FinancialSendAuthority__intent_hash = "retargeted"
+        with self.assertRaisesRegex(FinancialSendAuthorityError, "cannot be copied"):
+            copy.copy(authority)
+
+    def test_bound_sender_rejects_post_composition_retarget(self):
+        bound, _lower = _bound_sender_harness()
+        with self.assertRaisesRegex(FinancialSendAuthorityError, "immutable"):
+            bound._FinanciallyBoundBybitOrderSender__provider_environment = "DEMO"
+
+    def test_bound_sender_rejects_request_guard_rebinding_before_lower_dispatch(self):
+        from mvp.autotrade_mvp import financial_send_authority as module
+
+        bound, lower = _bound_sender_harness()
+        original = module.require_exact_bybit_financial_request
+        module.require_exact_bybit_financial_request = lambda *_args, **_kwargs: None
+        try:
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "request authority changed",
+            ):
+                bound.dispatch(
+                    authority=_AuthorityStub(binding()),
+                    attempt_id="attempt-rebound",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash-1",
+                    request=exact_request()[0],
+                    now="2026-10-04T04:30:00Z",
+                    submission_scope=exact_scope(),
+                )
+            self.assertIsNone(lower.request)
+        finally:
+            module.require_exact_bybit_financial_request = original
 
 
 if __name__ == "__main__":

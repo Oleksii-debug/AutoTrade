@@ -378,7 +378,8 @@ def _order_projection_binding_operations():
                 "_provider_evidence_reader",
                 trusted_reader,
             )
-            bindings[id(value)] = (
+            object_id = id(value)
+            bindings[object_id] = (
                 owner_ref,
                 store_ref,
                 identity,
@@ -388,28 +389,25 @@ def _order_projection_binding_operations():
                 reader_ref,
             )
 
-    def unbind(value):
-        """Remove only this exact unpublished/failed OMS binding."""
-        with lock:
-            object_id = id(value)
-            entry = bindings.get(object_id)
-            if entry is None:
-                return
-            owner = entry[0]()
-            if owner is not value:
-                if owner is None:
+            # Publish no partially replayed financial authority to competing
+            # threads. The RLock remains held across initial durable replay;
+            # re-entrant require() calls from this initializer are permitted,
+            # while other threads block until replay either completes or the
+            # unpublished binding is removed.
+            try:
+                DurableOrderBookProjection._reload(value)
+            except BaseException:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
                     bindings.pop(object_id, None)
-                    return
-                raise OrderProjectionConflict(
-                    "durable OMS selection authority identity collision"
-                )
-            reader_ref = entry[6]
-            reader = None if reader_ref is None else reader_ref()
-            bindings.pop(object_id, None)
-            state = object.__getattribute__(value, "__dict__")
-            visible_reader = state.get("_provider_evidence_reader")
-            if visible_reader is reader:
-                object.__setattr__(value, "_provider_evidence_reader", None)
+                state = object.__getattribute__(value, "__dict__")
+                if state.get("_provider_evidence_reader") is trusted_reader:
+                    object.__setattr__(
+                        value,
+                        "_provider_evidence_reader",
+                        None,
+                    )
+                raise
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:
@@ -514,12 +512,11 @@ def _order_projection_binding_operations():
                 )
         return trusted_reader(artifact_id)
 
-    return registered, bind, unbind, require, read_provider_evidence
+    return registered, bind, require, read_provider_evidence
 
 (
     _order_projection_is_registered,
     _bind_order_projection,
-    _unbind_order_projection,
     require_exact_order_projection_authority,
     _read_authenticated_provider_evidence,
 ) = _order_projection_binding_operations()
@@ -582,11 +579,6 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         _bind_order_projection(self)
-        try:
-            self._reload()
-        except BaseException:
-            _unbind_order_projection(self)
-            raise
 
     def _new_book(self) -> OrderBookProjection:
         return OrderBookProjection(

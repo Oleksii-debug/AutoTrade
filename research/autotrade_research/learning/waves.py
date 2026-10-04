@@ -341,43 +341,6 @@ def evaluate_pause(
 
 
 @dataclass(frozen=True, slots=True)
-class EvidencePopulation:
-    population_id: str
-    root_hash: str
-    causal_cut_hash: str
-    available_at: datetime
-    observation_ids: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "population_id",
-            _text(self.population_id, name="population_id"),
-        )
-        object.__setattr__(self, "root_hash", _digest(self.root_hash, name="root_hash"))
-        object.__setattr__(
-            self,
-            "causal_cut_hash",
-            _digest(self.causal_cut_hash, name="causal_cut_hash"),
-        )
-        object.__setattr__(
-            self,
-            "available_at",
-            _time(self.available_at, name="available_at"),
-        )
-        if type(self.observation_ids) is not tuple:
-            raise TypeError("observation_ids must be an immutable tuple")
-        normalized = tuple(
-            _text(value, name="observation_id") for value in self.observation_ids
-        )
-        if not normalized:
-            raise ValueError("observation_ids must not be empty")
-        if len(normalized) != len(set(normalized)):
-            raise ValueError("observation_ids must be unique")
-        object.__setattr__(self, "observation_ids", normalized)
-
-
-@dataclass(frozen=True, slots=True)
 class CandidateWave:
     wave_id: str
     policy: LearningWavePolicy
@@ -393,8 +356,8 @@ class CandidateWave:
     error_analysis_hash: str
     error_analysis_at: datetime
     change_summary: str
-    training_population: EvidencePopulation
-    validation_population: EvidencePopulation
+    training_population: PopulationCoverageManifest
+    validation_population: PopulationCoverageManifest
     validation_opened_at: datetime
 
     def __post_init__(self) -> None:
@@ -464,25 +427,63 @@ class CandidateWave:
             "change_summary",
             _text(self.change_summary, name="change_summary"),
         )
-        if not isinstance(self.training_population, EvidencePopulation):
-            raise TypeError("training_population must be EvidencePopulation")
-        if not isinstance(self.validation_population, EvidencePopulation):
-            raise TypeError("validation_population must be EvidencePopulation")
-        if self.training_population.causal_cut_hash != paused_cut:
-            raise ValueError("training population must bind the paused causal cut")
-        if self.training_population.available_at > created:
-            raise ValueError("training population cannot become available after candidate creation")
-        if self.validation_population.available_at > opened:
-            raise ValueError("validation population cannot be opened before it is available")
-        if self.training_population.root_hash == self.validation_population.root_hash:
-            raise ValueError("training and validation populations must differ")
-        if self.training_population.causal_cut_hash == self.validation_population.causal_cut_hash:
-            raise ValueError("validation must use an independently identified causal cut")
-        overlap = set(self.training_population.observation_ids).intersection(
-            self.validation_population.observation_ids
+        if not isinstance(self.training_population, PopulationCoverageManifest):
+            raise TypeError(
+                "training_population must be canonical PopulationCoverageManifest"
+            )
+        if not isinstance(self.validation_population, PopulationCoverageManifest):
+            raise TypeError(
+                "validation_population must be canonical PopulationCoverageManifest"
+            )
+        if not self.training_population.complete:
+            raise ValueError("training population coverage must be complete")
+        if not self.validation_population.complete:
+            raise ValueError("validation population coverage must be complete")
+        if self.training_population.candidate_hash != candidate:
+            raise ValueError("training population must bind the exact candidate artifact")
+        if self.validation_population.candidate_hash != candidate:
+            raise ValueError("validation population must bind the exact candidate artifact")
+        if (
+            self.training_population.frozen_protocol_hash
+            != self.validation_population.frozen_protocol_hash
+        ):
+            raise ValueError("training and validation must bind one frozen protocol")
+        if self.training_population.input_snapshot_hash != paused_cut:
+            raise ValueError(
+                "training population must bind the paused canonical population root"
+            )
+        training_cutoff = _time(
+            self.training_population.causal_cutoff,
+            name="training_population.causal_cutoff",
+        )
+        validation_cutoff = _time(
+            self.validation_population.causal_cutoff,
+            name="validation_population.causal_cutoff",
+        )
+        if training_cutoff > created:
+            raise ValueError(
+                "training population cannot include evidence after candidate creation"
+            )
+        if validation_cutoff > opened:
+            raise ValueError(
+                "validation population cannot be opened before its causal cutoff"
+            )
+        if self.training_population.digest == self.validation_population.digest:
+            raise ValueError("training and validation population manifests must differ")
+        if (
+            self.training_population.input_snapshot_hash
+            == self.validation_population.input_snapshot_hash
+        ):
+            raise ValueError(
+                "validation must use an independently identified population snapshot"
+            )
+        overlap = set(self.training_population.included_episode_ids).intersection(
+            self.validation_population.included_episode_ids
         )
         if overlap:
-            raise ValueError("validation observations must be disjoint from candidate training")
+            raise ValueError(
+                "validation episodes must be disjoint from candidate training"
+            )
 
     @property
     def promotion_mode(self) -> str:
@@ -501,8 +502,8 @@ class CandidateWave:
         error_analysis_hash: str,
         error_analysis_at: datetime,
         change_summary: str,
-        training_population: EvidencePopulation,
-        validation_population: EvidencePopulation,
+        training_population: PopulationCoverageManifest,
+        validation_population: PopulationCoverageManifest,
         validation_opened_at: datetime,
     ) -> "CandidateWave":
         if not isinstance(pause, PauseDecision):
@@ -592,6 +593,13 @@ def resolve_candidate(
         raise ValueError("approval does not bind this candidate identity")
     if approval.artifact_hash != wave.candidate_artifact_hash:
         raise ValueError("approval does not bind this candidate artifact")
+    if (
+        approval.protocol_hash
+        != wave.training_population.frozen_protocol_hash
+        or approval.protocol_hash
+        != wave.validation_population.frozen_protocol_hash
+    ):
+        raise ValueError("approval does not bind the learning-wave frozen protocol")
 
     reasons: list[str] = []
     expired = current >= approval.evidence_valid_until
@@ -627,8 +635,8 @@ def resolve_candidate(
         "error_analysis_hash": wave.error_analysis_hash,
         "error_analysis_at": wave.error_analysis_at.isoformat(),
         "change_summary": wave.change_summary,
-        "training_population_root": wave.training_population.root_hash,
-        "validation_population_root": wave.validation_population.root_hash,
+        "training_population_digest": wave.training_population.digest,
+        "validation_population_digest": wave.validation_population.digest,
         "validation_opened_at": wave.validation_opened_at.isoformat(),
         "resolved_at": current.isoformat(),
         "approval_evidence_id": approval.evidence_id,
@@ -704,19 +712,19 @@ def publish_wave_resolution(
         "error_analysis_at": wave.error_analysis_at.isoformat(),
         "change_summary": wave.change_summary,
         "training_population": {
-            "population_id": wave.training_population.population_id,
-            "root_hash": wave.training_population.root_hash,
-            "causal_cut_hash": wave.training_population.causal_cut_hash,
-            "available_at": wave.training_population.available_at.isoformat(),
-            "observation_count": len(wave.training_population.observation_ids),
+            "manifest_digest": wave.training_population.digest,
+            "input_snapshot_hash": wave.training_population.input_snapshot_hash,
+            "frozen_protocol_hash": wave.training_population.frozen_protocol_hash,
+            "causal_cutoff": wave.training_population.causal_cutoff,
+            "observation_count": len(wave.training_population.included_episode_ids),
         },
         "validation_population": {
-            "population_id": wave.validation_population.population_id,
-            "root_hash": wave.validation_population.root_hash,
-            "causal_cut_hash": wave.validation_population.causal_cut_hash,
-            "available_at": wave.validation_population.available_at.isoformat(),
+            "manifest_digest": wave.validation_population.digest,
+            "input_snapshot_hash": wave.validation_population.input_snapshot_hash,
+            "frozen_protocol_hash": wave.validation_population.frozen_protocol_hash,
+            "causal_cutoff": wave.validation_population.causal_cutoff,
             "opened_at": wave.validation_opened_at.isoformat(),
-            "observation_count": len(wave.validation_population.observation_ids),
+            "observation_count": len(wave.validation_population.included_episode_ids),
         },
         "approval": {
             "evidence_id": approval.evidence_id,
@@ -753,8 +761,10 @@ def publish_wave_resolution(
         source_refs=[
             wave.champion_artifact_hash,
             wave.candidate_artifact_hash,
-            wave.training_population.root_hash,
-            wave.validation_population.root_hash,
+            wave.training_population.digest,
+            wave.validation_population.digest,
+            wave.training_population.input_snapshot_hash,
+            wave.validation_population.input_snapshot_hash,
             approval.protocol_hash,
             approval.evaluation_result_hash,
         ],

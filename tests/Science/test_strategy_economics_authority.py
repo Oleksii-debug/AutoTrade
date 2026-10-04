@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentVersion,
     TradingCalendar,
 )
+import qualification.strategy_economics.qualify as economics_authority
 from qualification.strategy_economics.qualify import (
     StrategyEconomicsAuthorityAssessment,
     StrategyEconomicsAuthorityError,
@@ -251,6 +252,25 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 verified_owners=(),
                 unresolved_owners=(),
                 provider_economic_cut_digest=None,
+            )
+
+    def test_private_issue_token_still_cannot_mint_positive_status(self):
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "positive strategy economics issuance is unavailable",
+        ):
+            StrategyEconomicsAuthorityAssessment(
+                status="QUALIFIED",
+                binding_fingerprint="sha256:" + "a" * 64,
+                bound_proposal_fingerprint="sha256:" + "b" * 64,
+                instrument_version=INSTRUMENT_VERSION,
+                instrument_provider_id="SIMULATED",
+                verified_owners=(
+                    "instrument_registry",
+                ),
+                unresolved_owners=(),
+                provider_economic_cut_digest=None,
+                _token=economics_authority._ISSUE_TOKEN,
             )
 
     def test_unknown_instrument_fails_before_assessment_issuance(self):

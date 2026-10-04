@@ -1363,16 +1363,11 @@ class DeterministicStrategyTests(unittest.TestCase):
                 return super().__getattribute__(name)
 
         descriptor = HostileDescriptor(**self.descriptor().__dict__)
-        strategy = ReturnThresholdBaseline(
-            lookback=2, threshold="0.01", proposal_quantity="1",
-            descriptor=descriptor,
-        )
         object.__setattr__(descriptor, "_armed", True)
         with self.assertRaisesRegex(TypeError, "canonical StrategyDescriptor"):
-            run_registered_baseline(
-                strategy, [obs(0, "100"), obs(1, "102")],
-                decision_time=BASE + timedelta(minutes=1),
-                symbol="AAA", instrument_version="instrument:aaa@7",
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=descriptor,
             )
 
     def test_registered_run_rejects_observation_subclass_and_tuple_subclass(self):
@@ -2412,6 +2407,23 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
 
+
+    def test_strategy_constructor_detaches_descriptor_from_caller_mutation(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        object.__setattr__(descriptor, "family", "FORGED_FAMILY")
+        proposal = strategy.propose(symbol="AAA", decision_time=BASE)
+        self.assertEqual(
+            proposal.strategy_fingerprint,
+            strategy.descriptor.fingerprint,
+        )
+        self.assertEqual(
+            strategy.descriptor.family,
+            "DETERMINISTIC_RETURN_THRESHOLD",
+        )
 
     def test_strategy_use_boundary_rejects_post_construction_threshold_mutation(self):
         strategy = ReturnThresholdBaseline(

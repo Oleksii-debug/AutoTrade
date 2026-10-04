@@ -1279,8 +1279,7 @@ class ReturnThresholdBaseline:
         if self.proposal_quantity <= 0:
             raise ValueError("proposal_quantity must be positive")
         if descriptor is not None:
-            if not isinstance(descriptor, StrategyDescriptor):
-                raise TypeError("descriptor must be StrategyDescriptor or None")
+            descriptor = _readmit_strategy_descriptor(descriptor)
             expected_family = _threshold_family_for_type(type(self))
             if descriptor.family != expected_family:
                 raise ValueError(

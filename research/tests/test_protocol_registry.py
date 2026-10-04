@@ -420,16 +420,70 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                 reopened.locked_holdout_registration(registered.protocol_id),
                 first,
             )
+            self.assertEqual(
+                preregister_holdout(
+                    reopened,
+                    registered.protocol_id,
+                    dataset_digit="a",
+                ),
+                first,
+            )
 
             with self.assertRaisesRegex(
-                ProtocolViolation,
-                "before the first trial",
+                ProtocolConflict,
+                "immutable",
             ):
                 preregister_holdout(
                     reopened,
                     registered.protocol_id,
                     dataset_digit="b",
                 )
+
+    def test_legacy_trial_cannot_gain_first_physical_holdout_after_outcome(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            registry = ScientificRegistry(path)
+            registered = registry.register_protocol(protocol())
+            payload = {"reason": "legacy-trial-before-holdout-freeze"}
+            canonical = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            payload_hash = (
+                "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+            )
+
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO trials("
+                    "trial_id,protocol_id,status,payload_hash,payload_json,created_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "11111111-1111-4111-8111-111111111111",
+                        registered.protocol_id,
+                        "FAILED",
+                        payload_hash,
+                        canonical,
+                        "2026-09-28T12:00:00Z",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "before the first trial",
+            ):
+                preregister_holdout(
+                    registry,
+                    registered.protocol_id,
+                    dataset_digit="a",
+                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                registry.locked_holdout_registration(registered.protocol_id)
 
     def test_fresh_dataset_cannot_replace_preregistered_holdout_after_search(self):
         with TemporaryDirectory() as directory:

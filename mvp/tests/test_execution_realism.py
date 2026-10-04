@@ -266,6 +266,13 @@ class ExecutionRealismTests(unittest.TestCase):
             else:
                 self.assertLessEqual(low_floor.fill_price, Decimal("99"))
 
+    def test_market_execution_rejects_off_grid_reference_before_projection(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "market reference price is not aligned to authoritative price quantum",
+        ):
+            simulate_execution(order(), top(ask="101.005"), model())
+
     def test_market_execution_fails_closed_without_matching_projection_authority(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

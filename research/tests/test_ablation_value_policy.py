@@ -122,6 +122,36 @@ class AblationValuePolicyTests(unittest.TestCase):
                 eur_registration.protocol_hash,
             )
 
+    def test_protocol_container_is_rejected_before_polymorphic_callbacks(self):
+        calls: list[str] = []
+
+        class HostileProtocol(dict):
+            def __iter__(self):
+                calls.append("iter")
+                return super().__iter__()
+
+            def keys(self):
+                calls.append("keys")
+                return super().keys()
+
+            def get(self, key, default=None):
+                calls.append("get")
+                return super().get(key, default)
+
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            payload = HostileProtocol(protocol_payload())
+            payload["ablation_value_policy"] = dimensional_policy()
+            calls.clear()
+
+            with self.assertRaisesRegex(TypeError, "exact object"):
+                registry.register_protocol(
+                    payload,
+                    protocol_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                )
+
+            self.assertEqual(calls, [])
+
     def test_policy_subclasses_are_rejected_before_callbacks_or_hashing(self):
         calls: list[str] = []
 

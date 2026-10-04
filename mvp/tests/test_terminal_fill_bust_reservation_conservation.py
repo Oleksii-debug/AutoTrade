@@ -50,7 +50,10 @@ class TerminalFillBustReservationConservationTests(unittest.TestCase):
         self.assertEqual(restored.remaining["BUFFER:USD"], Decimal("20"))
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("120"))
         self.assertEqual(book.total_reserved("BUFFER:USD"), Decimal("20"))
-        self.assertEqual(tuple(item.reservation_id for item in book.active()), ("reservation-1",))
+        self.assertEqual(
+            tuple(item.reservation_id for item in book.active()),
+            ("reservation-1",),
+        )
 
         with self.assertRaisesRegex(
             ReservationConflict,
@@ -108,43 +111,64 @@ class TerminalFillBustReservationConservationTests(unittest.TestCase):
                 reservation_id="reservation-1",
                 usage={"CASH:USD": "100"},
             )
-            # Historical fixture only. Production terminalization requires the
-            # canonical provider-resolution authority; the purpose here is to
-            # exercise the later prepared bust transition without inventing it.
-            book._commit(
-                command_id="fixture-filled-terminal",
-                idempotency_key="fixture-filled-terminal",
-                operation="MARK_TERMINAL",
-                request={
-                    "reservation_id": "reservation-1",
-                    "outcome": "FILLED",
-                    "resolution_evidence": "fixture-provider-filled",
-                },
-            )
-            terminal = book.get("reservation-1")
-            self.assertEqual(terminal.state, "FILLED")
-            self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
 
-            plan = book.prepare_restore_consumption_mutation(
-                event_key="atomic-bust-reservation-event-1",
-                idempotency_key="atomic-bust-reservation-1",
-                reservation_id="reservation-1",
-                usage={"CASH:USD": "100"},
-                committed_at="2026-10-04T19:30:00Z",
-                expected_snapshot_digest=reservation_snapshot_digest(terminal),
-            )
+            # Historical-fixture bridge only. Production terminal release keeps
+            # its strict trusted-evidence verifier. Hold this override only while
+            # replaying the synthetic legacy FILLED event used to exercise the
+            # later prepared bust transition.
+            original_verify = DurableReservationBook._verify_resolution_evidence
 
-            self.assertFalse(plan.already_committed)
-            self.assertIsNotNone(plan.envelope)
-            self.assertEqual(plan.snapshot.state, POST_BUST_HOLD_STATE)
-            self.assertEqual(plan.snapshot.consumed["CASH:USD"], Decimal("0"))
-            self.assertEqual(plan.snapshot.remaining["CASH:USD"], Decimal("120"))
-            # Preparation alone cannot reopen durable authority. The shared
-            # OMS/economic bust barrier owns the eventual atomic commit.
-            still_terminal = book.get("reservation-1")
-            self.assertEqual(still_terminal.state, "FILLED")
-            self.assertEqual(still_terminal.remaining["CASH:USD"], Decimal("0"))
-            self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+            def accept_legacy_filled_fixture(selected_book, **kwargs):
+                if kwargs.get("resolution_evidence") == "fixture-provider-filled":
+                    return "fixture-provider-filled"
+                return original_verify(selected_book, **kwargs)
+
+            DurableReservationBook._verify_resolution_evidence = (
+                accept_legacy_filled_fixture
+            )
+            try:
+                book._commit(
+                    command_id="fixture-filled-terminal",
+                    idempotency_key="fixture-filled-terminal",
+                    operation="MARK_TERMINAL",
+                    request={
+                        "reservation_id": "reservation-1",
+                        "outcome": "FILLED",
+                        "resolution_evidence": "fixture-provider-filled",
+                    },
+                )
+                terminal = book.get("reservation-1")
+                self.assertEqual(terminal.state, "FILLED")
+                self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+                plan = book.prepare_restore_consumption_mutation(
+                    event_key="atomic-bust-reservation-event-1",
+                    idempotency_key="atomic-bust-reservation-1",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USD": "100"},
+                    committed_at="2026-10-04T19:30:00Z",
+                    expected_snapshot_digest=reservation_snapshot_digest(terminal),
+                )
+
+                self.assertFalse(plan.already_committed)
+                self.assertIsNotNone(plan.envelope)
+                self.assertEqual(plan.snapshot.state, POST_BUST_HOLD_STATE)
+                self.assertEqual(
+                    plan.snapshot.consumed["CASH:USD"], Decimal("0")
+                )
+                self.assertEqual(
+                    plan.snapshot.remaining["CASH:USD"], Decimal("120")
+                )
+                # Preparation alone cannot reopen durable authority. The shared
+                # OMS/economic bust barrier owns the eventual atomic commit.
+                still_terminal = book.get("reservation-1")
+                self.assertEqual(still_terminal.state, "FILLED")
+                self.assertEqual(
+                    still_terminal.remaining["CASH:USD"], Decimal("0")
+                )
+                self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+            finally:
+                DurableReservationBook._verify_resolution_evidence = original_verify
 
 
 if __name__ == "__main__":

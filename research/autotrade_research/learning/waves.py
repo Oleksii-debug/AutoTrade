@@ -18,8 +18,11 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
+from ..artifacts.store import ArtifactStore
 from .champion import CandidateApproval
+from .population_coverage import PopulationCoverageManifest
 
 
 _SHA256_PREFIX = "sha256:"
@@ -49,6 +52,21 @@ def _time(value: object, *, name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _population_cutoff(value: object, *, name: str) -> datetime:
+    """Read the canonical ISO cutoff stored by PopulationCoverageManifest."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be a canonical ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a canonical ISO timestamp") from error
+    admitted = _time(parsed, name=name)
+    if admitted.isoformat() != value:
+        raise ValueError(f"{name} must be canonical UTC ISO form")
+    return admitted
 
 
 def _positive_int_or_none(value: object, *, name: str) -> int | None:
@@ -452,11 +470,11 @@ class CandidateWave:
             raise ValueError(
                 "training population must bind the paused canonical population root"
             )
-        training_cutoff = _time(
+        training_cutoff = _population_cutoff(
             self.training_population.causal_cutoff,
             name="training_population.causal_cutoff",
         )
-        validation_cutoff = _time(
+        validation_cutoff = _population_cutoff(
             self.validation_population.causal_cutoff,
             name="validation_population.causal_cutoff",
         )

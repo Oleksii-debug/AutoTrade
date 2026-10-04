@@ -53,7 +53,10 @@ def _valid_sha512_content_hash(value: object) -> bool:
         decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
         return False
-    return len(decoded) == 64
+    return (
+        len(decoded) == 64
+        and base64.b64encode(decoded).decode('ascii') == value
+    )
 
 
 def _lock_dependency_edges(
@@ -125,8 +128,9 @@ def dotnet_lock_content_blockers(root: Path, project: Path) -> list[str]:
         return [f'DOTNET_PROJECT_LOCK_INVALID_JSON:{relative}']
     if not isinstance(document, dict):
         return [f'DOTNET_PROJECT_LOCK_INVALID_ROOT:{relative}']
-    if document.get('version') != 1:
-        return [f'DOTNET_PROJECT_LOCK_VERSION_UNSUPPORTED:{relative}:{document.get("version")}']
+    lock_version = document.get('version')
+    if type(lock_version) is not int or lock_version != 1:
+        return [f'DOTNET_PROJECT_LOCK_VERSION_UNSUPPORTED:{relative}:{lock_version}']
     targets = document.get('dependencies')
     if not isinstance(targets, dict) or not targets:
         return [f'DOTNET_PROJECT_LOCK_DEPENDENCIES_INVALID:{relative}']
@@ -288,7 +292,11 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
             document = _strict_json(lock_path.read_text(encoding='utf-8'))
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
             raise ValueError(f'invalid NuGet lock for {relative}') from error
-        if not isinstance(document, dict) or document.get('version') != 1:
+        if (
+            not isinstance(document, dict)
+            or type(document.get('version')) is not int
+            or document.get('version') != 1
+        ):
             raise ValueError(f'unsupported NuGet lock for {relative}')
         targets = document.get('dependencies')
         if not isinstance(targets, dict) or not targets:

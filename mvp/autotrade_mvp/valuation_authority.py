@@ -793,7 +793,7 @@ def _store_identity_digest(identity: JournalStoreIdentity) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _ValuationBookBinding:
-    store: JournalStore
+    store_ref: weakref.ReferenceType
     store_identity: JournalStoreIdentity
     store_identity_digest: str
 
@@ -802,10 +802,25 @@ def _build_valuation_book_binding_methods():
     # This table and its lock are closure-owned. They are never exported as
     # module attributes, so re-creating historical module-global names cannot
     # retarget the store generation selected for an existing financial book.
-    bindings: weakref.WeakKeyDictionary[object, _ValuationBookBinding] = (
-        weakref.WeakKeyDictionary()
-    )
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, _ValuationBookBinding],
+    ] = {}
     lock = threading.RLock()
+
+    def registered(value: object) -> _ValuationBookBinding | None:
+        object_id = id(value)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        value_ref, binding = entry
+        current = value_ref()
+        if current is value:
+            return binding
+        if current is None:
+            bindings.pop(object_id, None)
+            return None
+        raise ValuationConflict("valuation binding identity collision")
 
     def initialize(value: object, store: JournalStore) -> None:
         if type(value) is not DurableValuationBook:
@@ -814,7 +829,7 @@ def _build_valuation_book_binding_methods():
             raise TypeError("store must be exact JournalStore")
 
         with lock:
-            if value in bindings:
+            if registered(value) is not None:
                 raise ValuationConflict(
                     "valuation journal composition is already initialized"
                 )
@@ -834,23 +849,30 @@ def _build_valuation_book_binding_methods():
             object.__setattr__(value, "store", store)
             object.__setattr__(value, "store_identity", exact_identity)
             object.__setattr__(value, "store_identity_digest", identity_digest)
-            bindings[value] = _ValuationBookBinding(
-                store=store,
-                store_identity=exact_identity,
-                store_identity_digest=identity_digest,
+            object_id = id(value)
+            bindings[object_id] = (
+                weakref.ref(value),
+                _ValuationBookBinding(
+                    store_ref=weakref.ref(store),
+                    store_identity=exact_identity,
+                    store_identity_digest=identity_digest,
+                ),
             )
 
     def require(value: object) -> tuple[JournalStore, JournalStoreIdentity]:
         if type(value) is not DurableValuationBook:
             raise TypeError("book must be exact DurableValuationBook")
         with lock:
-            binding = bindings.get(value)
+            binding = registered(value)
         if binding is None:
             raise ValuationConflict(
                 "valuation book lacks original journal composition"
             )
 
-        if object.__getattribute__(value, "store") is not binding.store:
+        store = binding.store_ref()
+        if store is None:
+            raise ValuationConflict("valuation original journal store was released")
+        if object.__getattribute__(value, "store") is not store:
             raise ValuationConflict("valuation journal composition changed")
         visible_identity = require_exact_journal_store_identity(
             object.__getattribute__(value, "store_identity"),
@@ -865,14 +887,14 @@ def _build_valuation_book_binding_methods():
 
         try:
             current = require_exact_journal_store_authority(
-                binding.store,
+                store,
                 subject="current valuation JournalStore",
             )
         except (TypeError, ValueError, RuntimeError) as error:
             raise ValuationConflict("valuation journal authority changed") from error
         if current != binding.store_identity:
             raise ValuationConflict("valuation journal authority changed")
-        return binding.store, binding.store_identity
+        return store, binding.store_identity
 
     return initialize, require
 

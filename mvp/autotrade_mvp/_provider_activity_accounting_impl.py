@@ -12,10 +12,12 @@ closed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
+from threading import Lock
+import weakref
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
@@ -27,6 +29,7 @@ from .accounting import (
     ScopedEconomicBook,
     book_external_cash_flow,
     canonical_transaction,
+    transaction_digest,
 )
 from .durable_reservations import (
     DurableReservationBook,
@@ -39,7 +42,17 @@ from .fill_accounting import (
     build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .store_identity import (
+    JournalStoreIdentity,
+    require_exact_journal_store_identity,
+)
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
 
@@ -981,6 +994,217 @@ def _prepare_provider_fill_correction_binding(
     )
 
 
+_PROVIDER_ECONOMIC_CUT_TOKEN = object()
+_PROVIDER_ECONOMIC_CUT_LOCK = Lock()
+_ISSUED_PROVIDER_ECONOMIC_CUTS: dict[
+    int,
+    tuple[weakref.ReferenceType["ProviderEconomicCut"], str],
+] = {}
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class ProviderEconomicCut:
+    """Immutable evidence for one exact durable economic-book prefix."""
+
+    store_identity: JournalStoreIdentity
+    provider_id: str
+    account_id: str
+    environment: str
+    book_id: str
+    aggregate_version: int
+    journal_sequence: int
+    visibility_journal_sequence: int
+    event_id: str
+    payload_hash: str
+    transaction_digests: tuple[tuple[str, str], ...]
+    resulting_book_digest: str
+    cut_digest: str
+    _token: InitVar[object | None] = None
+
+    def __post_init__(self, _token: object | None) -> None:
+        if _token is not _PROVIDER_ECONOMIC_CUT_TOKEN:
+            raise AccountingConflict(
+                "provider economic cut must come from canonical durable replay"
+            )
+        require_exact_journal_store_identity(
+            self.store_identity,
+            subject="provider economic cut store identity",
+        )
+        for name in (
+            "provider_id",
+            "account_id",
+            "environment",
+            "book_id",
+            "event_id",
+            "payload_hash",
+            "resulting_book_digest",
+            "cut_digest",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise AccountingConflict(
+                    f"provider economic cut {name} must be exact canonical text"
+                )
+        if type(self.aggregate_version) is not int or self.aggregate_version <= 0:
+            raise AccountingConflict(
+                "provider economic cut aggregate_version must be positive"
+            )
+        if type(self.journal_sequence) is not int or self.journal_sequence <= 0:
+            raise AccountingConflict(
+                "provider economic cut journal_sequence must be positive"
+            )
+        if (
+            type(self.visibility_journal_sequence) is not int
+            or self.visibility_journal_sequence < self.journal_sequence
+        ):
+            raise AccountingConflict(
+                "provider economic cut visibility_journal_sequence must be an "
+                "integer at or after the terminal economic event"
+            )
+        if type(self.transaction_digests) is not tuple:
+            raise AccountingConflict(
+                "provider economic cut transaction_digests must be immutable"
+            )
+        for item in self.transaction_digests:
+            if (
+                type(item) is not tuple
+                or len(item) != 2
+                or any(type(value) is not str or not value for value in item)
+            ):
+                raise AccountingConflict(
+                    "provider economic cut transaction digest entry is invalid"
+                )
+
+
+def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
+    if type(value) is not ProviderEconomicCut:
+        raise TypeError("cut must be exact ProviderEconomicCut")
+    return payload_digest(
+        {
+            "schema_version": "provider-economic-cut-seal.v1",
+            "cut_digest": value.cut_digest,
+            "provider_id": value.provider_id,
+            "account_id": value.account_id,
+            "environment": value.environment,
+            "book_id": value.book_id,
+            "aggregate_version": value.aggregate_version,
+            "journal_sequence": value.journal_sequence,
+            "visibility_journal_sequence": value.visibility_journal_sequence,
+            "event_id": value.event_id,
+            "payload_hash": value.payload_hash,
+            "transaction_digests": [list(item) for item in value.transaction_digests],
+            "resulting_book_digest": value.resulting_book_digest,
+            "store_identity": {
+                "canonical_path": value.store_identity.canonical_path,
+                "filesystem_device": value.store_identity.filesystem_device,
+                "filesystem_inode": value.store_identity.filesystem_inode,
+                "identity_source": value.store_identity.identity_source,
+                "windows_volume_serial": value.store_identity.windows_volume_serial,
+                "windows_file_index_high": value.store_identity.windows_file_index_high,
+                "windows_file_index_low": value.store_identity.windows_file_index_low,
+            },
+        }
+    )
+
+
+def _seal_provider_economic_cut(
+    value: ProviderEconomicCut,
+) -> ProviderEconomicCut:
+    key = id(value)
+    seal = _provider_economic_cut_seal_digest(value)
+
+    def cleanup(ref: weakref.ReferenceType[ProviderEconomicCut]) -> None:
+        with _PROVIDER_ECONOMIC_CUT_LOCK:
+            current = _ISSUED_PROVIDER_ECONOMIC_CUTS.get(key)
+            if current is not None and current[0] is ref:
+                _ISSUED_PROVIDER_ECONOMIC_CUTS.pop(key, None)
+
+    ref = weakref.ref(value, cleanup)
+    with _PROVIDER_ECONOMIC_CUT_LOCK:
+        _ISSUED_PROVIDER_ECONOMIC_CUTS[key] = (ref, seal)
+    return value
+
+
+def require_provider_economic_cut(value: object) -> ProviderEconomicCut:
+    """Require an unchanged cut issued by canonical replay in this process."""
+
+    if type(value) is not ProviderEconomicCut:
+        raise TypeError("cut must be exact ProviderEconomicCut")
+    seal = _provider_economic_cut_seal_digest(value)
+    with _PROVIDER_ECONOMIC_CUT_LOCK:
+        issued = _ISSUED_PROVIDER_ECONOMIC_CUTS.get(id(value))
+    if (
+        issued is None
+        or issued[0]() is not value
+        or issued[1] != seal
+    ):
+        raise AccountingConflict(
+            "provider economic cut was not issued by canonical durable replay "
+            "or changed after issuance"
+        )
+    return value
+
+
+def reverify_provider_economic_cut(
+    book: "DurableProviderEconomicBook",
+    cut: object,
+    *,
+    expected_visibility_journal_sequence: int,
+) -> ProviderEconomicCut:
+    """Reconstruct one cut against an independently selected frozen visibility.
+
+    This terminal verification seam does not rely on the process-local issuance
+    registry and does not let the candidate select its own causal cutoff. A
+    value crossing a restart/artifact boundary is accepted only when exact
+    canonical replay of the selected JournalStore at the independently supplied
+    global visibility sequence reproduces every authority-bearing field.
+    """
+
+    if type(book) is not DurableProviderEconomicBook:
+        raise TypeError("book must be exact DurableProviderEconomicBook")
+    if type(cut) is not ProviderEconomicCut:
+        raise TypeError("cut must be exact ProviderEconomicCut")
+    if (
+        type(expected_visibility_journal_sequence) is not int
+        or expected_visibility_journal_sequence <= 0
+    ):
+        raise ValueError(
+            "expected_visibility_journal_sequence must be an exact positive integer"
+        )
+    if cut.visibility_journal_sequence != expected_visibility_journal_sequence:
+        raise AccountingConflict(
+            "provider economic cut visibility does not match expected authority"
+        )
+    if (
+        cut.provider_id != book.provider_id
+        or cut.account_id != book.account_id
+        or cut.environment != book.environment
+        or cut.book_id != book.book_id
+    ):
+        raise AccountingConflict(
+            "provider economic cut scope does not match selected durable book"
+        )
+    exact_store_identity = require_exact_journal_store_authority(
+        book.store,
+        subject="provider economic cut verification JournalStore",
+    )
+    if cut.store_identity != exact_store_identity:
+        raise AccountingConflict(
+            "provider economic cut store identity does not match selected authority"
+        )
+    replayed = book.resolve_historical_cut(
+        cut.aggregate_version,
+        expected_journal_sequence=cut.journal_sequence,
+        expected_event_id=cut.event_id,
+        visibility_journal_sequence=expected_visibility_journal_sequence,
+    )
+    if replayed != cut:
+        raise AccountingConflict(
+            "provider economic cut does not match canonical durable replay"
+        )
+    return replayed
+
+
 class DurableProviderEconomicBook(ScopedEconomicBook):
     """JournalStore-backed provider/account economic book.
 
@@ -1086,6 +1310,229 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
     def _reload(self) -> None:
         candidate = self._replay(self._events())
         self._book = candidate._book
+
+    @staticmethod
+    def _store_identity_payload(
+        identity: JournalStoreIdentity,
+    ) -> dict[str, object]:
+        exact = require_exact_journal_store_identity(
+            identity,
+            subject="provider economic cut store identity",
+        )
+        return {
+            "canonical_path": exact.canonical_path,
+            "filesystem_device": exact.filesystem_device,
+            "filesystem_inode": exact.filesystem_inode,
+            "identity_source": exact.identity_source,
+            "windows_volume_serial": exact.windows_volume_serial,
+            "windows_file_index_high": exact.windows_file_index_high,
+            "windows_file_index_low": exact.windows_file_index_low,
+        }
+
+    def resolve_historical_cut(
+        self,
+        aggregate_version: int,
+        *,
+        expected_journal_sequence: int | None = None,
+        expected_event_id: str | None = None,
+        visibility_journal_sequence: int | None = None,
+    ) -> ProviderEconomicCut:
+        """Resolve one immutable prefix at one frozen global journal cut.
+
+        When visibility_journal_sequence is omitted, the canonical JournalStore
+        freezes its current global journal sequence before aggregate replay.
+        That default prevents a caller from minting an older favorable economic
+        revision after a later correction is already durable. Reconstructing a
+        previously frozen historical cut must supply that cut's recorded
+        visibility_journal_sequence explicitly.
+
+        Current main does not yet retain exact provider_environment in this
+        durable book.  BYBIT PAPER/LIVE therefore remains too ambiguous for
+        terminal provider-cost evidence and is rejected here until the shared
+        provider-domain migration lands.
+        """
+
+        if type(aggregate_version) is not int or aggregate_version <= 0:
+            raise ValueError(
+                "aggregate_version must be an exact positive integer"
+            )
+        if (
+            expected_journal_sequence is not None
+            and (
+                type(expected_journal_sequence) is not int
+                or expected_journal_sequence <= 0
+            )
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be an exact positive integer"
+            )
+        if (
+            expected_event_id is not None
+            and (
+                type(expected_event_id) is not str
+                or not expected_event_id
+                or expected_event_id != expected_event_id.strip()
+            )
+        ):
+            raise ValueError("expected_event_id must be exact canonical text")
+        if (
+            visibility_journal_sequence is not None
+            and (
+                type(visibility_journal_sequence) is not int
+                or visibility_journal_sequence <= 0
+            )
+        ):
+            raise ValueError(
+                "visibility_journal_sequence must be an exact positive integer"
+            )
+        if type(self) is not DurableProviderEconomicBook:
+            raise TypeError(
+                "historical economic cut requires exact DurableProviderEconomicBook"
+            )
+        expected_book_id = _book_id(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+        )
+        if self.book_id != expected_book_id:
+            raise AccountingConflict(
+                "historical economic cut book identity does not match owner scope"
+            )
+        if self.provider_id == "BYBIT" and self.environment in {"PAPER", "LIVE"}:
+            raise AccountingConflict(
+                "BYBIT historical economic cut requires exact provider_environment "
+                "before terminal provider-cost evidence"
+            )
+        if type(self.store) is not JournalStore:
+            raise AccountingConflict(
+                "historical economic cut requires exact canonical JournalStore"
+            )
+        identity = require_exact_journal_store_authority(
+            self.store,
+            subject="provider economic cut JournalStore",
+        )
+        with journal_store_authority_scope(self.store, identity):
+            current_journal_sequence = JournalStore.current_journal_sequence(
+                self.store
+            )
+            if (
+                visibility_journal_sequence is not None
+                and visibility_journal_sequence > current_journal_sequence
+            ):
+                raise AccountingConflict(
+                    "historical economic visibility cut is beyond durable journal"
+                )
+            resolved_visibility_journal_sequence = (
+                current_journal_sequence
+                if visibility_journal_sequence is None
+                else visibility_journal_sequence
+            )
+            events = JournalStore.load_events(
+                self.store,
+                "economic_book",
+                self.book_id,
+            )
+
+        if len(events) < aggregate_version:
+            raise AccountingConflict(
+                "requested historical economic cut is beyond durable history"
+            )
+        visible_events = []
+        for event in events:
+            sequence = event.get("journal_sequence")
+            if type(sequence) is not int or sequence <= 0:
+                raise AccountingConflict(
+                    "historical economic event journal sequence is invalid"
+                )
+            if sequence <= resolved_visibility_journal_sequence:
+                visible_events.append(event)
+        if not visible_events:
+            raise AccountingConflict(
+                "historical economic book has no state at visibility cut"
+            )
+        visible_version = visible_events[-1].get("aggregate_version")
+        if visible_version != aggregate_version:
+            raise AccountingConflict(
+                "requested aggregate version is stale at visibility cut"
+            )
+
+        prefix = events[:aggregate_version]
+        if (
+            len(prefix) != aggregate_version
+            or prefix[-1].get("aggregate_version") != aggregate_version
+        ):
+            raise AccountingConflict(
+                "historical economic cut aggregate prefix is invalid"
+            )
+        candidate = DurableProviderEconomicBook._replay(self, prefix)
+        terminal = prefix[-1]
+        journal_sequence = terminal.get("journal_sequence")
+        if type(journal_sequence) is not int or journal_sequence <= 0:
+            raise AccountingConflict(
+                "historical economic cut terminal journal sequence is invalid"
+            )
+        event_id = terminal.get("event_id")
+        payload_hash = terminal.get("payload_hash")
+        if (
+            type(event_id) is not str
+            or not event_id
+            or type(payload_hash) is not str
+            or not payload_hash
+        ):
+            raise AccountingConflict(
+                "historical economic cut terminal durable identity is invalid"
+            )
+        if (
+            expected_journal_sequence is not None
+            and journal_sequence != expected_journal_sequence
+        ):
+            raise AccountingConflict(
+                "historical economic cut journal sequence mismatch"
+            )
+        if expected_event_id is not None and event_id != expected_event_id:
+            raise AccountingConflict(
+                "historical economic cut event identity mismatch"
+            )
+
+        ordered = tuple(
+            (transaction.transaction_id, transaction_digest(transaction))
+            for transaction in candidate.transactions
+        )
+        resulting = candidate.audit_digest()
+        visibility_sequence = resolved_visibility_journal_sequence
+        material = {
+            "schema_version": "provider-economic-cut.v1",
+            "store_identity": self._store_identity_payload(identity),
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+            "book_id": self.book_id,
+            "aggregate_version": aggregate_version,
+            "journal_sequence": journal_sequence,
+            "visibility_journal_sequence": visibility_sequence,
+            "event_id": event_id,
+            "payload_hash": payload_hash,
+            "transaction_digests": [list(item) for item in ordered],
+            "resulting_book_digest": resulting,
+        }
+        cut_digest = payload_digest(material)
+        cut = ProviderEconomicCut(
+            store_identity=identity,
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            book_id=self.book_id,
+            aggregate_version=aggregate_version,
+            journal_sequence=journal_sequence,
+            visibility_journal_sequence=visibility_sequence,
+            event_id=event_id,
+            payload_hash=payload_hash,
+            transaction_digests=ordered,
+            resulting_book_digest=resulting,
+            cut_digest=cut_digest,
+            _token=_PROVIDER_ECONOMIC_CUT_TOKEN,
+        )
+        return _seal_provider_economic_cut(cut)
 
     def prepare_batch_mutation(
         self,

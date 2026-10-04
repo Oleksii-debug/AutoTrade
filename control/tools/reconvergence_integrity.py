@@ -40,6 +40,7 @@ from typing import Iterable, Sequence
 from control.tools.registry_state import _normalized_scopes, path_covers
 
 TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+TRUSTED_MUTATION_SCOPE_MARKER = "AUTOTRADE_RECONVERGENCE_MUTATION_SCOPE_V1"
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _GIT_OBJECT_HEX = frozenset("0123456789abcdef")
 
@@ -225,6 +226,8 @@ def reconvergence_evidence(
     ]
     if scope_enforced:
         checks_run.append("trusted-mutation-scope")
+    if approvals:
+        checks_run.append("exact-trust-root-change-surface")
 
     return {
         "schema_version": "1.1.0",
@@ -345,6 +348,53 @@ def parse_trusted_scope_approval(
     return tuple(paths)
 
 
+def parse_trusted_mutation_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse an external exact-head full changed-path approval record.
+
+    This authority is deliberately separate from trust-root approval. It names
+    the complete Git changed-path surface acknowledged for a trust-root
+    evolution; it is not semantic ownership and cannot itself authorize a
+    protected root.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_MUTATION_SCOPE_MARKER:
+        return None
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected mutation-scope head must be a lowercase 40-hex SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted mutation scope requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted mutation-scope head must be a lowercase 40-hex SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted mutation scope must contain at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError(
+                "trusted mutation scope permits only path lines after head"
+            )
+        paths.append(
+            _validate_changed_path(
+                line.removeprefix("path: "),
+                name="trusted mutation-scope path",
+            )
+        )
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted mutation scope must not repeat paths")
+    return tuple(paths)
+
+
 def _validated_change(change: Change) -> Change:
     if type(change) is not Change:
         raise TypeError("changes must contain exact Change values")
@@ -461,6 +511,51 @@ def assess_reconvergence(
         trusted_root_approvals
     )
 
+    touched_paths: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "R":
+            if change.previous_path is None:
+                raise ValueError("rename source path identity is missing")
+            touched_paths.add(change.previous_path)
+            touched_paths.add(change.path)
+        elif kind == "C":
+            touched_paths.add(change.path)
+        else:
+            touched_paths.add(change.path)
+
+    trust_root_scope_reasons: list[str] = []
+    if normalized_trust_root_approvals:
+        unused_root_approvals = sorted(
+            set(normalized_trust_root_approvals) - touched_paths
+        )
+        if unused_root_approvals:
+            trust_root_scope_reasons.append(
+                "trusted root approval names unchanged path(s): "
+                + ", ".join(unused_root_approvals)
+            )
+
+        if normalized_scopes is None:
+            trust_root_scope_reasons.append(
+                "trust-root evolution requires exact-head full mutation scope"
+            )
+        else:
+            approved_paths = set(normalized_scopes)
+            missing_paths = sorted(touched_paths - approved_paths)
+            extra_or_broad_paths = sorted(approved_paths - touched_paths)
+            if missing_paths or extra_or_broad_paths:
+                detail: list[str] = []
+                if missing_paths:
+                    detail.append("missing " + ", ".join(missing_paths))
+                if extra_or_broad_paths:
+                    detail.append(
+                        "extra-or-broad " + ", ".join(extra_or_broad_paths)
+                    )
+                trust_root_scope_reasons.append(
+                    "trust-root evolution requires exact changed-path scope: "
+                    + "; ".join(detail)
+                )
+
     def exactly_authorized(path: str) -> bool:
         # Ordinary mutation ownership never grants executable trust-root authority.
         return path in normalized_trust_root_approvals
@@ -547,20 +642,9 @@ def assess_reconvergence(
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in validated_changes:
-            kind = change.status[:1]
-            if kind == "R":
-                touched = (change.previous_path, change.path)
-            elif kind == "C":
-                # Copying does not mutate the source path.
-                touched = (change.path,)
-            else:
-                touched = (change.path,)
-            for path in touched:
-                if path is None:
-                    raise ValueError("changed path identity is missing")
-                if not any(path_covers(scope, path) for scope in normalized_scopes):
-                    scope_damage.add(path)
+        for path in touched_paths:
+            if not any(path_covers(scope, path) for scope in normalized_scopes):
+                scope_damage.add(path)
     scope_violations = tuple(sorted(scope_damage))
 
     reasons: list[str] = []
@@ -578,6 +662,7 @@ def assess_reconvergence(
             "changed paths outside declared mutation scope: "
             + ", ".join(scope_violations)
         )
+    reasons.extend(trust_root_scope_reasons)
     if len(disappeared) >= max_deletions and fraction >= max_deleted_fraction:
         reasons.append(
             "mass base-tree deletion/rename-away: "

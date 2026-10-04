@@ -643,3 +643,103 @@ def resolve_candidate(
         resolution_hash=_hash_payload(payload),
         grants_trading_authority=False,
     )
+
+
+def publish_wave_resolution(
+    artifact_store: ArtifactStore,
+    wave: CandidateWave,
+    approval: CandidateApproval,
+    *,
+    resolved_at: datetime,
+    rights: dict[str, Any],
+) -> tuple[CandidateResolution, dict[str, Any]]:
+    """Persist one immutable Section-15 wave outcome in the canonical ArtifactStore.
+
+    Publication is evidence retention only.  It does not call ChampionRegistry,
+    mutate routing, change risk, or grant trading authority.
+    """
+
+    if not isinstance(artifact_store, ArtifactStore):
+        raise TypeError("artifact_store must be ArtifactStore")
+    resolution = resolve_candidate(
+        wave,
+        approval,
+        resolved_at=resolved_at,
+    )
+    record = {
+        "schema_version": "1.0.0",
+        "artifact_kind": "LEARNING_WAVE_RESOLUTION",
+        "wave_id": wave.wave_id,
+        "policy_hash": wave.policy_hash,
+        "champion_artifact_hash": wave.champion_artifact_hash,
+        "candidate_id": wave.candidate_id,
+        "candidate_artifact_hash": wave.candidate_artifact_hash,
+        "pause_decision_hash": wave.pause_decision_hash,
+        "paused_source_cut_hash": wave.paused_source_cut_hash,
+        "paused_at": wave.paused_at.isoformat(),
+        "error_analysis_hash": wave.error_analysis_hash,
+        "error_analysis_at": wave.error_analysis_at.isoformat(),
+        "change_summary": wave.change_summary,
+        "training_population": {
+            "population_id": wave.training_population.population_id,
+            "root_hash": wave.training_population.root_hash,
+            "causal_cut_hash": wave.training_population.causal_cut_hash,
+            "available_at": wave.training_population.available_at.isoformat(),
+            "observation_count": len(wave.training_population.observation_ids),
+        },
+        "validation_population": {
+            "population_id": wave.validation_population.population_id,
+            "root_hash": wave.validation_population.root_hash,
+            "causal_cut_hash": wave.validation_population.causal_cut_hash,
+            "available_at": wave.validation_population.available_at.isoformat(),
+            "opened_at": wave.validation_opened_at.isoformat(),
+            "observation_count": len(wave.validation_population.observation_ids),
+        },
+        "approval": {
+            "evidence_id": approval.evidence_id,
+            "evidence_valid_until": approval.evidence_valid_until.isoformat(),
+            "evaluation_status": approval.evaluation_status,
+            "retention_passed": approval.retention_passed,
+            "risk_passed": approval.risk_passed,
+            "authority_scope_id": approval.authority_scope_id,
+            "protocol_id": approval.protocol_id,
+            "protocol_hash": approval.protocol_hash,
+            "evaluation_id": approval.evaluation_id,
+            "evaluation_result_hash": approval.evaluation_result_hash,
+        },
+        "resolution": {
+            "action": resolution.action,
+            "reasons": list(resolution.reasons),
+            "resolution_hash": resolution.resolution_hash,
+            "grants_trading_authority": False,
+        },
+    }
+    data = _canonical_bytes(record)
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "autotrade:learning-wave-resolution:" + resolution.resolution_hash,
+        )
+    )
+    manifest = artifact_store.publish_bytes(
+        artifact_id=artifact_id,
+        data=data,
+        media_type="application/json",
+        rights=rights,
+        source_refs=[
+            wave.champion_artifact_hash,
+            wave.candidate_artifact_hash,
+            wave.training_population.root_hash,
+            wave.validation_population.root_hash,
+            approval.protocol_hash,
+            approval.evaluation_result_hash,
+        ],
+        metadata={
+            "artifact_kind": "LEARNING_WAVE_RESOLUTION",
+            "wave_id": wave.wave_id,
+            "candidate_id": wave.candidate_id,
+            "resolution_hash": resolution.resolution_hash,
+            "grants_trading_authority": False,
+        },
+    )
+    return resolution, manifest

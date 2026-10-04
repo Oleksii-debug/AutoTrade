@@ -53,7 +53,7 @@ _QUALIFICATION_REQUIREMENT = "bounded-real-terminal-evidence"
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -82,10 +82,10 @@ def _digest(value: str) -> str:
 
 
 def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in {Decimal, str, int}:
+        if isinstance(value, Decimal):
+            raise TypeError(f"{name} must use an exact built-in Decimal")
         raise TypeError(f"{name} must use Decimal, string or integer input")
-    if isinstance(value, Decimal) and type(value) is not Decimal:
-        raise TypeError(f"{name} must use an exact built-in Decimal")
     try:
         result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
@@ -110,6 +110,8 @@ def _bool(value, *, name: str) -> bool:
 
 
 def _actions(values: Iterable[str]) -> FrozenSet[str]:
+    if type(values) not in {set, frozenset}:
+        raise TypeError("allowed_actions must be an exact set or frozenset")
     result = frozenset(_text(value, name="action").upper() for value in values)
     if not result:
         raise ValueError("allowed_actions must be non-empty")
@@ -281,6 +283,8 @@ class EvidenceVerification:
     def __post_init__(self) -> None:
         _bool(self.valid, name="valid")
         _bool(self.conflicted, name="conflicted")
+        if type(self.reason) is not str:
+            raise TypeError("reason must be an exact string")
         if self.valid and self.conflicted:
             raise ValueError("evidence cannot be both valid and conflicted")
 
@@ -413,10 +417,12 @@ class ArtifactStoreEvidenceVerifier:
             raise TypeError(
                 "bounded-real integrity verification requires canonical ArtifactStore"
             )
-        if not isinstance(evidence_root, (str, Path)):
-            raise TypeError("evidence_root must be a string or Path")
-        if isinstance(evidence_root, str) and not evidence_root.strip():
-            raise ValueError("evidence_root must be non-empty")
+        canonical_path_type = type(Path())
+        if type(evidence_root) is str:
+            if not evidence_root.strip():
+                raise ValueError("evidence_root must be non-empty")
+        elif type(evidence_root) is not canonical_path_type:
+            raise TypeError("evidence_root must be an exact string or Path")
         root = Path(evidence_root).absolute()
         _require_unbound_artifact_store_evidence_verifier(self)
         read_snapshot = trusted_authenticated_reader(
@@ -444,7 +450,7 @@ class ArtifactStoreEvidenceVerifier:
     @property
     def identity(self) -> str:
         _, _, _, store_identity = _artifact_store_evidence_verifier_binding(self)
-        return f"{self.VERIFIER_ID}:{store_identity}"
+        return f"{ArtifactStoreEvidenceVerifier.VERIFIER_ID}:{store_identity}"
 
     @property
     def store(self) -> ArtifactStore:
@@ -489,7 +495,7 @@ class ArtifactStoreEvidenceVerifier:
                 conflicted=True,
                 reason="immutable evidence artifact is unreadable or corrupt",
             )
-        if type(manifest) is not dict or not isinstance(payload, bytes):
+        if type(manifest) is not dict or type(payload) is not bytes:
             return EvidenceVerification(
                 valid=False,
                 conflicted=True,
@@ -497,7 +503,7 @@ class ArtifactStoreEvidenceVerifier:
             )
         manifest_hash = manifest.get("manifest_hash")
         if (
-            not isinstance(manifest_hash, str)
+            type(manifest_hash) is not str
             or manifest_hash != ArtifactStoreEvidenceVerifier._manifest_hash(manifest)
         ):
             return EvidenceVerification(
@@ -541,9 +547,9 @@ class ArtifactStoreEvidenceVerifier:
                 reason="immutable evidence semantics do not match qualification scope",
             )
         if (
-            not isinstance(metadata.get("producer_id"), str)
+            type(metadata.get("producer_id")) is not str
             or not metadata["producer_id"].strip()
-            or not isinstance(metadata.get("evidence_version"), str)
+            or type(metadata.get("evidence_version")) is not str
             or not metadata["evidence_version"].strip()
         ):
             return EvidenceVerification(
@@ -579,6 +585,8 @@ class QualificationEvidence:
     unresolved_blockers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.unresolved_blockers) is not tuple:
+            raise TypeError("unresolved_blockers must be an exact tuple")
         blockers = tuple(
             _text(value, name="unresolved_blocker")
             for value in self.unresolved_blockers
@@ -641,7 +649,7 @@ class BoundedRealObservations:
             (self.unauthorized_action_count, "unauthorized_action_count"),
             (self.unresolved_unknown_count, "unresolved_unknown_count"),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         for field_name in (
             "observed_partial_fill",
@@ -749,6 +757,8 @@ def assess_bounded_real_qualification(
         raise TypeError("envelope must be exact BoundedRealEnvelope")
     if type(observations) is not BoundedRealObservations:
         raise TypeError("observations must be exact BoundedRealObservations")
+    if type(prerequisite_evidence) not in {list, tuple}:
+        raise TypeError("prerequisite_evidence must be an exact list or tuple")
 
     reasons: list[str] = []
     scope_matches = (
@@ -879,6 +889,11 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_incomplete")
     elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
+    elif (
+        type(qualification_receipt) is not SignedQualificationAttestation
+        or type(qualification_policy) is not QualificationTrustPolicy
+    ):
+        reasons.append("independent_evidence_trust_invalid")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
         signed_requirements = frozenset(

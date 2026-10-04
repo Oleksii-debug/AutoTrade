@@ -211,12 +211,14 @@ class ProductionFinancialHostTests(unittest.TestCase):
                     principal_resolver=Mock(),
                     snapshot_provider=Mock(),
                 )
-            host.close = Mock(
-                side_effect=lambda: (
-                    host._admission_gate.stop_and_drain(),
-                    host._terminal_finalizer(),
-                )
-            )  # type: ignore[method-assign]
+            fence_release_reached = Event()
+
+            def simulated_host_close() -> None:
+                host._admission_gate.stop_and_drain()
+                host._terminal_finalizer()
+                fence_release_reached.set()
+
+            host.close = Mock(side_effect=simulated_host_close)  # type: ignore[method-assign]
 
             lease_entered = Event()
             allow_lease_exit = Event()
@@ -256,7 +258,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertTrue(drain_started.wait(timeout=2))
             self.assertFalse(runtime.provider_secret_resolver.accepting)
             self.assertFalse(close_finished.is_set())
-            host.close.assert_not_called()
+            self.assertFalse(fence_release_reached.is_set())
             self.assertEqual(runtime.recovery_controller.state, HostState.RECOVERING)
 
             allow_lease_exit.set()
@@ -267,6 +269,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertFalse(close_thread.is_alive())
             self.assertTrue(close_finished.is_set())
             host.close.assert_called_once_with()
+            self.assertTrue(fence_release_reached.is_set())
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
 
     def test_resolver_binds_host_scope_and_trade_purpose(self) -> None:
@@ -321,10 +324,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 origin="http://127.0.0.1:18765",
                 handle=object(),
                 execution_identity="host-a",
-                account_id="account-1",
                 provider="BYBIT",
-                environment="PAPER",
-                purpose="TRADE",
                 provider_environment="TESTNET",
             ):
                 self.fail("closed resolver yielded a secret")

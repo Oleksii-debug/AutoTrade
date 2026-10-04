@@ -2,12 +2,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 from hashlib import sha256
+import gc
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import UUID
+from weakref import ref as weakref_ref
 
+import autotrade_research.evaluation.ablation as ablation_module
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
@@ -1031,6 +1034,33 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "incomplete_registered_population")
 
+    def test_qualified_outcome_after_evaluation_cutoff_is_inconclusive(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(
+                cases,
+                evaluation_cutoff=CUT + timedelta(minutes=30),
+            ),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "outcome_unavailable_at_evaluation_cutoff",
+        )
+
     def test_qualified_stale_pre_cutoff_revision_is_inconclusive(self):
         cases = [
             pair("qualified-a", "2", population_unit="unit-a"),
@@ -1162,6 +1192,33 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
 
+    def test_policy_binding_releases_registry_with_dead_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority = AblationQualificationAuthority(
+                scientific_registry=ScientificRegistry(root / "science.sqlite3"),
+                experience_memory=ExperienceMemory(root / "memory.sqlite3"),
+                artifact_store=ArtifactStore(root / "artifacts"),
+                protocol_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT + timedelta(hours=1),
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            registry = authority.scientific_registry
+            authority_reference = weakref_ref(authority)
+            registry_reference = weakref_ref(registry)
+
+            del registry
+            del authority
+            for _ in range(3):
+                gc.collect()
+
+            self.assertIsNone(authority_reference())
+            self.assertIsNone(registry_reference())
+
     def test_terminal_interlock_validates_inputs_without_resolving_authority(self):
         authority = object.__new__(AblationQualificationAuthority)
 
@@ -1178,23 +1235,17 @@ class AblationTests(unittest.TestCase):
             "agent",
             cases,
             authority=authority,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
+            minimum_pairs=1,
+            required_lower_bound=Decimal("-999"),
+            uncertainty_multiplier=Decimal("0"),
         )
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(
             result.reason,
-            "canonical_utility_cost_owner_evidence_unavailable",
+            "registered_ablation_decision_policy_unavailable",
         )
-
-        with self.assertRaisesRegex(ValueError, "minimum_pairs"):
-            evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                minimum_pairs=1,
-                required_lower_bound=Decimal("0"),
-            )
+        self.assertEqual(result.required_lower_bound, Decimal("0"))
+        self.assertEqual(result.uncertainty_multiplier, Decimal("0"))
 
         with self.assertRaisesRegex(ValueError, "duplicate matched ablation case_id"):
             evaluate_qualified_incremental_value(
@@ -1203,6 +1254,137 @@ class AblationTests(unittest.TestCase):
                 authority=authority,
                 minimum_pairs=2,
                 required_lower_bound=Decimal("0"),
+            )
+
+
+    def test_terminal_policy_preflight_is_registered_and_never_reads_outcomes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            cases = [
+                pair("policy-a", "2", population_unit="policy-unit-a"),
+                pair("policy-b", "2", population_unit="policy-unit-b"),
+            ]
+
+            base = {
+                "hypothesis": "agent adds after-cost value",
+                "strategy": "matched causal ablation",
+                "features": ["base", "agent"],
+                "search_space": {"agent": ["enabled", "ablated"]},
+                "train_period": {"start": "2026-01-01", "end": "2026-01-02"},
+                "validation_period": {"start": "2026-01-04", "end": "2026-01-05"},
+                "test_period": {"start": "2026-01-07", "end": "2026-01-08"},
+                "forward_period": {"start": "2026-01-10", "end": "2026-01-11"},
+                "labels": ["net_value"],
+                "horizons": ["1d"],
+                "purge_embargo": {"purge": "1d", "embargo": "1d"},
+                "universe": ["TEST"],
+                "cost_fill_model": "canonical-cost-v1",
+                "baselines": ["ablated"],
+                "primary_metrics": ["net_incremental_value"],
+                "secondary_metrics": ["latency"],
+                "trial_budget": 2,
+                "stopping_rules": {"maximum_trials": 2},
+                "statistical_estimator": "matched-lower-bound",
+                "multiplicity_treatment": "pre-registered-single-comparison",
+                "minimum_practical_effect": "0",
+                "risk_constraints": {"authority_expansion": False},
+                "retention_tolerances": {"negative_results": "retain"},
+                "promotion_rule": "qualified-only",
+            }
+
+            def authority_for(registration):
+                return AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id=registration.protocol_id,
+                    protocol_hash=registration.protocol_hash,
+                    source_revision="9" * 40,
+                    causal_cutoff=cases[0].full.decision_utc + timedelta(hours=1),
+                    granted_permissions={"RESEARCH"},
+                    task="ablation-qualification",
+                    instrument_family="EQUITY",
+                )
+
+            legacy = science.register_protocol(
+                dict(base),
+                protocol_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            )
+            missing_decision = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority_for(legacy),
+                minimum_pairs=1,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(
+                missing_decision.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
+
+            decision_only_payload = dict(base)
+            decision_only_payload["ablation_decision_policy"] = {
+                "schema_version": "1.0.0",
+                "minimum_pairs": 2,
+                "required_lower_bound": "0",
+                "uncertainty_multiplier": "2",
+                "decision_rule": "exact-rational-d2-sample-variance-v1",
+            }
+            decision_only = science.register_protocol(
+                decision_only_payload,
+                protocol_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            )
+            missing_value = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority_for(decision_only),
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(
+                missing_value.reason,
+                "registered_ablation_value_policy_unavailable",
+            )
+            self.assertEqual(missing_value.required_lower_bound, Decimal("0"))
+            self.assertEqual(missing_value.uncertainty_multiplier, Decimal("2"))
+
+            unsupported_payload = dict(base)
+            unsupported_payload["ablation_decision_policy"] = {
+                **decision_only_payload["ablation_decision_policy"],
+                "decision_rule": "unsupported-rule-v1",
+            }
+            unsupported_payload["ablation_value_policy"] = {
+                "schema_version": "1.0.0",
+                "value_unit": "USD",
+                "utility_projection_ref": (
+                    "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                    + "1" * 64
+                ),
+                "cost_projection_ref": (
+                    "artifact:22222222-2222-4222-8222-222222222222@sha256:"
+                    + "2" * 64
+                ),
+                "fx_valuation_ref": None,
+            }
+            unsupported = science.register_protocol(
+                unsupported_payload,
+                protocol_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            )
+            unsupported_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority_for(unsupported),
+                minimum_pairs=999,
+                required_lower_bound=Decimal("-999"),
+            )
+            self.assertEqual(
+                unsupported_result.reason,
+                "registered_ablation_decision_rule_unsupported",
             )
 
 
@@ -1231,6 +1413,26 @@ class AblationTests(unittest.TestCase):
                 "secondary_metrics": ["latency"],
                 "trial_budget": 2,
                 "stopping_rules": {"maximum_trials": 2},
+                "ablation_decision_policy": {
+                    "schema_version": "1.0.0",
+                    "minimum_pairs": 2,
+                    "required_lower_bound": "0",
+                    "uncertainty_multiplier": "2",
+                    "decision_rule": "exact-rational-d2-sample-variance-v1",
+                },
+                "ablation_value_policy": {
+                    "schema_version": "1.0.0",
+                    "value_unit": "USD",
+                    "utility_projection_ref": (
+                        "artifact:33333333-3333-4333-8333-333333333333@sha256:"
+                        + "3" * 64
+                    ),
+                    "cost_projection_ref": (
+                        "artifact:44444444-4444-4444-8444-444444444444@sha256:"
+                        + "4" * 64
+                    ),
+                    "fx_valuation_ref": None,
+                },
                 "statistical_estimator": "matched-lower-bound",
                 "multiplicity_treatment": "pre-registered-single-comparison",
                 "minimum_practical_effect": "0",
@@ -1241,6 +1443,22 @@ class AblationTests(unittest.TestCase):
             registration = science.register_protocol(
                 protocol_payload,
                 protocol_id="11111111-1111-4111-8111-111111111111",
+            )
+            attacker_science = ScientificRegistry(root / "attacker-science.sqlite3")
+            attacker_payload = {
+                **protocol_payload,
+                "minimum_practical_effect": "-999",
+                "ablation_decision_policy": {
+                    "schema_version": "1.0.0",
+                    "minimum_pairs": 2,
+                    "required_lower_bound": "-999",
+                    "uncertainty_multiplier": "0",
+                    "decision_rule": "exact-rational-d2-sample-variance-v1",
+                },
+            }
+            attacker_registration = attacker_science.register_protocol(
+                attacker_payload,
+                protocol_id="55555555-5555-4555-8555-555555555555",
             )
             registered_at = datetime.fromisoformat(registration.created_at)
             self.assertIsNotNone(registered_at.tzinfo)
@@ -1344,19 +1562,99 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
-            result = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
+
+            for field, forged_value in (
+                ("scientific_registry", attacker_science),
+                ("protocol_id", attacker_registration.protocol_id),
+                ("protocol_hash", attacker_registration.protocol_hash),
+            ):
+                tampered_authority = AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    protocol_id=registration.protocol_id,
+                    protocol_hash=registration.protocol_hash,
+                    source_revision=source_revision,
+                    causal_cutoff=evaluation_cutoff,
+                    granted_permissions={"RESEARCH"},
+                    task="ablation-qualification",
+                    instrument_family="EQUITY",
+                )
+                object.__setattr__(
+                    tampered_authority,
+                    field,
+                    forged_value,
+                )
+                tampered = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=tampered_authority,
+                    minimum_pairs=999,
+                    required_lower_bound=Decimal("-999"),
+                    uncertainty_multiplier=Decimal("0"),
+                )
+                self.assertEqual(
+                    tampered.reason,
+                    "registered_ablation_decision_policy_unavailable",
+                    field,
+                )
+                self.assertEqual(tampered.required_lower_bound, Decimal("0"), field)
+                self.assertEqual(tampered.uncertainty_multiplier, Decimal("0"), field)
+
+            self.assertFalse(
+                hasattr(
+                    ablation_module,
+                    "_issued_ablation_authority_policy_binding",
+                )
             )
+            ablation_module._issued_ablation_authority_policy_binding = (
+                lambda _authority: (
+                    attacker_science,
+                    attacker_registration.protocol_id,
+                    attacker_registration.protocol_hash,
+                )
+            )
+            try:
+                result = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=authority,
+                    outcome_refs=refs,
+                    minimum_pairs=999,
+                    required_lower_bound=Decimal("-999"),
+                    uncertainty_multiplier=Decimal("0"),
+                )
+            finally:
+                del ablation_module._issued_ablation_authority_policy_binding
             self.assertEqual(result.status, "INCONCLUSIVE")
             self.assertEqual(
                 result.reason,
                 "canonical_utility_cost_owner_evidence_unavailable",
             )
+            self.assertEqual(result.required_lower_bound, Decimal("0"))
+            self.assertEqual(result.uncertainty_multiplier, Decimal("2"))
+
+            pre_outcome_authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=cutoff + timedelta(minutes=30),
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            with self.assertRaisesRegex(ValueError, "not available by causal cutoff"):
+                pre_outcome_authority.resolve(cases, outcome_refs=())
+            with self.assertRaisesRegex(ValueError, "not available by causal cutoff"):
+                pre_outcome_authority.resolve(cases, outcome_refs=refs)
+
+            with self.assertRaisesRegex(ValueError, "exactly match selected pairs"):
+                authority.resolve(cases, outcome_refs=refs[:-1])
+            with self.assertRaisesRegex(ValueError, "duplicate canonical"):
+                authority.resolve(cases, outcome_refs=refs + refs[:1])
 
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
             diagnostic = evaluate_qualified_incremental_value(

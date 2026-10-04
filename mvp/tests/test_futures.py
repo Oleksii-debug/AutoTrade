@@ -760,6 +760,44 @@ class FuturesLifecycleTests(unittest.TestCase):
         ):
             lifecycle_gate(contract, utc(29, 12))
 
+    def test_coordinated_contract_and_instrument_mutation_cannot_reopen_delivery(self):
+        contract = self._linear_contract(settlement_method="PHYSICAL")
+        version = contract.canonical_instrument
+        self.assertIsNotNone(version)
+
+        object.__setattr__(contract, "settlement_method", "CASH")
+        object.__setattr__(version, "settlement_method", "CASH")
+
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches construction authority"
+        ):
+            lifecycle_gate(contract, utc(29, 12))
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches construction authority"
+        ):
+            require_open_for_new_exposure(contract, utc(29, 12))
+
+    def test_standalone_contract_mutation_cannot_reopen_delivery(self):
+        source = self._linear_contract(settlement_method="PHYSICAL")
+        contract = FuturesContract(
+            instrument=source.instrument,
+            payoff=source.payoff,
+            multiplier=source.multiplier,
+            quote_currency=source.quote_currency,
+            settlement_currency=source.settlement_currency,
+            last_trade_at=source.last_trade_at,
+            delivery_cutoff=source.delivery_cutoff,
+            expiry=source.expiry,
+            settlement_method=source.settlement_method,
+            price_base_currency=source.price_base_currency,
+        )
+
+        object.__setattr__(contract, "settlement_method", "CASH")
+        with self.assertRaisesRegex(
+            FuturesError, "no longer matches construction authority"
+        ):
+            lifecycle_gate(contract, utc(29, 12))
+
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(
             FuturesError, "delivery_cutoff cannot be after last_trade_at"

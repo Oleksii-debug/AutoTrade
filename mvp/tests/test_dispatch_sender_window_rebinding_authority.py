@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import dispatch as dispatch_module
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    submission_attempt_aggregate_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
@@ -61,6 +65,22 @@ class DispatchSenderWindowRebindingAuthorityTests(unittest.TestCase):
             sender_check=lambda _owner, _epoch: None,
         )
         return outcome, outbound
+
+    @staticmethod
+    def _submission_event_types(store: JournalStore) -> list[str]:
+        aggregate_id = submission_attempt_aggregate_id(
+            environment="PAPER",
+            account_id="acct",
+            attempt_id="dispatch-window-rebind-attempt",
+        )
+        return [
+            event["event_type"]
+            for event in JournalStore.load_events(
+                store,
+                "submission_attempt",
+                aggregate_id,
+            )
+        ]
 
     def test_rebound_sender_window_cannot_hide_pending_takeover(self) -> None:
         with TemporaryDirectory() as directory:
@@ -128,6 +148,63 @@ class DispatchSenderWindowRebindingAuthorityTests(unittest.TestCase):
                 "sender_authority_gate_failed:SenderAuthorityError",
             )
             self.assertEqual(outbound, 0)
+
+    def test_rebound_append_event_cannot_erase_durable_send_chronology(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store)
+
+            def forged_append(_store, _envelope, *args, **kwargs):
+                return SimpleNamespace(inserted=True)
+
+            with patch.object(JournalStore, "append_event", new=forged_append):
+                outcome, outbound = self._dispatch(
+                    dispatcher,
+                    lambda _intent_hash, _now: (True, "allowed"),
+                )
+
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outbound, 1)
+            self.assertEqual(
+                self._submission_event_types(store),
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_callback_rebound_append_event_cannot_erase_terminal_send_state(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store)
+            patcher = None
+            mutated = False
+
+            def forged_append(_store, _envelope, *args, **kwargs):
+                return SimpleNamespace(inserted=True)
+
+            def authority_check(_intent_hash, _now):
+                nonlocal patcher, mutated
+                if not mutated:
+                    mutated = True
+                    patcher = patch.object(
+                        JournalStore,
+                        "append_event",
+                        new=forged_append,
+                    )
+                    patcher.start()
+                return True, "allowed"
+
+            try:
+                outcome, outbound = self._dispatch(dispatcher, authority_check)
+            finally:
+                if patcher is not None:
+                    patcher.stop()
+
+            self.assertTrue(mutated)
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outbound, 1)
+            self.assertEqual(
+                self._submission_event_types(store),
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
 
 
 if __name__ == "__main__":

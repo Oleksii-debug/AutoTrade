@@ -195,9 +195,10 @@ class Section17BlindedReplayTests(unittest.TestCase):
         )
         result = self.blind(source, profile=alias_profile)
         item = result.events[0]
-        self.assertEqual(item.payload["instrument_id"], "Instrument 001")
-        self.assertEqual(item.payload["instrument_name"], "Instrument 001")
-        self.assertEqual(item.payload["ticker"], "Instrument 001")
+        token = item.payload["instrument_id"]
+        self.assertRegex(token, r"^Instrument [0-9A-F]{64}$")
+        self.assertEqual(item.payload["instrument_name"], token)
+        self.assertEqual(item.payload["ticker"], token)
 
     def test_identity_alias_is_included_in_leak_scan(self):
         source = dataset(
@@ -478,8 +479,9 @@ class Section17BlindedReplayTests(unittest.TestCase):
         source = dataset(event("one", instrument="SAME", provider="SAME"))
         result = self.blind(source)
         item = result.events[0]
-        self.assertEqual(item.payload["instrument_id"], "Instrument 001")
-        self.assertEqual(item.payload["provider_id"], "Provider 001")
+        self.assertRegex(item.payload["instrument_id"], r"^Instrument [0-9A-F]{64}$")
+        self.assertRegex(item.payload["provider_id"], r"^Provider [0-9A-F]{64}$")
+        self.assertNotEqual(item.payload["instrument_id"], item.payload["provider_id"])
 
     def test_relative_timing_preserves_causal_and_ingest_lags(self):
         source = dataset(

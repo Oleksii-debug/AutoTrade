@@ -273,7 +273,7 @@ class DispatchSenderBarrierLinearizationTests(unittest.TestCase):
                     now=NOW,
                     expected_journal_sequence=cut,
                 )
-                self.assertTrue(inserted.inserted)
+                self.assertEqual(inserted["event_type"], "SubmissionSending")
 
             def transport(client_id, _request, final_guard):
                 nonlocal outbound, captured_client_id
@@ -410,7 +410,7 @@ class DispatchSenderBarrierLinearizationTests(unittest.TestCase):
                 now=NOW,
                 expected_journal_sequence=cut,
             )
-            self.assertTrue(first.inserted)
+            self.assertEqual(first["event_type"], "SubmissionSending")
 
             with self.assertRaisesRegex(
                 DispatchBlocked,

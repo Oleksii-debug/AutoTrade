@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.autotrade_mvp.recovery_dispatch import build_recovery_issued_dispatcher
 
 
 class _FenceStub:
@@ -93,6 +94,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
 
             self.assertTrue(runtime.takeover_required)
             self.assertEqual(runtime.recovery_controller.owner, source_owner)
+            self.assertTrue(runtime.recovery_controller.takeover_source_only)
             self.assertIs(runtime.recovery_controller.state, HostState.RECOVERING)
             self.assertEqual(runtime.recovery_controller.durable_owner_chain(), (source_owner,))
             with self.assertRaisesRegex(
@@ -100,6 +102,57 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 "until explicit durable takeover completes",
             ):
                 _ = runtime.financial_dispatcher
+
+            # Even if source-owner reconciliation were to make the controller
+            # otherwise READY, the takeover-only marker is an independent sender
+            # and admission fence.  Reissuing the canonical recovery dispatcher
+            # directly cannot bypass explicit durable N -> N+1 takeover.
+            recovery = runtime.recovery_controller
+            recovery.provider_reconciled = True
+            recovery.reason_codes.clear()
+            recovery.state = HostState.READY
+            with self.assertRaisesRegex(
+                PermissionError,
+                "Takeover source owner cannot regain sender authority",
+            ):
+                recovery.validate_sender(source_owner.owner_id, source_owner.epoch)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "Takeover source owner cannot regain admission authority",
+            ):
+                recovery.validate_admission(source_owner.epoch)
+            with self.assertRaisesRegex(
+                PermissionError,
+                "has not advanced the source owner",
+            ):
+                recovery.activate_takeover_target_recovery()
+
+            issued = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            wire_calls = []
+
+            def forbidden_wire(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"status": "must-not-happen"}
+
+            outcome = issued.dispatch(
+                attempt_id="source-owner-bypass",
+                intent_id="intent-source",
+                intent_hash="hash-source",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-10-04T02:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=forbidden_wire,
+            )
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertIn("sender_fence_rejected:PermissionError", outcome.reason)
+            self.assertEqual(wire_calls, [])
 
     def test_host_closing_blocks_before_financial_dispatch_side_effects(self):
         with TemporaryDirectory() as directory:

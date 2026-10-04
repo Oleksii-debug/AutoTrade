@@ -459,6 +459,79 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             second = dotnet_locked_dependency_graph(root, [project])
             self.assertNotEqual(first, second)
 
+    def test_dependency_edge_target_must_exist_in_same_lock_target(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                            'dependencies': {
+                                'Missing.Transitive': '[2.0.0, )',
+                            },
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith(
+                        'DOTNET_PROJECT_LOCK_DEPENDENCY_TARGET_MISSING:'
+                    )
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, 'does not match project'):
+                dotnet_locked_dependency_graph(root, [project])
+
+    def test_dependency_edge_case_must_match_target_record_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                            'dependencies': {
+                                'example.transitive': '[2.0.0, )',
+                            },
+                        },
+                        'Example.Transitive': {
+                            'type': 'Transitive',
+                            'resolved': '2.0.0',
+                            'contentHash': GOOD_HASH,
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith(
+                        'DOTNET_PROJECT_LOCK_DEPENDENCY_EDGE_CASE_MISMATCH:'
+                    )
+                    for item in blockers
+                )
+            )
+
     def test_invalid_dependency_edge_shape_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

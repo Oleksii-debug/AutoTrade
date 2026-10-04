@@ -221,6 +221,108 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 Decimal("3"),
             )
 
+    def test_bust_restores_only_one_partial_fill_usage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            reservations.reserve(
+                command_id="reserve-partials",
+                idempotency_key="reserve-partials",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "200"},
+                available={"CASH:USD": "1000"},
+            )
+            orders.create_order(
+                event_key="create-partials",
+                client_order_id="order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=WHEN,
+            )
+
+            def fill(fill_id, execution_id, quantity, command_id):
+                projected = ProjectedFillEvidence.create(
+                    fill_id=fill_id,
+                    provider_execution_id=execution_id,
+                    intent_id="intent-1",
+                    client_order_id="order-1",
+                    side="BUY",
+                    quantity=quantity,
+                    price="100",
+                )
+                provider = ProviderFillEvidence.create(
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_execution_id=execution_id,
+                    client_order_id="order-1",
+                    instrument="ABC",
+                    quantity=quantity,
+                    price="100",
+                    fee_amount="0",
+                    fee_currency="USD",
+                    trade_time=WHEN,
+                    side="BUY",
+                )
+                self.assertTrue(
+                    commit_provider_fill_with_reservation_consumption(
+                        economics,
+                        reservations,
+                        command_id=command_id,
+                        idempotency_key=command_id,
+                        reservation_id="reservation-1",
+                        projected_fill=projected,
+                        provider_fill=provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        observed_at=WHEN,
+                        committed_at=WHEN,
+                        order_book=orders,
+                        order_event_key=fill_id,
+                    )
+                )
+                return projected, provider
+
+            first_projected, first_provider = fill(
+                "fill-partial-a",
+                "provider-execution-partial-a",
+                "0.4",
+                "provider-fill-partial-a",
+            )
+            fill(
+                "fill-partial-b",
+                "provider-execution-partial-b",
+                "0.6",
+                "provider-fill-partial-b",
+            )
+            before = reservations.get("reservation-1")
+            self.assertEqual(before.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(before.remaining["CASH:USD"], Decimal("100"))
+
+            self.assertTrue(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    first_projected,
+                    first_provider,
+                )
+            )
+
+            after = reservations.get("reservation-1")
+            self.assertEqual(after.consumed["CASH:USD"], Decimal("60"))
+            self.assertEqual(after.remaining["CASH:USD"], Decimal("140"))
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("140"),
+            )
+            order = orders.order("order-1").snapshot()
+            self.assertEqual(order.filled_quantity, Decimal("0.6"))
+            self.assertEqual(order.fill_count, 1)
+            self.assertEqual(economics.position("ABC"), Decimal("0.6"))
+
     def test_precommit_failure_leaves_oms_and_economics_unbusted(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

@@ -431,6 +431,21 @@ class QualifiedProviderResponseObservation:
         return self.observation.environment
 
 
+
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class TerminalQualifiedProviderReadAuthority:
+    """One exact current C/Q proof captured at the irreversible read boundary."""
+
+    query_binding: QualifiedProviderReadQueryBinding
+    journal_sequence_cut: int
+    verified_at: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderRouteReadError(
+            "terminal provider-read authority must come from exact current C/Q"
+        )
+
+
 def _install_qualified_provider_read_authority():
     """Keep Q/rule provenance outside caller-writable frozen dataclass state."""
 
@@ -564,6 +579,265 @@ def _install_qualified_provider_read_authority():
     _require_qualified_provider_response_authority,
 ) = _install_qualified_provider_read_authority()
 del _install_qualified_provider_read_authority
+
+
+def _install_terminal_qualified_provider_read_authority():
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[QualifiedProviderReadQueryBinding, int, str],
+        ],
+    ] = {}
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register(
+        value: TerminalQualifiedProviderReadAuthority,
+        query_binding: QualifiedProviderReadQueryBinding,
+        journal_sequence_cut: int,
+        verified_at: str,
+    ) -> None:
+        if type(value) is not TerminalQualifiedProviderReadAuthority:
+            raise ProviderRouteReadError(
+                "terminal provider-read construction authority requires exact proof"
+            )
+        prune()
+        states[id(value)] = (
+            weakref.ref(value),
+            (query_binding, journal_sequence_cut, verified_at),
+        )
+
+    def snapshot(
+        value: object,
+    ) -> tuple[QualifiedProviderReadQueryBinding, int, str]:
+        if type(value) is not TerminalQualifiedProviderReadAuthority:
+            raise ProviderRouteReadError(
+                "terminal provider-read authority requires exact proof"
+            )
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderRouteReadError(
+                "terminal provider-read construction authority is unavailable"
+            )
+        query_binding, journal_sequence_cut, verified_at = state[1]
+        if (
+            value.query_binding is not query_binding
+            or value.journal_sequence_cut != journal_sequence_cut
+            or value.verified_at != verified_at
+        ):
+            raise ProviderRouteReadError(
+                "terminal provider-read authority changed after C/Q verification"
+            )
+        _require_qualified_provider_read_binding_authority(query_binding)
+        return query_binding, journal_sequence_cut, verified_at
+
+    return register, snapshot
+
+
+(
+    _register_terminal_qualified_provider_read_authority,
+    _terminal_qualified_provider_read_authority_state,
+) = _install_terminal_qualified_provider_read_authority()
+del _install_terminal_qualified_provider_read_authority
+
+
+def _issue_terminal_qualified_provider_read_authority_impl(
+    route: SelectedProviderRoute,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
+    query_binding: QualifiedProviderReadQueryBinding,
+    *,
+    at: datetime,
+    _register_authority,
+) -> TerminalQualifiedProviderReadAuthority:
+    if type(route) is not SelectedProviderRoute:
+        raise TypeError("route must be exact SelectedProviderRoute")
+    if type(capability_registry) is not DurableCapabilityRegistry:
+        raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
+    if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    if type(query_binding) is not QualifiedProviderReadQueryBinding:
+        raise TypeError(
+            "query_binding must be exact QualifiedProviderReadQueryBinding"
+        )
+    _require_qualified_provider_read_binding_authority(query_binding)
+    if capability_registry.store is not qualification_registry.store:
+        raise ProviderRouteReadError(
+            "terminal C/Q authorities must share one JournalStore instance"
+        )
+
+    candidate = route.candidate
+    base = query_binding.query_binding
+    expected_scope = (
+        candidate.provider_id,
+        candidate.account_id,
+        candidate.entity_id,
+        route.capability.environment,
+        route.capability.instrument_version,
+        route.capability_snapshot_id,
+        route.qualification_id,
+        candidate.provider_environment,
+        candidate.adapter_code_sha,
+        candidate.packaged_artifact_digest,
+    )
+    actual_scope = (
+        base.provider_id,
+        base.account_id,
+        base.entity_id,
+        base.environment,
+        base.instrument_version,
+        base.capability_snapshot_id,
+        query_binding.qualification_id,
+        query_binding.provider_environment,
+        query_binding.adapter_code_sha,
+        query_binding.packaged_artifact_digest,
+    )
+    if actual_scope != expected_scope:
+        raise ProviderRouteReadError(
+            "terminal provider-read scope differs from selected route"
+        )
+
+    point = _point(at)
+    cut = _journal_cut(capability_registry.store)
+    try:
+        capability = capability_registry.require_verified(
+            provider_id=candidate.provider_id,
+            account_id=candidate.account_id,
+            entity_id=candidate.entity_id,
+            environment=route.capability.environment,
+            provider_environment=candidate.provider_environment,
+            instrument_version=route.capability.instrument_version,
+            at=point,
+            journal_sequence_cut=cut,
+        )
+    except CapabilityError as error:
+        raise ProviderRouteReadError(
+            "terminal provider-read capability is not exact current"
+        ) from error
+    if capability.snapshot_id != route.capability_snapshot_id:
+        raise ProviderRouteReadError(
+            "terminal provider-read capability differs from selected C"
+        )
+
+    try:
+        current_q = qualification_registry.require_exact_current(
+            scope=_q_scope(route),
+            at=point,
+            expected_qualification_id=route.qualification_id,
+            journal_sequence_cut=cut,
+        )
+    except ProviderQualificationError as error:
+        raise ProviderRouteReadError(
+            "terminal provider-read qualification is not exact current"
+        ) from error
+    if current_q.journal_sequence_cut != cut:
+        raise ProviderRouteReadError(
+            "terminal provider-read qualification did not honor exact cut"
+        )
+
+    (
+        route_semantics_digest,
+        endpoint_rule_digest,
+        qualified_route_rule_digest,
+        data_entitlement,
+        accepted_success_statuses,
+        parser_identity,
+    ) = _qualified_read_rule(
+        qualification=current_q.qualification,
+        provider_id=candidate.provider_id,
+        endpoint=base.endpoint,
+        surface=base.surface,
+        permission_scope=base.permission_scope,
+    )
+    current_rule = (
+        route_semantics_digest,
+        endpoint_rule_digest,
+        qualified_route_rule_digest,
+        data_entitlement,
+        accepted_success_statuses,
+        parser_identity,
+    )
+    prepared_rule = (
+        query_binding.route_semantics_digest,
+        query_binding.endpoint_rule_digest,
+        query_binding.qualified_route_rule_digest,
+        query_binding.data_entitlement,
+        query_binding.accepted_success_statuses,
+        query_binding.parser_identity,
+    )
+    if current_rule != prepared_rule:
+        raise ProviderRouteReadError(
+            "terminal provider-read rule differs from prepared qualified read"
+        )
+    if _journal_cut(capability_registry.store) != cut:
+        raise ProviderRouteReadError(
+            "terminal provider-read authority changed during final C/Q barrier"
+        )
+
+    verified_at = point.isoformat().replace("+00:00", "Z")
+    authority = object.__new__(TerminalQualifiedProviderReadAuthority)
+    object.__setattr__(authority, "query_binding", query_binding)
+    object.__setattr__(authority, "journal_sequence_cut", cut)
+    object.__setattr__(authority, "verified_at", verified_at)
+    _register_authority(authority, query_binding, cut, verified_at)
+    return authority
+
+
+def _bind_terminal_qualified_provider_read_authority(issue_impl, register_authority):
+    def issue_terminal_qualified_provider_read_authority(
+        route: SelectedProviderRoute,
+        capability_registry: DurableCapabilityRegistry,
+        qualification_registry: DurableProviderQualificationRegistry,
+        query_binding: QualifiedProviderReadQueryBinding,
+        *,
+        at: datetime,
+    ) -> TerminalQualifiedProviderReadAuthority:
+        return issue_impl(
+            route,
+            capability_registry,
+            qualification_registry,
+            query_binding,
+            at=at,
+            _register_authority=register_authority,
+        )
+
+    return issue_terminal_qualified_provider_read_authority
+
+
+issue_terminal_qualified_provider_read_authority = (
+    _bind_terminal_qualified_provider_read_authority(
+        _issue_terminal_qualified_provider_read_authority_impl,
+        _register_terminal_qualified_provider_read_authority,
+    )
+)
+del _bind_terminal_qualified_provider_read_authority
+del _issue_terminal_qualified_provider_read_authority_impl
+del _register_terminal_qualified_provider_read_authority
+
+
+def terminal_qualified_provider_read_authority_snapshot(
+    authority: TerminalQualifiedProviderReadAuthority,
+) -> Mapping[str, object]:
+    query_binding, journal_sequence_cut, verified_at = (
+        _terminal_qualified_provider_read_authority_state(authority)
+    )
+    return MappingProxyType(
+        {
+            "qualified_query_digest": query_binding.query_digest,
+            "capability_snapshot_id": query_binding.query_binding.capability_snapshot_id,
+            "qualification_id": query_binding.qualification_id,
+            "journal_sequence_cut": journal_sequence_cut,
+            "verified_at": verified_at,
+        }
+    )
+
 
 
 def _prepare_qualified_provider_read_impl(

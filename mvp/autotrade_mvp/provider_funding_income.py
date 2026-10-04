@@ -388,6 +388,12 @@ def _parse_bybit_funding_income_rows(
         raise ProviderFundingIncomeError(
             "funding transaction-log query is not narrowed to one derivative settlement domain"
         )
+    for unsupported_filter in ("baseCoin", "transSubType"):
+        if query.get(unsupported_filter) is not None:
+            raise ProviderFundingIncomeError(
+                f"qualified funding query filter {unsupported_filter} is not "
+                "supported by exact funding-income row scope validation"
+            )
     expected_category = query["category"]
     expected_currency = query.get("currency")
     if expected_currency is not None:
@@ -446,15 +452,15 @@ def _parse_bybit_funding_income_rows(
             raise ProviderFundingIncomeError(
                 "Bybit funding row escaped the qualified derivative category"
             )
-        if funding == "":
-            continue
-
         provider_transaction_id = _text(item.get("id"), name="id")
         if provider_transaction_id in seen_ids:
             raise ProviderFundingIncomeError(
                 "Bybit funding transaction id is duplicated in one provider response"
             )
         seen_ids.add(provider_transaction_id)
+        if funding == "":
+            continue
+
         symbol = _text(item.get("symbol"), name="symbol")
         currency = _uppercase_ascii_text(item.get("currency"), name="currency")
         if expected_currency is not None and currency != expected_currency:

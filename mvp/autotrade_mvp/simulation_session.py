@@ -1504,10 +1504,13 @@ def run_autonomous_simulation(
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
     Each new observation drives another autonomous decision; repeated BUY signals
-    are targets, never repeated incremental exposure. An unfinished episode is
-    UNKNOWN and blocks continuation without a spontaneous resend. Completed
-    episodes restore the simulator from its journal snapshot and economics from
-    DurableProviderEconomicBook. All evidence remains simulation-only.
+    are targets, never repeated incremental exposure. An unfinished episode
+    without a retained exact internal fill remains UNKNOWN and blocks continuation
+    without a spontaneous resend. A durably observed internal fill may finish only
+    through historical admission/send evidence and canonical atomic OMS+finance
+    recovery. Completed episodes restore the simulator from its journal snapshot
+    and economics from DurableProviderEconomicBook. All evidence remains
+    simulation-only.
     """
     from .zero_network import deny_python_network
     from .risk_policy_authority import canonical_risk_policy, risk_policy_digest

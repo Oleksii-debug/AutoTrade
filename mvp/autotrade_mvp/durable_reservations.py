@@ -846,28 +846,34 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "idempotency_key was already used for a different reservation request"
                 )
-            matching_events = tuple(
-                event
-                for event in events
+            matching_event_indexes = tuple(
+                index
+                for index, event in enumerate(events)
                 if isinstance(event.get("payload"), Mapping)
                 and event["payload"].get("idempotency_key") == key
                 and event["payload"].get("operation") == "RESTORE_CONSUMPTION"
             )
-            if len(matching_events) != 1:
+            if len(matching_event_indexes) != 1:
                 raise ReservationConflict(
                     "committed reservation restoration identity is ambiguous"
                 )
-            committed_event = matching_events[0]
+            committed_event_index = matching_event_indexes[0]
+            committed_event = events[committed_event_index]
             committed_snapshot = committed_event["payload"].get("snapshot")
             if committed_snapshot != existing[1]:
                 raise ReservationConflict(
                     "committed reservation restoration snapshot authority changed"
                 )
-            snapshot = candidate.get(request["reservation_id"])
+            # Exact retry binds to the historical post-restoration cut, not the
+            # reservation's current state. Later fills may legitimately consume
+            # the same reservation; replaying this command must neither reject
+            # that progress nor apply the restoration a second time.
+            historical_book, _ = self._replay(events[: committed_event_index + 1])
+            snapshot = historical_book.get(request["reservation_id"])
             snapshot_value = _snapshot_payload(snapshot)
             if snapshot_value != committed_snapshot:
                 raise ReservationConflict(
-                    "reservation changed after committed restoration; replay requires current authority"
+                    "committed reservation restoration historical cut changed"
                 )
             return PreparedReservationMutation(
                 snapshot=snapshot,

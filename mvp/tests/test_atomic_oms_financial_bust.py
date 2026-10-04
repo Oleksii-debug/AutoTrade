@@ -323,6 +323,36 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(order.fill_count, 1)
             self.assertEqual(economics.position("ABC"), Decimal("0.6"))
 
+            # A later fill on the same reservation is valid forward progress.
+            # Exact retry of the older bust must resolve its historical command
+            # authority without requiring the current reservation snapshot to
+            # equal the old post-bust snapshot and without restoring twice.
+            fill(
+                "fill-partial-c",
+                "provider-execution-partial-c",
+                "0.2",
+                "provider-fill-partial-c",
+            )
+            before_retry = reservations.get("reservation-1")
+            self.assertEqual(before_retry.consumed["CASH:USD"], Decimal("80"))
+            self.assertEqual(before_retry.remaining["CASH:USD"], Decimal("120"))
+            self.assertFalse(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    first_projected,
+                    first_provider,
+                )
+            )
+            after_retry = reservations.get("reservation-1")
+            self.assertEqual(after_retry, before_retry)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0.8"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("0.8"))
+
     def test_precommit_failure_leaves_oms_and_economics_unbusted(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

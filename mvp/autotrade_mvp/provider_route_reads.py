@@ -652,6 +652,14 @@ def _prepare_qualified_provider_read_impl(
         surface=base.surface,
         permission_scope=base.permission_scope,
     )
+    if base.permission_scope not in capability.permission_scopes:
+        raise ProviderRouteReadError(
+            "selected route durable capability does not authorize exact provider-read permission"
+        )
+    if data_entitlement not in capability.data_entitlements:
+        raise ProviderRouteReadError(
+            "selected route durable capability does not authorize exact provider-read data entitlement"
+        )
     material = {
         "query_binding": base,
         "qualification_id": route.qualification_id,
@@ -762,4 +770,3 @@ del _prepare_qualified_provider_read_impl
 del _observe_qualified_provider_json_response_impl
 del _register_qualified_provider_read_binding_authority
 del _register_qualified_provider_response_authority
-

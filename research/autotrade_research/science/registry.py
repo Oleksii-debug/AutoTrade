@@ -247,6 +247,22 @@ def _immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
+def _registered_protocol_payload(row: sqlite3.Row) -> dict[str, Any]:
+    """Decode and revalidate one stored protocol row before using its authority."""
+
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ProtocolViolation("registered protocol payload is corrupt") from error
+    if (
+        not isinstance(payload, dict)
+        or _canonical(payload) != row["payload_json"]
+        or _hash(payload) != row["protocol_hash"]
+    ):
+        raise ProtocolViolation("registered protocol integrity mismatch")
+    return payload
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -448,16 +464,7 @@ class ScientificRegistry:
             ).fetchone()
         if row is None:
             raise KeyError(protocol)
-        try:
-            payload = json.loads(row["payload_json"])
-        except json.JSONDecodeError as error:
-            raise ProtocolViolation("registered protocol payload is corrupt") from error
-        if (
-            not isinstance(payload, dict)
-            or _canonical(payload) != row["payload_json"]
-            or _hash(payload) != row["protocol_hash"]
-        ):
-            raise ProtocolViolation("registered protocol integrity mismatch")
+        _registered_protocol_payload(row)
         return ProtocolRegistration(
             protocol_id=protocol,
             protocol_hash=row["protocol_hash"],
@@ -483,9 +490,13 @@ class ScientificRegistry:
         digest = _hash(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            owner = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
             if owner is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
             existing = con.execute("SELECT * FROM trials WHERE trial_id=?", (identifier,)).fetchone()
             if existing is not None:
                 if (
@@ -496,7 +507,7 @@ class ScientificRegistry:
                 ):
                     raise ProtocolConflict("trial identity was reused inconsistently")
                 return identifier
-            budget = json.loads(owner["payload_json"])["trial_budget"]
+            budget = protocol_payload["trial_budget"]
             used = con.execute("SELECT COUNT(*) FROM trials WHERE protocol_id=?", (protocol,)).fetchone()[0]
             if used >= budget:
                 raise ProtocolViolation("registered trial budget exhausted")
@@ -609,7 +620,7 @@ class ScientificRegistry:
                 holdout_id=holdout,
                 holdout_identity=holdout_identity,
             )
-            protocol_payload = json.loads(p["payload_json"])
+            protocol_payload = _registered_protocol_payload(p)
             trial_budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """
@@ -935,12 +946,12 @@ class ScientificRegistry:
         protocol = _id(protocol_id)
         with self._connect() as con:
             p = con.execute(
-                "SELECT payload_json FROM protocols WHERE protocol_id=?",
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
                 (protocol,),
             ).fetchone()
             if p is None:
                 raise KeyError(protocol)
-            protocol_payload = json.loads(p["payload_json"])
+            protocol_payload = _registered_protocol_payload(p)
             budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """

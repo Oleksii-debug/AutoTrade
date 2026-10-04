@@ -364,7 +364,13 @@ def assess_reconvergence(
         # C* intentionally does not remove its source path.
 
     disappeared = tuple(sorted(disappeared_paths))
-    protected = tuple(sorted(direct_deletions.intersection(protected_sentinels)))
+    protected = tuple(
+        sorted(
+            path
+            for path in direct_deletions
+            if path in protected_sentinels or _is_workflow_authority_path(path)
+        )
+    )
     fraction = len(disappeared) / base_count
 
     protected_damage: set[str] = set(protected)
@@ -372,20 +378,26 @@ def assess_reconvergence(
         kind = change.status[:1]
         if (
             kind == "R"
-            and change.previous_path in protected_sentinels
+            and (
+                change.previous_path in protected_sentinels
+                or _is_workflow_authority_path(change.previous_path)
+            )
             and change.path != change.previous_path
         ):
             protected_damage.add(
                 f"{change.previous_path} -> {change.path} (rename)"
             )
-        if kind == "T" and change.path in protected_sentinels:
+        if kind == "T" and (
+            change.path in protected_sentinels
+            or _is_workflow_authority_path(change.path)
+        ):
             protected_damage.add(f"{change.path} (type change)")
         if (
             kind == "M"
             and (
                 change.path in SELF_PROTECTING_TRUST_ROOTS
                 or change.path in BOOTSTRAP_TRUST_ROOTS
-                or change.path in WORKFLOW_AUTHORITY_ROOTS
+                or _is_workflow_authority_path(change.path)
                 or change.path in INTEGRATION_HARNESS_ROOTS
             )
             and not exactly_authorized(change.path)

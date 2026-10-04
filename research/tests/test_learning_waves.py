@@ -653,7 +653,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
 class CandidateResolutionTests(unittest.TestCase):
     def test_pass_under_auto_policy_hands_off_to_canonical_promotion_authority(self):
         result = resolve(candidate_wave(promotion_mode="AUTO"))
-        self.assertEqual(result.action, "HANDOFF_AUTO_PROMOTION_AUTHORITY")
+        self.assertEqual(result.action, "HANDOFF_TO_AUTO_PROMOTION_CHECK")
         self.assertFalse(result.grants_trading_authority)
 
     def test_pass_under_confirmation_policy_waits_for_confirmation(self):

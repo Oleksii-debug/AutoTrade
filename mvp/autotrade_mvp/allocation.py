@@ -1663,7 +1663,10 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
-def _make_allocation_payload_sealer(_json_dumps=json.dumps):
+def _make_allocation_payload_sealer(
+    _json_dumps=json.dumps,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+):
     """Create closure-private provenance for canonical frozen mapping nodes."""
 
     registry: dict[int, tuple[weakref.ReferenceType, object, str]] = {}
@@ -1701,6 +1704,10 @@ def _make_allocation_payload_sealer(_json_dumps=json.dumps):
                 frozen_items[key] = frozen_item
                 owners.extend(nested_owners)
             proxy = MappingProxyType(frozen_items)
+            if getattr(_json_dumps, "__code__", None) is not _json_dumps_code:
+                raise ValueError(
+                    "allocation evidence serializer executable changed after binding"
+                )
             canonical_json = _json_dumps(
                 value,
                 sort_keys=True,
@@ -1746,6 +1753,7 @@ def _canonical_evidence_value(
     value,
     _sealed_lookup=_registered_allocation_payload,
     _json_loads=json.loads,
+    _json_loads_code=getattr(json.loads, "__code__", None),
 ):
     """Reduce untrusted evidence to exact built-in JSON-domain values.
 
@@ -1790,6 +1798,10 @@ def _canonical_evidence_value(
                     "allocation evidence mappingproxy lacks sealed canonical provenance"
                 )
             _, canonical_json = sealed
+            if getattr(_json_loads, "__code__", None) is not _json_loads_code:
+                raise ValueError(
+                    "allocation evidence decoder executable changed after binding"
+                )
             decoded = _json_loads(canonical_json)
             if type(decoded) is not dict:
                 raise RuntimeError("sealed allocation payload provenance is invalid")
@@ -1806,7 +1818,16 @@ def _canonical_evidence_json(
     value,
     _json_dumps=json.dumps,
     _canonicalize=_canonical_evidence_value,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+    _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
 ) -> str:
+    if (
+        getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+        or getattr(_canonicalize, "__code__", None) is not _canonicalize_code
+    ):
+        raise ValueError(
+            "allocation evidence canonicalizer executable changed after binding"
+        )
     return _json_dumps(
         _canonicalize(value),
         sort_keys=True,
@@ -1827,7 +1848,12 @@ def _allocation_evidence_digest(
     payload: Mapping[str, object],
     _canonical_json=_canonical_evidence_json,
     _sha256=sha256,
+    _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
 ) -> str:
+    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise ValueError(
+            "allocation evidence digest canonicalizer executable changed after binding"
+        )
     body = {
         "evidence_id": evidence_id,
         "kind": kind,
@@ -1981,6 +2007,8 @@ def _verified_allocation_payload_owner(
     _sealed_lookup=_registered_allocation_payload,
     _json_loads=json.loads,
     _digest=_allocation_evidence_digest,
+    _json_loads_code=getattr(json.loads, "__code__", None),
+    _digest_code=getattr(_allocation_evidence_digest, "__code__", None),
 ):
     """Verify canonical issuer provenance before any payload mapping method."""
 
@@ -1996,6 +2024,13 @@ def _verified_allocation_payload_owner(
     owner, canonical_json = sealed
     if not any(candidate is owner for candidate in owners):
         raise ValueError("allocation evidence payload provenance is not sealed")
+    if (
+        getattr(_json_loads, "__code__", None) is not _json_loads_code
+        or getattr(_digest, "__code__", None) is not _digest_code
+    ):
+        raise ValueError(
+            "allocation evidence trust helper executable changed after binding"
+        )
     decoded = _json_loads(canonical_json)
     if type(decoded) is not dict:
         raise RuntimeError("sealed allocation payload provenance is invalid")

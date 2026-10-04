@@ -435,5 +435,24 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
+    def test_same_function_digest_code_mutation_fails_before_execution(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        helper = allocation_module._allocation_evidence_digest
+        original_code = helper.__code__
+
+        def forged_digest(**_kwargs):
+            raise AssertionError("forged digest helper executed")
+
+        try:
+            helper.__code__ = forged_digest.__code__
+            with self.assertRaisesRegex(
+                ValueError,
+                "trust helper executable changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            helper.__code__ = original_code
+
+
 if __name__ == "__main__":
     unittest.main()

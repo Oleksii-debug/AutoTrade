@@ -3595,6 +3595,7 @@ class KrakenSpotAuthenticatedReadTransport:
                         signed,
                         query_binding,
                         terminal_authority_factory,
+                        provider_environment="LIVE",
                     )
                     wire_response = self.wire_client.send(signed)
             finally:
@@ -4644,6 +4645,7 @@ class BybitV5AuthenticatedReadTransport:
                 signed,
                 query_binding,
                 terminal_authority_factory,
+                provider_environment=self.provider_environment,
             )
             wire_response = self.wire_client.send(signed)
             if not isinstance(wire_response, AuthenticatedReadWireResponse):
@@ -5252,6 +5254,7 @@ class BinanceSpotAuthenticatedReadTransport:
                 signed,
                 query_binding,
                 terminal_authority_factory,
+                provider_environment="TESTNET" if self.policy.environment == "PAPER" else "LIVE",
             )
             wire_response = self.wire_client.send(signed)
             if not isinstance(wire_response, AuthenticatedReadWireResponse):

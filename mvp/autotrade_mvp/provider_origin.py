@@ -1195,6 +1195,14 @@ class ProviderOriginJournal:
             type(manifest) is not dict
             or manifest.get("artifact_id") != artifact_id
             or manifest.get("sha256") != response_digest
+            or manifest.get("bytes") != len(raw)
+            or manifest.get("media_type") != "application/octet-stream"
+            or manifest.get("rights") != {
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "qualified-provider-origin-response:v1",
+                }
+            or manifest.get("source_refs") != []
             or manifest.get("metadata") != metadata
         ):
             raise ProviderOriginError("provider response artifact conflicts with exact response")
@@ -1399,6 +1407,14 @@ class ProviderOriginJournal:
                 type(manifest) is not dict
                 or manifest.get("artifact_id") != artifact_id
                 or manifest.get("sha256") != response_digest
+                or manifest.get("bytes") != len(raw)
+                or manifest.get("media_type") != "application/octet-stream"
+                or manifest.get("rights") != {
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "qualified-provider-origin-response:v1",
+                }
+                or manifest.get("source_refs") != []
                 or manifest.get("metadata") != expected_metadata
                 or "sha256:" + sha256(raw).hexdigest() != response_digest
             ):
@@ -1629,8 +1645,22 @@ class ProviderOriginJournal:
             )
         except (ArtifactIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as error:
             raise ProviderOriginError("durable provider response artifact is unavailable") from error
-        if manifest.get("sha256") != response_digest:
-            raise ProviderOriginError("durable provider response manifest digest mismatch")
+        if (
+            type(manifest) is not dict
+            or manifest.get("artifact_id") != artifact_id
+            or manifest.get("sha256") != response_digest
+            or manifest.get("bytes") != len(raw)
+            or manifest.get("media_type") != "application/octet-stream"
+            or manifest.get("rights") != {
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "qualified-provider-origin-response:v1",
+                }
+            or manifest.get("source_refs") != []
+        ):
+            raise ProviderOriginError(
+                "durable provider response artifact policy differs from canonical retention"
+            )
         if "sha256:" + sha256(raw).hexdigest() != response_digest:
             raise ProviderOriginError("durable provider response bytes digest mismatch")
         execution_class = _exact_text(

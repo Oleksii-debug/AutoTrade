@@ -912,17 +912,19 @@ class DurableReservationBook:
         candidate, idempotency = self._replay(events)
         existing = idempotency.get(key)
         if existing is not None:
-            matching = [
-                event
-                for event in events
+            matching_indexes = tuple(
+                index
+                for index, event in enumerate(events)
                 if isinstance(event.get("payload"), dict)
                 and event["payload"].get("idempotency_key") == key
-            ]
-            if len(matching) != 1:
+            )
+            if len(matching_indexes) != 1:
                 raise ReservationConflict(
                     "committed reservation fill mutation identity is ambiguous"
                 )
-            stored_payload = matching[0]["payload"]
+            matching_index = matching_indexes[0]
+            matching_event = events[matching_index]
+            stored_payload = matching_event["payload"]
             stored_operation = stored_payload.get("operation")
             if (
                 stored_operation == "CONSUME"
@@ -938,9 +940,15 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "idempotency_key was already used for a different reservation request"
                 )
-            snapshot = candidate.get(legacy_request["reservation_id"])
+
+            # Return the exact historical post-mutation cut. A later bust or
+            # refill may legitimately move the current projection forward and
+            # must not invalidate idempotent recovery of this command.
+            historical_book, _ = self._replay(events[: matching_index + 1])
+            snapshot = historical_book.get(legacy_request["reservation_id"])
             snapshot_value = _snapshot_payload(snapshot)
-            if snapshot_value != existing[1]:
+            stored_snapshot = stored_payload.get("snapshot")
+            if snapshot_value != existing[1] or snapshot_value != stored_snapshot:
                 raise ReservationConflict(
                     "committed reservation fill snapshot does not match replayed state"
                 )
@@ -950,7 +958,7 @@ class DurableReservationBook:
                 envelope=None,
                 idempotency_key=key,
                 request=replay_request,
-                aggregate_version=int(matching[0]["aggregate_version"]),
+                aggregate_version=int(matching_event["aggregate_version"]),
                 already_committed=True,
             )
 

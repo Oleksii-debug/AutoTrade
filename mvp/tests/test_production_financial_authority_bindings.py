@@ -33,9 +33,10 @@ def _forged_guarded_dispatch(_self, **kwargs):
     return "forged"
 
 
+@contextmanager
 def _forged_security_lease(_self, *args, **kwargs):
     _FORGED_LEASE_CALLS.append((args, kwargs))
-    raise AssertionError("forged credential lease executed")
+    yield "forged"
 
 
 class _LeaseBoundary:

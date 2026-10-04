@@ -274,11 +274,21 @@ class ExecutionRealismTests(unittest.TestCase):
             simulate_execution(order(), top(ask="101.005"), model())
 
     def test_market_execution_fails_closed_without_matching_projection_authority(self):
-        with self.assertRaisesRegex(
-            ExecutionRealismError,
-            "requires authoritative price projection policy",
+        for observation in (
+            top(),
+            top(market_time="2026-09-24T10:00:00.050000Z"),
+            top(available_volume="0"),
         ):
-            simulate_execution(order(), top(), model(price_projection=None))
+            with self.subTest(observation=observation):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "requires authoritative price projection policy",
+                ):
+                    simulate_execution(
+                        order(),
+                        observation,
+                        model(price_projection=None),
+                    )
 
         mismatched = ExecutionPriceProjectionPolicy(
             policy_id="ADVERSE_INSTRUMENT_TICK",

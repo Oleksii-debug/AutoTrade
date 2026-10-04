@@ -55,6 +55,7 @@ def revision(
     ingested_at="2024-03-12T10:00:07Z",
     source_event_at="2024-03-12T09:45:00Z",
     source_sequence=1,
+    source_priority=10,
     source_id="Reuters",
     syndication_sha256=SYNDICATION,
     content_sha256=CONTENT,
@@ -83,7 +84,7 @@ def revision(
         available_at=available_at,
         ingested_at=ingested_at,
         source_event_at=source_event_at,
-        source_priority=10,
+        source_priority=source_priority,
         source_sequence=source_sequence,
         language=language,
         rights_id="rights-news-test",
@@ -190,6 +191,71 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         self.assertEqual(second[0].payload["supersedes_revision"], 1)
         self.assertEqual(
             [item.payload["revision"] for item in feeder.view().events],
+            [1, 2],
+        )
+
+    def test_same_availability_revision_cannot_sort_before_predecessor(self):
+        original = revision(
+            published_at="2024-03-12T10:00:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:00Z",
+            source_priority=10,
+            source_sequence=2,
+        )
+        correction = revision(
+            revision_number=2,
+            revision_kind="CORRECTION",
+            supersedes_revision=1,
+            published_at="2024-03-12T10:20:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:01Z",
+            source_priority=5,
+            source_sequence=1,
+            summary_template="{company} corrected the reported earnings surprise to 11%",
+            claims=(
+                claim(
+                    claim_id="earnings-corrected",
+                    magnitude="11",
+                    relevance_bps=9000,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            NewsReplayError, "would expose a later revision before its predecessor"
+        ):
+            self.bundle(original, correction)
+
+    def test_same_availability_revision_preserves_revision_order(self):
+        original = revision(
+            published_at="2024-03-12T10:00:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:00Z",
+            source_priority=10,
+            source_sequence=1,
+        )
+        correction = revision(
+            revision_number=2,
+            revision_kind="CORRECTION",
+            supersedes_revision=1,
+            published_at="2024-03-12T10:20:00Z",
+            available_at="2024-03-12T10:30:00Z",
+            ingested_at="2024-03-12T10:30:01Z",
+            source_priority=10,
+            source_sequence=2,
+            summary_template="{company} corrected the reported earnings surprise to 11%",
+            claims=(
+                claim(
+                    claim_id="earnings-corrected",
+                    magnitude="11",
+                    relevance_bps=9000,
+                ),
+            ),
+        )
+        bundle = self.bundle(original, correction)
+        feeder = self.feeder(bundle)
+        published = feeder.advance_to("2024-03-12T10:30:00Z")
+        self.assertEqual(
+            [item.payload["revision"] for item in published],
             [1, 2],
         )
 

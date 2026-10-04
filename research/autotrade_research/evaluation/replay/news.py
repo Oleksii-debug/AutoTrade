@@ -541,6 +541,22 @@ def _validate_revision_chains(records: tuple[NewsRevision, ...]) -> None:
                     f"{information_id} correction/update becomes available before "
                     "the revision it supersedes"
                 )
+            if current.available_at == prior.available_at:
+                prior_key = (
+                    prior.source_priority,
+                    prior.source_sequence,
+                    f"NEWS:{information_id}:r{prior.revision}",
+                )
+                current_key = (
+                    current.source_priority,
+                    current.source_sequence,
+                    f"NEWS:{information_id}:r{current.revision}",
+                )
+                if current_key <= prior_key:
+                    raise NewsReplayError(
+                        f"{information_id} same-availability revision ordering "
+                        "would expose a later revision before its predecessor"
+                    )
 
 
 @dataclass(frozen=True, slots=True)

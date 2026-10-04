@@ -9,6 +9,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import re
+import weakref
 from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -321,6 +322,61 @@ class RawMarketUpdate:
             )
 
 
+def _make_normalized_event_build_identity_guard():
+    """Keep normalized event/build binding outside caller-mutable dataclass state."""
+
+    bindings: dict[int, tuple[weakref.ReferenceType[object], str, str]] = {}
+
+    def bind(event: object, event_id: str, adapter_version: str) -> None:
+        identity = id(event)
+        existing = bindings.get(identity)
+        if existing is not None and existing[0]() is event:
+            if existing[1:] != (event_id, adapter_version):
+                raise MarketDataError(
+                    "normalized market event build identity cannot be rebound"
+                )
+            return
+
+        def release(
+            reference: weakref.ReferenceType[object],
+            *,
+            identity: int = identity,
+        ) -> None:
+            current = bindings.get(identity)
+            if current is not None and current[0] is reference:
+                bindings.pop(identity, None)
+
+        reference = weakref.ref(event, release)
+        bindings[identity] = (reference, event_id, adapter_version)
+
+    def require(event: object) -> tuple[str, str]:
+        current = bindings.get(id(event))
+        if current is None or current[0]() is not event:
+            raise MarketDataError(
+                "normalized market event build identity authority is unavailable"
+            )
+        event_id = object.__getattribute__(event, "event_id")
+        adapter_version = object.__getattribute__(event, "adapter_version")
+        if type(event_id) is not str or type(adapter_version) is not str:
+            raise MarketDataError(
+                "normalized market event build identity changed after construction"
+            )
+        if current[1] != event_id or current[2] != adapter_version:
+            raise MarketDataError(
+                "normalized market event build identity changed after construction"
+            )
+        return current[1], current[2]
+
+    return bind, require
+
+
+(
+    _bind_normalized_event_build_identity,
+    _require_normalized_event_build_identity,
+) = _make_normalized_event_build_identity_guard()
+del _make_normalized_event_build_identity_guard
+
+
 @dataclass(frozen=True)
 class NormalizedMarketEvent:
     event_id: str
@@ -335,18 +391,65 @@ class NormalizedMarketEvent:
     payload_json: str
     quality_flags: tuple[str, ...]
     raw_evidence_ref: Mapping[str, object]
+    _identity_material: str
     source_sequence: int | None = None
     stream_generation: int | None = None
+
+    def __post_init__(
+        self,
+        _bind=_bind_normalized_event_build_identity,
+    ) -> None:
+        event_id = _admission_text(self.event_id, "event_id")
+        try:
+            UUID(event_id)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise MarketDataError("event_id must be a UUID") from error
+        adapter_version = _adapter_version(self.adapter_version)
+        identity_material = object.__getattribute__(self, "_identity_material")
+        if type(identity_material) is not str or not identity_material:
+            raise MarketDataError(
+                "normalized market event identity material is required"
+            )
+        if len(identity_material.encode("utf-8")) > 65_536:
+            raise MarketDataError(
+                "normalized market event identity material exceeds the resource envelope"
+            )
+        try:
+            identity_components = json.loads(identity_material)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise MarketDataError(
+                "normalized market event identity material is invalid"
+            ) from error
+        if (
+            type(identity_components) is not list
+            or len(identity_components) != 14
+            or type(identity_components[3]) is not str
+            or identity_components[3] != adapter_version
+        ):
+            raise MarketDataError(
+                "normalized market event adapter build differs from identity material"
+            )
+        if str(uuid5(NAMESPACE_URL, identity_material)) != event_id:
+            raise MarketDataError(
+                "event_id does not match normalized market event identity material"
+            )
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "adapter_version", adapter_version)
+        _bind(self, event_id, adapter_version)
 
     @property
     def payload(self) -> dict[str, Any]:
         return json.loads(self.payload_json)
 
-    def to_contract_dict(self) -> dict[str, Any]:
+    def to_contract_dict(
+        self,
+        _require=_require_normalized_event_build_identity,
+    ) -> dict[str, Any]:
+        bound_event_id, bound_adapter_version = _require(self)
         result = {
-            "event_id": self.event_id,
+            "event_id": bound_event_id,
             "instrument_version": self.instrument_version,
-            "adapter_version": self.adapter_version,
+            "adapter_version": bound_adapter_version,
             "kind": self.kind,
             "source_event_at": _utc_text(self.source_event_at),
             "available_at": _utc_text(self.available_at),
@@ -362,6 +465,10 @@ class NormalizedMarketEvent:
         if self.stream_generation is not None:
             result["stream_generation"] = str(self.stream_generation)
         return result
+
+
+del _bind_normalized_event_build_identity
+del _require_normalized_event_build_identity
 
 
 @dataclass(frozen=True)
@@ -2156,6 +2263,7 @@ class MarketNormalizer:
             payload_json=payload_json,
             quality_flags=tuple(sorted(flags)),
             raw_evidence_ref=update.raw_evidence_ref,
+            _identity_material=identity_material,
         )
         if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
             self._retain_book_event_identity(event, stream_key)

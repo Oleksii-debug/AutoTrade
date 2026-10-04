@@ -114,6 +114,114 @@ class DurableModelBudgetTests(unittest.TestCase):
                 )
 
 
+    def test_budget_id_rejects_hostile_text_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            hostile = HostileText("policy-hostile")
+            with self.assertRaisesRegex(ValueError, "budget_id is required"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id=hostile,
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+
+    def test_environment_rejects_hostile_text_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            hostile = HostileText("SIMULATION")
+            with self.assertRaisesRegex(ValueError, "environment must be"):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-environment",
+                    ceiling="1",
+                    environment=hostile,
+                    clock=lambda: NOW,
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+
+    def test_route_reservation_context_rejects_dict_subclass_before_iteration(self):
+        class HostileDict(dict):
+            items_calls = 0
+
+            def items(self):
+                type(self).items_calls += 1
+                raise AssertionError("hostile items executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile = HostileDict({"attempt_id": "attempt-1"})
+            with self.assertRaisesRegex(TypeError, "exact dict"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-context"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context=hostile,
+                )
+            self.assertEqual(HostileDict.items_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_reservation_context_rejects_hostile_key_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile_key = HostileText("attempt_id")
+            with self.assertRaisesRegex(TypeError, "keys must be text"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-key"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={hostile_key: "attempt-1"},
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_route_reservation_context_rejects_hostile_value_before_strip(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory, ceiling="1")
+            hostile_value = HostileText("attempt-1")
+            with self.assertRaisesRegex(TypeError, "values must be text"):
+                budget.admit_route(
+                    route_policy(),
+                    route_request("route-hostile-value"),
+                    [route_model_descriptor(cost="0.1")],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": hostile_value},
+                )
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

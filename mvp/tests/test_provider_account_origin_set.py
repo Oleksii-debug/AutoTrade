@@ -11,7 +11,7 @@ from mvp.autotrade_mvp.provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
 )
 from mvp.autotrade_mvp.provider_account_origin_set import (
-    AcceptedProviderAccountOriginSet,
+    ProviderAccountOriginBindingSet,
     ProviderAccountOriginSetError,
     issue_provider_account_origin_set,
     require_provider_account_origin_set_authority,
@@ -141,7 +141,7 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ProviderAccountOriginSetError, "canonical issuer"
         ):
-            AcceptedProviderAccountOriginSet()
+            ProviderAccountOriginBindingSet()
 
     def test_issue_seals_direct_current_acquisition_and_current_q(self):
         with TemporaryDirectory() as directory:

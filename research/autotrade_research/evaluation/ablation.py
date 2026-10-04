@@ -1350,6 +1350,8 @@ class AblationQualificationAuthority:
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
         selected = tuple(pairs)
+        if selected:
+            _validate_pairs(selected[0].target_component, selected)
         registration = self.scientific_registry.protocol_registration(self.protocol_id)
         if registration.protocol_hash != self.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
@@ -1391,6 +1393,22 @@ class AblationQualificationAuthority:
             raise ValueError(
                 "ablation outcome artifact became available after causal cutoff"
             )
+        if selected:
+            expected_outcomes = {
+                (item.case_id, item.variant)
+                for pair in selected
+                for item in (pair.full, pair.ablated)
+            }
+            observed_outcomes = [
+                (evidence.case_id, evidence.variant)
+                for evidence in outcomes
+            ]
+            if len(observed_outcomes) != len(set(observed_outcomes)):
+                raise ValueError("duplicate canonical ablation outcome artifact identity")
+            if set(observed_outcomes) != expected_outcomes:
+                raise ValueError(
+                    "canonical ablation outcomes do not exactly match selected pairs"
+                )
         if selected:
             earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
             if registered_at > earliest_cutoff:

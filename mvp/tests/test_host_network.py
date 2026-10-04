@@ -195,11 +195,13 @@ class HostNetworkTests(unittest.TestCase):
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
 
-    def test_snapshot_fails_closed_if_global_journal_advances_during_projection(self):
+    def test_snapshot_retries_on_one_global_journal_advance_and_returns_one_coherent_cut(self):
         writer = JournalStore(self.path)
         inserted = {"done": False}
+        calls = {"count": 0}
 
         def advancing_snapshot(durable, principal):
+            calls["count"] += 1
             value = self._snapshot(durable, principal)
             if not inserted["done"]:
                 inserted["done"] = True
@@ -230,18 +232,48 @@ class HostNetworkTests(unittest.TestCase):
             target="/api/v1/state",
             headers=self.headers(),
         )
-        self.assertEqual(response.status, 400)
-        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.body(response)["state_version"], "0")
+        self.assertEqual(calls["count"], 2)
 
-        # The injected unrelated journal event is durable, but a subsequent
-        # stable projection is coherent and remains readable.
-        response = self.app.dispatch(
+    def test_snapshot_persistent_journal_churn_remains_bounded_and_fails_closed(self):
+        writer = JournalStore(self.path)
+        calls = {"count": 0}
+
+        def always_advancing_snapshot(durable, principal):
+            calls["count"] += 1
+            value = self._snapshot(durable, principal)
+            sequence = calls["count"]
+            payload = {"reason": "snapshot-cut-persistent-churn", "attempt": sequence}
+            writer.append_event(
+                {
+                    "event_id": f"snapshot-cut-persistent-{sequence}",
+                    "event_type": "SnapshotCutRaceInjected",
+                    "aggregate_type": "snapshot_cut_persistent_test",
+                    "aggregate_id": str(sequence),
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-25T09:30:00Z",
+                }
+            )
+            return value
+
+        app = self._application(
+            origin=self.origin,
+            boundary=self.boundary,
+            session=self.owner,
+            path=self.path,
+            snapshot_provider=always_advancing_snapshot,
+        )
+        response = app.dispatch(
             method="GET",
             target="/api/v1/state",
             headers=self.headers(),
         )
-        self.assertEqual(response.status, 200)
-        self.assertEqual(self.body(response)["state_version"], "0")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+        self.assertEqual(calls["count"], 4)
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):
         observer = self.boundary.create_session(

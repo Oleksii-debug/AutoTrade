@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.recovery import RecoveryController
@@ -79,6 +80,42 @@ class RecoveryDispatchBindingTests(unittest.TestCase):
                 store.load_events_by_aggregate_type("submission_attempt"),
                 [],
             )
+
+    def test_canonical_bound_validator_reaches_wire_with_captured_owner(self):
+        with TemporaryDirectory() as directory:
+            store, controller = self._started(Path(directory))
+            dispatcher = RecoveryBoundDispatcher(
+                controller,
+                store,
+                environment="PAPER",
+                account_id="acct",
+            )
+            wire_calls: list[str] = []
+
+            def transport(client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append(client_order_id)
+                return {"status": "accepted"}
+
+            with patch.object(
+                RecoveryController,
+                "validate_sender",
+                autospec=True,
+            ) as canonical_validator:
+                outcome = dispatcher.dispatch(
+                    attempt_id="bound-positive",
+                    intent_id="intent-positive",
+                    intent_hash="hash-positive",
+                    provider="SIMULATED",
+                    request={},
+                    now="2026-10-04T00:40:30Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                )
+
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(len(wire_calls), 1)
+            canonical_validator.assert_called_once_with(controller, "host-a", 1)
 
     def test_instance_shadow_cannot_replace_canonical_recovery_validator(self):
         with TemporaryDirectory() as directory:

@@ -1683,6 +1683,7 @@ def _make_allocation_payload_sealer(
     _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
         "encode_basestring"
     ),
+    _json_infinity=json.JSONEncoder.iterencode.__globals__.get("INFINITY"),
     _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
         "c_make_encoder"
     ),
@@ -1758,6 +1759,7 @@ def _make_allocation_payload_sealer(
                 or type(_json_encoder_globals) is not dict
                 or dict.get(_json_encoder_globals, "encode_basestring")
                 is not _json_encode_basestring
+                or dict.get(_json_encoder_globals, "INFINITY") is not _json_infinity
                 or dict.get(_json_encoder_globals, "c_make_encoder")
                 is not _json_c_make_encoder
                 or dict.get(_json_encoder_globals, "_make_iterencode")
@@ -1936,6 +1938,7 @@ def _canonical_evidence_json(
     _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
         "encode_basestring"
     ),
+    _json_infinity=json.JSONEncoder.iterencode.__globals__.get("INFINITY"),
     _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
         "c_make_encoder"
     ),
@@ -1980,6 +1983,7 @@ def _canonical_evidence_json(
         or type(_json_encoder_globals) is not dict
         or dict.get(_json_encoder_globals, "encode_basestring")
         is not _json_encode_basestring
+        or dict.get(_json_encoder_globals, "INFINITY") is not _json_infinity
         or dict.get(_json_encoder_globals, "c_make_encoder")
         is not _json_c_make_encoder
         or dict.get(_json_encoder_globals, "_make_iterencode")

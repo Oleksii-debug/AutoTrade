@@ -547,6 +547,30 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_json_infinity_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_infinity = encoder_globals["INFINITY"]
+        touched = []
+
+        class ForgedInfinity:
+            def __neg__(self):
+                touched.append("neg")
+                raise AssertionError("forged JSON infinity executed")
+
+        encoder_globals["INFINITY"] = ForgedInfinity()
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["INFINITY"] = original_infinity
+
+        self.assertEqual(touched, [])
+
+
     def test_json_c_encoder_retarget_fails_before_callback(self):
         evidence = self.evidence({"symbol": "AAA"})
         encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__

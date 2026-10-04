@@ -120,6 +120,20 @@ def _utc_instant(value: datetime, *, name: str) -> datetime:
     return datetime.astimezone(value, timezone.utc)
 
 
+def _payload_value_text(value, *, name: str) -> str:
+    if type(value) is str:
+        return value
+    if type(value) in (int, Decimal):
+        return str(_decimal(value, name=name))
+    if type(value) in (bool, float):
+        raise TypeError(
+            "corporate-event numeric payload must use exact decimal input"
+        )
+    raise TypeError(
+        "corporate-event payload values must be text or exact decimal input"
+    )
+
+
 @dataclass(frozen=True)
 class EquityState:
     symbol: str
@@ -256,11 +270,7 @@ class CorporateEvent:
         }:
             raise ValueError("unsupported corporate event kind")
         instrument_id = _text(self.instrument_id, name="instrument_id")
-        if (
-            not isinstance(self.instrument_version, int)
-            or isinstance(self.instrument_version, bool)
-            or self.instrument_version < 1
-        ):
+        if type(self.instrument_version) is not int or self.instrument_version < 1:
             raise ValueError("instrument_version must be a positive integer")
         if type(self.effective_date) is not date:
             raise ValueError("effective_date must be an exact date")
@@ -271,8 +281,8 @@ class CorporateEvent:
                     "effective_at UTC date must match effective_date"
                 )
             object.__setattr__(self, "effective_at", effective_at)
-        if not isinstance(self.payload, Mapping):
-            raise ValueError("payload must be a mapping")
+        if type(self.payload) is not dict:
+            raise TypeError("payload must be an exact dict")
 
         normalized_payload: dict[str, str] = {}
         for raw_key, raw_value in self.payload.items():
@@ -281,15 +291,10 @@ class CorporateEvent:
                 raise ValueError(
                     "corporate-event payload keys must be unique after normalization"
                 )
-            if type(raw_value) in (bool, float):
-                raise TypeError(
-                    "corporate-event numeric payload must use exact decimal input"
-                )
-            if type(raw_value) not in (str, int, Decimal):
-                raise TypeError(
-                    "corporate-event payload values must be text or exact decimal input"
-                )
-            normalized_payload[key] = str(raw_value)
+            normalized_payload[key] = _payload_value_text(
+                raw_value,
+                name=f"payload value for {key}",
+            )
 
         object.__setattr__(self, "event_id", _text(self.event_id, name="event_id"))
         object.__setattr__(self, "instrument_id", instrument_id)
@@ -300,8 +305,7 @@ class CorporateEvent:
             _text(self.source_revision, name="source_revision"),
         )
         if self.source_sequence is not None and (
-            not isinstance(self.source_sequence, int)
-            or isinstance(self.source_sequence, bool)
+            type(self.source_sequence) is not int
             or self.source_sequence < 0
         ):
             raise ValueError("source_sequence must be a non-negative integer when provided")
@@ -333,8 +337,8 @@ class CorporateEvent:
             raise ValueError("unsupported corporate event kind")
         if type(effective_date) is not date:
             raise ValueError("effective_date must be an exact date")
-        if not isinstance(payload, Mapping):
-            raise ValueError("payload must be a mapping")
+        if type(payload) is not dict:
+            raise TypeError("payload must be an exact dict")
         normalized_payload: dict[str, str] = {}
         for raw_key, raw_value in payload.items():
             key = _text(raw_key, name="payload key")
@@ -342,11 +346,10 @@ class CorporateEvent:
                 raise ValueError(
                     "corporate-event payload keys must be unique after normalization"
                 )
-            if type(raw_value) in (bool, float):
-                raise TypeError("corporate-event numeric payload must use exact decimal input")
-            if type(raw_value) not in (str, int, Decimal):
-                raise TypeError("corporate-event payload values must be text or exact decimal input")
-            normalized_payload[key] = str(raw_value)
+            normalized_payload[key] = _payload_value_text(
+                raw_value,
+                name=f"payload value for {key}",
+            )
         return cls(
             event_id=_text(event_id, name="event_id"),
             instrument_id=_text(instrument_id, name="instrument_id"),
@@ -979,7 +982,7 @@ def accrue_borrow_financing(
 ) -> EquityState:
     rate = _positive(daily_rate, name="daily_rate", allow_zero=True)
     value = _positive(marked_value, name="marked_value", allow_zero=True)
-    if not isinstance(days, int) or isinstance(days, bool) or days < 0:
+    if type(days) is not int or days < 0:
         raise ValueError("days must be a non-negative integer")
     charge = _exact_product(
         value,

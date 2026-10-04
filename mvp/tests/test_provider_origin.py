@@ -238,6 +238,24 @@ class ProviderOriginJournalTests(unittest.TestCase):
             self.assertEqual(recorded.execution_class, "DIRECT_PROVIDER_WIRE")
             self.assertEqual(recorded.qualification_id, q1.qualification_id)
 
+            # A second real call with the same exact signed request bytes (the
+            # test clock is intentionally fixed) is not independent provider
+            # evidence. Its request digest is already durably claimed by the
+            # first Prepared attempt, so it must fail closed instead of minting
+            # a second origin from an execution-equivalent request.
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "already claimed by another attempt",
+            ):
+                execute_direct_provider_origin_read(
+                    origin=origin,
+                    route=route,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                    query_binding=binding,
+                    transport=transport,
+                )
+
             restarted = self._origin(JournalStore(journal.path), directory)
             recovered = restarted.load_response_binding(recorded.attempt_id, binding)
             observation = observe_provider_origin_json_response(

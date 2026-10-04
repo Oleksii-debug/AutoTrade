@@ -964,6 +964,54 @@ class ProviderOriginJournal:
             raise ProviderOriginError("durable provider response manifest digest mismatch")
         if "sha256:" + sha256(raw).hexdigest() != response_digest:
             raise ProviderOriginError("durable provider response bytes digest mismatch")
+        execution_class = _exact_text(
+            retained_payload.get("execution_class"),
+            name="execution_class",
+        )
+        if execution_class not in {
+            _DIRECT_EXECUTION_CLASS,
+            _TEST_EXECUTION_CLASS,
+        }:
+            raise ProviderOriginError("durable provider response execution class is invalid")
+        wire_request_sha256 = _exact_text(
+            retained_payload.get("wire_request_sha256"),
+            name="wire_request_sha256",
+        )
+        if _SHA256_RE.fullmatch(wire_request_sha256) is None:
+            raise ProviderOriginError("durable wire request digest is invalid")
+        terminal_cut = retained_payload.get(
+            "terminal_authority_journal_sequence_cut"
+        )
+        if type(terminal_cut) is not int or terminal_cut < 0:
+            raise ProviderOriginError("durable terminal authority cut is invalid")
+        terminal_verified_at = _exact_text(
+            retained_payload.get("terminal_authority_verified_at"),
+            name="terminal_authority_verified_at",
+        )
+        _parse_utc_text(
+            terminal_verified_at,
+            name="terminal_authority_verified_at",
+        )
+        expected_metadata = {
+            "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
+            "attempt_id": attempt,
+            "prepared_subject_digest": expected_subject_digest,
+            "qualified_query_digest": snapshot["qualified_query_digest"],
+            "qualification_id": snapshot["qualification_id"],
+            "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+            "qualified_route_rule_digest": snapshot["qualified_route_rule_digest"],
+            "data_entitlement": snapshot["data_entitlement"],
+            "parser_identity": snapshot["parser_identity"],
+            "provider_environment": snapshot["provider_environment"],
+            "execution_class": execution_class,
+            "wire_request_sha256": wire_request_sha256,
+            "terminal_authority_journal_sequence_cut": terminal_cut,
+            "terminal_authority_verified_at": terminal_verified_at,
+        }
+        if manifest.get("metadata") != expected_metadata:
+            raise ProviderOriginError(
+                "durable provider response artifact metadata differs from journal authority"
+            )
         observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
         _parse_utc_text(observed_text, name="observed_at")
         journal_sequence = observed.get("journal_sequence")
@@ -979,6 +1027,10 @@ class ProviderOriginJournal:
             response_artifact_id=artifact_id,
             observed_at=observed_text,
             journal_sequence=journal_sequence,
+            execution_class=execution_class,
+            wire_request_sha256=wire_request_sha256,
+            terminal_authority_journal_sequence_cut=terminal_cut,
+            terminal_authority_verified_at=terminal_verified_at,
         )
         return AuthenticatedReadResponseBinding(
             attempt_id=attempt,
@@ -1003,6 +1055,10 @@ class ProviderOriginJournal:
             response_bytes=raw,
             origin_ref=origin_ref,
             journal_sequence=journal_sequence,
+            execution_class=execution_class,
+            wire_request_sha256=wire_request_sha256,
+            terminal_authority_journal_sequence_cut=terminal_cut,
+            terminal_authority_verified_at=terminal_verified_at,
             _binding_token=_BINDING_TOKEN,
         )
 
@@ -1014,6 +1070,19 @@ def observe_provider_origin_json_response(
 ) -> ProviderOriginObservation:
     if type(response_binding) is not AuthenticatedReadResponseBinding:
         raise TypeError("response_binding must be exact AuthenticatedReadResponseBinding")
+    if response_binding.execution_class != _DIRECT_EXECUTION_CLASS:
+        raise ProviderOriginError(
+            "provider-origin financial observation requires DIRECT_PROVIDER_WIRE evidence"
+        )
+    if (
+        response_binding.transport_identity
+        != direct_authenticated_read_transport_identity()
+        or response_binding.network_policy_identity
+        != direct_authenticated_read_network_policy_identity()
+    ):
+        raise ProviderOriginError(
+            "provider-origin financial observation requires canonical direct network policy"
+        )
     snapshot = _qualified_query_snapshot(query_binding)
     base = snapshot["base_query"]
     if (

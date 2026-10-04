@@ -223,6 +223,157 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             ("control/qualification.json (type change)",),
         )
 
+    def test_protected_sentinel_content_change_requires_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        base = [sentinel, "README.md"]
+        change = Change(status="M", path=sentinel)
+
+        no_authority = assess_reconvergence(
+            base_paths=base,
+            changes=[change],
+        )
+        self.assertFalse(no_authority.allowed)
+        self.assertIn(
+            f"{sentinel} (content change without exact-path authorization)",
+            no_authority.protected_violations,
+        )
+
+        directory_only = assess_reconvergence(
+            base_paths=base,
+            changes=[change],
+            allowed_scopes=("control/tools",),
+        )
+        self.assertFalse(directory_only.allowed)
+        self.assertEqual(directory_only.scope_violations, ())
+        self.assertIn(
+            f"{sentinel} (content change without exact-path authorization)",
+            directory_only.protected_violations,
+        )
+
+        exact_authority = assess_reconvergence(
+            base_paths=base,
+            changes=[change],
+            allowed_scopes=(sentinel,),
+        )
+        self.assertTrue(exact_authority.allowed)
+        self.assertEqual(exact_authority.protected_violations, ())
+        self.assertEqual(exact_authority.scope_violations, ())
+
+    def test_exact_scope_does_not_authorize_destructive_sentinel_change(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="D", path=sentinel)],
+            allowed_scopes=(sentinel,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.protected_deletions, (sentinel,))
+        self.assertIn(sentinel, result.protected_violations)
+
+    def test_parser_rejects_unmerged_unsupported_and_malformed_statuses(self):
+        for raw in (
+            "U\tconflicted.py",
+            "X\tunknown.py",
+            "B\tbroken-pair.py",
+            "M100\tnot-a-valid-modification.py",
+            "R101\told.py\tnew.py",
+            "Cabc\told.py\tnew.py",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    parse_name_status([raw])
+
+    def test_parser_and_synthetic_change_reject_noncanonical_paths(self):
+        for raw in (
+            "M\t../escape.py",
+            "M\t/absolute.py",
+            "M\tbad\\windows.py",
+            "M\tbad\x00path.py",
+            "M\tbad\npath.py",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    parse_name_status([raw])
+
+        for path_value in ("../escape.py", "/absolute.py", "bad\\windows.py"):
+            with self.subTest(path_value=path_value):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=["README.md"],
+                        changes=[Change(status="M", path=path_value)],
+                        protected_sentinels=frozenset(),
+                    )
+
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="U", path="conflicted.py")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_synthetic_change_subclass_is_not_authority(self):
+        class ForgedChange(Change):
+            pass
+
+        with self.assertRaises(TypeError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[ForgedChange(status="M", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_real_git_trust_root_modification_needs_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            target = root / sentinel
+            target.parent.mkdir(parents=True)
+            target.write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "trusted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            target.write_text("VALUE = 2\n", encoding="utf-8")
+            git("add", sentinel)
+            git("commit", "-m", "candidate trust-root edit")
+            head_sha = git("rev-parse", "HEAD")
+
+            no_authority = assess_git_revisions(base_sha, head_sha, cwd=root)
+            directory_only = assess_git_revisions(
+                base_sha,
+                head_sha,
+                cwd=root,
+                allowed_scopes=("control/tools",),
+            )
+            exact_authority = assess_git_revisions(
+                base_sha,
+                head_sha,
+                cwd=root,
+                allowed_scopes=(sentinel,),
+            )
+
+        self.assertFalse(no_authority.allowed)
+        self.assertFalse(directory_only.allowed)
+        self.assertEqual(directory_only.scope_violations, ())
+        self.assertTrue(exact_authority.allowed)
+        self.assertEqual(exact_authority.protected_violations, ())
+
     def test_declared_scope_rejects_small_unrelated_blob_change(self):
         result = assess_reconvergence(
             base_paths=[

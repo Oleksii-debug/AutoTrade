@@ -104,6 +104,8 @@ def _canonical_economic_report_is_readable(
 ) -> bool:
     status_journal_sequence = status.get("journal_sequence")
     report_journal_sequence = report.get("journal_sequence")
+    if report.get("reconciled") is not True:
+        return False
     if (
         not is_valid_common_scalar("Sequence", status_journal_sequence)
         or not is_valid_common_scalar("Sequence", report_journal_sequence)
@@ -172,8 +174,17 @@ def _canonical_economic_report_is_readable(
     return True
 
 
-def _canonical_fill_count(value: Any) -> int | None:
-    if not _has_exact_text_keys(value):
+def _canonical_fill_count(
+    value: Any,
+    *,
+    expected_instrument: Any,
+) -> int | None:
+    if (
+        type(expected_instrument) is not str
+        or not expected_instrument
+        or expected_instrument != expected_instrument.strip()
+        or not _has_exact_text_keys(value)
+    ):
         return None
     for fill_id, payload in value.items():
         if type(fill_id) is not str or not fill_id or fill_id != fill_id.strip():
@@ -184,8 +195,7 @@ def _canonical_fill_count(value: Any) -> int | None:
         quantity = payload.get("quantity")
         if (
             type(instrument) is not str
-            or not instrument
-            or instrument != instrument.strip()
+            or instrument != expected_instrument
         ):
             return None
         try:
@@ -263,7 +273,10 @@ def format_accessible_status(
     replay_verified = status.get("replay_verified")
     fills = status.get("fills", {})
     if state_format == "canonical_journal":
-        canonical_fill_count = _canonical_fill_count(fills)
+        canonical_fill_count = _canonical_fill_count(
+            fills,
+            expected_instrument=status.get("symbol"),
+        )
         recorded_fills = (
             canonical_fill_count
             if canonical_fill_count is not None
@@ -281,7 +294,24 @@ def format_accessible_status(
             f"Replay verification: {_replay_verification_text(replay_verified)}",
             f"Instrument: {_value(status, 'symbol')}",
             f"Initial capital: {initial_capital}",
-            f"Recorded evidence items: {_value(status, 'evidence_count', '0')}",
+            "Recorded evidence items: "
+            + (
+                str(status.get("evidence_count"))
+                if (
+                    state_format != "canonical_journal"
+                    or (
+                        type(status.get("evidence_count")) is int
+                        and status.get("evidence_count") >= 0
+                        and str(status.get("evidence_count"))
+                        == _canonical_sequence_value(
+                            status,
+                            "journal_sequence",
+                            "",
+                        )
+                    )
+                )
+                else "Unavailable"
+            ),
             f"Recorded fills: {recorded_fills}",
         ]
     )

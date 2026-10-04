@@ -477,6 +477,86 @@ class AccessibleStatusTests(unittest.TestCase):
                 self.assertIn("Economic reconciliation: not confirmed", text)
                 self.assertIn("Final equity: Unavailable", text)
 
+    def test_canonical_fill_evidence_must_match_status_instrument(self):
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "900",
+            "position": "1",
+            "journal_sequence": "15",
+            "evidence_count": 15,
+            "fills": {
+                "fill-1": {
+                    "instrument": "OTHER",
+                    "quantity": "1",
+                }
+            },
+            "active_reservations": [],
+        }
+        text = format_accessible_status(status)
+        self.assertIn("Recorded fills: Unavailable", text)
+        self.assertNotIn("Recorded fills: 1", text)
+
+    def test_canonical_evidence_count_must_equal_journal_sequence(self):
+        base = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "16",
+            "fills": {},
+            "active_reservations": [],
+        }
+        for evidence_count in (True, -1, 15, "16", None):
+            with self.subTest(evidence_count=evidence_count):
+                status = dict(base)
+                status["evidence_count"] = evidence_count
+                text = format_accessible_status(status)
+                self.assertIn("Recorded evidence items: Unavailable", text)
+        status = dict(base)
+        status["evidence_count"] = 16
+        self.assertIn(
+            "Recorded evidence items: 16",
+            format_accessible_status(status),
+        )
+
+    def test_canonical_economic_report_requires_reconciled_true(self):
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "17",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": "1000",
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "reconciled": False,
+            "journal_sequence": "17",
+        }
+        text = format_accessible_status(status, report)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn("Final equity: Unavailable", text)
+
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(
             {

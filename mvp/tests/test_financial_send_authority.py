@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import replace
 import unittest
 
@@ -5,6 +6,7 @@ from mvp.autotrade_mvp.financial_request_binding import FinancialRequestBindingM
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthority,
     FinancialSendAuthorityError,
+    FinanciallyBoundBybitOrderSender,
     require_exact_bybit_financial_request,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
@@ -102,6 +104,84 @@ def binding():
     )
 
 
+class _RetargetingMapping(Mapping):
+    """Expose one mapping on first materialization and another on any later one."""
+
+    def __init__(self, first, later):
+        self._first = dict(first)
+        self._later = dict(later)
+        self._active = self._first
+        self.materializations = 0
+
+    def __iter__(self):
+        self.materializations += 1
+        self._active = self._first if self.materializations == 1 else self._later
+        return iter(self._active)
+
+    def __len__(self):
+        return len(self._active)
+
+    def __getitem__(self, key):
+        return self._active[key]
+
+
+class _AuthorityStub:
+    def __init__(self, material):
+        self.binding = material
+        self.intent_id = "intent-1"
+        self.intent_hash = "intent-hash-1"
+
+
+class _IssuerStub:
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    def _dispatch_guard_for(self, _authority):
+        return lambda _intent_hash, _now: (True, "allowed")
+
+
+class _SenderStub:
+    def __init__(self):
+        self.request = None
+        self.submission_scope = None
+
+    def dispatch(self, **kwargs):
+        # Model the lower GuardedDispatcher materialization. If the bound sender
+        # leaks the original stateful Mapping, this observes its later state.
+        self.request = dict(kwargs["request"])
+        self.submission_scope = dict(kwargs["submission_scope"])
+        return "sent"
+
+
+def _bound_sender_harness():
+    runtime = object()
+    lower = _SenderStub()
+    bound = object.__new__(FinanciallyBoundBybitOrderSender)
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__sender",
+        lower,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__issuer",
+        _IssuerStub(runtime),
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__runtime",
+        runtime,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__provider_environment",
+        "TESTNET",
+    )
+    return bound, lower
+
+
+
+
 class ExactBybitFinancialRequestTests(unittest.TestCase):
     def test_exact_prepared_projection_and_scope_are_admitted(self):
         request, _ = exact_request()
@@ -177,6 +257,51 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 exact_scope(),
                 provider_environment="DEMO",
             )
+
+    def test_bound_sender_detaches_stateful_request_before_financial_check(self):
+        admitted, _ = exact_request()
+        retargeted = dict(admitted)
+        retargeted["account_id"] = "account-2"
+        stateful_request = _RetargetingMapping(admitted, retargeted)
+        bound, lower = _bound_sender_harness()
+
+        result = bound.dispatch(
+            authority=_AuthorityStub(binding()),
+            attempt_id="attempt-1",
+            intent_id="intent-1",
+            intent_hash="intent-hash-1",
+            request=stateful_request,
+            now="2026-10-04T04:30:00Z",
+            submission_scope=exact_scope(),
+        )
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(stateful_request.materializations, 1)
+        self.assertEqual(lower.request["account_id"], "account-1")
+
+    def test_bound_sender_detaches_stateful_submission_scope_before_dispatch(self):
+        admitted_scope = exact_scope()
+        retargeted_scope = dict(admitted_scope)
+        retargeted_scope["provider_environment"] = "DEMO"
+        stateful_scope = _RetargetingMapping(admitted_scope, retargeted_scope)
+        bound, lower = _bound_sender_harness()
+
+        result = bound.dispatch(
+            authority=_AuthorityStub(binding()),
+            attempt_id="attempt-2",
+            intent_id="intent-1",
+            intent_hash="intent-hash-1",
+            request=exact_request()[0],
+            now="2026-10-04T04:30:00Z",
+            submission_scope=stateful_scope,
+        )
+
+        self.assertEqual(result, "sent")
+        self.assertEqual(stateful_scope.materializations, 1)
+        self.assertEqual(
+            lower.submission_scope["provider_environment"],
+            "TESTNET",
+        )
 
     def test_direct_capability_construction_is_rejected(self):
         with self.assertRaisesRegex(

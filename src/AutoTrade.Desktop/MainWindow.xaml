@@ -144,13 +144,16 @@
                      Text="Unavailable"
                      IsReadOnly="True"
                      AutomationProperties.Name="Emergency operation" />
-            <TextBlock x:Name="EmergencyResult"
-                       Margin="0,12,0,0"
-                       TextWrapping="Wrap"
-                       Focusable="True"
-                       Text="No emergency command has been requested."
-                       AutomationProperties.Name="Emergency command result"
-                       AutomationProperties.LiveSetting="Assertive" />
+            <TextBox x:Name="EmergencyResult"
+                     Margin="0,12,0,0"
+                     TextWrapping="Wrap"
+                     Focusable="True"
+                     IsReadOnly="True"
+                     IsReadOnlyCaretVisible="True"
+                     Text="No emergency command has been requested."
+                     AutomationProperties.Name="Emergency command result"
+                     AutomationProperties.HelpText="Read-only emergency outcome text. Use standard selection and copy commands."
+                     AutomationProperties.LiveSetting="Assertive" />
           </StackPanel>
         </GroupBox>
 

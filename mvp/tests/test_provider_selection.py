@@ -3,10 +3,12 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.durable_provider_qualification import DurableProviderQualificationRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_qualification_authority import (
     _derive_accepted_provider_qualification,
@@ -32,7 +34,6 @@ from mvp.tests.test_provider_qualification_authority import (
     POLICY_ID,
     ROOT_ID,
     SOURCE_SHA,
-    _ProjectionOnlyRegistry,
     _artifact_id,
     _campaign_payload,
     _protocol,
@@ -141,6 +142,19 @@ def accepted_spot_q(*, ordinal=40, unsupported=()):
 
 
 class ProviderSelectionTests(unittest.TestCase):
+    def setUp(self):
+        # Unit route-selection tests intentionally bypass external qualification
+        # evidence verification, but they must still exercise the production
+        # exact-registry type boundary. Patch only the verifier method on the
+        # canonical class instead of substituting a permissive subclass.
+        self._qualification_auth_patch = patch.object(
+            DurableProviderQualificationRegistry,
+            "_authenticate_record",
+            new=lambda _registry, *, protocol_key, record, receipt: record,
+        )
+        self._qualification_auth_patch.start()
+        self.addCleanup(self._qualification_auth_patch.stop)
+
     def authorities(self, directory: str, *, unsupported=()):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
@@ -154,7 +168,7 @@ class ProviderSelectionTests(unittest.TestCase):
         )
         evidence_root = Path(directory) / "evidence"
         evidence = ArtifactStore(evidence_root)
-        qualifications = _ProjectionOnlyRegistry(
+        qualifications = DurableProviderQualificationRegistry(
             journal,
             evidence_store=evidence,
             evidence_root=evidence_root,
@@ -280,7 +294,7 @@ class ProviderSelectionTests(unittest.TestCase):
     def test_different_journal_store_instances_are_not_one_decision_authority(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, _record = self.authorities(directory)
-            other = _ProjectionOnlyRegistry(
+            other = DurableProviderQualificationRegistry(
                 JournalStore(Path(directory) / "journal.sqlite3"),
                 evidence_store=qualifications.evidence_store,
                 evidence_root=qualifications.evidence_root,

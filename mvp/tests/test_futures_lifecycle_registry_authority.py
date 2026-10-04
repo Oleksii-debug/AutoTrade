@@ -5,6 +5,7 @@ import unittest
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
     FuturesError,
+    lifecycle_gate,
     require_open_for_new_exposure,
 )
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
@@ -52,7 +53,7 @@ class FuturesLifecycleRegistryAuthorityTests(unittest.TestCase):
         with self.assertRaises((FuturesError, TypeError)):
             require_open_for_new_exposure(contract, utc(29, 11))
 
-    def test_selected_registry_version_authorizes_normal_open_path(self):
+    def test_caller_constructed_registry_is_diagnostic_not_new_exposure_authority(self):
         version = InstrumentVersion(
             instrument_id="44444444-4444-4444-8444-444444444444",
             version=1,
@@ -86,11 +87,23 @@ class FuturesLifecycleRegistryAuthorityTests(unittest.TestCase):
         )
         contract = FuturesContract.from_instrument_version(selected)
 
-        require_open_for_new_exposure(
-            contract,
-            utc(29, 11),
-            instrument_registry=registry,
+        self.assertEqual(
+            lifecycle_gate(
+                contract,
+                utc(29, 11),
+                instrument_registry=registry,
+            ),
+            "OPEN",
         )
+        with self.assertRaisesRegex(
+            FuturesError,
+            "product-selected.*composition authority",
+        ):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 11),
+                instrument_registry=registry,
+            )
 
     def test_superseded_registry_version_cannot_authorize_new_exposure(self):
         instrument_id = "77777777-7777-4777-8777-777777777777"

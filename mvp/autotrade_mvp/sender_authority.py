@@ -39,6 +39,14 @@ _TAKEOVER_EVENT_TYPES = (
 )
 _TAKEOVER_COMPLETE_EVENT_TYPE = _TAKEOVER_EVENT_TYPES[-1]
 
+# Retain installed JournalStore gate primitives once. A later public class
+# rebind must not hide a durable takeover or redirect store identity checks.
+_CANONICAL_JOURNAL_STORE_IDENTITY = JournalStore.store_identity
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
+    JournalStore.load_events_by_aggregate_type
+)
+
 
 @dataclass(frozen=True)
 class SenderAuthorityLease:
@@ -69,7 +77,7 @@ def _canonical_store_path(store: JournalStore) -> Path:
     if set(state) != {"path", "_store_identity"}:
         raise SenderAuthorityError("sender authority JournalStore state is shadowed")
     path = state.get("path")
-    identity = JournalStore.store_identity.__get__(store, JournalStore)
+    identity = _CANONICAL_JOURNAL_STORE_IDENTITY.__get__(store, JournalStore)
     if getattr(identity, "canonical_path", None) != str(path):
         raise SenderAuthorityError("sender authority JournalStore identity changed")
     return Path(path)
@@ -234,7 +242,9 @@ def _validate_completed_takeover(
     ):
         raise SenderAuthorityError("durable takeover completion owner identity is invalid")
 
-    owner_events = JournalStore.load_events(store, "recovery_owner", owner_scope)
+    owner_events = _CANONICAL_JOURNAL_LOAD_EVENTS(
+        store, "recovery_owner", owner_scope
+    )
     if len(owner_events) < target_owner_epoch:
         raise SenderAuthorityError("durable takeover target owner event is missing")
     owner_event = owner_events[target_owner_epoch - 1]
@@ -259,7 +269,7 @@ def _assert_no_pending_takeover(store: JournalStore, *, owner_scope: str) -> Non
     """Fail closed while a crash-resumable takeover is not durably complete."""
 
     scope = _canonical_scope(owner_scope)
-    events = JournalStore.load_events_by_aggregate_type(
+    events = _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
         store,
         _TAKEOVER_AGGREGATE_TYPE,
     )

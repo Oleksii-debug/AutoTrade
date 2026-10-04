@@ -22,6 +22,15 @@ from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
 
+# Retain the installed JournalStore owner/recovery primitives once. Financial
+# sender authority must not be redirected through later mutable class attrs.
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
+    JournalStore.load_events_by_aggregate_type
+)
+
+
 class HostState(str, Enum):
     STOPPED = "STOPPED"
     RECOVERING = "RECOVERING"
@@ -239,7 +248,7 @@ class RecoveryController:
         store = self._canonical_owner_store()
         if store is None:
             return ()
-        events = JournalStore.load_events(
+        events = _CANONICAL_JOURNAL_LOAD_EVENTS(
             store,
             self._OWNER_AGGREGATE_TYPE,
             owner_scope,
@@ -310,7 +319,7 @@ class RecoveryController:
                 f"{owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
-        JournalStore.append_event(
+        _CANONICAL_JOURNAL_APPEND_EVENT(
             store,
             {
                 "event_id": event_id,
@@ -560,7 +569,7 @@ class RecoveryController:
             environment,
             account_id,
         )
-        events = JournalStore.load_events_by_aggregate_type(
+        events = _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
             store,
             "submission_attempt",
         )

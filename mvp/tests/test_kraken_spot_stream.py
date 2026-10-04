@@ -658,6 +658,43 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-10-04T05:00:00.123456Z")
         self.assertEqual(fill.evidence_refs, (frame.evidence_ref,))
 
+    def test_provider_fill_bridge_preserves_negative_spot_maker_rebate(self):
+        frame = parse_execution_frame(
+            frame_bytes(
+                frame_type="update",
+                sequence=44,
+                reports=[
+                    {
+                        "order_id": "O-MAKER-REBATE",
+                        "cl_ord_id": "client-maker-rebate",
+                        "exec_id": "E-MAKER-REBATE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "symbol": "BTC/USD",
+                        "side": "buy",
+                        "last_qty": 1,
+                        "last_price": 25000,
+                        "cost": 25000,
+                        "fees": [{"asset": "USD", "qty": -1}],
+                        "timestamp": "2026-10-04T05:00:00Z",
+                        "trade_id": 403,
+                        "margin_borrow": False,
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+
+        fill = self.provider_fills_from_admitted_frame(
+            frame,
+            instrument_versions={"BTC/USD": "CRYPTO:BTC-USD:v1"},
+            fee_currency_by_symbol={"BTC/USD": "USD"},
+        )[0]
+
+        self.assertEqual(fill.fee_amount, Decimal("-1"))
+        self.assertEqual(fill.fee_currency, "USD")
+
     def test_provider_fill_bridge_rejects_noncanonical_authority_map_keys(self):
         frame = parse_execution_frame(
             frame_bytes(

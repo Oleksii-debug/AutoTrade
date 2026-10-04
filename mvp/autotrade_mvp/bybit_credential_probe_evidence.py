@@ -873,6 +873,10 @@ class BybitCredentialProbeUrllibClient:
         )
 
 
+_DIRECT_PROVIDER_WIRE_CLIENT_TYPE = BybitCredentialProbeUrllibClient
+_DIRECT_PROVIDER_WIRE_CLIENT_SEND = BybitCredentialProbeUrllibClient.send
+
+
 def execute_bybit_credential_probe_wire_query(
     *,
     source_uri: str,
@@ -891,7 +895,22 @@ def execute_bybit_credential_probe_wire_query(
             "Bybit credential probe timeout must be exact integer 1..120"
         )
     direct_provider_transport = wire_client is None
-    client = BybitCredentialProbeUrllibClient() if direct_provider_transport else wire_client
+    if direct_provider_transport:
+        if BybitCredentialProbeUrllibClient is not _DIRECT_PROVIDER_WIRE_CLIENT_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport type authority is not canonical"
+            )
+        if BybitCredentialProbeUrllibClient.send is not _DIRECT_PROVIDER_WIRE_CLIENT_SEND:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport send authority is not canonical"
+            )
+        client = _DIRECT_PROVIDER_WIRE_CLIENT_TYPE()
+        if type(client) is not _DIRECT_PROVIDER_WIRE_CLIENT_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport construction is not canonical"
+            )
+    else:
+        client = wire_client
     if not hasattr(client, "send"):
         raise TypeError("wire_client must implement send")
     request = BybitCredentialProbeHttpRequest(

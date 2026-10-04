@@ -6,7 +6,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from tools.dotnet_lock import dotnet_lock_content_blockers, dotnet_locked_dependency_graph
+from tools.dotnet_lock import (
+    dotnet_imported_package_reference_blockers,
+    dotnet_lock_content_blockers,
+    dotnet_locked_dependency_graph,
+    dotnet_project_package_references,
+    dotnet_restore_command_tokens,
+    dotnet_restore_targets_project,
+    dotnet_restore_tokens_are_locked,
+)
 
 
 GOOD_HASH = base64.b64encode(bytes(range(64))).decode('ascii')
@@ -42,6 +50,102 @@ def write_lock(project: Path, *, resolved: str = '1.0.4191.47', content_hash: ob
 
 
 class NugetLockGateCandidateTests(unittest.TestCase):
+    def test_restore_locked_mode_requires_exact_switch_or_property(self):
+        spoof = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj '
+            '-p:Fake=RestoreLockedMode=true'
+        )
+        self.assertFalse(dotnet_restore_tokens_are_locked(spoof))
+
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj --locked-mode'
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:RestoreLockedMode=true'
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:RestoreLockedMode=false'
+                )
+            )
+        )
+
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj --locked-mode '
+                    '-p:RestoreLockedMode=false'
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj -- --locked-mode'
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:Other=x;RestoreLockedMode=true'
+                )
+            )
+        )
+
+    def test_yaml_comment_cannot_mint_locked_restore_authority(self):
+        tokens = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj # --locked-mode'
+        )
+        self.assertFalse(dotnet_restore_tokens_are_locked(tokens))
+        self.assertTrue(
+            dotnet_restore_targets_project(tokens, 'src/App/App.csproj')
+        )
+
+    def test_restore_project_coverage_requires_first_positional_target(self):
+        canonical = dotnet_restore_command_tokens(
+            'run: dotnet restore src/App/App.csproj --locked-mode'
+        )
+        self.assertTrue(
+            dotnet_restore_targets_project(canonical, 'src/App/App.csproj')
+        )
+
+        after_sentinel = dotnet_restore_command_tokens(
+            'run: dotnet restore src/Other/Other.csproj --locked-mode '
+            '-- src/App/App.csproj'
+        )
+        self.assertFalse(
+            dotnet_restore_targets_project(
+                after_sentinel,
+                'src/App/App.csproj',
+            )
+        )
+
+        option_value = dotnet_restore_command_tokens(
+            'run: dotnet restore --source src/App/App.csproj --locked-mode'
+        )
+        self.assertFalse(
+            dotnet_restore_targets_project(option_value, 'src/App/App.csproj')
+        )
+
+    def test_malformed_restore_command_fails_parsing(self):
+        with self.assertRaisesRegex(ValueError, 'malformed dotnet restore command'):
+            dotnet_restore_command_tokens(
+                'run: dotnet restore "src/App/App.csproj --locked-mode'
+            )
+
     def test_webview2_exact_lock_with_sha512_passes(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -611,6 +715,128 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                     )
                     for item in blockers
                 )
+            )
+
+
+    def test_namespaced_project_package_reference_cannot_bypass_lock_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+                '<ItemGroup><PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_project_package_references(project),
+                [('Microsoft.Web.WebView2', '1.0.4191.47')],
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertEqual(
+                blockers,
+                ['DOTNET_PROJECT_LOCK_MISSING:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
+            )
+
+    def test_explicit_project_import_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            imported = root / 'external' / 'Injected.targets'
+            project.parent.mkdir(parents=True)
+            imported.parent.mkdir(parents=True)
+            imported.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="9.9.9" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            project.write_text(
+                '<Project>'
+                '<Import Project="../../external/Injected.targets" />'
+                '<ItemGroup><PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" /></ItemGroup>'
+                '</Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                'imported MSBuild PackageReference',
+            ):
+                dotnet_locked_dependency_graph(root, [project])
+
+    def test_root_props_package_reference_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="1.2.3" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:Directory.Build.props'],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                'imported MSBuild PackageReference',
+            ):
+                dotnet_locked_dependency_graph(root, [])
+
+    def test_namespaced_src_props_package_reference_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'src' / 'Build' / 'Dependencies.props'
+            props.parent.mkdir(parents=True)
+            props.write_text(
+                '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+                '<ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="1.2.3" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:src/Build/Dependencies.props'],
+            )
+
+    def test_nested_props_import_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            imported = root / 'external' / 'Injected.targets'
+            imported.parent.mkdir(parents=True)
+            imported.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="9.9.9" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><Import Project="external/Injected.targets" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:Directory.Build.props'],
+            )
+
+    def test_malformed_root_props_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Directory.Build.props').write_text(
+                '<Project><ItemGroup>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:Directory.Build.props'],
             )
 
 

@@ -42,6 +42,7 @@ class StrategyEconomicsAuthorityError(ValueError):
 
 # Retain installed structural/replay primitives.  Later public module/class
 # rebinding must not redirect which implementation this composition uses.
+_BIND_STRATEGY_ECONOMICS = bind_strategy_economics
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
@@ -289,7 +290,7 @@ def assess_strategy_economics_authority(
             "instrument_registry must be exact InstrumentRegistry"
         )
 
-    bound = bind_strategy_economics(
+    bound = _BIND_STRATEGY_ECONOMICS(
         proposal,
         economics_binding,
         instrument_version=economics_binding.instrument_version,

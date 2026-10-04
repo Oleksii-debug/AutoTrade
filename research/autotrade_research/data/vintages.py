@@ -67,14 +67,14 @@ _EVIDENCE_REF_REQUIRED_FIELDS = frozenset({"artifact_id", "sha256", "observed_at
 
 
 def _text(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise HistoricalDataError(f"{name} must be non-empty text")
+    if type(value) is not str or not value.strip():
+        raise HistoricalDataError(f"{name} must be non-empty exact text")
     return value.strip()
 
 
 def _sequence(value: Any, name: str) -> int:
-    if isinstance(value, bool):
-        raise HistoricalDataError(f"{name} must be a positive integer")
+    if type(value) not in {int, str}:
+        raise HistoricalDataError(f"{name} must be a positive canonical integer")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as error:
@@ -87,7 +87,7 @@ def _sequence(value: Any, name: str) -> int:
 def _optional_non_negative_sequence(value: Any, name: str) -> int | None:
     if value is None:
         return None
-    if isinstance(value, bool):
+    if type(value) not in {int, str}:
         raise HistoricalDataError(
             f"{name} must be a canonical non-negative integer"
         )
@@ -114,9 +114,11 @@ def _non_negative_sequence(value: Any, name: str) -> int:
 
 
 def _utc(value: Any, name: str) -> datetime:
-    if isinstance(value, datetime):
+    if type(value) is datetime:
         if value.tzinfo is None:
             raise HistoricalDataError(f"{name} must be timezone-aware")
+        if type(value.tzinfo) is not timezone:
+            raise HistoricalDataError(f"{name} must use built-in timezone authority")
         return value.astimezone(timezone.utc)
     text = _text(value, name)
     if not text.endswith("Z"):

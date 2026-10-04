@@ -2990,7 +2990,8 @@ def _run_autonomous_locked(
             policy_id = _uuid("loop-authority-policy", key)
             authority.register_policy(AuthorityPolicy.create(policy_id=policy_id, account_id=ACCOUNT,
                 environments={ENVIRONMENT}, instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
-                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1))
+                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1),
+                simulation_time=timestamp)
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
                 "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),

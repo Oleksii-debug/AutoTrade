@@ -22,6 +22,12 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
 
 
+# Retain the installed JournalStore CAS primitives once. The final-send boundary
+# must not be redirected by later mutation of public class attributes.
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
+
+
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
@@ -628,23 +634,46 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
     ):
         store = self._journal_store_authority()
-        return JournalStore.append_event(
-            store,
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            return JournalStore.append_event(
+                store,
+                envelope,
+                outbox_topic="autotrade.submission.events",
+            )
+        _, inserted, appended = _CANONICAL_JOURNAL_COMMIT_COMMAND(
+            store,
+            command_id=envelope["event_id"],
+            actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment,
+            idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={
+                "event": envelope,
+                "journal_sequence": expected_journal_sequence,
+            },
+            result={"event_id": envelope["event_id"]},
+            state_version=expected_journal_sequence,
+            events=[(envelope, "autotrade.submission.events")],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            # Replaying the durable one-use send marker can never authorize
+            # a second provider call.
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
@@ -913,6 +942,16 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+
+            # Snapshot one exact canonical journal cut before every authority
+            # check that can authorize irreversible provider I/O. Sending is
+            # committed only if that same global cut still holds. This is a
+            # deliberately conservative bridge to the full transactional
+            # recovery-owner/takeover predicate: any intervening journal write
+            # fails closed instead of leaving a check->send race.
+            store = self._journal_store_authority()
+            barrier_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(store)
+
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -971,18 +1010,35 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                )
+            except ValueError as error:
+                reason = "journal_changed_during_final_send_validation"
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": reason,
+                        },
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(reason) from error
             barrier_passed = True
 
         try:

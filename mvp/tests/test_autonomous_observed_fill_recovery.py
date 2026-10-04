@@ -81,6 +81,10 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 status = get_status(directory)
                 self.assertEqual(status["status"], "needs_recovery")
                 self.assertTrue(status["retained_fill_observed"])
+                self.assertEqual(
+                    status["recovery_disposition"],
+                    "RETAINED_FILL_RECOVERY",
+                )
                 self.assertEqual(store.current_journal_sequence(), cut)
 
                 with patch.object(
@@ -154,6 +158,17 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                     Path(directory) / "journal.sqlite3"
                 )
                 before = store.current_journal_sequence()
+
+                from mvp.autotrade_mvp.cli import get_status
+
+                zero_status = get_status(directory)
+                self.assertEqual(
+                    zero_status["recovery_disposition"],
+                    "ZERO_WIRE_COMPLETION",
+                )
+                self.assertEqual(
+                    store.current_journal_sequence(), before
+                )
                 with patch.object(
                     SimulatedProvider,
                     "transport_send",
@@ -340,6 +355,17 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 Path(directory) / "journal.sqlite3"
             )
             before = store.current_journal_sequence()
+
+            from mvp.autotrade_mvp.cli import get_status
+
+            unresolved_status = get_status(directory)
+            self.assertEqual(
+                unresolved_status["recovery_disposition"],
+                "RECONCILIATION_REQUIRED",
+            )
+            self.assertEqual(
+                store.current_journal_sequence(), before
+            )
             with patch.object(
                 SimulatedProvider,
                 "transport_send",

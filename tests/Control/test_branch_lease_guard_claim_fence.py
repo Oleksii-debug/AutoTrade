@@ -57,7 +57,7 @@ def registry(*, mode="ATOMIC_CLAIMS_ENABLED", generation=7, claim_generation=7, 
             "pr_number": 101,
             "head_sha": "d" * 40,
             "review_evidence_digest": "sha256:" + ("e" * 64),
-            "submitted_at": "2026-09-22T10:01:00Z",
+            "submitted_at": NOW,
             "fenced_claim_generation": claim_generation - 1,
             "owner_identity": deepcopy(SERVICE),
         }

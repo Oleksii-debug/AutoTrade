@@ -14,7 +14,11 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 
 from .execution_oracle import assert_conservative_execution
 from .execution_realism import (
@@ -27,9 +31,10 @@ from .execution_realism import (
 )
 
 
-# Retain the installed canonical authenticated reader once. Later mutation of the
-# public ArtifactStore class attribute must not redirect this qualification boundary.
-_CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
+# Reuse the repository's canonical root/generation authority. It issues a private
+# authenticated reader detached from caller-owned ArtifactStore instance state and
+# pins the installed authenticated-read dispatch.
+_CANONICAL_TRUSTED_AUTHENTICATED_READER = trusted_authenticated_reader
 
 
 class ExecutionQualificationError(ValueError):
@@ -173,9 +178,12 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest, evidence_bytes = _CANONICAL_AUTHENTICATED_SNAPSHOT_READ(
-            artifact_store,
-            normalized_evidence_artifact_id,
+        evidence_reader = _CANONICAL_TRUSTED_AUTHENTICATED_READER(
+            object.__getattribute__(artifact_store, "root"),
+            publication_store=artifact_store,
+        )
+        evidence_manifest, evidence_bytes = evidence_reader(
+            normalized_evidence_artifact_id
         )
         if evidence_manifest.get("manifest_hash") is None:
             raise ExecutionQualificationError(

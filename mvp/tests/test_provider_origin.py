@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    _response_artifact_id,
     execute_direct_provider_origin_read,
     observe_provider_origin_json_response,
 )
@@ -471,7 +472,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
             claims = JournalStore.load_events(
                 journal,
                 "qualified_authenticated_provider_wire_execution",
-                recorded.wire_request_sha256,
+                recorded.attempt_id,
             )
             self.assertEqual(len(claims), 1)
             self.assertEqual(claims[0]["payload"]["attempt_id"], recorded.attempt_id)
@@ -495,6 +496,212 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 observation.origin_ref,
                 observation.qualified_evidence_ref,
             )
+
+    def test_direct_wire_claim_recovers_after_crash_before_retained_without_requery(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"11.50"}]}}'
+
+            class Stream(BytesIO):
+                status = 200
+
+            open_calls = 0
+
+            def open_once(*_args, **_kwargs):
+                nonlocal open_calls
+                open_calls += 1
+                return Stream(body)
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener.open = open_once
+            base = binding.query_binding
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-recovery-read",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-recovery-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-recovery-host",
+                clock_millis=lambda: 1_700_000_000_123,
+                clock_utc=lambda: NOW,
+                wire_client=client,
+            )
+
+            original_append = JournalStore.append_event
+
+            def fail_retained(store, envelope, **kwargs):
+                if envelope.get("event_type") == "AuthenticatedReadRetained":
+                    raise RuntimeError("simulated crash before Retained commit")
+                return original_append(store, envelope, **kwargs)
+
+            with patch.object(
+                JournalStore,
+                "append_event",
+                side_effect=fail_retained,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated crash before Retained commit",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+            self.assertEqual(open_calls, 1)
+
+            all_events = JournalStore.load_events_after_journal_sequence(
+                journal,
+                0,
+            )
+            prepared_events = [
+                event
+                for event in all_events
+                if event.get("event_type") == "AuthenticatedReadPrepared"
+            ]
+            self.assertEqual(len(prepared_events), 1)
+            attempt_id = prepared_events[0]["aggregate_id"]
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            claims = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+                attempt_id,
+            )
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]["payload"]["http_status"], 200)
+
+            claim_payload = claims[0]["payload"]
+            artifact_id = _response_artifact_id(
+                attempt_id=attempt_id,
+                qualified_query_digest=claim_payload["qualified_query_digest"],
+                response_sha256=claim_payload["response_sha256"],
+            )
+            response_store = origin._response_store
+            manifest = response_store.load_manifest(artifact_id)
+            object_path = response_store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            exact_bytes = object_path.read_bytes()
+            object_path.unlink()
+
+            missing_artifact_restart = self._origin(
+                JournalStore(journal.path),
+                directory,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "recovery provider response artifact is unavailable",
+            ):
+                missing_artifact_restart.recover_response_binding(
+                    attempt_id,
+                    binding,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            object_path.write_bytes(exact_bytes)
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            recovered = restarted.recover_response_binding(
+                attempt_id,
+                binding,
+            )
+            self.assertEqual(open_calls, 1)
+            self.assertEqual(recovered.execution_class, "DIRECT_PROVIDER_WIRE")
+            self.assertEqual(recovered.response_bytes, body)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                [
+                    "AuthenticatedReadPrepared",
+                    "AuthenticatedReadRetained",
+                    "AuthenticatedReadObserved",
+                ],
+            )
+
+    def test_imported_observation_token_cannot_promote_test_injected_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
+                network_policy_identity="sha256:" + "8" * 64,
+                recorded_at=NOW,
+            )
+            recorded = self._record(origin, attempt_id, binding)
+            qualified = provider_origin_module.observe_qualified_provider_json_response(
+                query_binding=binding,
+                http_status=recorded.http_status,
+                response_bytes=recorded.response_bytes,
+                observed_at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "DIRECT_PROVIDER_WIRE",
+            ):
+                provider_origin_module.ProviderOriginObservation(
+                    response_binding=recorded,
+                    qualified_observation=qualified,
+                    _observation_token=provider_origin_module._OBSERVATION_TOKEN,
+                )
 
     def test_journal_never_embeds_provider_response_bytes(self):
         with TemporaryDirectory() as directory:
@@ -716,33 +923,6 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 origin.load_response_binding(attempt_id, binding).response_sha256,
                 first.response_sha256,
             )
-
-    def test_imported_observation_token_cannot_promote_test_injected_origin(self):
-        with TemporaryDirectory() as directory:
-            _fixture, journal, *_rest, binding = self._route_fixture(directory)
-            origin = self._origin(journal, directory)
-            attempt_id = origin.prepare(
-                binding,
-                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
-                network_policy_identity="sha256:" + "8" * 64,
-                recorded_at=NOW,
-            )
-            recorded = self._record(origin, attempt_id, binding)
-            qualified = provider_origin_module.observe_qualified_provider_json_response(
-                query_binding=binding,
-                http_status=recorded.http_status,
-                response_bytes=recorded.response_bytes,
-                observed_at=NOW,
-            )
-            with self.assertRaisesRegex(
-                ProviderOriginError,
-                "DIRECT_PROVIDER_WIRE",
-            ):
-                provider_origin_module.ProviderOriginObservation(
-                    response_binding=recorded,
-                    qualified_observation=qualified,
-                    _observation_token=provider_origin_module._OBSERVATION_TOKEN,
-                )
 
     def test_imported_module_token_cannot_mint_direct_provider_origin(self):
         with TemporaryDirectory() as directory:

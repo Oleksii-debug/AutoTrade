@@ -1105,6 +1105,81 @@ class ReconciliationTests(unittest.TestCase):
                 provider_working_orders=[foreign],
             )
 
+    def test_provider_execution_replay_merges_distinct_provenance(self):
+        reference_a = "provider-read:sha256:" + "a" * 64
+        reference_b = "provider-stream:sha256:" + "b" * 64
+        first = fill(
+            "e-replay",
+            "c-replay",
+            trade_time="2026-09-24T18:00:00+00:00",
+            evidence_refs=(reference_b,),
+        )
+        second = fill(
+            "e-replay",
+            "c-replay",
+            trade_time="2026-09-24T18:00:00Z",
+            evidence_refs=(reference_a,),
+        )
+
+        forward = self.base(
+            local_execution_ids=[],
+            provider_fills=[first, second],
+        )
+        reverse = self.base(
+            local_execution_ids=[],
+            provider_fills=[second, first],
+        )
+
+        self.assertEqual(forward.unexpected_execution_ids, ("e-replay",))
+        self.assertEqual(reverse.unexpected_execution_ids, ("e-replay",))
+        self.assertEqual(len(forward.unexpected_provider_fills), 1)
+        self.assertEqual(len(reverse.unexpected_provider_fills), 1)
+        expected_refs = (reference_a, reference_b)
+        self.assertEqual(
+            forward.unexpected_provider_fills[0].evidence_refs,
+            expected_refs,
+        )
+        self.assertEqual(
+            reverse.unexpected_provider_fills[0].evidence_refs,
+            expected_refs,
+        )
+        self.assertEqual(
+            forward.unexpected_provider_fills[0].trade_time,
+            "2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(
+            reverse.unexpected_provider_fills[0].trade_time,
+            "2026-09-24T18:00:00Z",
+        )
+
+    def test_proven_duplicate_can_supply_missing_provenance_without_changing_economics(self):
+        reference = "provider-read:sha256:" + "c" * 64
+        without_provenance = fill(
+            "e-provenance",
+            "c-provenance",
+            evidence_refs=(),
+        )
+        with_provenance = fill(
+            "e-provenance",
+            "c-provenance",
+            evidence_refs=(reference,),
+        )
+
+        result = self.base(
+            local_execution_ids=[],
+            provider_fills=[without_provenance, with_provenance],
+        )
+
+        self.assertEqual(result.unexpected_execution_ids, ("e-provenance",))
+        self.assertEqual(
+            result.unexpected_provider_fills[0].evidence_refs,
+            (reference,),
+        )
+        self.assertNotIn(
+            "provider execution evidence lacks reconciliation financial direction/provenance authority",
+            result.reasons,
+        )
+
     def test_provider_execution_conflict_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conflicting"):
             self.base(

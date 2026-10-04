@@ -594,6 +594,58 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
     }
 
 
+def _provider_fill_semantic_identity_payload(
+    fill: ProviderFillEvidence,
+) -> dict[str, object]:
+    """Return execution semantics without observation-specific provenance.
+
+    Provider response/frame references prove where an observation came from;
+    they are not part of the provider execution's economic identity.  Keep the
+    full public payload above for evidence persistence, while duplicate
+    detection uses this provenance-independent view.
+    """
+
+    payload = provider_fill_identity_payload(fill)
+    return {
+        key: value
+        for key, value in payload.items()
+        if key != "evidence_refs"
+    }
+
+
+def _merge_provider_fill_provenance(
+    first: ProviderFillEvidence,
+    second: ProviderFillEvidence,
+) -> ProviderFillEvidence:
+    """Merge equivalent execution observations without dropping provenance."""
+
+    first_identity = _provider_fill_semantic_identity_payload(first)
+    second_identity = _provider_fill_semantic_identity_payload(second)
+    if first_identity != second_identity:
+        raise ValueError("provider execution id has conflicting observations")
+
+    evidence_refs = tuple(
+        sorted(set(first.evidence_refs).union(second.evidence_refs))
+    )
+    return ProviderFillEvidence.create(
+        provider_id=first_identity["provider_id"],
+        account_id=first_identity["account_id"],
+        environment=first_identity["environment"],
+        provider_execution_id=first_identity["provider_execution_id"],
+        client_order_id=first_identity["client_order_id"],
+        instrument=first_identity["instrument"],
+        quantity=first_identity["quantity"],
+        price=first_identity["price"],
+        fee_amount=first_identity["fee_amount"],
+        fee_currency=first_identity["fee_currency"],
+        trade_time=first_identity["trade_time"],
+        side=first_identity["side"],
+        position_side=first_identity["position_side"],
+        position_effect=first_identity["position_effect"],
+        evidence_refs=evidence_refs,
+    )
+
+
 def _snapshot_provider_fill(fill: ProviderFillEvidence) -> ProviderFillEvidence:
     """Detach one caller-owned fill into exact inert reconciliation state."""
 
@@ -1667,14 +1719,6 @@ def reconcile_account(
         raise ValueError("local_execution_ids must be unique")
 
     observed_provider_by_id: dict[str, ProviderFillEvidence] = {}
-    provider_by_id: dict[str, ProviderFillEvidence] = {}
-    inadmissible_provider_by_id: dict[
-        str, tuple[ProviderFillEvidence, tuple[str, ...]]
-    ] = {}
-    inadmissible_provider_client_ids: set[str] = set()
-    provider_client_ids: set[str] = set()
-    provider_client_fill_times: dict[str, list[datetime]] = {}
-    provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
     for fill in provider_fills:
         fill = _snapshot_provider_fill(fill)
         if fill.provider_id != provider_scope:
@@ -1683,16 +1727,23 @@ def reconcile_account(
             raise ValueError("provider fill evidence account_id mismatch")
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
-        if fill.provider_execution_id in observed_provider_by_id:
-            if (
-                provider_fill_identity_payload(
-                    observed_provider_by_id[fill.provider_execution_id]
-                )
-                != provider_fill_identity_payload(fill)
-            ):
-                raise ValueError("provider execution id has conflicting observations")
-            continue
-        observed_provider_by_id[fill.provider_execution_id] = fill
+        existing = observed_provider_by_id.get(fill.provider_execution_id)
+        if existing is None:
+            observed_provider_by_id[fill.provider_execution_id] = fill
+        else:
+            observed_provider_by_id[fill.provider_execution_id] = (
+                _merge_provider_fill_provenance(existing, fill)
+            )
+
+    provider_by_id: dict[str, ProviderFillEvidence] = {}
+    inadmissible_provider_by_id: dict[
+        str, tuple[ProviderFillEvidence, tuple[str, ...]]
+    ] = {}
+    inadmissible_provider_client_ids: set[str] = set()
+    provider_client_ids: set[str] = set()
+    provider_client_fill_times: dict[str, list[datetime]] = {}
+    provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
+    for fill in observed_provider_by_id.values():
         ingress_errors = _provider_fill_reconciliation_ingress_errors(fill)
         if ingress_errors:
             inadmissible_provider_by_id[fill.provider_execution_id] = (

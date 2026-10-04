@@ -17,6 +17,8 @@ from mvp.autotrade_mvp.execution_qualification import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    MARKET_PRICE_PROJECTION_POLICY_ID,
+    MARKET_PRICE_PROJECTION_POLICY_VERSION,
     LiquidityObservation,
     SimulatedOrder,
 )
@@ -43,6 +45,11 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256="c" * 64,
+        price_projection_policy_id=MARKET_PRICE_PROJECTION_POLICY_ID,
+        price_projection_policy_version=MARKET_PRICE_PROJECTION_POLICY_VERSION,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

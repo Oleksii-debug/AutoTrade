@@ -371,9 +371,7 @@ def _build_external_function_graph_guard(*, root, label: str):
                         function,
                         function.__code__,
                         function.__defaults__,
-                        None
-                        if function.__kwdefaults__ is None
-                        else dict(function.__kwdefaults__),
+                        freeze_kwdefaults(function.__kwdefaults__),
                     )
                 )
         external_type_states.append(

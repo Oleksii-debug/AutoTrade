@@ -281,7 +281,8 @@ def _bind_futures_contract_lifecycle_authority(
             for object_id in dead:
                 states.pop(object_id, None)
 
-    def construction_new(cls):
+    def construction_new(cls, *args, **kwargs):
+        del args, kwargs
         value = object.__new__(cls)
         if cls is contract_type:
             prune_dead()

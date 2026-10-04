@@ -6,9 +6,11 @@ referenced costs, capacity, FX/borrow/funding evidence, or after-cost values
 came from independent canonical owners.
 
 This qualification composition creates a separate issued assessment.  Current
-main can re-run the structural join, resolve the exact product instrument
-version, and optionally reverify a durable provider-economic cut from canonical
-replay.  It deliberately remains INCONCLUSIVE until the remaining WP-33 owner
+main can re-run the structural join, resolve an exact caller-selected product
+instrument version, and optionally reverify a durable provider-economic cut
+from canonical replay.  A caller-selected InstrumentRegistry is structural
+input, not proof that product composition selected the registry authority.  The
+assessment deliberately remains INCONCLUSIVE until the remaining WP-33 owner
 graph is independently available.  No green software test from this module is
 economic-edge evidence.
 """
@@ -38,11 +40,16 @@ class StrategyEconomicsAuthorityError(ValueError):
     """Terminal strategy-economics authority is unavailable or inconsistent."""
 
 
+# Retain the installed structural registry lookup.  Public class rebinding after
+# this composition loads must not redirect which primitive resolves the version.
+_INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
+
 _BASE_REQUIRED_OWNERS = (
     "registered_strategy_run_receipt",
     "execution_calibration_authority",
     "capacity_evidence_authority",
     "after_cost_projection_authority",
+    "instrument_registry_authority",
     "provider_economic_cut",
     "provider_scope_binding",
 )
@@ -269,7 +276,9 @@ def assess_strategy_economics_authority(
 
     No caller-supplied verifier/callback is accepted.  Provider economics counts
     as verified only when exact durable replay reproduces the supplied cut from
-    an independently selected book and visibility sequence.
+    an independently selected book and visibility sequence.  A caller-supplied
+    exact InstrumentRegistry can validate structural version content only; it
+    does not establish product-selected registry authority.
     """
 
     proposal = _snapshot_proposal(proposal)
@@ -284,13 +293,13 @@ def assess_strategy_economics_authority(
         economics_binding,
         instrument_version=economics_binding.instrument_version,
     )
-    instrument = InstrumentRegistry.exact(
+    instrument = _INSTRUMENT_REGISTRY_EXACT(
         instrument_registry,
         economics_binding.instrument_version,
     )
 
     verified = {
-        "instrument_registry",
+        "instrument_registry_shape",
         "structural_economics_binding",
     }
     unresolved = set(_BASE_REQUIRED_OWNERS)

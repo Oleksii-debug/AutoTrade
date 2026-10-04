@@ -1,18 +1,11 @@
-"""Fail-closed correlation concentration guard for canonical portfolio allocations.
+"""Fail-closed correlation concentration guard for WP-32 allocations.
 
-This module is deliberately a composition layer over ``allocation.py``. It does
-not select orders, send provider requests, replace hard risk, or claim an
-economic edge. It answers one narrower Product Specification section 25
-question: can several individually acceptable positions reinforce the same
-underlying risk strongly enough that their combined gross exposure breaches a
-portfolio concentration limit?
-
-The guard uses decision-time pairwise correlation evidence only as a conservative
-clustering signal. It does not interpret correlation as causation or as a
-profitability estimate. Missing, future, or expired pair evidence is
-INCONCLUSIVE and therefore cannot authorize use of the allocation.
+This composes the canonical evidence-bound allocation proposal.  It never sends
+orders, replaces independent hard risk, authenticates a caller resolver, or
+establishes economic edge.  Correlation is an uncertain descriptive estimate:
+every active pair needs fresh content-bound interval evidence, and all policy
+thresholds are explicit user/pre-registered values.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,8 +14,14 @@ from decimal import Decimal
 from hashlib import sha256
 from itertools import combinations
 import json
+from typing import Mapping
 
-from .allocation import AllocationResult, AllocationTarget
+from .allocation import (
+    AllocationResult,
+    AllocationTarget,
+    EvidenceBoundObjectiveAllocationResult,
+    ObjectiveAllocationResult,
+)
 from .exact_decimal import (
     ExactDecimalError,
     exact_abs,
@@ -31,18 +30,23 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
 )
 
+_ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
 
 class CorrelationConcentrationError(ValueError):
-    """Raised when a portfolio allocation lacks correlation-safe evidence."""
+    """The proposal did not pass this non-authorizing portfolio guard."""
 
 
-def _text(value: object, *, name: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise TypeError(f"{name} must be a non-empty exact str")
-    return value.strip()
+def _text(value, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact str")
+    value = str.strip(value)
+    if not value:
+        raise ValueError(f"{name} must be non-empty")
+    return value
 
 
-def _decimal(value: object, *, name: str) -> Decimal:
+def _dec(value, *, name: str) -> Decimal:
     if type(value) not in (Decimal, str, int) or type(value) is bool:
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
@@ -51,18 +55,18 @@ def _decimal(value: object, *, name: str) -> Decimal:
         raise ValueError(f"{name} must be a bounded exact decimal") from error
 
 
-def _decimal_text(value: Decimal) -> str:
-    """Context-independent plain decimal identity for bounded finite values."""
+def _dec_text(value: Decimal) -> str:
     sign, digits, exponent = value.as_tuple()
     coefficient = "".join(str(digit) for digit in digits) or "0"
     if exponent >= 0:
-        text = coefficient + ("0" * exponent)
+        text = coefficient + "0" * exponent
     else:
         split = len(coefficient) + exponent
-        if split > 0:
-            text = coefficient[:split] + "." + coefficient[split:]
-        else:
-            text = "0." + ("0" * (-split)) + coefficient
+        text = (
+            coefficient[:split] + "." + coefficient[split:]
+            if split > 0
+            else "0." + "0" * (-split) + coefficient
+        )
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     if not text or set(text) <= {"0", "."}:
@@ -70,10 +74,10 @@ def _decimal_text(value: Decimal) -> str:
     return ("-" if sign else "") + text
 
 
-def _utc_text(value: object, *, name: str) -> str:
+def _utc(value, *, name: str) -> str:
     text = _text(value, name=name)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str.replace(text, "Z", "+00:00"))
     except ValueError as error:
         raise ValueError(f"{name} must be an ISO timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -81,69 +85,160 @@ def _utc_text(value: object, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _utc_instant(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+def _instant(value: str) -> datetime:
+    return datetime.fromisoformat(str.replace(value, "Z", "+00:00")).astimezone(
+        timezone.utc
+    )
+
+
+def _hash(payload: dict[str, object], _dumps=json.dumps, _sha=sha256) -> str:
+    return _sha(
+        _dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _normalized_evidence_fields(raw: Mapping[str, object]) -> dict[str, object]:
+    environment = _text(raw["environment"], name="correlation environment").upper()
+    if environment not in _ALLOWED_ENVIRONMENTS:
+        raise ValueError(f"unsupported correlation environment: {environment}")
+    left = _text(raw["left_symbol"], name="left_symbol")
+    right = _text(raw["right_symbol"], name="right_symbol")
+    if left == right:
+        raise ValueError("correlation evidence requires two distinct symbols")
+    left, right = sorted((left, right))
+    lower = _dec(raw["correlation_lower"], name="correlation_lower")
+    upper = _dec(raw["correlation_upper"], name="correlation_upper")
+    if lower < Decimal("-1") or upper > Decimal("1") or lower > upper:
+        raise ValueError("correlation interval must satisfy -1 <= lower <= upper <= 1")
+    observed = _utc(raw["observed_at"], name="observed_at")
+    valid_until = _utc(raw["valid_until"], name="valid_until")
+    sample_start = _utc(raw["sample_start"], name="sample_start")
+    sample_end = _utc(raw["sample_end"], name="sample_end")
+    if _instant(valid_until) < _instant(observed):
+        raise ValueError("valid_until must not precede observed_at")
+    if _instant(sample_end) < _instant(sample_start):
+        raise ValueError("sample_end must not precede sample_start")
+    if _instant(sample_end) > _instant(observed):
+        raise ValueError("sample_end must not follow observed_at")
+    return {
+        "evidence_id": _text(raw["evidence_id"], name="correlation evidence_id"),
+        "environment": environment,
+        "left_symbol": left,
+        "right_symbol": right,
+        "correlation_lower": lower,
+        "correlation_upper": upper,
+        "observed_at": observed,
+        "valid_until": valid_until,
+        "sample_start": sample_start,
+        "sample_end": sample_end,
+        "estimator_id": _text(raw["estimator_id"], name="estimator_id"),
+        "uncertainty_method": _text(
+            raw["uncertainty_method"], name="uncertainty_method"
+        ),
+        "source_ref": _text(raw["source_ref"], name="source_ref"),
+    }
+
+
+def _evidence_payload(fields: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": "portfolio-correlation-evidence.v2",
+        "evidence_id": fields["evidence_id"],
+        "environment": fields["environment"],
+        "left_symbol": fields["left_symbol"],
+        "right_symbol": fields["right_symbol"],
+        "correlation_lower": _dec_text(fields["correlation_lower"]),
+        "correlation_upper": _dec_text(fields["correlation_upper"]),
+        "observed_at": fields["observed_at"],
+        "valid_until": fields["valid_until"],
+        "sample_start": fields["sample_start"],
+        "sample_end": fields["sample_end"],
+        "estimator_id": fields["estimator_id"],
+        "uncertainty_method": fields["uncertainty_method"],
+        "source_ref": fields["source_ref"],
+    }
 
 
 @dataclass(frozen=True)
 class CorrelationEvidence:
-    """One symmetric decision-time pairwise correlation observation.
+    """Content-bound interval; source authentication remains external."""
 
-    ``correlation`` is descriptive evidence in [-1, 1]. The source reference
-    identifies the external/statistical evidence artifact; this value object
-    does not authenticate that source by itself.
-    """
-
+    evidence_id: str
+    environment: str
     left_symbol: str
     right_symbol: str
-    correlation: Decimal
+    correlation_lower: Decimal
+    correlation_upper: Decimal
     observed_at: str
     valid_until: str
+    sample_start: str
+    sample_end: str
+    estimator_id: str
+    uncertainty_method: str
     source_ref: str
+    digest: str
 
-    def __post_init__(self) -> None:
-        left = _text(self.left_symbol, name="left_symbol")
-        right = _text(self.right_symbol, name="right_symbol")
-        if left == right:
-            raise ValueError("correlation evidence requires two distinct symbols")
-        left, right = sorted((left, right))
-        correlation = _decimal(self.correlation, name="correlation")
-        if correlation < Decimal("-1") or correlation > Decimal("1"):
-            raise ValueError("correlation must be between -1 and 1")
-        observed = _utc_text(self.observed_at, name="observed_at")
-        valid_until = _utc_text(self.valid_until, name="valid_until")
-        if _utc_instant(valid_until) < _utc_instant(observed):
-            raise ValueError("valid_until must not precede observed_at")
-        source = _text(self.source_ref, name="source_ref")
-        object.__setattr__(self, "left_symbol", left)
-        object.__setattr__(self, "right_symbol", right)
-        object.__setattr__(self, "correlation", correlation)
-        object.__setattr__(self, "observed_at", observed)
-        object.__setattr__(self, "valid_until", valid_until)
-        object.__setattr__(self, "source_ref", source)
+    def __post_init__(self, _get=object.__getattribute__) -> None:
+        fields = _normalized_evidence_fields(
+            {
+                name: _get(self, name)
+                for name in (
+                    "evidence_id",
+                    "environment",
+                    "left_symbol",
+                    "right_symbol",
+                    "correlation_lower",
+                    "correlation_upper",
+                    "observed_at",
+                    "valid_until",
+                    "sample_start",
+                    "sample_end",
+                    "estimator_id",
+                    "uncertainty_method",
+                    "source_ref",
+                )
+            }
+        )
+        supplied = _text(_get(self, "digest"), name="correlation digest")
+        if supplied != _hash(_evidence_payload(fields)):
+            raise ValueError("correlation evidence digest does not match canonical content")
+        for name, value in fields.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "digest", supplied)
 
-    @property
-    def pair(self) -> tuple[str, str]:
-        return (self.left_symbol, self.right_symbol)
+    @classmethod
+    def create(cls, **values) -> "CorrelationEvidence":
+        fields = _normalized_evidence_fields(values)
+        return cls(**fields, digest=_hash(_evidence_payload(fields)))
 
 
 @dataclass(frozen=True)
 class CorrelationConcentrationPolicy:
-    """Conservative cap for strongly reinforcing portfolio exposures."""
+    """Explicit user/pre-registered concentration envelope; no architecture defaults."""
 
+    policy_id: str
+    reporting_currency: str
     max_correlated_gross_notional: Decimal
-    reinforcing_threshold: Decimal = Decimal("0.80")
+    reinforcing_threshold: Decimal
 
-    def __post_init__(self) -> None:
-        maximum = _decimal(
-            self.max_correlated_gross_notional,
+    def __post_init__(self, _get=object.__getattribute__) -> None:
+        policy_id = _text(_get(self, "policy_id"), name="policy_id")
+        currency = _text(_get(self, "reporting_currency"), name="reporting_currency").upper()
+        maximum = _dec(
+            _get(self, "max_correlated_gross_notional"),
             name="max_correlated_gross_notional",
         )
+        threshold = _dec(_get(self, "reinforcing_threshold"), name="reinforcing_threshold")
         if maximum <= 0:
             raise ValueError("max_correlated_gross_notional must be positive")
-        threshold = _decimal(self.reinforcing_threshold, name="reinforcing_threshold")
         if threshold < 0 or threshold > 1:
             raise ValueError("reinforcing_threshold must be between 0 and 1")
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(self, "reporting_currency", currency)
         object.__setattr__(self, "max_correlated_gross_notional", maximum)
         object.__setattr__(self, "reinforcing_threshold", threshold)
 
@@ -157,31 +252,80 @@ class CorrelationComponent:
 @dataclass(frozen=True)
 class CorrelationConcentrationAssessment:
     status: str
+    base_currency: str
+    allocation_decision_digest: str
+    policy_id: str
     components: tuple[CorrelationComponent, ...]
+    evidence_refs: tuple[tuple[str, str], ...]
     missing_pairs: tuple[tuple[str, str], ...]
     stale_pairs: tuple[tuple[str, str], ...]
     assessment_digest: str
     reason: str
     economic_edge_status: str = "NOT_ESTABLISHED"
+    evidence_authority_status: str = "RESOLVER_NOT_FINANCIAL_AUTHORITY"
     grants_trading_authority: bool = False
 
 
-def _canonical_allocation_exposures(allocation: AllocationResult) -> dict[str, Decimal]:
-    if type(allocation) is not AllocationResult:
-        raise TypeError("allocation must be exact AllocationResult")
-    if type(allocation.status) is not str or allocation.status != "ALLOCATED":
+def _evidence_payload_field_names() -> tuple[str, ...]:
+    return (
+        "evidence_id",
+        "environment",
+        "left_symbol",
+        "right_symbol",
+        "correlation_lower",
+        "correlation_upper",
+        "observed_at",
+        "valid_until",
+        "sample_start",
+        "sample_end",
+        "estimator_id",
+        "uncertainty_method",
+        "source_ref",
+    )
+
+
+def _record(item: CorrelationEvidence, _type=CorrelationEvidence, _get=object.__getattribute__):
+    if type(item) is not _type:
+        raise TypeError("correlation evidence entries must be exact CorrelationEvidence")
+    fields = _normalized_evidence_fields(
+        {name: _get(item, name) for name in _evidence_payload_field_names()}
+    )
+    digest = _text(_get(item, "digest"), name="correlation digest")
+    if digest != _hash(_evidence_payload(fields)):
+        raise ValueError("correlation evidence digest does not match canonical content")
+    return {**fields, "digest": digest}
+
+
+def _allocation_context(
+    result: EvidenceBoundObjectiveAllocationResult,
+    _result_type=EvidenceBoundObjectiveAllocationResult,
+    _objective_type=ObjectiveAllocationResult,
+    _allocation_type=AllocationResult,
+    _target_type=AllocationTarget,
+    _get=object.__getattribute__,
+):
+    if type(result) is not _result_type:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    objective = _get(result, "objective")
+    if type(objective) is not _objective_type:
+        raise TypeError("result objective must be exact ObjectiveAllocationResult")
+    allocation = _get(objective, "allocation")
+    if type(allocation) is not _allocation_type:
+        raise TypeError("objective allocation must be exact AllocationResult")
+    if type(_get(allocation, "status")) is not str or _get(allocation, "status") != "ALLOCATED":
         raise ValueError("correlation guard requires an allocated portfolio")
-    if type(allocation.targets) is not tuple:
+    targets = _get(allocation, "targets")
+    if type(targets) is not tuple:
         raise TypeError("allocation targets must be an exact tuple")
     exposures: dict[str, Decimal] = {}
-    for target in allocation.targets:
-        if type(target) is not AllocationTarget:
+    for target in targets:
+        if type(target) is not _target_type:
             raise TypeError("allocation targets must contain exact AllocationTarget values")
-        symbol = _text(target.symbol, name="allocation target symbol")
+        symbol = _text(_get(target, "symbol"), name="allocation target symbol")
         if symbol in exposures:
             raise ValueError("allocation target symbols must be unique")
-        quantity = _decimal(target.quantity, name=f"allocation quantity {symbol}")
-        notional = _decimal(target.notional, name=f"allocation notional {symbol}")
+        quantity = _dec(_get(target, "quantity"), name=f"allocation quantity {symbol}")
+        notional = _dec(_get(target, "notional"), name=f"allocation notional {symbol}")
         if (
             (quantity == 0) != (notional == 0)
             or (quantity > 0 and notional < 0)
@@ -195,237 +339,249 @@ def _canonical_allocation_exposures(allocation: AllocationResult) -> dict[str, D
         gross = exact_add(gross, exact_abs(notional))
         signed_net = exact_add(signed_net, notional)
     if (
-        _decimal(allocation.gross_notional, name="allocation gross_notional") != gross
-        or _decimal(allocation.net_notional, name="allocation net_notional")
+        _dec(_get(allocation, "gross_notional"), name="allocation gross_notional") != gross
+        or _dec(_get(allocation, "net_notional"), name="allocation net_notional")
         != exact_abs(signed_net)
     ):
         raise ValueError("allocation aggregate notionals disagree with targets")
-    return exposures
+    environment = _text(_get(result, "environment"), name="allocation environment").upper()
+    if environment not in _ALLOWED_ENVIRONMENTS:
+        raise ValueError(f"unsupported allocation environment: {environment}")
+    decision_time = _utc(_get(result, "decision_time"), name="allocation decision_time")
+    base_currency = _text(_get(result, "base_currency"), name="allocation base_currency").upper()
+    decision_digest = _text(_get(result, "decision_digest"), name="allocation decision_digest")
+    if (
+        len(decision_digest) != 64
+        or decision_digest.lower() != decision_digest
+        or any(ch not in "0123456789abcdef" for ch in decision_digest)
+    ):
+        raise ValueError("allocation decision_digest must be lowercase sha256 hex")
+    return exposures, environment, decision_time, base_currency, decision_digest
 
 
-def _canonical_evidence(
-    evidence: tuple[CorrelationEvidence, ...] | list[CorrelationEvidence],
-    *,
-    allowed_symbols: frozenset[str],
-) -> dict[tuple[str, str], CorrelationEvidence]:
+def _policy(policy: CorrelationConcentrationPolicy, _type=CorrelationConcentrationPolicy, _get=object.__getattribute__):
+    if type(policy) is not _type:
+        raise TypeError("policy must be exact CorrelationConcentrationPolicy")
+    normalized = {
+        "policy_id": _text(_get(policy, "policy_id"), name="policy_id"),
+        "reporting_currency": _text(
+            _get(policy, "reporting_currency"), name="reporting_currency"
+        ).upper(),
+        "max_correlated_gross_notional": _dec(
+            _get(policy, "max_correlated_gross_notional"),
+            name="max_correlated_gross_notional",
+        ),
+        "reinforcing_threshold": _dec(
+            _get(policy, "reinforcing_threshold"), name="reinforcing_threshold"
+        ),
+    }
+    if normalized["max_correlated_gross_notional"] <= 0:
+        raise ValueError("max_correlated_gross_notional must be positive")
+    if not Decimal("0") <= normalized["reinforcing_threshold"] <= Decimal("1"):
+        raise ValueError("reinforcing_threshold must be between 0 and 1")
+    return normalized
+
+
+def _evidence_by_pair(evidence, resolved_evidence, *, active, environment, decision_time):
     if type(evidence) not in (tuple, list):
         raise TypeError("correlation evidence must be an exact tuple or list")
-    result: dict[tuple[str, str], CorrelationEvidence] = {}
+    if not isinstance(resolved_evidence, Mapping):
+        raise TypeError("resolved_evidence must be a mapping")
+    resolver = dict(resolved_evidence)
+    point = _instant(decision_time)
+    result = {}
+    stale = []
     for item in evidence:
-        if type(item) is not CorrelationEvidence:
-            raise TypeError("correlation evidence entries must be exact CorrelationEvidence")
-        # Reconstruct at use time so object.__setattr__ mutation of a frozen
-        # instance cannot bypass the value boundary.
-        canonical = CorrelationEvidence(
-            left_symbol=item.left_symbol,
-            right_symbol=item.right_symbol,
-            correlation=item.correlation,
-            observed_at=item.observed_at,
-            valid_until=item.valid_until,
-            source_ref=item.source_ref,
-        )
-        if canonical.left_symbol not in allowed_symbols or canonical.right_symbol not in allowed_symbols:
+        record = _record(item)
+        evidence_id = record["evidence_id"]
+        resolved = resolver.get(evidence_id)
+        if type(resolved) is not CorrelationEvidence:
+            raise ValueError(
+                f"correlation evidence {evidence_id} cannot be resolved authoritatively"
+            )
+        if _record(resolved)["digest"] != record["digest"]:
+            raise ValueError(
+                f"correlation evidence {evidence_id} does not match resolved content"
+            )
+        if record["environment"] != environment:
+            raise ValueError(f"correlation evidence {evidence_id} environment mismatch")
+        pair = (record["left_symbol"], record["right_symbol"])
+        if pair[0] not in active or pair[1] not in active:
             raise ValueError("correlation evidence references a symbol outside the allocation")
-        if canonical.pair in result:
+        if pair in result:
             raise ValueError("duplicate correlation evidence pair")
-        result[canonical.pair] = canonical
-    return result
+        result[pair] = record
+        if point < _instant(record["observed_at"]) or point > _instant(record["valid_until"]):
+            stale.append(pair)
+    return result, tuple(sorted(stale))
 
 
-def _assessment_digest(
-    *,
-    exposures: dict[str, Decimal],
-    evidence: dict[tuple[str, str], CorrelationEvidence],
-    policy: CorrelationConcentrationPolicy,
-    decision_time: str,
-) -> str:
-    payload = {
-        "schema_version": "portfolio-correlation-concentration.v1",
-        "decision_time": decision_time,
-        "policy": {
-            "max_correlated_gross_notional": _decimal_text(policy.max_correlated_gross_notional),
-            "reinforcing_threshold": _decimal_text(policy.reinforcing_threshold),
-        },
-        "exposures": [
-            {"symbol": symbol, "notional": _decimal_text(exposures[symbol])}
-            for symbol in sorted(exposures)
-        ],
-        "evidence": [
-            {
-                "left_symbol": item.left_symbol,
-                "right_symbol": item.right_symbol,
-                "correlation": _decimal_text(item.correlation),
-                "observed_at": item.observed_at,
-                "valid_until": item.valid_until,
-                "source_ref": item.source_ref,
-            }
-            for _pair, item in sorted(evidence.items())
-        ],
-    }
-    return sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    ).hexdigest()
-
-
-def _components(
-    exposures: dict[str, Decimal],
-    evidence: dict[tuple[str, str], CorrelationEvidence],
-    threshold: Decimal,
-) -> tuple[CorrelationComponent, ...]:
-    active = sorted(symbol for symbol, notional in exposures.items() if notional != 0)
+def _components(exposures, evidence, threshold):
+    active = sorted(symbol for symbol, amount in exposures.items() if amount != 0)
     parent = {symbol: symbol for symbol in active}
 
-    def find(symbol: str) -> str:
+    def find(symbol):
         while parent[symbol] != symbol:
             parent[symbol] = parent[parent[symbol]]
             symbol = parent[symbol]
         return symbol
 
-    def union(left: str, right: str) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root == right_root:
-            return
-        if left_root < right_root:
-            parent[right_root] = left_root
-        else:
-            parent[left_root] = right_root
+    def union(left, right):
+        left, right = find(left), find(right)
+        if left != right:
+            parent[max(left, right)] = min(left, right)
 
     for left, right in combinations(active, 2):
-        item = evidence[(left, right)]
-        left_sign = Decimal("1") if exposures[left] > 0 else Decimal("-1")
-        right_sign = Decimal("1") if exposures[right] > 0 else Decimal("-1")
-        reinforcement = exact_multiply(item.correlation, left_sign, right_sign)
+        record = evidence[(left, right)]
+        same_direction = (exposures[left] > 0) == (exposures[right] > 0)
+        reinforcement = (
+            record["correlation_upper"]
+            if same_direction
+            else exact_multiply(Decimal("-1"), record["correlation_lower"])
+        )
         if reinforcement >= threshold:
             union(left, right)
-
-    grouped: dict[str, list[str]] = {}
+    groups = {}
     for symbol in active:
-        grouped.setdefault(find(symbol), []).append(symbol)
-
-    components: list[CorrelationComponent] = []
-    for symbols in grouped.values():
+        groups.setdefault(find(symbol), []).append(symbol)
+    components = []
+    for symbols in groups.values():
         gross = Decimal("0")
         for symbol in sorted(symbols):
             gross = exact_add(gross, exact_abs(exposures[symbol]))
-        components.append(
-            CorrelationComponent(symbols=tuple(sorted(symbols)), gross_notional=gross)
-        )
-    return tuple(sorted(components, key=lambda component: component.symbols))
+        components.append(CorrelationComponent(tuple(sorted(symbols)), gross))
+    return tuple(sorted(components, key=lambda item: item.symbols))
+
+
+def _assessment_digest(*, decision_digest, environment, decision_time, currency, exposures, evidence, policy):
+    return _hash(
+        {
+            "schema_version": "portfolio-correlation-concentration.v2",
+            "allocation_decision_digest": decision_digest,
+            "environment": environment,
+            "decision_time": decision_time,
+            "base_currency": currency,
+            "policy": {
+                "policy_id": policy["policy_id"],
+                "reporting_currency": policy["reporting_currency"],
+                "max_correlated_gross_notional": _dec_text(
+                    policy["max_correlated_gross_notional"]
+                ),
+                "reinforcing_threshold": _dec_text(policy["reinforcing_threshold"]),
+            },
+            "exposures": [
+                {"symbol": symbol, "notional": _dec_text(exposures[symbol])}
+                for symbol in sorted(exposures)
+            ],
+            "evidence_refs": [
+                {"evidence_id": record["evidence_id"], "digest": record["digest"]}
+                for _, record in sorted(evidence.items())
+            ],
+        }
+    )
 
 
 def assess_correlation_concentration(
-    allocation: AllocationResult,
+    result: EvidenceBoundObjectiveAllocationResult,
     evidence: tuple[CorrelationEvidence, ...] | list[CorrelationEvidence],
+    resolved_evidence: Mapping[str, CorrelationEvidence],
     policy: CorrelationConcentrationPolicy,
-    *,
-    decision_time: str,
 ) -> CorrelationConcentrationAssessment:
-    """Assess joint concentration without upgrading any trading authority.
+    """Assess the normalized proposal cut; PASS still grants no trading authority."""
 
-    Pair coverage is complete and fail-closed for every currently non-zero
-    allocation target. A positive correlation reinforces same-direction
-    exposures; a negative correlation reinforces opposite-direction exposures.
-    Reinforcing relationships are transitively clustered and their absolute
-    notionals are summed conservatively.
-    """
-
-    if type(policy) is not CorrelationConcentrationPolicy:
-        raise TypeError("policy must be exact CorrelationConcentrationPolicy")
-    policy = CorrelationConcentrationPolicy(
-        max_correlated_gross_notional=policy.max_correlated_gross_notional,
-        reinforcing_threshold=policy.reinforcing_threshold,
-    )
-    point_text = _utc_text(decision_time, name="decision_time")
-    point = _utc_instant(point_text)
-    exposures = _canonical_allocation_exposures(allocation)
-    evidence_by_pair = _canonical_evidence(
+    exposures, environment, decision_time, currency, decision_digest = _allocation_context(result)
+    normalized_policy = _policy(policy)
+    if normalized_policy["reporting_currency"] != currency:
+        raise ValueError(
+            "correlation policy reporting_currency must match allocation base_currency"
+        )
+    active = sorted(symbol for symbol, amount in exposures.items() if amount != 0)
+    by_pair, stale = _evidence_by_pair(
         evidence,
-        allowed_symbols=frozenset(exposures),
+        resolved_evidence,
+        active=frozenset(active),
+        environment=environment,
+        decision_time=decision_time,
+    )
+    required = tuple(combinations(active, 2))
+    missing = tuple(pair for pair in required if pair not in by_pair)
+    refs = tuple(
+        sorted((record["evidence_id"], record["digest"]) for record in by_pair.values())
     )
     digest = _assessment_digest(
+        decision_digest=decision_digest,
+        environment=environment,
+        decision_time=decision_time,
+        currency=currency,
         exposures=exposures,
-        evidence=evidence_by_pair,
-        policy=policy,
-        decision_time=point_text,
+        evidence=by_pair,
+        policy=normalized_policy,
     )
-
-    active = sorted(symbol for symbol, notional in exposures.items() if notional != 0)
-    required_pairs = tuple(combinations(active, 2))
-    missing = tuple(pair for pair in required_pairs if pair not in evidence_by_pair)
-    stale: list[tuple[str, str]] = []
-    for pair in required_pairs:
-        item = evidence_by_pair.get(pair)
-        if item is None:
-            continue
-        if point < _utc_instant(item.observed_at) or point > _utc_instant(item.valid_until):
-            stale.append(pair)
-
+    common = dict(
+        base_currency=currency,
+        allocation_decision_digest=decision_digest,
+        policy_id=normalized_policy["policy_id"],
+        evidence_refs=refs,
+        assessment_digest=digest,
+    )
     if missing or stale:
-        reasons: list[str] = []
+        reason = []
         if missing:
-            reasons.append("missing decision-time pair evidence")
+            reason.append("missing decision-time pair evidence")
         if stale:
-            reasons.append("future or expired pair evidence")
+            reason.append("future or expired pair evidence")
         return CorrelationConcentrationAssessment(
             status="INCONCLUSIVE",
             components=(),
             missing_pairs=missing,
-            stale_pairs=tuple(stale),
-            assessment_digest=digest,
-            reason="; ".join(reasons),
+            stale_pairs=stale,
+            reason="; ".join(reason),
+            **common,
         )
-
-    components = _components(exposures, evidence_by_pair, policy.reinforcing_threshold)
+    components = _components(
+        exposures, by_pair, normalized_policy["reinforcing_threshold"]
+    )
     breached = tuple(
-        component
-        for component in components
-        if component.gross_notional > policy.max_correlated_gross_notional
+        item
+        for item in components
+        if item.gross_notional > normalized_policy["max_correlated_gross_notional"]
     )
     if breached:
         detail = ", ".join(
-            f"{'/'.join(component.symbols)}={component.gross_notional}"
-            for component in breached
+            f"{'/'.join(item.symbols)}={item.gross_notional} {currency}"
+            for item in breached
         )
         return CorrelationConcentrationAssessment(
             status="FAIL",
             components=components,
             missing_pairs=(),
             stale_pairs=(),
-            assessment_digest=digest,
             reason=f"correlated gross-notional cap exceeded: {detail}",
+            **common,
         )
-
     return CorrelationConcentrationAssessment(
         status="PASS",
         components=components,
         missing_pairs=(),
         stale_pairs=(),
-        assessment_digest=digest,
-        reason="complete fresh pair evidence is within the correlated gross-notional cap",
+        reason=(
+            "complete fresh uncertainty-bounded pair evidence is within the "
+            "explicit correlated gross-notional policy cap"
+        ),
+        **common,
     )
 
 
-def require_correlation_safe_allocation(
-    allocation: AllocationResult,
-    evidence: tuple[CorrelationEvidence, ...] | list[CorrelationEvidence],
-    policy: CorrelationConcentrationPolicy,
-    *,
-    decision_time: str,
-) -> AllocationResult:
-    """Return the canonical allocation only when the correlation guard passes."""
-
-    assessment = assess_correlation_concentration(
-        allocation,
-        evidence,
-        policy,
-        decision_time=decision_time,
-    )
-    if assessment.status != "PASS":
+def require_correlation_safe_proposal(result, evidence, resolved_evidence, policy):
+    """Return the unchanged proposal only after this non-authorizing guard passes."""
+    assessment = assess_correlation_concentration(result, evidence, resolved_evidence, policy)
+    status = object.__getattribute__(assessment, "status")
+    if status != "PASS":
         raise CorrelationConcentrationError(
-            f"correlation concentration {assessment.status.lower()}: {assessment.reason}"
+            f"correlation concentration {status.lower()}: "
+            f"{object.__getattribute__(assessment, 'reason')}"
         )
-    return allocation
+    return result
 
 
 __all__ = [
@@ -435,5 +591,5 @@ __all__ = [
     "CorrelationConcentrationPolicy",
     "CorrelationEvidence",
     "assess_correlation_concentration",
-    "require_correlation_safe_allocation",
+    "require_correlation_safe_proposal",
 ]

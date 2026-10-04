@@ -351,6 +351,47 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
             or owner_epoch < 1
         ):
             raise BackupIntegrityError("source_owner_epoch is invalid")
+
+    runtime_evidence = marker.get("runtime_checkpoint_evidence")
+    reconstitution_required = marker.get(
+        "runtime_checkpoint_reconstitution_required"
+    )
+    runtime_evidence_sha256 = marker.get(
+        "runtime_checkpoint_evidence_sha256"
+    )
+    evidence_path = root / Path(
+        *_RUNTIME_CHECKPOINT_EVIDENCE_PATH.split("/")
+    )
+    if runtime_evidence == "QUARANTINED":
+        if reconstitution_required is not True:
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence must require reconstitution"
+            )
+        expected_evidence_digest = _canonical_sha256_ref(
+            runtime_evidence_sha256,
+            name="runtime_checkpoint_evidence_sha256",
+        )
+        if evidence_path.is_symlink() or not evidence_path.is_file():
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence is missing or unsafe"
+            )
+        if expected_evidence_digest != f"sha256:{_sha256_file(evidence_path)}":
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint evidence digest mismatch"
+            )
+    elif runtime_evidence in {"ABSENT", "UNAVAILABLE_LEGACY_BACKUP"}:
+        if (
+            reconstitution_required is not False
+            or runtime_evidence_sha256 is not None
+            or evidence_path.exists()
+        ):
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint absence claim is inconsistent"
+            )
+    else:
+        raise BackupIntegrityError(
+            "Restore runtime checkpoint evidence status is invalid"
+        )
     return marker
 
 

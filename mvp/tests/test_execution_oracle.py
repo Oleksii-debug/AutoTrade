@@ -245,6 +245,20 @@ class ExecutionOracleTests(unittest.TestCase):
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
 
+    def test_oracle_requires_market_projection_authority_before_result_checks(self):
+        o, q, valid_model = order(), observation(), model()
+        result = simulate_execution(o, q, valid_model)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires authoritative price projection policy",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=model(price_projection=None),
+                result=result,
+            )
+
     def test_oracle_market_projection_is_invariant_to_ambient_decimal_context(self):
         o = order(quantity="10")
         q = observation(available_volume="30")

@@ -2687,7 +2687,7 @@ class IndependentRiskTests(unittest.TestCase):
     def test_risk_decimal_resource_envelope_fails_closed_before_authority(self):
         with self.assertRaisesRegex(
             ValueError,
-            "quantity exceeds the exact Decimal resource envelope",
+            "quantity must be a bounded finite decimal",
         ):
             RiskIntent.create(
                 symbol="ABC",

@@ -336,6 +336,11 @@ class RiskExactArithmeticTests(unittest.TestCase):
         class HostileScope(LiquidationScope):
             reads = 0
 
+            def __post_init__(self):
+                # Construct the hostile subclass without invoking the parent's
+                # normalizer before RiskContext can reject its exact type.
+                pass
+
             def __getattribute__(self, name):
                 if name in {
                     "provider_id",
@@ -780,7 +785,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
 
     def test_exact_resource_overflow_fails_before_risk_authority(self):
-        oversized = "9" * 129
+        oversized = "9" * 257
         with self.assertRaisesRegex(
             ValueError,
             "bounded finite decimal",
@@ -822,8 +827,8 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(HostileDecimal.finite_reads, 0)
 
     def test_intermediate_notional_overflow_fails_closed(self):
-        large = "1" + "0" * 64
-        wide_limit = "9" * 128
+        large = "1" + "0" * 255
+        wide_limit = "9" * 256
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",
@@ -839,7 +844,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             ValueError,
-            "risk product exceeds the exact arithmetic resource envelope",
+            "decimal exceeds maximum significant digits",
         ):
             evaluate_risk(
                 intent,

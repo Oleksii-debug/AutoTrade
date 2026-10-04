@@ -4,6 +4,7 @@ This launcher owns composition, not financial logic. All operator commands,
 orders, fills, reservations and accounting use one canonical JournalStore.
 """
 import argparse
+import json
 from functools import partial
 from hashlib import sha256
 from http.cookies import SimpleCookie

@@ -546,8 +546,11 @@ def _detached_dataclass_input(value, expected_type, *, name: str):
     if type(state) is not dict:
         raise TypeError(f"{name} must expose canonical dataclass state")
     snapshot = dict(state)
+    state_keys = tuple(snapshot)
+    if any(type(field_name) is not str for field_name in state_keys):
+        raise TypeError(f"{name} has non-canonical state field names")
     expected_fields = tuple(field.name for field in fields(expected_type))
-    if set(snapshot) != set(expected_fields):
+    if set(state_keys) != set(expected_fields):
         raise TypeError(f"{name} has unexpected state fields")
     return expected_type(
         **{field_name: snapshot[field_name] for field_name in expected_fields}

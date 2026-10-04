@@ -8,6 +8,7 @@ import unittest
 from uuid import NAMESPACE_URL, uuid5
 
 from autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.data.vintages import HistoricalVintageRegistry
 
 from research.autotrade_research.learning.champion import (
     CandidateApproval,
@@ -141,13 +142,92 @@ def champion_registry(
     return registry
 
 
+def _vintage_manifest(seed: str) -> dict:
+    return {
+        "dataset_id": str(uuid5(NAMESPACE_URL, f"autotrade-test-dataset:{seed}")),
+        "version": "1",
+        "content_hashes": [digest(f"content:{seed}")],
+        "instrument_universe_version": "universe:test-v1",
+        "calendar_version": "calendar:test-v1",
+        "coverage": {
+            "from": "2026-07-02T00:00:00Z",
+            "to": "2026-09-30T23:59:59Z",
+        },
+        "availability_policy": {
+            "point_in_time": True,
+            "no_future_leakage": True,
+            "cutoff": "2026-09-30T23:59:59Z",
+            "basis": "test-fixture-evidence",
+        },
+        "revision_policy": {
+            "append_only": True,
+            "replace_prior_vintages": False,
+        },
+        "normalization_version": "normalization:test-v1",
+        "adjustment_policy": {
+            "raw_retained": True,
+            "adjusted_available": False,
+            "method": "none",
+        },
+        "rights": {
+            "storage": True,
+            "research_use": True,
+            "redistribution": False,
+            "basis": "first-party-test-fixture",
+        },
+        "missingness_report": {
+            "expected_count": 1,
+            "observed_count": 1,
+            "missing_keys": [],
+            "invented_count": 0,
+        },
+        "source_evidence": [
+            {
+                "artifact_id": str(
+                    uuid5(NAMESPACE_URL, f"autotrade-test-vintage-evidence:{seed}")
+                ),
+                "sha256": digest(f"vintage-evidence:{seed}"),
+                "observed_at": "2026-09-30T23:59:59Z",
+            }
+        ],
+        "created_at": "2026-10-01T00:00:00Z",
+    }
+
+
+def _vintage_digest(seed: str) -> str:
+    raw = json.dumps(
+        _vintage_manifest(seed),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
 def holdout_identity(seed: str) -> dict[str, str]:
     return {
-        "dataset_digest": digest(f"locked-forward:{seed}"),
+        "dataset_digest": _vintage_digest(seed),
         "segment_start": "2026-07-02",
         "segment_end": "2026-09-30",
         "role": "LOCKED_FORWARD",
     }
+
+
+def preregister_holdout(science: ScientificRegistry, protocol_id: str, seed: str):
+    vintages = HistoricalVintageRegistry(
+        science.path.parent / "historical-vintages"
+    )
+    manifest = _vintage_manifest(seed)
+    committed_digest = vintages.commit(manifest)
+    if committed_digest != _vintage_digest(seed):
+        raise AssertionError("test vintage digest drifted from canonical manifest")
+    return science.preregister_locked_holdout(
+        protocol_id,
+        vintage_registry=vintages,
+        dataset_id=manifest["dataset_id"],
+        dataset_version=1,
+    )
 
 
 def protocol():
@@ -204,6 +284,7 @@ def approval(
     record_trial=True,
 ):
     registered = science.register_protocol(protocol())
+    preregister_holdout(science, registered.protocol_id, candidate)
     valid_until = BASE + timedelta(days=valid_days)
     if record_trial:
         science.record_trial(
@@ -373,6 +454,11 @@ class ChampionRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                "holdout-forged-trial-binding",
+            )
             original_candidate = "candidate-original"
             promoted_candidate = "candidate-forged"
             science.record_trial(
@@ -497,6 +583,11 @@ class ChampionRegistryTests(unittest.TestCase):
             value["trial_budget"] = 2
             value["stopping_rules"] = "stop after invariant failure"
             registered = science.register_protocol(value)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                "holdout-early-stop",
+            )
             candidate = "candidate-early-stop"
             artifact = digest(candidate)
             science.record_trial(
@@ -547,6 +638,11 @@ class ChampionRegistryTests(unittest.TestCase):
             value["trial_budget"] = 1
             value["stopping_rules"] = "legacy caller asserted stop"
             registered = science.register_protocol(value)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                "holdout-legacy-early-stop",
+            )
             candidate = "candidate-legacy-early-stop"
             artifact = digest(candidate)
             science.record_trial(
@@ -622,6 +718,11 @@ class ChampionRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 2
             registered = science.register_protocol(value)
+            preregister_holdout(
+                science,
+                registered.protocol_id,
+                "holdout-log-bound",
+            )
             candidate = "candidate-log-bound"
             artifact = digest(candidate)
             science.record_trial(
@@ -973,6 +1074,7 @@ class ChampionRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            preregister_holdout(science, registered.protocol_id, "holdout-a")
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

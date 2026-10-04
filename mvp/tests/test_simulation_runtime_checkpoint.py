@@ -170,6 +170,52 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), before)
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics only")
+    def test_checkpoint_leaf_symlink_fails_before_provider_restore(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=3)
+            path = Path(directory) / "autonomous-runtime-checkpoint.json"
+            target = Path(directory) / "checkpoint-target.json"
+            path.replace(target)
+            path.symlink_to(target.name)
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            before = store.whole_store_state_cut()
+            with patch.object(
+                SimulatedProvider,
+                "from_state",
+                side_effect=AssertionError("symlinked checkpoint cannot restore provider"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "missing or has unsafe runtime checkpoint evidence",
+                ):
+                    run(directory)
+            self.assertEqual(store.whole_store_state_cut(), before)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics only")
+    def test_authority_key_leaf_symlink_fails_before_provider_restore(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=3)
+            key_path = Path(directory) / ".autonomous-runtime-authority.key"
+            target = Path(directory) / "authority-key-target.bin"
+            key_path.replace(target)
+            key_path.symlink_to(target.name)
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            before = store.whole_store_state_cut()
+            with patch.object(
+                SimulatedProvider,
+                "from_state",
+                side_effect=AssertionError("symlinked authority key cannot restore provider"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must have one ordinary pathname",
+                ):
+                    run(directory)
+            self.assertEqual(store.whole_store_state_cut(), before)
+
     def test_runtime_checkpoint_module_exposes_no_reusable_signing_oracle(self):
         from mvp.autotrade_mvp import simulation_runtime_checkpoint as checkpoint_module
 

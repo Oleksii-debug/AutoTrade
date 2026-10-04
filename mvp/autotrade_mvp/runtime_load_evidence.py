@@ -368,6 +368,9 @@ def evaluate_journal_backed_runtime_budget(
     reading the journal cut, so iteration cannot mutate durable truth after the
     conservation boundary has been selected. Latency/staleness/interference are
     still measurement inputs owned by the later target-host campaign harness.
+    When a complete series has one value per recovered durable event, this
+    diagnostic helper binds that series to the recovered canonical event order;
+    incomplete/extra series remain unbound and therefore cannot qualify.
     """
 
     spec = _validated_spec(spec)
@@ -394,6 +397,13 @@ def evaluate_journal_backed_runtime_budget(
         expected_events=expected_events,
         max_journal_events=max_journal_events,
     )
+    recovered_ids = evidence.recovered_event_ids
+    latency_event_ids = (
+        recovered_ids if len(financial_latency_us) == len(recovered_ids) else ()
+    )
+    staleness_event_ids = (
+        recovered_ids if len(financial_staleness_us) == len(recovered_ids) else ()
+    )
     observation = RuntimeLoadObservation.create(
         scenario_id=spec.scenario_id,
         spec_digest=spec.digest,
@@ -401,12 +411,15 @@ def evaluate_journal_backed_runtime_budget(
         configuration_hash=spec.configuration_hash,
         host_fingerprint=spec.host_fingerprint,
         expected_financial_events=len(evidence.expected_event_ids),
-        recovered_financial_events=len(evidence.recovered_event_ids),
+        recovered_financial_events=len(recovered_ids),
         financial_latency_us=financial_latency_us,
         financial_staleness_us=financial_staleness_us,
         research_interference_us=research_interference_us,
         reconnect_backlog_remaining=reconnect_backlog_remaining,
         declared_duration_us=declared_duration_us,
         observed_duration_us=observed_duration_us,
+        recovered_financial_event_ids=recovered_ids,
+        financial_latency_event_ids=latency_event_ids,
+        financial_staleness_event_ids=staleness_event_ids,
     )
     return evaluate_runtime_budget(spec, observation), evidence

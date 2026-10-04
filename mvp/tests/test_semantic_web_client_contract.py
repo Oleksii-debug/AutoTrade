@@ -986,7 +986,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
-            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-controls="{prefix}-body" aria-describedby="{prefix}-filter-status"', html)
             self.assertIn(f'id="{prefix}-previous" type="button"', html)
             self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
@@ -1125,7 +1125,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for prefix in ("permissions", "operations"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
-            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-controls="{prefix}-body" aria-describedby="{prefix}-filter-status"', html)
             self.assertIn(f'id="{prefix}-previous" type="button"', html)
             self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'"{prefix}-filter"', js)

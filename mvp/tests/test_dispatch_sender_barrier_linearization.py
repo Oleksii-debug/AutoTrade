@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -180,6 +181,63 @@ class DispatchSenderBarrierLinearizationTests(unittest.TestCase):
             events = store.load_events(
                 "submission_attempt",
                 dispatcher._aggregate_id("stable-send"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_public_journal_cas_method_replacement_cannot_redirect_final_barrier(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner-a",
+                owner_epoch=1,
+            )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"ok": True}
+
+            with (
+                patch.object(
+                    JournalStore,
+                    "current_journal_sequence",
+                    side_effect=AssertionError(
+                        "public current_journal_sequence replacement must not run"
+                    ),
+                ),
+                patch.object(
+                    JournalStore,
+                    "commit_command",
+                    side_effect=AssertionError(
+                        "public commit_command replacement must not run"
+                    ),
+                ),
+            ):
+                outcome = dispatcher.dispatch(
+                    attempt_id="canonical-cas-methods",
+                    intent_id="intent-canonical-cas-methods",
+                    intent_hash="hash-canonical-cas-methods",
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now=NOW,
+                    authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                )
+
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(outbound, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("canonical-cas-methods"),
             )
             self.assertEqual(
                 [event["event_type"] for event in events],

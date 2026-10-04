@@ -376,14 +376,18 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="SIMULATION",
             account_id="paper-account",
         )
-        simulation.reserve(
-            command_id="cmd-sim-reserve",
-            idempotency_key="idem-sim-reserve",
-            reservation_id="r-sim",
-            intent_id="i-sim",
-            requirements={"CASH:USD": "70"},
-            available={"CASH:USD": "100"},
-        )
+        with patch(
+            "mvp.autotrade_mvp.durable_reservations._now",
+            return_value="2026-10-03T00:00:02.000001Z",
+        ):
+            simulation.reserve(
+                command_id="cmd-sim-reserve",
+                idempotency_key="idem-sim-reserve",
+                reservation_id="r-sim",
+                intent_id="i-sim",
+                requirements={"CASH:USD": "70"},
+                available={"CASH:USD": "100"},
+            )
         with patch(
             "mvp.autotrade_mvp.durable_reservations._now",
             side_effect=AssertionError("explicit simulation time must not read wall clock"),

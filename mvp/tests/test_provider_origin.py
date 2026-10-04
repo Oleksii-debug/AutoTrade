@@ -304,7 +304,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
             claims = JournalStore.load_events(
                 journal,
                 "qualified_authenticated_provider_wire_execution",
-                recorded.wire_request_sha256,
+                recorded.attempt_id,
             )
             self.assertEqual(len(claims), 1)
             self.assertEqual(claims[0]["payload"]["attempt_id"], recorded.attempt_id)
@@ -327,6 +327,146 @@ class ProviderOriginJournalTests(unittest.TestCase):
             self.assertNotEqual(
                 observation.origin_ref,
                 observation.qualified_evidence_ref,
+            )
+
+    def test_direct_wire_claim_recovers_after_crash_before_retained_without_requery(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"11.50"}]}}'
+
+            class Stream(BytesIO):
+                status = 200
+
+            open_calls = 0
+
+            def open_once(*_args, **_kwargs):
+                nonlocal open_calls
+                open_calls += 1
+                return Stream(body)
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener.open = open_once
+            base = binding.query_binding
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-recovery-read",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-recovery-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-recovery-host",
+                clock_millis=lambda: 1_700_000_000_123,
+                clock_utc=lambda: NOW,
+                wire_client=client,
+            )
+
+            original_append = JournalStore.append_event
+
+            def fail_retained(store, envelope, **kwargs):
+                if envelope.get("event_type") == "AuthenticatedReadRetained":
+                    raise RuntimeError("simulated crash before Retained commit")
+                return original_append(store, envelope, **kwargs)
+
+            with patch.object(
+                JournalStore,
+                "append_event",
+                side_effect=fail_retained,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated crash before Retained commit",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+            self.assertEqual(open_calls, 1)
+
+            all_events = JournalStore.load_events_after_journal_sequence(
+                journal,
+                0,
+            )
+            prepared_events = [
+                event
+                for event in all_events
+                if event.get("event_type") == "AuthenticatedReadPrepared"
+            ]
+            self.assertEqual(len(prepared_events), 1)
+            attempt_id = prepared_events[0]["aggregate_id"]
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            claims = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+                attempt_id,
+            )
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]["payload"]["http_status"], 200)
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            recovered = restarted.recover_response_binding(
+                attempt_id,
+                binding,
+            )
+            self.assertEqual(open_calls, 1)
+            self.assertEqual(recovered.execution_class, "DIRECT_PROVIDER_WIRE")
+            self.assertEqual(recovered.response_bytes, body)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                [
+                    "AuthenticatedReadPrepared",
+                    "AuthenticatedReadRetained",
+                    "AuthenticatedReadObserved",
+                ],
             )
 
     def test_journal_never_embeds_provider_response_bytes(self):

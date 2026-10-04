@@ -150,6 +150,52 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
         ):
             self._parse(query=self._query(currency="usdt"))
 
+    def test_signed_funding_cash_is_not_inverted_by_position_side(self):
+        for side in ("Buy", "Sell", "None"):
+            with self.subTest(side=side):
+                rows = self._parse(
+                    payload=self._payload(
+                        side=side,
+                        funding="0.125",
+                        fee="0",
+                        cash_flow="0",
+                        change="0.125",
+                    )
+                )
+                self.assertEqual(rows[0].funding_amount, Decimal("0.125"))
+
+    def test_session_cash_flow_is_not_folded_into_funding_amount(self):
+        rows = self._parse(
+            payload=self._payload(
+                funding="-0.003",
+                fee="0",
+                cash_flow="5.25",
+                change="5.247",
+            )
+        )
+        row = rows[0]
+        self.assertEqual(row.funding_amount, Decimal("-0.003"))
+        self.assertFalse(hasattr(row, "cash_flow"))
+        self.assertFalse(hasattr(row, "funding_rate"))
+
+    def test_negative_fee_rebate_obeys_provider_change_equation(self):
+        rows = self._parse(
+            payload=self._payload(
+                funding="0",
+                fee="-0.10",
+                cash_flow="0",
+                change="0.10",
+            )
+        )
+        self.assertEqual(rows[0].funding_amount, Decimal("0"))
+
+    def test_actual_null_side_is_not_provider_none_side(self):
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "side must be exact non-empty text",
+        ):
+            self._parse(payload=self._payload(side=None))
+
     def test_funding_row_change_equation_must_reconcile_exactly(self):
         with self.assertRaisesRegex(
             ProviderFundingIncomeError,
@@ -245,8 +291,15 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
                 )
             )
 
-    def test_empty_funding_settlement_is_not_projected_as_funding_cash(self):
-        rows = self._parse(payload=self._payload(funding="", change="0"))
+    def test_empty_funding_session_settlement_is_not_projected_as_funding_cash(self):
+        rows = self._parse(
+            payload=self._payload(
+                funding="",
+                fee="0",
+                cash_flow="7.5",
+                change="7.5",
+            )
+        )
         self.assertEqual(rows, ())
 
     def test_missing_exact_decimal_component_fails_closed(self):

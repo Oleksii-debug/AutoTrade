@@ -16,8 +16,9 @@ from mvp.autotrade_mvp.production_bybit import _build_production_bybit_order_sen
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
 from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.security import SecurityBoundary
-from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
+from mvp.tests.test_security import DeterministicProtector
 
 
 class _FenceStub:
@@ -35,7 +36,7 @@ class _RecordingWire:
 
 
 class ProductionBybitBarrierTests(unittest.TestCase):
-    def _runtime(self, root: str):
+    def _runtime(self, root: str, *, security_boundary=None):
         config = ProductionHostConfig(
             journal_path=Path(root) / "financial-host.sqlite",
             account_id="account-1",
@@ -45,7 +46,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             bind_port=18765,
             public_origin="http://127.0.0.1:18765",
         )
-        boundary = object.__new__(SecurityBoundary)
+        boundary = security_boundary or object.__new__(SecurityBoundary)
         application = object.__new__(AuthenticatedHostApplication)
         application.security_boundary = boundary
         host = ProductionHostRuntime(
@@ -71,7 +72,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             generation=1,
         )
 
-    def _sender_and_request(self, runtime, wire):
+    def _sender_and_request(self, runtime, wire, *, credential_handle=None, session_token="session-1"):
         capability = write_capability(
             family="LINEAR_DERIVATIVES",
             position_mode="HEDGE",
@@ -80,6 +81,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             instrument_version="BTCUSDT@1",
             permission_scope="BYBIT.LINEAR.ORDER.WRITE",
             additional_permission_scopes=("ORDER_WRITE",),
+            provider_environment="TESTNET",
         )
         registry = CapabilityRegistry()
         registry.add(capability)
@@ -113,8 +115,8 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             provider_environment="TESTNET",
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
-            credential_handle=self._handle(),
-            session_token="session-1",
+            credential_handle=credential_handle or self._handle(),
+            session_token=session_token,
             clock_millis=lambda: 1_700_000_000_000,
             clock_utc=lambda: READ_AT,
             wire_client=wire,
@@ -128,39 +130,42 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             separators=(",", ":"),
         )
         with TemporaryDirectory() as root:
-            runtime, _boundary = self._runtime(root)
+            boundary = SecurityBoundary(
+                allowed_origins={"http://127.0.0.1:18765"},
+                credential_vault=ProtectedCredentialVault(
+                    Path(root) / "credentials.json", protector=DeterministicProtector(),
+                ),
+                session_authorizer=lambda _subject, _role, _origin: True,
+                now=lambda: 1000.0,
+            )
+            runtime, _boundary = self._runtime(root, security_boundary=boundary)
+            session = boundary.create_session(
+                subject="test-owner", role="OWNER", origin=runtime.config.public_origin,
+            )
+            credential_handle = boundary.register_secret(
+                session.token, origin=runtime.config.public_origin,
+                owner_identity=runtime.financial_dispatcher.owner.owner_id,
+                account_id="account-1", provider="BYBIT", environment="PAPER",
+                provider_environment="TESTNET", purpose="TRADE", secret_value=plaintext,
+            )
             wire = _RecordingWire()
-            intent_id, sender, request = self._sender_and_request(runtime, wire)
-            lease_calls = []
-
-            @contextmanager
-            def fake_lease(_self, token, **kwargs):
-                lease_calls.append((token, kwargs))
-                yield plaintext
-
-            original = SecurityBoundary.lease_for_execution
-            SecurityBoundary.lease_for_execution = fake_lease
-            try:
-                dispatch_now = READ_AT.isoformat().replace("+00:00", "Z")
-                authority_calls = []
-                outcome = sender.dispatch(
-                    attempt_id="attempt-recovering",
-                    intent_id=intent_id,
-                    intent_hash="sha256:" + "3" * 64,
-                    request=request,
-                    now=dispatch_now,
-                    authority_check=lambda intent_hash, at: (
-                        authority_calls.append((intent_hash, at))
-                        or (True, "authorized")
-                    ),
-                    final_barrier_clock=lambda: dispatch_now,
-                )
-            finally:
-                SecurityBoundary.lease_for_execution = original
+            intent_id, sender, request = self._sender_and_request(
+                runtime, wire, credential_handle=credential_handle, session_token=session.token,
+            )
+            dispatch_now = READ_AT.isoformat().replace("+00:00", "Z")
+            authority_calls = []
+            outcome = sender.dispatch(
+                attempt_id="attempt-recovering", intent_id=intent_id,
+                intent_hash="sha256:" + "3" * 64, request=request,
+                now=dispatch_now,
+                authority_check=lambda intent_hash, at: (
+                    authority_calls.append((intent_hash, at)) or (True, "authorized")
+                ),
+                final_barrier_clock=lambda: dispatch_now,
+            )
 
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(outcome.reason, "sender_fence_rejected:PermissionError")
-            self.assertEqual(len(lease_calls), 1)
             self.assertEqual(wire.requests, [])
             self.assertEqual(len(authority_calls), 1)
             events = runtime.journal.load_events_by_aggregate_type("submission_attempt")

@@ -33,12 +33,13 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1", provider_environment=None):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -47,6 +48,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             account_id=account_id,
             entity_id="bybit-reconciliation",
             environment=environment,
+            provider_environment=provider_environment or ("MAINNET" if environment == "LIVE" else "TESTNET"),
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -66,12 +68,12 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=READ_AT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 
@@ -85,6 +87,7 @@ def write_capability(
     expires_at=None,
     permission_scope=None,
     additional_permission_scopes=(),
+    provider_environment="DEMO",
 ):
     scope = permission_scope or {
         "LINEAR_DERIVATIVES": "BYBIT.LINEAR.ORDER.WRITE",
@@ -99,6 +102,7 @@ def write_capability(
             account_id=account_id,
             entity_id="bybit-unified-account",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
@@ -118,18 +122,19 @@ def write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=READ_AT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
     instrument_version="BTCUSDT@v1",
+    provider_environment=None,
 ):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
@@ -139,6 +144,7 @@ def submission_write_capability(
             account_id=account_id,
             entity_id="bybit-order",
             environment=environment,
+            provider_environment=provider_environment or ("MAINNET" if environment == "LIVE" else "TESTNET"),
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -158,12 +164,12 @@ def submission_write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=READ_AT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def bound_execution_response(
@@ -513,6 +519,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
+            provider_environment=provider_environment,
         )
         prepared = prepare_order_submission(
             capability=capability,

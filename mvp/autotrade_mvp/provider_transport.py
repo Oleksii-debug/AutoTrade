@@ -3650,6 +3650,7 @@ class BybitV5HttpTransport:
                 account_id=self.account_id,
                 entity_id=entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=instrument_version,
                 at=point,
             )
@@ -3970,6 +3971,7 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )

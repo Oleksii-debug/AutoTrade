@@ -267,21 +267,21 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
                 acquisition_authority, acquisition, _binding,
             ) = fixture
             response = self._direct_binding(fixture, directory, marker="foreign-q")
-            foreign_store = JournalStore(f"{directory}/foreign-q.sqlite3")
-            evidence_root = f"{directory}/foreign-evidence"
-            foreign_q = tests._route_fixture(directory + "-other")[3]
-            self.assertIsNot(foreign_q.store, acquisition_authority.store)
-            with self.assertRaisesRegex(
-                ProviderAccountOriginSetError, "share one JournalStore"
-            ):
-                issue_provider_account_origin_set(
-                    qualification_registry=foreign_q,
-                    account_acquisition_authority=acquisition_authority,
-                    account_acquisition=acquisition,
-                    response_bindings=(response,),
-                    at=NOW,
+            with TemporaryDirectory() as foreign_directory:
+                foreign_q = tests._route_fixture(foreign_directory)[3]
+                self.assertIsNot(
+                    foreign_q.store, acquisition_authority.store
                 )
-
+                with self.assertRaisesRegex(
+                    ProviderAccountOriginSetError, "share one JournalStore"
+                ):
+                    issue_provider_account_origin_set(
+                        qualification_registry=foreign_q,
+                        account_acquisition_authority=acquisition_authority,
+                        account_acquisition=acquisition,
+                        response_bindings=(response,),
+                        at=NOW,
+                    )
     def test_empty_and_list_inputs_fail_closed(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)

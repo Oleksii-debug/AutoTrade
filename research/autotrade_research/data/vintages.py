@@ -120,6 +120,8 @@ def _utc(value: Any, name: str) -> datetime:
         if type(value.tzinfo) is not timezone:
             raise HistoricalDataError(f"{name} must use built-in timezone authority")
         return value.astimezone(timezone.utc)
+    if isinstance(value, datetime):
+        raise HistoricalDataError(f"{name} must be an exact datetime")
     text = _text(value, name)
     if not text.endswith("Z"):
         raise HistoricalDataError(f"{name} must be UTC and end in Z")

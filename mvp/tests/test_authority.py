@@ -17,6 +17,10 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
     RiskAuthorityRequest,
 )
+from mvp.autotrade_mvp.authority_persistence import (
+    persist_authority_snapshot,
+    restore_authority_snapshot,
+)
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -450,6 +454,671 @@ class AuthorityTests(unittest.TestCase):
                 )
                 self.assertEqual(result.outcome, "REJECTED")
                 self.assertEqual(result.reason, "confirmation_scope_mismatch")
+
+    def test_public_financial_admission_requires_bound_confirmation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_confirmation(
+                confirmation_id="legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            authority.add_confirmation(
+                confirmation_id="other-legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            kwargs = dict(
+                command_id="cmd-legacy-confirmation",
+                idempotency_key="idem-legacy-confirmation",
+                admission_id="admission-legacy-confirmation",
+                policy_id=item.policy_id,
+                intent_id="intent-legacy-confirmation",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-legacy-confirmation",
+                confirmation_id="legacy-confirmation",
+                **public_financial_kwargs(store),
+            )
+            result = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            self.assertEqual(result.outcome, "REJECTED")
+            self.assertEqual(
+                result.reason,
+                "confirmation_financial_binding_missing",
+            )
+            self.assertIsNone(result.confirmation_id)
+            self.assertEqual(
+                result.requested_confirmation_id,
+                "legacy-confirmation",
+            )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            authority_event_count = len(
+                store.load_events("authority_state", "canonical")
+            )
+            risk_event_count = len(
+                store.load_events("risk_decision", result.risk_decision_id)
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
+            )
+            retry = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            self.assertEqual(retry, result)
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                authority_event_count,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                ),
+                risk_event_count,
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+            changed_confirmation = dict(kwargs)
+            changed_confirmation["confirmation_id"] = (
+                "other-legacy-confirmation"
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "another financial command",
+            ):
+                authority.admit(
+                    reservation_book=reservations,
+                    **changed_confirmation,
+                )
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                authority_event_count,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                ),
+                risk_event_count,
+            )
+            self.assertEqual(
+                store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                ),
+                [],
+            )
+
+            restarted = authority_service(store)
+            restored = restarted._admissions[result.admission_id]
+            self.assertIsNone(restored.confirmation_id)
+            self.assertEqual(
+                restored.requested_confirmation_id,
+                "legacy-confirmation",
+            )
+            historical = (
+                restarted._validate_historical_financial_retry_evidence(
+                    restored,
+                    restarted._policies[item.policy_id],
+                )
+            )
+            self.assertEqual(
+                historical["decision_id"],
+                result.risk_decision_id,
+            )
+
+    def test_confirmation_absence_replays_exactly(self):
+        cases = (
+            (None, "confirmation_required"),
+            ("unknown-confirmation", "confirmation_missing"),
+        )
+        for confirmation_id, expected_reason in cases:
+            with self.subTest(reason=expected_reason), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority = authority_service(store)
+                item = policy(environments={"SIMULATION"})
+                authority.register_policy(item)
+                reservations = DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                )
+                kwargs = dict(
+                    command_id=f"cmd-{expected_reason}",
+                    idempotency_key=f"idem-{expected_reason}",
+                    admission_id=f"admission-{expected_reason}",
+                    policy_id=item.policy_id,
+                    intent_id=f"intent-{expected_reason}",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_id=f"reservation-{expected_reason}",
+                    confirmation_id=confirmation_id,
+                    **public_financial_kwargs(store),
+                )
+                result = authority.admit(
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+                self.assertEqual(result.outcome, "REJECTED")
+                self.assertEqual(result.reason, expected_reason)
+                self.assertIsNone(result.confirmation_id)
+                self.assertEqual(
+                    result.requested_confirmation_id,
+                    confirmation_id,
+                )
+                self.assertEqual(
+                    reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
+                retry = authority.admit(
+                    reservation_book=reservations,
+                    **kwargs,
+                )
+                self.assertEqual(retry, result)
+
+                restarted = authority_service(store)
+                restored = restarted._admissions[result.admission_id]
+                self.assertEqual(
+                    restored.requested_confirmation_id,
+                    confirmation_id,
+                )
+                historical = (
+                    restarted._validate_historical_financial_retry_evidence(
+                        restored,
+                        restarted._policies[item.policy_id],
+                    )
+                )
+                self.assertEqual(
+                    historical["decision_id"],
+                    result.risk_decision_id,
+                )
+
+    def test_durable_financial_binding_rejects_legacy_confirmation(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="legacy-durable-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="legacy-durable-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+
+        confirmation = service._confirmations["legacy-durable-confirmation"]
+        record = AdmissionRecord(
+            admission_id="legacy-durable-admission",
+            policy_id=item.policy_id,
+            intent_hash="legacy-durable-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_version=InstrumentVersionIdentity(
+                INSTRUMENT_ID,
+                1,
+            ),
+            action="ORDER.SUBMIT",
+            notional=Decimal("100"),
+            risk_reducing=False,
+            state_version=1,
+            authority_epoch=0,
+            outcome="ADMITTED",
+            admitted_at="2026-09-24T18:00:00Z",
+            confirmation_id="legacy-durable-confirmation",
+            reason="admitted",
+            request_fingerprint="0" * 64,
+        )
+        with self.assertRaisesRegex(
+            AuthorityConflict,
+            "lacks financial binding",
+        ):
+            authority_module._validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                record=record,
+                authority_policy_version=item.version,
+                durable_risk_intent={},
+                authoritative_risk_snapshot={},
+                reservation_requirements={},
+            )
+
+    def test_durable_financial_binding_revalidates_confirmation_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_financial_confirmation(
+                confirmation_id="bound-durable-scope",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+                risk_intent=public_risk_intent(),
+                risk_policy=public_risk_policy(),
+                reservation_requirements={"CASH:USD": "100"},
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="cmd-bound-durable-scope",
+                idempotency_key="idem-bound-durable-scope",
+                admission_id="admission-bound-durable-scope",
+                policy_id=item.policy_id,
+                intent_id="intent-bound-durable-scope",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-bound-durable-scope",
+                confirmation_id="bound-durable-scope",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            risk_payload = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]["payload"]
+            tampered = replace(
+                authority._confirmations["bound-durable-scope"],
+                account_id="different-account",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "confirmation scope is inconsistent",
+            ):
+                authority_module._validate_confirmation_financial_binding(
+                    confirmation=tampered,
+                    record=admitted,
+                    authority_policy_version=item.version,
+                    durable_risk_intent=risk_payload["risk_intent"],
+                    authoritative_risk_snapshot=risk_payload[
+                        "authoritative_risk_snapshot"
+                    ],
+                    reservation_requirements=risk_payload[
+                        "reservation_requirements"
+                    ],
+                )
+
+    def test_requested_confirmation_identity_survives_snapshot_round_trip(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="snapshot-requested-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-requested-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        rejected = service._admit_unverified(
+            admission_id="snapshot-requested-admission",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-requested-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+            confirmation_id="snapshot-requested-confirmation",
+            financial_confirmation_binding_hash="sha256:" + "0" * 64,
+        )
+        self.assertEqual(rejected.outcome, "REJECTED")
+        self.assertIsNone(rejected.confirmation_id)
+        self.assertEqual(
+            rejected.requested_confirmation_id,
+            "snapshot-requested-confirmation",
+        )
+
+        snapshot = service.export_state()
+        admission_payload = snapshot["admissions"][0]
+        self.assertEqual(
+            admission_payload["requested_confirmation_id"],
+            "snapshot-requested-confirmation",
+        )
+        restored = AuthorityService.restore(snapshot)
+        self.assertEqual(
+            restored._admissions[rejected.admission_id],
+            rejected,
+        )
+
+    def test_rejected_confirmation_survives_canonical_snapshot_seal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_confirmation(
+                confirmation_id="sealed-requested-confirmation",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            rejected = authority.admit(
+                command_id="cmd-sealed-requested-confirmation",
+                idempotency_key="idem-sealed-requested-confirmation",
+                admission_id="admission-sealed-requested-confirmation",
+                policy_id=item.policy_id,
+                intent_id="intent-sealed-requested-confirmation",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-sealed-requested-confirmation",
+                confirmation_id="sealed-requested-confirmation",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(
+                rejected.reason,
+                "confirmation_financial_binding_missing",
+            )
+            persist_authority_snapshot(
+                store,
+                authority,
+                authority_id="runtime-authority",
+                event_id="authority-snapshot-requested-confirmation",
+                committed_at="2026-09-24T18:00:01Z",
+            )
+            restored = restore_authority_snapshot(
+                store,
+                authority_id="runtime-authority",
+            )
+            restored_record = restored._admissions[rejected.admission_id]
+            self.assertIsNone(restored_record.confirmation_id)
+            self.assertEqual(
+                restored_record.requested_confirmation_id,
+                "sealed-requested-confirmation",
+            )
+            self.assertEqual(
+                restored_record.request_fingerprint,
+                rejected.request_fingerprint,
+            )
+
+    def test_admitted_snapshot_keeps_legacy_confirmation_shape(self):
+        service = AuthorityService()
+        item = policy()
+        service.register_policy(item)
+        service.add_confirmation(
+            confirmation_id="snapshot-consumed-confirmation",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-consumed-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            expires_at="2026-09-24T23:00:00Z",
+        )
+        admitted = service._admit_unverified(
+            admission_id="snapshot-consumed-admission",
+            policy_id=item.policy_id,
+            intent_hash="snapshot-consumed-intent",
+            account_id="paper-1",
+            environment="PAPER",
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="100",
+            state_version=1,
+            risk_admitted=True,
+            now="2026-09-24T18:00:00Z",
+            confirmation_id="snapshot-consumed-confirmation",
+        )
+        self.assertEqual(admitted.outcome, "ADMITTED")
+        self.assertEqual(
+            admitted.requested_confirmation_id,
+            admitted.confirmation_id,
+        )
+        snapshot = service.export_state()
+        self.assertNotIn(
+            "requested_confirmation_id",
+            snapshot["admissions"][0],
+        )
+        restored = AuthorityService.restore(snapshot)
+        restored_admitted = restored._admissions[admitted.admission_id]
+        self.assertEqual(restored_admitted, admitted)
+        self.assertEqual(
+            restored_admitted.requested_confirmation_id,
+            restored_admitted.confirmation_id,
+        )
+
+    def test_financial_confirmation_invalidates_material_envelope_changes(self):
+        variants = (
+            (
+                "quantity",
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="2",
+                    price="100",
+                    expected_state_version=7,
+                ),
+                public_risk_policy(),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "price",
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="101",
+                    expected_state_version=7,
+                ),
+                public_risk_policy(),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "risk-policy",
+                public_risk_intent(),
+                public_risk_policy(max_single_notional="900"),
+                {"CASH:USD": "100"},
+            ),
+            (
+                "reservation",
+                public_risk_intent(),
+                public_risk_policy(),
+                {"CASH:USD": "110"},
+            ),
+        )
+        for label, changed_intent, changed_policy, changed_requirements in variants:
+            with self.subTest(label=label), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority = authority_service(
+                    store,
+                    risk_policy=changed_policy,
+                )
+                item = policy(environments={"SIMULATION"})
+                authority.register_policy(item)
+                authority.add_financial_confirmation(
+                    confirmation_id=f"bound-{label}",
+                    policy_id=item.policy_id,
+                    intent_hash=PUBLIC_INTENT_HASH,
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    expires_at="2026-09-24T23:00:00Z",
+                    risk_intent=public_risk_intent(),
+                    risk_policy=public_risk_policy(),
+                    reservation_requirements={"CASH:USD": "100"},
+                )
+                reservations = DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id="paper-1",
+                )
+                admit_kwargs = dict(
+                    command_id=f"cmd-bound-{label}",
+                    idempotency_key=f"idem-bound-{label}",
+                    admission_id=f"admission-bound-{label}",
+                    policy_id=item.policy_id,
+                    intent_id=f"intent-bound-{label}",
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    reservation_id=f"reservation-bound-{label}",
+                    confirmation_id=f"bound-{label}",
+                    **public_financial_kwargs(
+                        store,
+                        risk_intent=changed_intent,
+                        risk_policy=changed_policy,
+                        reservation_requirements=changed_requirements,
+                    ),
+                )
+                result = authority.admit(
+                    reservation_book=reservations,
+                    **admit_kwargs,
+                )
+                self.assertEqual(result.outcome, "REJECTED")
+                self.assertEqual(
+                    result.reason,
+                    "confirmation_financial_binding_mismatch",
+                )
+                self.assertIsNone(result.confirmation_id)
+                self.assertEqual(
+                    result.requested_confirmation_id,
+                    f"bound-{label}",
+                )
+                self.assertEqual(
+                    reservations.total_reserved("CASH:USD"),
+                    Decimal("0"),
+                )
+                authority_event_count = len(
+                    store.load_events("authority_state", "canonical")
+                )
+                risk_event_count = len(
+                    store.load_events(
+                        "risk_decision",
+                        result.risk_decision_id,
+                    )
+                )
+                retry = authority.admit(
+                    reservation_book=reservations,
+                    **admit_kwargs,
+                )
+                self.assertEqual(retry, result)
+                self.assertEqual(
+                    len(store.load_events("authority_state", "canonical")),
+                    authority_event_count,
+                )
+                self.assertEqual(
+                    len(
+                        store.load_events(
+                            "risk_decision",
+                            result.risk_decision_id,
+                        )
+                    ),
+                    risk_event_count,
+                )
+                historical = (
+                    authority._validate_historical_financial_retry_evidence(
+                        result,
+                        item,
+                    )
+                )
+                self.assertEqual(
+                    historical["decision_id"],
+                    result.risk_decision_id,
+                )
 
     def test_symbol_alias_is_not_an_authority_identity(self):
         with self.assertRaisesRegex(TypeError, "instrument"):
@@ -1631,7 +2300,7 @@ class AuthorityTests(unittest.TestCase):
             item = policy(environments={"SIMULATION"})
             authority.register_policy(item)
             confirmation_id = "confirm-transaction-a-fault"
-            authority.add_confirmation(
+            authority.add_financial_confirmation(
                 confirmation_id=confirmation_id,
                 policy_id=item.policy_id,
                 intent_hash=PUBLIC_INTENT_HASH,
@@ -1642,6 +2311,9 @@ class AuthorityTests(unittest.TestCase):
                 action="ORDER.SUBMIT",
                 notional="100",
                 expires_at="2026-09-24T23:00:00Z",
+                risk_intent=public_risk_intent(),
+                risk_policy=public_risk_policy(),
+                reservation_requirements={"CASH:USD": "100"},
             )
             reservations = DurableReservationBook(
                 store,

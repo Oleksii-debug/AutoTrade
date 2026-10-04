@@ -158,7 +158,7 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                 "from_state",
                 side_effect=AssertionError("missing checkpoint cannot restore provider"),
             ):
-                with self.assertRaisesRegex(ValueError, "missing its runtime checkpoint"):
+                with self.assertRaisesRegex(ValueError, "missing or has unsafe runtime checkpoint evidence"):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), before)
 

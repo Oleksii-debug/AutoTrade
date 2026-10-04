@@ -56,7 +56,7 @@ class ProviderOriginJournalRebindingAuthorityTests(unittest.TestCase):
                 [],
                 "provider-origin durability must not dispatch through a rebound public JournalStore method",
             )
-            events = installed_append.__self__ if False else JournalStore.load_events(
+            events = JournalStore.load_events(
                 journal,
                 "qualified_authenticated_provider_read",
                 attempt_id,

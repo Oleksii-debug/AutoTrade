@@ -588,14 +588,18 @@ def _load_composition(
             "composition runtime must contain architecture, runtime_identifier, "
             "minimum_windows_version"
         )
+    minimum_windows_version = _required_text(
+        runtime["minimum_windows_version"],
+        name="minimum Windows version",
+    )
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", minimum_windows_version) is None:
+        raise BundleError("minimum Windows version must use major.minor.build")
     normalized_runtime = {
         "architecture": _required_text(runtime["architecture"], name="runtime architecture"),
         "runtime_identifier": _required_text(
             runtime["runtime_identifier"], name="runtime identifier"
         ),
-        "minimum_windows_version": _required_text(
-            runtime["minimum_windows_version"], name="minimum Windows version"
-        ),
+        "minimum_windows_version": minimum_windows_version,
     }
     expected_rid = {
         "x64": "win-x64",

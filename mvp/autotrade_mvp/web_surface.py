@@ -10,6 +10,8 @@ from html import escape
 from math import isfinite
 from typing import Iterable, Mapping
 
+from ._generated_common_scalars import is_valid_common_scalar
+
 
 def _text(value: object, fallback: str = "Unavailable") -> str:
     """Render only JSON-like scalars; malformed objects must not execute code."""
@@ -32,11 +34,7 @@ def _has_exact_text_keys(value: object) -> bool:
 def _canonical_sequence_text(value: object) -> str | None:
     """Return the canonical host sequence representation or fail closed."""
 
-    if type(value) is not str or not value or not value.isascii() or not value.isdigit():
-        return None
-    if value != "0" and value.startswith("0"):
-        return None
-    return value
+    return value if is_valid_common_scalar("Sequence", value) else None
 
 
 def _rows(items: Iterable[tuple[str, object]]) -> str:

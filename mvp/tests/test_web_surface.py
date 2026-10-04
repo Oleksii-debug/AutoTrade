@@ -224,6 +224,24 @@ class SemanticWebSurfaceTests(unittest.TestCase):
             "Command result is unavailable because the result shape is malformed.",
         )
 
+    def test_sequence_validation_uses_canonical_ascii_contract(self):
+        for value in ("0", "1", "42"):
+            with self.subTest(value=value):
+                snapshot = self.snapshot()
+                snapshot["state_version"] = value
+                html = render_semantic_page(snapshot, status_text="Ready")
+                self.assertIn(
+                    f'name="expected_state_version" value="{value}"',
+                    html,
+                )
+        for value in ("00", "+1", " 1", "1 ", "１２", True, 1):
+            with self.subTest(value=value):
+                snapshot = self.snapshot()
+                snapshot["state_version"] = value
+                html = render_semantic_page(snapshot, status_text="Ready")
+                self.assertIn("Commands are unavailable", html)
+                self.assertNotIn('name="expected_state_version"', html)
+
     def test_command_form_carries_exact_state_version(self):
         html = render_semantic_page(self.snapshot(), status_text="Ready")
         self.assertIn(

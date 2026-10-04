@@ -206,7 +206,12 @@ class AccessibleStatusTests(unittest.TestCase):
                 "environment": "SIMULATION",
                 "currency": "USD",
                 "reconciled": True,
-                "fills": {"fill-1": {}},
+                "fills": {
+                    "fill-1": {
+                        "instrument": "SIM",
+                        "quantity": "1",
+                    }
+                },
                 "active_reservations": [],
             },
             {
@@ -396,6 +401,81 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Economic reconciliation: not confirmed", text)
         self.assertIn("Final equity: 1000", text)
         self.assertIn("Action required: recovery or reconciliation is needed", text)
+
+    def test_canonical_recorded_fill_count_requires_readable_fill_evidence(self):
+        valid = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "900",
+            "position": "1",
+            "journal_sequence": "13",
+            "fills": {
+                "fill-1": {
+                    "instrument": "SIM",
+                    "quantity": "1",
+                }
+            },
+            "active_reservations": [],
+        }
+        self.assertIn("Recorded fills: 1", format_accessible_status(valid))
+
+        malformed_payloads = (
+            {"fill-1": {}},
+            {"fill-1": {"instrument": "SIM", "quantity": 1}},
+            {"fill-1": {"instrument": "SIM", "quantity": "0"}},
+            {"fill-1": {"instrument": "", "quantity": "1"}},
+        )
+        for fills in malformed_payloads:
+            with self.subTest(fills=fills):
+                status = dict(valid)
+                status["fills"] = fills
+                text = format_accessible_status(status)
+                self.assertIn("Recorded fills: Unavailable", text)
+                self.assertNotIn("Recorded fills: 1", text)
+
+    def test_canonical_economic_identity_rejects_noncanonical_environment_or_currency(self):
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "cash": "1000",
+            "position": "0",
+            "journal_sequence": "14",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": "1000",
+            "cash": "1000",
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": "1000",
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "reconciled": True,
+            "journal_sequence": "14",
+        }
+        for key, value in (
+            ("environment", True),
+            ("environment", "simulation"),
+            ("currency", True),
+            ("currency", " USD"),
+        ):
+            with self.subTest(key=key, value=value):
+                candidate = dict(report)
+                candidate[key] = value
+                text = format_accessible_status(status, candidate)
+                self.assertIn("Economic reconciliation: not confirmed", text)
+                self.assertIn("Final equity: Unavailable", text)
 
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(

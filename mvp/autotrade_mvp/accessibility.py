@@ -111,10 +111,17 @@ def _canonical_economic_report_is_readable(
     ):
         return False
 
-    for key in ("environment", "currency"):
-        status_text = _safe_text(status.get(key), "")
-        report_text = _safe_text(report.get(key), "")
-        if not status_text or report_text != status_text:
+    for key, scalar_kind in (
+        ("environment", "Environment"),
+        ("currency", "CurrencyId"),
+    ):
+        status_value = status.get(key)
+        report_value = report.get(key)
+        if (
+            not is_valid_common_scalar(scalar_kind, status_value)
+            or not is_valid_common_scalar(scalar_kind, report_value)
+            or report_value != status_value
+        ):
             return False
 
     matched_values = {}
@@ -163,6 +170,31 @@ def _canonical_economic_report_is_readable(
     else:
         return False
     return True
+
+
+def _canonical_fill_count(value: Any) -> int | None:
+    if not _has_exact_text_keys(value):
+        return None
+    for fill_id, payload in value.items():
+        if type(fill_id) is not str or not fill_id or fill_id != fill_id.strip():
+            return None
+        if not _has_exact_text_keys(payload):
+            return None
+        instrument = payload.get("instrument")
+        quantity = payload.get("quantity")
+        if (
+            type(instrument) is not str
+            or not instrument
+            or instrument != instrument.strip()
+        ):
+            return None
+        try:
+            parsed_quantity = parse_canonical_decimal_text(quantity)
+        except ExactDecimalError:
+            return None
+        if parsed_quantity <= 0:
+            return None
+    return len(value)
 
 
 def _replay_verification_text(value: Any) -> str:
@@ -230,7 +262,15 @@ def format_accessible_status(
 
     replay_verified = status.get("replay_verified")
     fills = status.get("fills", {})
-    recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
+    if state_format == "canonical_journal":
+        canonical_fill_count = _canonical_fill_count(fills)
+        recorded_fills = (
+            canonical_fill_count
+            if canonical_fill_count is not None
+            else "Unavailable"
+        )
+    else:
+        recorded_fills = len(fills) if type(fills) is dict else "Unavailable"
     initial_capital = (
         _canonical_decimal_value(status, "initial_cash")
         if state_format == "canonical_journal"

@@ -20,6 +20,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             source_sha = 'a' * 40
             paths = tuple(candidate.STATIC) + (
                 'mvp/autotrade_mvp/product_runtime.py',
+                'contracts/bindings/python/common_scalars.py',
             )
             tree = ('\n'.join(paths) + '\n').encode('utf-8')
 
@@ -43,6 +44,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             )
             stage.assert_called_once()
             self.assertIn('mvp/autotrade_mvp/product_runtime.py', selected)
+            self.assertIn('contracts/bindings/python/common_scalars.py', selected)
             self.assertEqual(
                 (destination / 'SOURCE_REVISION').read_text(encoding='utf-8'),
                 source_sha + '\n',
@@ -51,6 +53,20 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 any(path.name.endswith('.lock') for path in destination.rglob('*')),
                 'transient payload must not ship durable-publication lock metadata',
             )
+
+    def test_real_exact_source_staging_has_import_contracts_and_passes_content_gate(self):
+        import subprocess
+        source_sha = subprocess.check_output(
+            ['git', '-C', str(candidate.ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = candidate.stage_source(candidate.ROOT, source_sha,
+                root / 'product', root / 'composition.json')
+            self.assertIn('contracts/bindings/python/common_scalars.py', selected)
+            # Exercise actual directory authority and secret-content gates, not
+            # mocked staging. The committed source must be safely packageable.
+            files = candidate._collect(root / 'product')
+            self.assertIn('mvp/autotrade_mvp/diagnostics.py', {p for p, _, _ in files})
 
     def test_archive_replacement_after_digest_check_cannot_change_extracted_bytes(self):
         with TemporaryDirectory() as directory:

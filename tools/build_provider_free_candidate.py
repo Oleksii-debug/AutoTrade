@@ -4,6 +4,7 @@ This creates an unsigned diagnostics candidate, never a qualified release. Sourc
 bytes come from one exact Git object; developer caches and state cannot enter it.
 """
 import argparse
+from contextlib import ExitStack
 import io
 from hashlib import sha256
 import json
@@ -12,13 +13,16 @@ from pathlib import Path, PurePosixPath
 import stat
 import zipfile
 
-from tools.stage_windows_foundation import (_SourceControlledComponent, _git, _stage_source_controlled_components)
+from tools.stage_windows_foundation import (
+    _SourceControlledComponent, _git, _stage_source_controlled_components,
+    _retained_posix_directory, _retained_posix_relative_directory,
+)
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
 from research.autotrade_research.artifacts.durable_publish import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
-                   'autotrade_numeric/', 'autotrade_foundation/')
+                   'autotrade_numeric/', 'autotrade_foundation/', 'contracts/bindings/python/')
 STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
           'contracts/openapi/host-api.yaml', 'src/AutoTrade.Desktop/packages.lock.json',
           'packaging/windows/provider-free-inputs.json', 'provenance/release-dependency-manifest.json')
@@ -74,6 +78,17 @@ def stage_source(source_root, source_sha, destination, composition_path):
     atomic_write_json(composition_path, {'source_sha': source_sha, 'components': []})
     descriptors = tuple(_SourceControlledComponent('zero-' + sha256(p.encode()).hexdigest()[:32],
         'runtime-source', p) for p in selected)
+    if os.name != 'nt':
+        # The canonical POSIX publisher requires nested parents to exist before
+        # it retains the full namespace. Create each child relative to a retained
+        # parent, using the same no-follow authority rather than path mkdirs.
+        with _retained_posix_directory(destination, label='candidate source root') as root_descriptor:
+            for parts in sorted({PurePosixPath(p).parent.parts for p in selected}):
+                with ExitStack() as parents:
+                    descriptor = root_descriptor
+                    for part in parts:
+                        descriptor = parents.enter_context(_retained_posix_relative_directory(
+                            descriptor, (part,), create=True))
     _stage_source_controlled_components(staging=destination, composition_path=composition_path,
         source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
     _write_new_payload_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())

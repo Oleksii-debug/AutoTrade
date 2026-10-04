@@ -32,6 +32,7 @@ def descriptor(
     *,
     regimes=("bear", "bull"),
     horizon=3600,
+    evaluation_marker="d",
 ):
     return StrategyDescriptor(
         strategy_id=family.lower(),
@@ -47,7 +48,9 @@ def descriptor(
         resource_profile="CPU_LIGHT",
         supported_regimes=regimes,
         source_license="FIRST_PARTY",
-        evaluation_protocol_sha256="sha256:" + marker * 64,
+        evaluation_protocol_sha256=(
+            "sha256:" + evaluation_marker * 64
+        ),
         artifact_sha256="sha256:" + marker * 64,
     )
 
@@ -878,6 +881,24 @@ class StrategyToolWeightingTests(unittest.TestCase):
                 assessment=assessment,
             )
         self.assertEqual(touched["count"], 0)
+
+
+    def test_policy_rejects_metrics_from_different_evaluation_protocols(self):
+        first = descriptor(
+            "FIBONACCI",
+            "a",
+            evaluation_marker="d",
+        )
+        second = descriptor(
+            "MOMENTUM",
+            "b",
+            evaluation_marker="e",
+        )
+        with self.assertRaisesRegex(
+            StrategyToolWeightingError,
+            "share one registered evaluation protocol",
+        ):
+            policy(strategies=(first, second))
 
 
 if __name__ == "__main__":

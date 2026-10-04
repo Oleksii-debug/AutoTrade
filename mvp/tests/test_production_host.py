@@ -56,6 +56,17 @@ class ProductionHostCompositionTests(unittest.TestCase):
             public_origin="http://127.0.0.1:8765",
         )
 
+    @staticmethod
+    def _runtime(*, server=None, gate=None, fence=None):
+        return production_host.ProductionHostRuntime(
+            config=Mock(),
+            journal=Mock(),
+            application=Mock(),
+            server=server or Mock(),
+            instance_fence=fence or Mock(),
+            admission_gate=gate or Mock(),
+        )
+
     def _composition_patches(self, *, application=None, server=None):
         application = application or Mock()
         server = server or Mock()
@@ -323,7 +334,6 @@ class ProductionHostCompositionTests(unittest.TestCase):
                         principal_resolver=Mock(),
                         snapshot_provider=Mock(),
                     )
-
 
     def test_terminal_finalizer_runs_after_command_drain_before_listener_and_fence(self):
         order = []

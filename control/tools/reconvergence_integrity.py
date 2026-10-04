@@ -223,9 +223,9 @@ def assess_reconvergence(
             trust_root,
             name="protected trust root",
         )
-        if canonical.casefold() not in protected_by_casefold:
-            raise ValueError("protected trust root must also be a protected sentinel")
-        trust_roots_by_casefold[canonical.casefold()] = canonical
+        folded = canonical.casefold()
+        if folded in protected_by_casefold:
+            trust_roots_by_casefold[folded] = protected_by_casefold[folded]
 
     deleted = tuple(
         sorted(

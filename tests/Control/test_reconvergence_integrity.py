@@ -528,6 +528,94 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 exact_scope.stderr + exact_scope.stdout,
             )
 
+    def test_module_entrypoint_rejects_diverged_and_sparse_real_git_histories(self):
+        repository_root = Path.cwd().resolve()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            def run_guard(base: str, head: str) -> subprocess.CompletedProcess[str]:
+                env = os.environ.copy()
+                python_path = env.get("PYTHONPATH")
+                env["PYTHONPATH"] = (
+                    str(repository_root)
+                    if not python_path
+                    else str(repository_root) + os.pathsep + python_path
+                )
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "control.tools.reconvergence_integrity",
+                        "--base",
+                        base,
+                        "--head",
+                        head,
+                    ],
+                    cwd=root,
+                    env=env,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+            git("init")
+            git("config", "user.email", "reconvergence-history@example.invalid")
+            git("config", "user.name", "Reconvergence History Test")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "root")
+            root_sha = git("rev-parse", "HEAD")
+
+            for index in range(100):
+                (root / f"path-{index:03d}.txt").write_text(
+                    f"{index}\n",
+                    encoding="utf-8",
+                )
+            git("add", ".")
+            git("commit", "-m", "accepted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "diverged", root_sha)
+            (root / "diverged.txt").write_text("sibling\n", encoding="utf-8")
+            git("add", "diverged.txt")
+            git("commit", "-m", "diverged sibling")
+            diverged_sha = git("rev-parse", "HEAD")
+            diverged = run_guard(base_sha, diverged_sha)
+            self.assertEqual(
+                diverged.returncode,
+                2,
+                diverged.stderr + diverged.stdout,
+            )
+            self.assertIn(
+                "head is not descended from exact base revision",
+                diverged.stdout,
+            )
+
+            git("checkout", "-B", "sparse", base_sha)
+            for index in range(60):
+                (root / f"path-{index:03d}.txt").unlink()
+            git("add", "-A")
+            git("commit", "-m", "sparse replacement")
+            sparse_sha = git("rev-parse", "HEAD")
+            sparse = run_guard(base_sha, sparse_sha)
+            self.assertEqual(
+                sparse.returncode,
+                2,
+                sparse.stderr + sparse.stdout,
+            )
+            self.assertIn("mass base-tree deletion", sparse.stdout)
+
     def test_canonical_workflow_rejects_stale_target_branch_event_base(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"

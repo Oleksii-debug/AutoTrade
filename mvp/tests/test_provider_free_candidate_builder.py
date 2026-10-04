@@ -47,6 +47,10 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 (destination / 'SOURCE_REVISION').read_text(encoding='utf-8'),
                 source_sha + '\n',
             )
+            self.assertFalse(
+                any(path.name.endswith('.lock') for path in destination.rglob('*')),
+                'transient payload must not ship durable-publication lock metadata',
+            )
 
     def test_archive_replacement_after_digest_check_cannot_change_extracted_bytes(self):
         with TemporaryDirectory() as directory:
@@ -86,6 +90,48 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 b'verified bytes',
             )
             self.assertFalse((destination / 'bad.txt').exists())
+            self.assertFalse(
+                any(path.name.endswith('.lock') for path in destination.rglob('*')),
+                'archive extraction must not create shipped lock sidecars',
+            )
+
+    def test_archive_override_is_written_once_without_lock_sidecar(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'python.zip'
+            destination = root / 'runtime'
+
+            with zipfile.ZipFile(archive, 'w') as value:
+                value.writestr('python312._pth', b'original path config')
+                value.writestr('python.exe', b'fake runtime bytes')
+
+            expected_digest = sha256(archive.read_bytes()).hexdigest()
+            candidate.extract_pinned(
+                archive,
+                destination,
+                expected_digest,
+                overrides={'python312._pth': b'frozen isolated config\n'},
+            )
+
+            self.assertEqual(
+                (destination / 'python312._pth').read_bytes(),
+                b'frozen isolated config\n',
+            )
+            self.assertEqual(
+                (destination / 'python.exe').read_bytes(),
+                b'fake runtime bytes',
+            )
+            self.assertFalse(
+                any(path.name.endswith('.lock') for path in destination.rglob('*')),
+            )
+
+    def test_transient_payload_writer_refuses_existing_leaf(self):
+        with TemporaryDirectory() as directory:
+            target = Path(directory) / 'payload.bin'
+            candidate._write_new_payload_bytes(target, b'first')
+            with self.assertRaisesRegex(ValueError, 'already exists'):
+                candidate._write_new_payload_bytes(target, b'second')
+            self.assertEqual(target.read_bytes(), b'first')
 
 
 if __name__ == '__main__':

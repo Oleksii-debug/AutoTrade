@@ -18,7 +18,7 @@ from pathlib import Path
 import threading
 from typing import Any, Mapping, Sequence
 
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
 from .replay import (
     CausalReplay,
     CompositeReplayCheckpoint,
@@ -120,7 +120,15 @@ def _protocol_identity(protocol: Mapping[str, object]) -> tuple[str, str, str]:
         raise AutonomousRuntimeCheckpointError(
             "source_build_identity must be canonical lowercase hex"
         )
-    protocol_digest = "sha256:" + _digest(protocol)
+    protocol_digest = payload_digest(protocol)
+    if (
+        type(protocol_digest) is not str
+        or not protocol_digest.startswith("sha256:")
+        or len(protocol_digest) != 71
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "canonical protocol digest is unavailable"
+        )
     return run_id, build_sha, protocol_digest
 
 

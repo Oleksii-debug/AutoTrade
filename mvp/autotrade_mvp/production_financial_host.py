@@ -229,6 +229,11 @@ class FinancialProductionHostRuntime:
                 raise RuntimeError(
                     "durable takeover target does not match production host identity"
                 )
+            activated = self.recovery_controller.activate_takeover_target_recovery()
+            if activated != result.target_owner:
+                raise RuntimeError(
+                    "activated recovery owner does not match durable takeover target"
+                )
             issued = build_recovery_issued_dispatcher(
                 self.recovery_controller,
                 self.journal,
@@ -298,14 +303,13 @@ def compose_financial_authority(
             )
             dispatcher = HostBoundFinancialDispatcher(host, issued)
         else:
-            # Attachment to the current durable source owner grants no send
-            # readiness. It exists solely so execute_durable_takeover can prove
-            # and advance that exact source owner under its own issuer protocol.
-            recovery.owner = chain[-1]
-            recovery.state = HostState.RECOVERING
-            recovery.provider_reconciled = False
-            recovery.reason_codes = {"startup_reconciliation_required"}
-            recovery._recover_scoped_submission_uncertainty_from_owner_scope()
+            # Canonical restart attachment is takeover-only.  Even if the source
+            # owner later receives a current reconciliation checkpoint, recovery
+            # validators deny sender/admission authority until the durable owner
+            # chain has advanced exactly N -> N+1 through execute_durable_takeover.
+            attached = recovery.attach_current_durable_owner_for_takeover()
+            if attached != chain[-1]:
+                raise RuntimeError("attached takeover source does not match durable tail")
         return FinancialProductionHostRuntime(host, recovery, dispatcher)
 
 

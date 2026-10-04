@@ -3785,9 +3785,9 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
     if type(order_book) is not DurableOrderBookProjection:
         raise TypeError("order_book must be exact DurableOrderBookProjection")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
+    if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
+    if type(provider_fill) is not ProviderFillEvidence:
         raise TypeError("provider_fill must be ProviderFillEvidence")
     _require_durable_provider_economic_book_authority(economic_book)
     _require_same_financial_journal_generation(

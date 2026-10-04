@@ -2614,9 +2614,7 @@ class AuthorityService:
         risk_digest = record.risk_decision_id.removeprefix(
             "risk:sha256:"
         )
-        expected_verdict = (
-            "ALLOW" if record.outcome == "ADMITTED" else "REJECT"
-        )
+        risk_verdict = risk_payload.get("verdict")
         if (
             risk_payload.get("decision_id") != record.risk_decision_id
             or risk_payload.get("fingerprint") != risk_digest
@@ -2626,7 +2624,15 @@ class AuthorityService:
             or risk_payload.get("capability_snapshot_id")
             != record.capability_snapshot_id
             or risk_payload.get("valid_until") != record.risk_valid_until
-            or risk_payload.get("verdict") != expected_verdict
+            or risk_verdict not in {"ALLOW", "REJECT"}
+            or (
+                record.outcome == "ADMITTED"
+                and risk_verdict != "ALLOW"
+            )
+            or (
+                record.reason == "risk_rejected"
+                and risk_verdict != "REJECT"
+            )
         ):
             raise AuthorityConflict(
                 "historical risk decision does not match admission"

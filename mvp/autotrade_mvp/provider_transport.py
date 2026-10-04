@@ -1440,11 +1440,14 @@ def _install_direct_authenticated_read_execution_authority():
             frozen_items = tuple(
                 sorted(
                     (
-                        freeze_authority_state(key),
-                        freeze_authority_state(item),
-                    )
-                    for key, item in value.items()
-                , key=repr)
+                        (
+                            freeze_authority_state(key),
+                            freeze_authority_state(item),
+                        )
+                        for key, item in value.items()
+                    ),
+                    key=repr,
+                )
             )
             return ("dict", frozen_items)
         if type(value) is set:

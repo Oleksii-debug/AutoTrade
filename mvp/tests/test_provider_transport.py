@@ -57,6 +57,7 @@ from mvp.autotrade_mvp.provider_transport import (
     direct_authenticated_read_execution_receipt,
     direct_authenticated_read_execution_receipt_snapshot,
     provider_observation_direct_execution_material,
+    require_direct_authenticated_read_client,
     _validated_authenticated_read_wire_semantics_digest,
     _exact_trading_response,
     _binance_exact_trading_response,
@@ -4493,6 +4494,29 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             self.assertEqual(len(selected), 1)
             self.assertEqual(selected[0].proxies, {})
         self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_direct_authenticated_read_authority_rejects_proxy_policy_mutation(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        proxy = next(
+            handler
+            for handler in client._opener.handlers
+            if type(handler) is ProxyHandler
+        )
+        proxy.proxies["https"] = "http://127.0.0.1:9"
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_authenticated_read_client(client)
+
+    def test_direct_authenticated_read_authority_rejects_handler_topology_mutation(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener.handlers.append(object())
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_authenticated_read_client(client)
 
     def test_instance_shadowed_opener_cannot_mint_direct_authenticated_read_receipt(self):
         class Stream(BytesIO):

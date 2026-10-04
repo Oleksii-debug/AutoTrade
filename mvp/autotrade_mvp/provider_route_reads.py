@@ -702,6 +702,8 @@ def _observe_qualified_provider_json_response_impl(
     return qualified
 
 def _bind_qualified_provider_read_minting(
+    prepare_impl,
+    observe_impl,
     register_query,
     register_response,
 ):
@@ -716,7 +718,7 @@ def _bind_qualified_provider_read_minting(
         at: datetime,
         permission_scope: str = "ORDER.READ",
     ) -> QualifiedProviderReadQueryBinding:
-        return _prepare_qualified_provider_read_impl(
+        return prepare_impl(
             route,
             capability_registry,
             qualification_registry,
@@ -735,7 +737,7 @@ def _bind_qualified_provider_read_minting(
         response_bytes: bytes,
         observed_at: datetime,
     ) -> QualifiedProviderResponseObservation:
-        return _observe_qualified_provider_json_response_impl(
+        return observe_impl(
             query_binding=query_binding,
             http_status=http_status,
             response_bytes=response_bytes,
@@ -750,10 +752,14 @@ def _bind_qualified_provider_read_minting(
     prepare_qualified_provider_read,
     observe_qualified_provider_json_response,
 ) = _bind_qualified_provider_read_minting(
+    _prepare_qualified_provider_read_impl,
+    _observe_qualified_provider_json_response_impl,
     _register_qualified_provider_read_binding_authority,
     _register_qualified_provider_response_authority,
 )
 del _bind_qualified_provider_read_minting
+del _prepare_qualified_provider_read_impl
+del _observe_qualified_provider_json_response_impl
 del _register_qualified_provider_read_binding_authority
 del _register_qualified_provider_response_authority
 

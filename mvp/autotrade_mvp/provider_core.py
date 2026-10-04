@@ -576,6 +576,8 @@ def _observe_authenticated_json_response_impl(
 
 
 def _bind_authenticated_provider_read_minting(
+    prepare_impl,
+    observe_impl,
     register_query,
     register_response,
 ):
@@ -588,7 +590,7 @@ def _bind_authenticated_provider_read_minting(
         at: datetime,
         permission_scope: str = "ORDER.READ",
     ) -> AuthenticatedReadQueryBinding:
-        return _prepare_authenticated_read_query_impl(
+        return prepare_impl(
             capability=capability,
             surface=surface,
             endpoint=endpoint,
@@ -605,7 +607,7 @@ def _bind_authenticated_provider_read_minting(
         response_bytes: bytes,
         observed_at: datetime,
     ) -> ProviderResponseObservation:
-        return _observe_authenticated_json_response_impl(
+        return observe_impl(
             query_binding=query_binding,
             http_status=http_status,
             response_bytes=response_bytes,
@@ -620,10 +622,14 @@ def _bind_authenticated_provider_read_minting(
     prepare_authenticated_read_query,
     observe_authenticated_json_response,
 ) = _bind_authenticated_provider_read_minting(
+    _prepare_authenticated_read_query_impl,
+    _observe_authenticated_json_response_impl,
     _register_authenticated_read_query_binding_authority,
     _register_provider_response_observation_authority,
 )
 del _bind_authenticated_provider_read_minting
+del _prepare_authenticated_read_query_impl
+del _observe_authenticated_json_response_impl
 del _register_authenticated_read_query_binding_authority
 del _register_provider_response_observation_authority
 

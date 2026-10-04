@@ -194,6 +194,54 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         )
         self.assertIn("protected canonical sentinel damage", result.reasons[0])
 
+    def test_case_only_protected_sentinel_rename_fails_closed(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path=sentinel,
+                    path="control/index.json",
+                )
+            ],
+            allowed_scopes=(sentinel,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            f"{sentinel} -> control/index.json (rename)",
+            result.protected_violations,
+        )
+
+    def test_rename_into_trust_root_requires_exact_destination_authority(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        change = Change(
+            status="R100",
+            previous_path="control/tools/candidate_guard.py",
+            path=sentinel,
+        )
+        directory_only = assess_reconvergence(
+            base_paths=["control/tools/candidate_guard.py", "README.md"],
+            changes=[change],
+            allowed_scopes=("control/tools",),
+        )
+        self.assertFalse(directory_only.allowed)
+        self.assertIn(
+            "rename into trust root without exact-path authorization",
+            directory_only.protected_violations[0],
+        )
+
+        exact_destination = assess_reconvergence(
+            base_paths=["control/tools/candidate_guard.py", "README.md"],
+            changes=[change],
+            allowed_scopes=(
+                "control/tools/candidate_guard.py",
+                sentinel,
+            ),
+        )
+        self.assertTrue(exact_destination.allowed)
+
     def test_copy_of_protected_sentinel_does_not_mutate_source(self):
         sentinel = "control/INDEX.json"
         result = assess_reconvergence(

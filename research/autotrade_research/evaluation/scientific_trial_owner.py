@@ -69,20 +69,8 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
     return authority
 
 
-def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
-    """Return the complete immutable GateProfile subject payload.
-
-    Every dataclass field that can change evaluation authority is included.
-    Sequence order is preserved exactly because GateProfile itself preserves it;
-    the subject digest must not silently canonicalize two distinct exact values
-    into one identity.
-
-    Frozen dataclasses are not a trust boundary in Python: object.__setattr__
-    can still mutate an instance after construction. Revalidate the complete
-    profile at the moment the scientific subject is hashed. The two iterable
-    fields are required to remain exact tuples before reconstruction so a
-    post-construction hostile iterable cannot execute inside this trust use.
-    """
+def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
+    """Detach and revalidate one complete GateProfile value for trust use."""
 
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
@@ -100,7 +88,7 @@ def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
                 f"{name} must remain an exact tuple of built-in text"
             )
 
-    canonical = GateProfile(
+    return GateProfile(
         profile_id=object.__getattribute__(profile, "profile_id"),
         minimum_net_advantage=object.__getattribute__(
             profile, "minimum_net_advantage"
@@ -136,6 +124,21 @@ def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
         ),
     )
 
+
+def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
+    """Return the complete immutable GateProfile subject payload.
+
+    Every dataclass field that can change evaluation authority is included.
+    Sequence order is preserved exactly because GateProfile itself preserves it;
+    the subject digest must not silently canonicalize two distinct exact values
+    into one identity.
+
+    Frozen dataclasses are not a trust boundary in Python: object.__setattr__
+    can still mutate an instance after construction. Revalidate and detach the
+    complete profile at the moment the scientific subject is hashed.
+    """
+
+    canonical = _canonical_gate_profile_authority_view(profile)
     return {
         "schema_version": "wp36-gate-profile-subject-v1",
         "profile_id": canonical.profile_id,
@@ -259,8 +262,9 @@ def resolve_gate_profile_protocol_binding(
     bindings, id/digest rebinds and malformed bindings fail closed.
     """
 
-    profile_id = profile.profile_id
-    profile_digest = gate_profile_subject_digest(profile)
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
+    profile_id = canonical_profile.profile_id
+    profile_digest = gate_profile_subject_digest(canonical_profile)
     candidates: list[GateProfileProtocolBinding] = []
     for row in _registered_protocol_rows(registry):
         payload = row["payload"]
@@ -326,15 +330,14 @@ def resolve_scientific_trial_owner(
     """
 
     authority = _registry_authority_view(registry)
-    if type(profile) is not GateProfile:
-        raise TypeError("profile must be exact GateProfile")
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
     with ScientificRegistry._connect(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
             registry=authority,
-            profile=profile,
+            profile=canonical_profile,
         )
         trial_evidence = ScientificRegistry.trial_completeness_evidence(
             authority,
@@ -344,7 +347,7 @@ def resolve_scientific_trial_owner(
             raise ProtocolViolation(
                 "trial completeness snapshot does not match bound protocol hash"
             )
-        if trial_evidence.trial_budget > profile.max_trials:
+        if trial_evidence.trial_budget > canonical_profile.max_trials:
             raise ProtocolViolation(
                 "bound scientific protocol trial budget exceeds gate profile max_trials"
             )
@@ -380,19 +383,18 @@ def evaluate_gates_with_scientific_trial_owner(
     semantic-owner INCONCLUSIVE remains unavailable for terminal PASS.
     """
 
-    if type(profile) is not GateProfile:
-        raise TypeError("profile must be exact GateProfile")
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
     _assert_registry_dispatch_unshadowed(scientific_registry)
-    base = evaluate_gates(profile, evidence, **gate_kwargs)
+    base = evaluate_gates(canonical_profile, evidence, **gate_kwargs)
     checks = dict(base.checks)
     provenance = dict(base.provenance or {})
     reasons = list(base.reasons)
     try:
         owner = resolve_scientific_trial_owner(
             registry=scientific_registry,
-            profile=profile,
+            profile=canonical_profile,
             evidence=evidence,
         )
     except KeyError:

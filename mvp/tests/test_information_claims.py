@@ -315,6 +315,98 @@ class InformationClaimTests(unittest.TestCase):
             (delayed_old, newer),
         )
 
+    def test_equal_publication_revision_conflict_has_no_causal_winner(self):
+        store = ClaimStore()
+        first_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="revision-alpha",
+            source_kind="CORPORATE",
+            title="first visible copy",
+            passage="guidance is 10",
+            published_at=BASE,
+            available_at=BASE,
+            ingested_at=BASE,
+            rights_basis="issuer-release",
+            locator="guidance",
+        )
+        later_visible_document = SourceDocument.create(
+            source_id="corp",
+            source_revision="revision-zeta",
+            source_kind="CORPORATE",
+            title="same-time competing revision",
+            passage="guidance is 8",
+            published_at=BASE,
+            available_at=BASE + timedelta(hours=1),
+            ingested_at=BASE + timedelta(hours=1),
+            rights_basis="issuer-release",
+            locator="guidance",
+        )
+        first = store.build_claim(
+            first_document,
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        later_visible = store.build_claim(
+            later_visible_document,
+            subject="X",
+            predicate="guidance",
+            value="8",
+        )
+        store.add(first)
+        store.add(later_visible)
+
+        self.assertEqual(store.effective_at(BASE), (first,))
+        with self.assertRaisesRegex(
+            ValueError,
+            "equal publication time have ambiguous ordering",
+        ):
+            store.effective_at(BASE + timedelta(hours=1))
+
+    def test_equal_publication_same_value_may_choose_deterministic_provenance(self):
+        store = ClaimStore()
+        first = store.build_claim(
+            SourceDocument.create(
+                source_id="corp",
+                source_revision="revision-alpha",
+                source_kind="CORPORATE",
+                title="first copy",
+                passage="guidance is 10",
+                published_at=BASE,
+                available_at=BASE,
+                ingested_at=BASE,
+                rights_basis="issuer-release",
+                locator="guidance",
+            ),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        later_visible = store.build_claim(
+            SourceDocument.create(
+                source_id="corp",
+                source_revision="revision-zeta",
+                source_kind="CORPORATE",
+                title="same semantic fact",
+                passage="guidance remains 10",
+                published_at=BASE,
+                available_at=BASE + timedelta(hours=1),
+                ingested_at=BASE + timedelta(hours=1),
+                rights_basis="issuer-release",
+                locator="guidance",
+            ),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        store.add(first)
+        store.add(later_visible)
+
+        self.assertEqual(
+            store.effective_at(BASE + timedelta(hours=1)),
+            (later_visible,),
+        )
+
     def test_contradictions_are_detected_across_different_publication_times(self):
         store = ClaimStore()
         first_document = SourceDocument.create(

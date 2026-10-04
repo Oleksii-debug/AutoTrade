@@ -8,11 +8,20 @@ reconciliation decisions, or trading readiness.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
+import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
+
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
 
 
 class KrakenSpotStreamError(ValueError):
@@ -59,14 +68,13 @@ class KrakenSpotExecutionsSubscriptionBinding:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         if (
-            isinstance(connection_generation, bool)
-            or not isinstance(connection_generation, int)
+            type(connection_generation) is not int
             or connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if isinstance(req_id, bool) or not isinstance(req_id, int):
+        if type(req_id) is not int:
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
             )
@@ -111,14 +119,13 @@ class KrakenSpotExecutionsSubscriptionBinding:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if isinstance(self.req_id, bool) or not isinstance(self.req_id, int):
+        if type(self.req_id) is not int:
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
             )
@@ -183,10 +190,26 @@ _ALLOWED_ORDER_STATUSES = frozenset(
 )
 _TERMINAL_ORDER_STATUSES = frozenset({"filled", "canceled", "expired"})
 _MAX_FRAME_BYTES = 4 * 1024 * 1024
+_RFC3339_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})\Z",
+    re.ASCII,
+)
+_TRADE_ONLY_EXECUTION_FIELDS = frozenset(
+    {
+        "cost",
+        "exec_id",
+        "ext_exec_id",
+        "fees",
+        "last_price",
+        "last_qty",
+        "margin_borrow",
+        "trade_id",
+    }
+)
 
 
 def _canonical_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise KrakenSpotStreamError(f"{name} must be non-empty text")
     if value != value.strip():
         raise KrakenSpotStreamError(f"{name} must be canonical text")
@@ -231,12 +254,16 @@ def _decode_exact_json(response_bytes: object) -> Mapping[str, object]:
         decoded = json.loads(
             text,
             object_pairs_hook=_json_object,
-            parse_float=Decimal,
-            parse_int=int,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=_reject_json_constant,
         )
     except KrakenSpotStreamError:
         raise
+    except ExactDecimalError as error:
+        raise KrakenSpotStreamError(
+            "Kraken stream numeric token exceeds the exact resource envelope"
+        ) from error
     except (json.JSONDecodeError, ValueError, TypeError) as error:
         raise KrakenSpotStreamError(
             "Kraken stream frame is invalid JSON"
@@ -258,6 +285,8 @@ class KrakenSpotExecutionsSubscriptionAck:
     subscription_binding: KrakenSpotExecutionsSubscriptionBinding
     evidence_ref: str
     response_bytes: bytes = field(repr=False, compare=False)
+    maxratecount: int | None = None
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -275,17 +304,13 @@ class KrakenSpotExecutionsSubscriptionAck:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
                 "Kraken connection_generation must be a positive integer"
             )
-        if not isinstance(
-            self.subscription_binding,
-            KrakenSpotExecutionsSubscriptionBinding,
-        ):
+        if type(self.subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
             raise TypeError(
                 "subscription_binding must be "
                 "KrakenSpotExecutionsSubscriptionBinding"
@@ -301,6 +326,18 @@ class KrakenSpotExecutionsSubscriptionAck:
             )
         if type(self.response_bytes) is not bytes:
             raise TypeError("response_bytes must be bytes")
+        if self.maxratecount is not None and (
+            type(self.maxratecount) is not int or self.maxratecount < 0
+        ):
+            raise KrakenSpotStreamError(
+                "maxratecount must be a non-negative exact integer when present"
+            )
+        if type(self.warnings) is not tuple or any(
+            type(item) is not str for item in self.warnings
+        ):
+            raise KrakenSpotStreamError(
+                "warnings must be an exact tuple of strings"
+            )
         expected_ref = (
             "provider-stream:sha256:"
             + sha256(self.response_bytes).hexdigest()
@@ -322,10 +359,7 @@ def parse_executions_subscription_ack(
 ) -> KrakenSpotExecutionsSubscriptionAck:
     """Bind the exact server ACK to the qualified outbound subscription."""
 
-    if not isinstance(
-        subscription_binding,
-        KrakenSpotExecutionsSubscriptionBinding,
-    ):
+    if type(subscription_binding) is not KrakenSpotExecutionsSubscriptionBinding:
         raise TypeError(
             "subscription_binding must be "
             "KrakenSpotExecutionsSubscriptionBinding"
@@ -390,6 +424,20 @@ def parse_executions_subscription_ack(
         raise KrakenSpotStreamError(
             "Kraken executions subscription must acknowledge snap_trades=false"
         )
+    maxratecount = result.get("maxratecount")
+    if maxratecount is not None and (
+        type(maxratecount) is not int or maxratecount < 0
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription maxratecount must be a non-negative integer"
+        )
+    raw_warnings = result.get("warnings", [])
+    if type(raw_warnings) is not list or any(
+        type(item) is not str for item in raw_warnings
+    ):
+        raise KrakenSpotStreamError(
+            "Kraken subscription warnings must be an array of strings"
+        )
 
     exact = response_bytes
     return KrakenSpotExecutionsSubscriptionAck(
@@ -401,18 +449,91 @@ def parse_executions_subscription_ack(
             "provider-stream:sha256:" + sha256(exact).hexdigest()
         ),
         response_bytes=exact,
+        maxratecount=maxratecount,
+        warnings=tuple(raw_warnings),
     )
+
+
+def _bounded_decimal(
+    value: object,
+    *,
+    name: str,
+    positive: bool = False,
+) -> Decimal:
+    if type(value) not in (Decimal, int):
+        raise KrakenSpotStreamError(
+            f"{name} must be an exact JSON number"
+        )
+    try:
+        admitted = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise KrakenSpotStreamError(
+            f"{name} must be a bounded exact decimal"
+        ) from error
+    if positive and admitted <= Decimal("0"):
+        raise KrakenSpotStreamError(f"{name} must be positive")
+    return admitted
+
+
+def _rfc3339_text(value: object, *, name: str) -> str:
+    text = _canonical_text(value, name=name)
+    if _RFC3339_TIMESTAMP.fullmatch(text) is None:
+        raise KrakenSpotStreamError(
+            f"{name} must be an RFC3339 timestamp"
+        )
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, OverflowError) as error:
+        raise KrakenSpotStreamError(
+            f"{name} must be an RFC3339 timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise KrakenSpotStreamError(
+            f"{name} must include an explicit timezone"
+        )
+    return text
+
+
+@dataclass(frozen=True)
+class KrakenSpotExecutionFee:
+    """One exact fee component carried by a Kraken trade execution."""
+
+    asset: str
+    quantity: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "asset",
+            _canonical_text(self.asset, name="fee.asset"),
+        )
+        object.__setattr__(
+            self,
+            "quantity",
+            _bounded_decimal(self.quantity, name="fee.qty"),
+        )
 
 
 @dataclass(frozen=True)
 class KrakenSpotExecutionReport:
-    """Minimal identity/status projection from one exact executions report."""
+    """Exact order/status report with complete economics for trade events."""
 
     order_id: str
     exec_type: str
     order_status: str | None
     client_order_id: str | None = None
     exec_id: str | None = None
+    ext_exec_id: str | None = None
+    symbol: str | None = None
+    side: str | None = None
+    last_qty: Decimal | None = None
+    last_price: Decimal | None = None
+    cost: Decimal | None = None
+    fees: tuple[KrakenSpotExecutionFee, ...] = ()
+    fees_reported: bool = False
+    event_time: str | None = None
+    trade_id: int | None = None
+    margin_borrow: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -436,7 +557,12 @@ class KrakenSpotExecutionReport:
                 )
             object.__setattr__(self, "order_status", status)
 
-        for field_name in ("client_order_id", "exec_id"):
+        for field_name in (
+            "client_order_id",
+            "exec_id",
+            "ext_exec_id",
+            "symbol",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(
@@ -444,6 +570,96 @@ class KrakenSpotExecutionReport:
                     field_name,
                     _canonical_text(value, name=field_name),
                 )
+
+        side = self.side
+        if side is not None:
+            side = _canonical_text(side, name="side")
+            if side not in {"buy", "sell"}:
+                raise KrakenSpotStreamError(
+                    "Kraken execution report side must be buy or sell"
+                )
+            object.__setattr__(self, "side", side)
+
+        for field_name in ("last_qty", "last_price", "cost"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _bounded_decimal(
+                        value,
+                        name=field_name,
+                        positive=True,
+                    ),
+                )
+
+        if type(self.fees) is not tuple:
+            raise TypeError("fees must be an exact tuple")
+        if any(type(value) is not KrakenSpotExecutionFee for value in self.fees):
+            raise TypeError(
+                "fees must contain KrakenSpotExecutionFee"
+            )
+        if type(self.fees_reported) is not bool:
+            raise TypeError("fees_reported must be an exact boolean")
+        if self.fees and not self.fees_reported:
+            raise KrakenSpotStreamError(
+                "fee components require fees_reported=true"
+            )
+
+        if self.event_time is None:
+            raise KrakenSpotStreamError(
+                "Kraken execution report timestamp is required"
+            )
+        object.__setattr__(
+            self,
+            "event_time",
+            _rfc3339_text(self.event_time, name="timestamp"),
+        )
+
+        if self.trade_id is not None:
+            if (
+                type(self.trade_id) is not int
+                or self.trade_id < 0
+            ):
+                raise KrakenSpotStreamError(
+                    "trade_id must be a non-negative integer"
+                )
+        if self.margin_borrow is not None and type(self.margin_borrow) is not bool:
+            raise KrakenSpotStreamError(
+                "margin_borrow must be an exact boolean when present"
+            )
+
+        if exec_type != "trade" and (
+            self.exec_id is not None
+            or self.ext_exec_id is not None
+            or self.last_qty is not None
+            or self.last_price is not None
+            or self.cost is not None
+            or self.fees
+            or self.fees_reported
+            or self.trade_id is not None
+            or self.margin_borrow is not None
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken non-trade report contains trade-only economics"
+            )
+
+    @property
+    def trade_economics_complete(self) -> bool:
+        """Whether this trade report carries the full immediate economics slice."""
+
+        if self.exec_type != "trade":
+            return False
+        return (
+            self.exec_id is not None
+            and self.symbol is not None
+            and self.side is not None
+            and self.last_qty is not None
+            and self.last_price is not None
+            and self.cost is not None
+            and self.trade_id is not None
+            and self.fees_reported
+        )
 
 
 @dataclass(frozen=True)
@@ -475,8 +691,7 @@ class KrakenSpotExecutionFrame:
             )
         object.__setattr__(self, "environment", environment)
         if (
-            isinstance(self.connection_generation, bool)
-            or not isinstance(self.connection_generation, int)
+            type(self.connection_generation) is not int
             or self.connection_generation < 1
         ):
             raise KrakenSpotStreamError(
@@ -494,17 +709,16 @@ class KrakenSpotExecutionFrame:
         object.__setattr__(self, "frame_type", frame_type)
 
         if (
-            isinstance(self.sequence, bool)
-            or not isinstance(self.sequence, int)
+            type(self.sequence) is not int
             or self.sequence < 0
         ):
             raise KrakenSpotStreamError(
                 "Kraken executions sequence must be a non-negative integer"
             )
-        if not isinstance(self.reports, tuple):
+        if type(self.reports) is not tuple:
             raise TypeError("reports must be a tuple")
         if any(
-            not isinstance(report, KrakenSpotExecutionReport)
+            type(report) is not KrakenSpotExecutionReport
             for report in self.reports
         ):
             raise TypeError(
@@ -550,7 +764,7 @@ def parse_execution_frame(
             "Kraken executions frame type must be snapshot or update"
         )
     sequence = raw.get("sequence")
-    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+    if type(sequence) is not int or sequence < 0:
         raise KrakenSpotStreamError(
             "Kraken executions sequence must be a non-negative integer"
         )
@@ -577,6 +791,52 @@ def parse_execution_frame(
             raise KrakenSpotStreamError(
                 f"Kraken executions data[{index}] lacks exec_type"
             )
+        if raw_report.get("timestamp") is None:
+            raise KrakenSpotStreamError(
+                f"Kraken executions data[{index}] lacks timestamp"
+            )
+        if (
+            type(exec_type) is str
+            and exec_type in _ALLOWED_EXEC_TYPES
+            and exec_type != "trade"
+        ):
+            trade_only_fields = sorted(
+                field_name
+                for field_name in _TRADE_ONLY_EXECUTION_FIELDS
+                if raw_report.get(field_name) is not None
+            )
+            if trade_only_fields:
+                raise KrakenSpotStreamError(
+                    "Kraken non-trade report contains trade-only economics: "
+                    + ", ".join(trade_only_fields)
+                )
+        raw_fees = raw_report.get("fees")
+        fees: tuple[KrakenSpotExecutionFee, ...] = ()
+        if raw_fees is not None:
+            if type(raw_fees) is not list:
+                raise KrakenSpotStreamError(
+                    f"Kraken executions data[{index}].fees must be an array"
+                )
+            parsed_fees: list[KrakenSpotExecutionFee] = []
+            for fee_index, raw_fee in enumerate(raw_fees):
+                if not isinstance(raw_fee, Mapping):
+                    raise KrakenSpotStreamError(
+                        f"Kraken executions data[{index}].fees[{fee_index}] "
+                        "must be an object"
+                    )
+                if "asset" not in raw_fee or "qty" not in raw_fee:
+                    raise KrakenSpotStreamError(
+                        f"Kraken executions data[{index}].fees[{fee_index}] "
+                        "lacks asset or qty"
+                    )
+                parsed_fees.append(
+                    KrakenSpotExecutionFee(
+                        asset=raw_fee.get("asset"),
+                        quantity=raw_fee.get("qty"),
+                    )
+                )
+            fees = tuple(parsed_fees)
+
         reports.append(
             KrakenSpotExecutionReport(
                 order_id=order_id,
@@ -584,6 +844,17 @@ def parse_execution_frame(
                 order_status=raw_report.get("order_status"),
                 client_order_id=raw_report.get("cl_ord_id"),
                 exec_id=raw_report.get("exec_id"),
+                ext_exec_id=raw_report.get("ext_exec_id"),
+                symbol=raw_report.get("symbol"),
+                side=raw_report.get("side"),
+                last_qty=raw_report.get("last_qty"),
+                last_price=raw_report.get("last_price"),
+                cost=raw_report.get("cost"),
+                fees=fees,
+                fees_reported=raw_fees is not None,
+                event_time=raw_report.get("timestamp"),
+                trade_id=raw_report.get("trade_id"),
+                margin_borrow=raw_report.get("margin_borrow"),
             )
         )
 
@@ -631,6 +902,8 @@ class KrakenSpotStreamRecoveryEvidence:
     phase: str
     subscription_binding_evidence_ref: str | None
     subscription_ack_evidence_ref: str | None
+    subscription_maxratecount: int | None
+    subscription_warnings: tuple[str, ...]
     snapshot_sequence: int | None
     last_sequence: int | None
     snapshot_evidence_ref: str | None
@@ -677,8 +950,7 @@ class KrakenSpotExecutionStreamRecovery:
                 "Kraken Spot stream recovery permits LIVE only"
             )
         if (
-            isinstance(max_buffered_updates, bool)
-            or not isinstance(max_buffered_updates, int)
+            type(max_buffered_updates) is not int
             or max_buffered_updates < 1
             or max_buffered_updates > 100_000
         ):
@@ -691,6 +963,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.DISCONNECTED
         self._subscription_binding_evidence_ref: str | None = None
         self._subscription_ack_evidence_ref: str | None = None
+        self._subscription_maxratecount: int | None = None
+        self._subscription_warnings: tuple[str, ...] = ()
         self._snapshot_sequence: int | None = None
         self._last_sequence: int | None = None
         self._snapshot_evidence_ref: str | None = None
@@ -710,6 +984,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.AWAITING_SUBSCRIPTION_ACK
         self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
+        self._subscription_maxratecount = None
+        self._subscription_warnings = ()
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -729,6 +1005,8 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.DISCONNECTED
         self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
+        self._subscription_maxratecount = None
+        self._subscription_warnings = ()
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -747,10 +1025,7 @@ class KrakenSpotExecutionStreamRecovery:
     ) -> None:
         """Require an exact successful ACK before accepting a snapshot."""
 
-        if not isinstance(
-            acknowledgement,
-            KrakenSpotExecutionsSubscriptionAck,
-        ):
+        if type(acknowledgement) is not KrakenSpotExecutionsSubscriptionAck:
             raise TypeError(
                 "acknowledgement must be KrakenSpotExecutionsSubscriptionAck"
             )
@@ -773,6 +1048,8 @@ class KrakenSpotExecutionStreamRecovery:
             acknowledgement.subscription_binding.evidence_ref
         )
         self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self._subscription_maxratecount = acknowledgement.maxratecount
+        self._subscription_warnings = acknowledgement.warnings
         self._crosscheck_evidence_refs.append(
             acknowledgement.subscription_binding.evidence_ref
         )
@@ -781,7 +1058,7 @@ class KrakenSpotExecutionStreamRecovery:
         self.phase = self.AWAITING_SNAPSHOT
 
     def _require_scope(self, frame: KrakenSpotExecutionFrame) -> None:
-        if not isinstance(frame, KrakenSpotExecutionFrame):
+        if type(frame) is not KrakenSpotExecutionFrame:
             raise TypeError("frame must be KrakenSpotExecutionFrame")
         if (
             frame.account_id != self.account_id
@@ -839,6 +1116,10 @@ class KrakenSpotExecutionStreamRecovery:
             if frame.frame_type != "snapshot":
                 raise KrakenSpotStreamError(
                     "Kraken stream generation requires snapshot before updates"
+                )
+            if any(report.exec_type == "trade" for report in frame.reports):
+                raise KrakenSpotStreamError(
+                    "Kraken snap_trades=false snapshot contains trade events"
                 )
             terminal = sorted(
                 {
@@ -951,6 +1232,8 @@ class KrakenSpotExecutionStreamRecovery:
                 self._subscription_binding_evidence_ref
             ),
             subscription_ack_evidence_ref=self._subscription_ack_evidence_ref,
+            subscription_maxratecount=self._subscription_maxratecount,
+            subscription_warnings=self._subscription_warnings,
             snapshot_sequence=self._snapshot_sequence,
             last_sequence=self._last_sequence,
             snapshot_evidence_ref=self._snapshot_evidence_ref,

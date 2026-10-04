@@ -1,5 +1,6 @@
 import hashlib
 import unittest
+from decimal import Decimal
 
 from mvp.autotrade_mvp.kraken_spot_stream import (
     KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION,
@@ -27,13 +28,37 @@ def frame_bytes(
                 "order_status": "new",
             }
         ]
+    normalized_reports = []
+    for report in reports:
+        normalized = dict(report)
+        normalized.setdefault(
+            "timestamp",
+            "2026-10-04T05:00:00.123456Z",
+        )
+        if normalized.get("exec_type") == "trade":
+            normalized.setdefault("symbol", "BTC/USD")
+            normalized.setdefault("side", "buy")
+            normalized.setdefault("last_qty", 1)
+            normalized.setdefault("last_price", 25000)
+            normalized.setdefault("cost", 25000)
+            normalized.setdefault("trade_id", 1)
+            normalized.setdefault("margin_borrow", False)
+            normalized.setdefault(
+                "fees",
+                [{"asset": "USD", "qty": 1}],
+            )
+            normalized.setdefault(
+                "timestamp",
+                "2026-10-04T05:00:00.123456Z",
+            )
+        normalized_reports.append(normalized)
     import json
 
     return json.dumps(
         {
             "channel": channel,
             "type": frame_type,
-            "data": reports,
+            "data": normalized_reports,
             "sequence": sequence,
         },
         sort_keys=True,
@@ -84,6 +109,33 @@ def subscription_binding(
 
 
 class KrakenSpotExecutionFrameTests(unittest.TestCase):
+    def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile text normalization")
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                touched.append("lt")
+                raise AssertionError("hostile integer comparison")
+
+        with self.assertRaisesRegex(KrakenSpotStreamError, "account_id"):
+            KrakenSpotExecutionsSubscriptionBinding.create(
+                account_id=HostileText("spot-live-1"),
+                connection_generation=1,
+                req_id=7,
+            )
+        with self.assertRaisesRegex(KrakenSpotStreamError, "connection_generation"):
+            KrakenSpotExecutionsSubscriptionBinding.create(
+                account_id="spot-live-1",
+                connection_generation=HostileInt(1),
+                req_id=7,
+            )
+        self.assertEqual(touched, [])
+
     def test_subscription_profile_requires_open_order_snapshot_without_trade_snapshot(self):
         self.assertEqual(
             dict(KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION),
@@ -132,6 +184,326 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertEqual(report.exec_id, "E-1")
         self.assertEqual(report.exec_type, "trade")
         self.assertEqual(report.order_status, "partially_filled")
+        self.assertEqual(report.symbol, "BTC/USD")
+        self.assertEqual(report.side, "buy")
+        self.assertEqual(report.last_qty, Decimal("1"))
+        self.assertEqual(report.last_price, Decimal("25000"))
+        self.assertEqual(report.cost, Decimal("25000"))
+        self.assertEqual(report.trade_id, 1)
+        self.assertFalse(report.margin_borrow)
+        self.assertEqual(len(report.fees), 1)
+        self.assertTrue(report.fees_reported)
+        self.assertTrue(report.trade_economics_complete)
+        self.assertEqual(report.fees[0].asset, "USD")
+        self.assertEqual(report.fees[0].quantity, Decimal("1"))
+        self.assertEqual(report.event_time, "2026-10-04T05:00:00.123456Z")
+
+    def test_trade_frame_retains_exact_decimal_economics_from_provider_bytes(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-EXACT","cl_ord_id":"client-exact",'
+            b'"exec_id":"E-EXACT","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD",'
+            b'"side":"sell","last_qty":0.00000001,'
+            b'"last_price":12345.67890123,"cost":0.0001234567890123,'
+            b'"fees":[{"asset":"USD","qty":0.00000123}],'
+            b'"timestamp":"2026-10-04T05:00:00.123456Z","trade_id":42,'
+            b'"margin_borrow":false}],'
+            b'"sequence":2}'
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+
+        self.assertEqual(report.exec_id, "E-EXACT")
+        self.assertEqual(report.symbol, "BTC/USD")
+        self.assertEqual(report.side, "sell")
+        self.assertEqual(report.last_qty, Decimal("0.00000001"))
+        self.assertEqual(report.last_price, Decimal("12345.67890123"))
+        self.assertEqual(report.cost, Decimal("0.0001234567890123"))
+        self.assertEqual(report.trade_id, 42)
+        self.assertFalse(report.margin_borrow)
+        self.assertEqual(report.fees[0].asset, "USD")
+        self.assertEqual(report.fees[0].quantity, Decimal("0.00000123"))
+        self.assertEqual(report.event_time, "2026-10-04T05:00:00.123456Z")
+        self.assertEqual(report.trade_id, 42)
+
+    def test_trade_frame_preserves_incomplete_economics_for_reconciliation(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-INCOMPLETE","exec_id":"E-INCOMPLETE",'
+            b'"exec_type":"trade","order_status":"partially_filled",'
+            b'"symbol":"BTC/USD","side":"buy","last_qty":1,'
+            b'"last_price":25000,"cost":25000,"trade_id":7,"margin_borrow":false,'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],'
+            b'"sequence":3}'
+        )
+        frame = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        )
+        report = frame.reports[0]
+        self.assertEqual(report.exec_id, "E-INCOMPLETE")
+        self.assertEqual(report.fees, ())
+        self.assertFalse(report.fees_reported)
+        self.assertFalse(report.trade_economics_complete)
+        self.assertEqual(frame.response_bytes, raw)
+
+    def test_trade_frame_rejects_string_encoded_numeric_fields(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-STRING","exec_id":"E-STRING","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD","side":"buy",'
+            b'"last_qty":"1.0","last_price":25000,"cost":25000,"trade_id":8,'
+            b'"margin_borrow":false,"fees":[{"asset":"USD","qty":1}],'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],"sequence":4}'
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "last_qty must be an exact JSON number",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_trade_frame_marks_missing_conditional_fields_incomplete(self):
+        cases = (
+            (
+                {
+                    "order_id": "O-COST",
+                    "exec_id": "E-COST",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "cost": None,
+                },
+                "cost",
+            ),
+            (
+                {
+                    "order_id": "O-ID",
+                    "exec_id": "E-ID",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "trade_id": None,
+                },
+                "trade_id",
+            ),
+        )
+        for report_input, missing_field in cases:
+            with self.subTest(missing_field=missing_field):
+                report = parse_execution_frame(
+                    frame_bytes(reports=[report_input]),
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                ).reports[0]
+                self.assertIsNone(getattr(report, missing_field))
+                self.assertFalse(report.trade_economics_complete)
+
+    def test_trade_frame_rejects_non_boolean_margin_flag_when_present(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":[{"order_id":"O-MARGIN",'
+            b'"exec_id":"E-MARGIN","exec_type":"trade","order_status":"partially_filled",'
+            b'"symbol":"BTC/USD","side":"buy","last_qty":1,"last_price":25000,"cost":25000,'
+            b'"fees":[{"asset":"USD","qty":1}],"timestamp":"2026-10-04T05:00:00Z",'
+            b'"trade_id":10,"margin_borrow":1}],"sequence":7}'
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "margin_borrow must be an exact boolean",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_non_trade_report_cannot_carry_trade_only_economics(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-STATUS",
+                    "exec_type": "status",
+                    "order_status": "new",
+                    "exec_id": "E-FORGED",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "non-trade report contains trade-only economics",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_trade_frame_retains_optional_external_execution_identity(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-EXT",
+                    "exec_id": "E-EXT",
+                    "ext_exec_id": "00000000-0000-0000-0000-000000000042",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                }
+            ],
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+        self.assertEqual(
+            report.ext_exec_id,
+            "00000000-0000-0000-0000-000000000042",
+        )
+
+    def test_non_trade_tolerates_null_conditional_trade_fields(self):
+        for field_name in (
+            "cost",
+            "ext_exec_id",
+            "fees",
+            "last_price",
+            "last_qty",
+            "margin_borrow",
+            "trade_id",
+        ):
+            with self.subTest(field_name=field_name):
+                report = parse_execution_frame(
+                    frame_bytes(
+                        reports=[
+                            {
+                                "order_id": "O-STATUS-NULL",
+                                "exec_type": "status",
+                                "order_status": "new",
+                                field_name: None,
+                            }
+                        ],
+                    ),
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                ).reports[0]
+                self.assertEqual(report.exec_type, "status")
+
+    def test_every_execution_report_requires_timestamp(self):
+        raw = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-NO-TIME","exec_type":"status","order_status":"new"}],'
+            b'"sequence":8}'
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "lacks timestamp",
+        ):
+            parse_execution_frame(
+                raw,
+                account_id="spot-live-1",
+                connection_generation=1,
+            )
+
+    def test_explicit_empty_fee_array_is_reported_not_missing(self):
+        report = parse_execution_frame(
+            frame_bytes(
+                reports=[
+                    {
+                        "order_id": "O-ZERO-FEE",
+                        "exec_id": "E-ZERO-FEE",
+                        "exec_type": "trade",
+                        "order_status": "partially_filled",
+                        "fees": [],
+                    }
+                ],
+            ),
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+        self.assertEqual(report.fees, ())
+        self.assertTrue(report.fees_reported)
+        self.assertTrue(report.trade_economics_complete)
+
+    def test_trade_timestamp_requires_rfc3339_lexical_form(self):
+        invalid = (
+            "2026-10-04 05:00:00+00:00",
+            "2026-10-04T05:00:00",
+            "2026-10-04T05:00:00z",
+        )
+        for timestamp in invalid:
+            with self.subTest(timestamp=timestamp):
+                raw = frame_bytes(
+                    reports=[
+                        {
+                            "order_id": "O-TIME",
+                            "exec_id": "E-TIME",
+                            "exec_type": "trade",
+                            "order_status": "partially_filled",
+                            "timestamp": timestamp,
+                        }
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    KrakenSpotStreamError,
+                    "timestamp must be an RFC3339 timestamp",
+                ):
+                    parse_execution_frame(
+                        raw,
+                        account_id="spot-live-1",
+                        connection_generation=1,
+                    )
+
+    def test_trade_timestamp_accepts_rfc3339_offset(self):
+        raw = frame_bytes(
+            reports=[
+                {
+                    "order_id": "O-OFFSET",
+                    "exec_id": "E-OFFSET",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "timestamp": "2026-10-04T07:00:00+02:00",
+                }
+            ],
+        )
+        report = parse_execution_frame(
+            raw,
+            account_id="spot-live-1",
+            connection_generation=1,
+        ).reports[0]
+        self.assertEqual(
+            report.event_time,
+            "2026-10-04T07:00:00+02:00",
+        )
+
+    def test_json_numeric_tokens_use_shared_exact_resource_envelope(self):
+        huge_integer = b"9" * 1000
+        raw_sequence = (
+            b'{"channel":"executions","type":"snapshot","data":[],"sequence":'
+            + huge_integer
+            + b"}"
+        )
+        huge_exponent = (
+            b'{"channel":"executions","type":"update","data":['
+            b'{"order_id":"O-HUGE","exec_id":"E-HUGE","exec_type":"trade",'
+            b'"order_status":"partially_filled","symbol":"BTC/USD","side":"buy",'
+            b'"last_qty":1e999999,"last_price":25000,'
+            b'"fees":[{"asset":"USD","qty":1}],'
+            b'"timestamp":"2026-10-04T05:00:00Z"}],"sequence":1}'
+        )
+        for raw in (raw_sequence, huge_exponent):
+            with self.subTest(raw_prefix=raw[:80]), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                "numeric token exceeds the exact resource envelope",
+            ):
+                parse_execution_frame(
+                    raw,
+                    account_id="spot-live-1",
+                    connection_generation=1,
+                )
 
     def test_byte_distinct_frames_have_distinct_evidence(self):
         compact = (
@@ -244,6 +616,49 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         self.assertNotIn(b"token", acknowledgement.response_bytes.lower())
         self.assertNotIn("token", binding.evidence_ref)
 
+    def test_subscription_ack_retains_rate_ceiling_and_schema_warnings(self):
+        binding = subscription_binding()
+        raw = (
+            b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":180,"warnings":["field deprecation scheduled"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        self.assertEqual(acknowledgement.maxratecount, 180)
+        self.assertEqual(
+            acknowledgement.warnings,
+            ("field deprecation scheduled",),
+        )
+
+    def test_subscription_ack_rejects_malformed_rate_ceiling_or_warnings(self):
+        binding = subscription_binding()
+        cases = (
+            (
+                b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+                b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+                b'"maxratecount":true}}',
+                "maxratecount",
+            ),
+            (
+                b'{"method":"subscribe","req_id":7,"success":true,"result":{'
+                b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+                b'"warnings":"deprecated"}}',
+                "warnings",
+            ),
+        )
+        for raw, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                message,
+            ):
+                parse_executions_subscription_ack(
+                    raw,
+                    subscription_binding=binding,
+                )
+
     def test_subscription_binding_rejects_noncanonical_profile(self):
         valid = subscription_binding()
         with self.assertRaisesRegex(
@@ -351,6 +766,34 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             connection_generation=connection_generation,
         )
 
+    def test_recovery_handoff_retains_subscription_rate_and_warning_evidence(self):
+        recovery = self.make_recovery()
+        generation = recovery.begin_connection()
+        binding = subscription_binding(
+            connection_generation=generation,
+            req_id=77,
+        )
+        raw = (
+            b'{"method":"subscribe","req_id":77,"success":true,"result":{'
+            b'"channel":"executions","snap_orders":true,"snap_trades":false,'
+            b'"maxratecount":240,"warnings":["schema change pending"]}}'
+        )
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            subscription_binding=binding,
+        )
+        recovery.apply_subscription_ack(acknowledgement)
+        evidence = recovery.evidence()
+        self.assertEqual(evidence.subscription_maxratecount, 240)
+        self.assertEqual(
+            evidence.subscription_warnings,
+            ("schema change pending",),
+        )
+        recovery.disconnect()
+        reset = recovery.evidence()
+        self.assertIsNone(reset.subscription_maxratecount)
+        self.assertEqual(reset.subscription_warnings, ())
+
     def test_generation_requires_fresh_snapshot_and_never_grants_ready(self):
         recovery = self.make_recovery()
         generation = recovery.begin_connection()
@@ -433,6 +876,31 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "snapshot_requires_rest_crosscheck",
         )
         self.assertFalse(evidence.trading_ready)
+
+    def test_snapshot_rejects_trade_events_when_snap_trades_is_false(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        self.acknowledge(recovery)
+        trade_snapshot = self.parse(
+            recovery=recovery,
+            frame_type="snapshot",
+            sequence=1,
+            reports=[
+                {
+                    "order_id": "O-TRADE-SNAPSHOT",
+                    "exec_id": "E-TRADE-SNAPSHOT",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                }
+            ],
+        )
+        before = recovery.evidence()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "snap_trades=false snapshot contains trade events",
+        ):
+            recovery.apply_frame(trade_snapshot)
+        self.assertEqual(recovery.evidence(), before)
 
     def test_snapshot_rejects_terminal_orders_under_snap_orders_contract(self):
         recovery = self.make_recovery()

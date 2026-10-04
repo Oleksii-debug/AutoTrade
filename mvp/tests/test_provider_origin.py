@@ -177,6 +177,51 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     )
                 prepare_direct.assert_not_called()
 
+    def test_direct_origin_rejects_cross_store_authority_before_prepare_or_transport(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                _journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            foreign_store = JournalStore(Path(directory) / "foreign-journal.sqlite3")
+            origin = self._origin(foreign_store, directory)
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct, patch.object(
+                BybitV5AuthenticatedReadTransport,
+                "__call__",
+                autospec=True,
+            ) as transport_call:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "share exact C/Q JournalStore",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+                transport_call.assert_not_called()
+            self.assertEqual(
+                foreign_store.whole_store_state_cut()["journal_sequence"],
+                0,
+            )
+
     def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
         class Resolver:
             @contextmanager

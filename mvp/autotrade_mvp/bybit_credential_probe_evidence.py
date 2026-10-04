@@ -87,6 +87,7 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PROVIDER_ECHO_ATTESTATION = object()
+_PROVIDER_TRANSPORT_ATTESTATION = object()
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -405,9 +406,16 @@ class BybitCredentialProbeWireResponse:
     http_status: int
     response: InitVar[dict[str, Any]]
     api_key_echo_confirmed: bool = False
+    _provider_transport_attestation: InitVar[object | None] = None
     _provider_echo_attestation: InitVar[object | None] = None
     ret_code: int = field(init=False)
     response_sha256: str = field(init=False)
+    provider_transport_confirmed: bool = field(init=False)
+    _provider_transport_proof: object | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _provider_echo_proof: object | None = field(
         init=False,
         repr=False,
@@ -417,6 +425,7 @@ class BybitCredentialProbeWireResponse:
     def __post_init__(
         self,
         response: dict[str, Any],
+        _provider_transport_attestation: object | None,
         _provider_echo_attestation: object | None,
     ) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
@@ -428,6 +437,20 @@ class BybitCredentialProbeWireResponse:
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
         ret_code, response_sha256 = _response_digest(response)
+        if _provider_transport_attestation not in {
+            None,
+            _PROVIDER_TRANSPORT_ATTESTATION,
+        }:
+            raise ProviderCoreError(
+                "Bybit credential probe provider transport attestation is invalid"
+            )
+        provider_transport_confirmed = (
+            _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
+        )
+        if ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential probe requires direct provider transport attestation"
+            )
         if ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential probe requires exact API key echo confirmation"
@@ -446,6 +469,16 @@ class BybitCredentialProbeWireResponse:
             )
         object.__setattr__(self, "ret_code", ret_code)
         object.__setattr__(self, "response_sha256", response_sha256)
+        object.__setattr__(
+            self,
+            "provider_transport_confirmed",
+            provider_transport_confirmed,
+        )
+        object.__setattr__(
+            self,
+            "_provider_transport_proof",
+            _provider_transport_attestation,
+        )
         object.__setattr__(self, "_provider_echo_proof", _provider_echo_attestation)
 
 
@@ -466,10 +499,16 @@ class BybitCredentialProbeEvidence:
     response_sha256: str
     observed_at: str
     api_key_echo_confirmed: bool = False
+    _provider_transport_attestation: InitVar[object | None] = None
     _provider_echo_attestation: InitVar[object | None] = None
+    provider_transport_confirmed: bool = field(init=False)
     classification: BybitCredentialNonAcceptance = field(init=False)
 
-    def __post_init__(self, _provider_echo_attestation: object | None) -> None:
+    def __post_init__(
+        self,
+        _provider_transport_attestation: object | None,
+        _provider_echo_attestation: object | None,
+    ) -> None:
         credential_handle = _snapshot_credential_handle(self.credential_handle)
         object.__setattr__(self, "credential_handle", credential_handle)
         if credential_handle.provider != "BYBIT":
@@ -528,6 +567,20 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe API key echo flag must be exact boolean"
             )
+        if _provider_transport_attestation not in {
+            None,
+            _PROVIDER_TRANSPORT_ATTESTATION,
+        }:
+            raise ProviderCoreError(
+                "Bybit credential evidence provider transport attestation is invalid"
+            )
+        provider_transport_confirmed = (
+            _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
+        )
+        if self.ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential evidence requires direct provider transport attestation"
+            )
         if self.ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential evidence requires API key echo confirmation"
@@ -555,14 +608,23 @@ class BybitCredentialProbeEvidence:
             raise ProviderCoreError(
                 "Bybit credential probe observed_at cannot precede signed request timestamp"
             )
-        classification = _classify_query_api_credential_nonacceptance(
-            ret_code=self.ret_code,
-            product_family=product_family,
-            response_surface=response_surface,
+        classification = (
+            _classify_query_api_credential_nonacceptance(
+                ret_code=self.ret_code,
+                product_family=product_family,
+                response_surface=response_surface,
+            )
+            if provider_transport_confirmed
+            else BybitCredentialNonAcceptance.INCONCLUSIVE
         )
         object.__setattr__(self, "request_timestamp_ms", request_timestamp_ms)
         object.__setattr__(self, "recv_window_ms", recv_window_ms)
         object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(
+            self,
+            "provider_transport_confirmed",
+            provider_transport_confirmed,
+        )
         object.__setattr__(self, "classification", classification)
 
     @property
@@ -604,6 +666,7 @@ def bybit_credential_probe_receipt_metadata(
         "response_sha256": evidence.response_sha256,
         "observed_at": evidence.observed_at,
         "api_key_echo_confirmed": evidence.api_key_echo_confirmed,
+        "provider_transport_confirmed": evidence.provider_transport_confirmed,
         "classification": evidence.classification.value,
         "send_authority": False,
         "retirement_authority": False,
@@ -1012,6 +1075,9 @@ def execute_bybit_credential_probe_wire_query(
         http_status=raw_response.http_status,
         response=decoded,
         api_key_echo_confirmed=api_key_echo_confirmed,
+        _provider_transport_attestation=(
+            _PROVIDER_TRANSPORT_ATTESTATION if direct_provider_transport else None
+        ),
         _provider_echo_attestation=(
             _PROVIDER_ECHO_ATTESTATION if api_key_echo_confirmed else None
         ),
@@ -1108,6 +1174,14 @@ def probe_bybit_credential_with_vault(
             )
         if (
             wire_response.ret_code == 0
+            and wire_response._provider_transport_proof
+            is not _PROVIDER_TRANSPORT_ATTESTATION
+        ):
+            raise ProviderCoreError(
+                "successful Bybit credential wire result lost provider transport attestation"
+            )
+        if (
+            wire_response.ret_code == 0
             and wire_response._provider_echo_proof is not _PROVIDER_ECHO_ATTESTATION
         ):
             raise ProviderCoreError(
@@ -1134,6 +1208,7 @@ def probe_bybit_credential_with_vault(
             response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
             api_key_echo_confirmed=wire_response.api_key_echo_confirmed,
+            _provider_transport_attestation=wire_response._provider_transport_proof,
             _provider_echo_attestation=wire_response._provider_echo_proof,
         )
 

@@ -22,6 +22,11 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     canonical_packaged_qualification_trust_policy_digest,
 )
+from tools.stage_windows_foundation import FoundationStagingError
+from tools.stage_windows_release_runtime import (
+    _RELEASE_RUNTIME_REQUIRED,
+    stage_windows_release_runtime,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -217,7 +222,7 @@ def _looks_like_credential_vault(data: bytes) -> bool:
     """Detect the existing AutoTrade protected-vault shape by content.
 
     Filename/path gates are necessary but insufficient: a copied credential
-    vault can be renamed before staging.  Detection intentionally requires the
+    vault can be renamed before staging. Detection intentionally requires the
     characteristic owner/ciphertext record shape to avoid treating arbitrary
     JSON documents as secrets.
     """
@@ -388,6 +393,86 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
         "sha256": "sha256:" + sha256(data).hexdigest(),
         "size": len(data),
     }
+
+
+def _require_release_runtime_snapshot_binding(
+    *,
+    files: list[tuple[str, Path, bytes]],
+    composition: dict[str, object],
+    staged_expected: tuple[dict[str, str], ...],
+) -> None:
+    """Bind post-stage collection to the exact-source release TCB snapshot."""
+
+    if type(staged_expected) is not tuple or len(staged_expected) != len(
+        _RELEASE_RUNTIME_REQUIRED
+    ):
+        raise BundleError(
+            "release runtime stager did not return the canonical 37-leaf snapshot"
+        )
+    required = {"component_id", "kind", "path", "version", "sha256"}
+    descriptor_by_path = {
+        descriptor.path: descriptor for descriptor in _RELEASE_RUNTIME_REQUIRED
+    }
+    validated_expected: list[dict[str, str]] = []
+    expected_paths: set[str] = set()
+    for index, expected in enumerate(staged_expected):
+        if type(expected) is not dict or set(expected) != required:
+            raise BundleError(
+                f"release runtime snapshot record {index} is not canonical"
+            )
+        if any(
+            type(expected[field]) is not str or not expected[field]
+            for field in ("component_id", "kind", "path", "version", "sha256")
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid identity"
+            )
+        descriptor = descriptor_by_path.get(expected["path"])
+        if (
+            descriptor is None
+            or expected["component_id"] != descriptor.component_id
+            or expected["kind"] != descriptor.kind
+            or expected["version"] != "source-controlled"
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} is not a canonical descriptor"
+            )
+        _windows_path_key(expected["path"])
+        if expected["path"] in expected_paths:
+            raise BundleError("release runtime snapshot contains duplicate paths")
+        expected_paths.add(expected["path"])
+        if CANONICAL_SHA256.fullmatch(expected["sha256"]) is None:
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid digest"
+            )
+        validated_expected.append(expected)
+    if expected_paths != set(descriptor_by_path):
+        raise BundleError(
+            "release runtime snapshot does not cover the canonical descriptor set"
+        )
+
+    collected = {
+        relative: "sha256:" + sha256(data).hexdigest()
+        for relative, _, data in files
+    }
+    raw_components = composition.get("components")
+    if not isinstance(raw_components, list):
+        raise BundleError("release composition components are unavailable")
+    by_path = {
+        item["path"]: item
+        for item in raw_components
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for expected in validated_expected:
+        path = expected["path"]
+        if collected.get(path) != expected["sha256"]:
+            raise BundleError(
+                f"release runtime changed after exact-source staging: {path}"
+            )
+        if by_path.get(path) != expected:
+            raise BundleError(
+                f"release composition changed after exact-source staging: {path}"
+            )
 
 
 def _canonical_digest(value: object, *, name: str) -> str:
@@ -588,7 +673,7 @@ def _load_composition(
     # Exact Git objects remain the qualification trust authority for checkout/CI.
     # A source-controlled packaged-policy digest is only a composition inventory
     # constraint: it can require the exact policy bytes to be shipped, but cannot
-    # authenticate the installed source SHA.  Terminal non-Git verification stays
+    # authenticate the installed source SHA. Terminal non-Git verification stays
     # unavailable until a separate signed/delivered source-identity authority is
     # wired into qualification_attestation.
     try:
@@ -642,7 +727,6 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     info.external_attr = 0o100644 << 16
     info.flag_bits = 0
     archive.writestr(info, data)
-
 
 
 def _validate_output_destination(path: Path, *, name: str) -> None:
@@ -725,6 +809,7 @@ def build_bundle(
             + ", ".join(sorted(codes))
         )
 
+    release_runtime_expected: tuple[dict[str, str], ...] = ()
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
@@ -738,6 +823,21 @@ def build_bundle(
             raise BundleError(
                 "release provenance source_sha does not match bundle source_sha"
             )
+        if composition_path is None:
+            raise BundleError(
+                "release bundle requires an exact Windows composition manifest"
+            )
+        try:
+            release_runtime_expected = stage_windows_release_runtime(
+                staging=staging,
+                composition_path=composition_path,
+                expected_source_sha=normalized_sha,
+                source_root=ROOT,
+            )
+        except FoundationStagingError as error:
+            raise BundleError(
+                f"release source-controlled runtime staging failed closed: {error}"
+            ) from error
 
     files = _collect(staging)
     composition = None
@@ -748,6 +848,12 @@ def build_bundle(
             source_sha=normalized_sha,
             files=files,
         )
+        if mode == "release":
+            _require_release_runtime_snapshot_binding(
+                files=files,
+                composition=composition,
+                staged_expected=release_runtime_expected,
+            )
     elif mode == "release":
         raise BundleError(
             "release bundle requires an exact Windows composition manifest"

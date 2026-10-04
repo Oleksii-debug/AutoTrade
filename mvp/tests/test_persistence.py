@@ -28,6 +28,55 @@ def event(event_id="evt-1", version=1, payload=None):
 
 
 class JournalStoreTests(unittest.TestCase):
+    def test_event_append_freezes_mutating_payload_once(self):
+        class MutatingPayload(dict):
+            def __init__(self):
+                super().__init__(kind="fill", quantity="1")
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    self["quantity"] = "999"
+                return items
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            payload = MutatingPayload()
+            envelope = {
+                "event_id": "evt-freeze",
+                "event_type": "ExecutionFillObserved",
+                "aggregate_type": "account",
+                "aggregate_id": "paper-1",
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest({"kind": "fill", "quantity": "1"}),
+                "committed_at": "2026-10-04T15:00:00+00:00",
+            }
+
+            self.assertTrue(
+                store.append_event(envelope, outbox_topic="events").inserted
+            )
+            self.assertEqual(payload["quantity"], "999")
+
+            loaded = JournalStore(path).load_events("account", "paper-1")
+            self.assertEqual(
+                loaded[0]["payload"],
+                {"kind": "fill", "quantity": "1"},
+            )
+            self.assertEqual(
+                loaded[0]["payload_hash"],
+                payload_digest({"kind": "fill", "quantity": "1"}),
+            )
+            pending = JournalStore(path).pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(
+                pending[0]["payload"]["payload"],
+                {"kind": "fill", "quantity": "1"},
+            )
+
     def test_event_and_outbox_commit_atomically_and_replay_idempotently(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

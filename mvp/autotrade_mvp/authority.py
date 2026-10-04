@@ -275,6 +275,7 @@ class Confirmation:
     action: str
     notional: Decimal
     expires_at: str
+    financial_binding_hash: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -304,6 +305,23 @@ class Confirmation:
         expires_at = _text(self.expires_at, name="expires_at")
         _instant(expires_at, name="confirmation.expires_at")
         object.__setattr__(self, "expires_at", expires_at)
+        if self.financial_binding_hash is not None:
+            binding = _text(
+                self.financial_binding_hash,
+                name="financial_binding_hash",
+            ).lower()
+            if (
+                not binding.startswith("sha256:")
+                or len(binding) != 71
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in binding[7:]
+                )
+            ):
+                raise ValueError(
+                    "financial_binding_hash must be a canonical SHA-256 digest"
+                )
+            object.__setattr__(self, "financial_binding_hash", binding)
 
 
 @dataclass(frozen=True)
@@ -331,6 +349,7 @@ class AdmissionRecord:
     risk_valid_until: str | None = None
     policy_version: int | None = None
     financial_command_id: str | None = None
+    requested_confirmation_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -370,11 +389,30 @@ class AdmissionRecord:
         admitted_at = _text(self.admitted_at, name="admitted_at")
         _instant(admitted_at, name="admitted_at")
         object.__setattr__(self, "admitted_at", admitted_at)
+        confirmation_id = None
         if self.confirmation_id is not None:
             confirmation_id = _text(self.confirmation_id, name="confirmation_id")
             if outcome != "ADMITTED":
                 raise ValueError("rejected admission cannot consume confirmation")
             object.__setattr__(self, "confirmation_id", confirmation_id)
+        requested_confirmation_id = self.requested_confirmation_id
+        if requested_confirmation_id is not None:
+            requested_confirmation_id = _text(
+                requested_confirmation_id,
+                name="requested_confirmation_id",
+            )
+        if confirmation_id is not None:
+            if requested_confirmation_id is None:
+                requested_confirmation_id = confirmation_id
+            elif requested_confirmation_id != confirmation_id:
+                raise ValueError(
+                    "consumed confirmation must match requested confirmation"
+                )
+        object.__setattr__(
+            self,
+            "requested_confirmation_id",
+            requested_confirmation_id,
+        )
         object.__setattr__(self, "reason", _text(self.reason, name="reason"))
         fingerprint = _text(
             self.request_fingerprint, name="request_fingerprint"
@@ -1272,6 +1310,54 @@ def _risk_intent_payload(intent: RiskIntent) -> dict[str, object]:
     }
 
 
+def _financial_confirmation_binding_hash(
+    *,
+    authority_policy_version: int,
+    risk_intent: RiskIntent,
+    risk_policy_fingerprint: str,
+    reservation_requirements,
+) -> str:
+    """Bind confirmation to the exact financial and risk envelope."""
+
+    if (
+        type(authority_policy_version) is not int
+        or authority_policy_version < 1
+    ):
+        raise ValueError("authority_policy_version must be positive")
+    fingerprint = _text(
+        risk_policy_fingerprint,
+        name="risk_policy_fingerprint",
+    ).lower()
+    if (
+        len(fingerprint) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in fingerprint
+        )
+    ):
+        raise ValueError("risk_policy_fingerprint must be a SHA-256 hex digest")
+    requirements = normalize_reservation_requirements(
+        reservation_requirements
+    )
+    payload = {
+        "schema_version": 1,
+        "authority_policy_version": authority_policy_version,
+        "risk_intent": _risk_intent_payload(risk_intent),
+        "risk_policy_fingerprint": fingerprint,
+        "reservation_requirements": reservation_requirements_payload(
+            requirements
+        ),
+    }
+    return "sha256:" + sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _durable_risk_intent_payload(value: object) -> dict[str, object]:
     expected = {
         "symbol",
@@ -1306,6 +1392,78 @@ def _durable_risk_intent_payload(value: object) -> dict[str, object]:
             "durable financial retry risk_intent is non-canonical"
         )
     return payload
+
+
+def _validate_confirmation_financial_binding(
+    *,
+    confirmation: Confirmation,
+    record: AdmissionRecord,
+    authority_policy_version: int,
+    durable_risk_intent: object,
+    authoritative_risk_snapshot: Mapping[str, object],
+    reservation_requirements,
+) -> None:
+    """Recompute a persisted confirmation binding from durable evidence."""
+
+    if confirmation.financial_binding_hash is None:
+        raise AuthorityConflict(
+            "durable confirmed admission lacks financial binding"
+        )
+    if (
+        record.confirmation_id != confirmation.confirmation_id
+        or confirmation.policy_id != record.policy_id
+        or confirmation.intent_hash != record.intent_hash
+        or confirmation.account_id != record.account_id
+        or confirmation.environment != record.environment
+        or confirmation.instrument_version != record.instrument_version
+        or confirmation.action != record.action
+        or confirmation.notional != record.notional
+    ):
+        raise AuthorityConflict(
+            "durable confirmed admission confirmation scope is inconsistent"
+        )
+    if _instant(
+        record.admitted_at,
+        name="admitted_at",
+    ) >= _instant(
+        confirmation.expires_at,
+        name="confirmation.expires_at",
+    ):
+        raise AuthorityConflict(
+            "durable confirmed admission used expired confirmation"
+        )
+    risk_intent_payload = _durable_risk_intent_payload(
+        durable_risk_intent
+    )
+    risk_intent = RiskIntent.create(
+        symbol=risk_intent_payload["symbol"],
+        side=risk_intent_payload["side"],
+        quantity=risk_intent_payload["quantity"],
+        price=risk_intent_payload["price"],
+        expected_state_version=risk_intent_payload[
+            "expected_state_version"
+        ],
+        reduce_only=risk_intent_payload["reduce_only"],
+        action=risk_intent_payload["action"],
+        instrument_type=risk_intent_payload["instrument_type"],
+    )
+    fingerprint = authoritative_risk_snapshot.get(
+        "risk_policy_fingerprint"
+    )
+    if not isinstance(fingerprint, str):
+        raise AuthorityConflict(
+            "durable confirmed admission lacks risk policy fingerprint"
+        )
+    expected = _financial_confirmation_binding_hash(
+        authority_policy_version=authority_policy_version,
+        risk_intent=risk_intent,
+        risk_policy_fingerprint=fingerprint,
+        reservation_requirements=reservation_requirements,
+    )
+    if confirmation.financial_binding_hash != expected:
+        raise AuthorityConflict(
+            "durable confirmed admission financial binding is inconsistent"
+        )
 
 
 def _risk_snapshot_value(value):
@@ -1986,7 +2144,7 @@ class AuthorityService:
 
     @classmethod
     def _confirmation_payload(cls, confirmation: Confirmation) -> dict[str, Any]:
-        return {
+        payload = {
             "confirmation_id": confirmation.confirmation_id,
             "policy_id": confirmation.policy_id,
             "intent_hash": confirmation.intent_hash,
@@ -1997,10 +2155,15 @@ class AuthorityService:
             "notional": _canonical_decimal_text(confirmation.notional),
             "expires_at": confirmation.expires_at,
         }
+        if confirmation.financial_binding_hash is not None:
+            payload["financial_binding_hash"] = (
+                confirmation.financial_binding_hash
+            )
+        return payload
 
     @classmethod
     def _admission_payload(cls, record: AdmissionRecord) -> dict[str, Any]:
-        return {
+        payload = {
             "admission_id": record.admission_id,
             "policy_id": record.policy_id,
             "intent_hash": record.intent_hash,
@@ -2025,6 +2188,14 @@ class AuthorityService:
             "policy_version": record.policy_version,
             "financial_command_id": record.financial_command_id,
         }
+        if (
+            record.requested_confirmation_id is not None
+            and record.requested_confirmation_id != record.confirmation_id
+        ):
+            payload["requested_confirmation_id"] = (
+                record.requested_confirmation_id
+            )
+        return payload
 
     def _persist(self, event_type: str, key: str, payload: dict[str, Any], *, committed_at: str) -> None:
         if _authority_service_store(self) is None:
@@ -2217,6 +2388,9 @@ class AuthorityService:
                     action=payload["action"],
                     notional=_decimal(payload["notional"], name="notional"),
                     expires_at=payload["expires_at"],
+                    financial_binding_hash=payload.get(
+                        "financial_binding_hash"
+                    ),
                 )
                 if confirmation.policy_id not in self._policies:
                     raise AuthorityConflict("durable confirmation references missing policy")
@@ -2254,6 +2428,9 @@ class AuthorityService:
                     risk_valid_until=payload.get("risk_valid_until"),
                     policy_version=payload.get("policy_version"),
                     financial_command_id=payload.get("financial_command_id"),
+                    requested_confirmation_id=payload.get(
+                        "requested_confirmation_id"
+                    ),
                 )
                 if record.policy_id not in self._policies:
                     raise AuthorityConflict("durable admission references missing policy")
@@ -2501,9 +2678,7 @@ class AuthorityService:
         risk_digest = record.risk_decision_id.removeprefix(
             "risk:sha256:"
         )
-        expected_verdict = (
-            "ALLOW" if record.outcome == "ADMITTED" else "REJECT"
-        )
+        risk_verdict = risk_payload.get("verdict")
         if (
             risk_payload.get("decision_id") != record.risk_decision_id
             or risk_payload.get("fingerprint") != risk_digest
@@ -2513,7 +2688,15 @@ class AuthorityService:
             or risk_payload.get("capability_snapshot_id")
             != record.capability_snapshot_id
             or risk_payload.get("valid_until") != record.risk_valid_until
-            or risk_payload.get("verdict") != expected_verdict
+            or risk_verdict not in {"ALLOW", "REJECT"}
+            or (
+                record.outcome == "ADMITTED"
+                and risk_verdict != "ALLOW"
+            )
+            or (
+                record.reason == "risk_rejected"
+                and risk_verdict != "REJECT"
+            )
         ):
             raise AuthorityConflict(
                 "historical risk decision does not match admission"
@@ -2537,6 +2720,20 @@ class AuthorityService:
         if type(risk_requirements) is not dict:
             raise AuthorityConflict(
                 "historical risk reservation requirements are malformed"
+            )
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if confirmation is None:
+                raise AuthorityConflict(
+                    "historical confirmed admission references missing confirmation"
+                )
+            _validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                record=record,
+                authority_policy_version=policy.version,
+                durable_risk_intent=durable_risk_intent,
+                authoritative_risk_snapshot=authoritative_snapshot,
+                reservation_requirements=risk_requirements,
             )
 
         reservation_request = None
@@ -2669,10 +2866,46 @@ class AuthorityService:
             "authoritative_risk_snapshot": dict(
                 authoritative_snapshot
             ),
-            "confirmation_id": record.confirmation_id,
+            "confirmation_id": record.requested_confirmation_id,
             "risk_reducing": record.risk_reducing,
             "journal_sequence_cut": journal_sequence_cut,
         }
+        if not policy.autonomous:
+            historical_risk_policy_fingerprint = (
+                authoritative_snapshot.get("risk_policy_fingerprint")
+            )
+            if not isinstance(
+                historical_risk_policy_fingerprint,
+                str,
+            ):
+                raise AuthorityConflict(
+                    "historical authoritative risk snapshot lacks "
+                    "risk policy fingerprint"
+                )
+            historical_risk_intent = RiskIntent.create(
+                symbol=durable_risk_intent["symbol"],
+                side=durable_risk_intent["side"],
+                quantity=durable_risk_intent["quantity"],
+                price=durable_risk_intent["price"],
+                expected_state_version=durable_risk_intent[
+                    "expected_state_version"
+                ],
+                reduce_only=durable_risk_intent["reduce_only"],
+                action=durable_risk_intent["action"],
+                instrument_type=durable_risk_intent[
+                    "instrument_type"
+                ],
+            )
+            request["financial_confirmation_binding_hash"] = (
+                _financial_confirmation_binding_hash(
+                    authority_policy_version=policy.version,
+                    risk_intent=historical_risk_intent,
+                    risk_policy_fingerprint=(
+                        historical_risk_policy_fingerprint
+                    ),
+                    reservation_requirements=risk_requirements,
+                )
+            )
         if historical_arithmetic_policy_id is not None:
             request["risk_arithmetic_policy_id"] = (
                 historical_arithmetic_policy_id
@@ -2920,6 +3153,24 @@ class AuthorityService:
         ):
             raise AuthorityConflict(
                 "risk decision reservation delta does not match durable reservation"
+            )
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if confirmation is None:
+                raise AuthorityConflict(
+                    "durable confirmed admission references missing confirmation"
+                )
+            if authoritative_snapshot is None:
+                raise AuthorityConflict(
+                    "durable confirmed admission lacks authoritative risk snapshot"
+                )
+            _validate_confirmation_financial_binding(
+                confirmation=confirmation,
+                record=record,
+                authority_policy_version=policy.version,
+                durable_risk_intent=durable_risk_intent,
+                authoritative_risk_snapshot=authoritative_snapshot,
+                reservation_requirements=risk_requirements,
             )
 
         availability_evidence = risk_payload.get(
@@ -3244,12 +3495,21 @@ class AuthorityService:
             "reservation_id": record.reservation_id,
             "reservation": reservation_event["payload"].get("request"),
             "reservation_availability_evidence": availability_evidence,
-            "confirmation_id": record.confirmation_id,
+            "confirmation_id": record.requested_confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
         if durable_risk_intent is not None:
             request["risk_intent"] = durable_risk_intent
             request["financial_idempotency_key"] = durable_idempotency_key
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if (
+                confirmation is not None
+                and confirmation.financial_binding_hash is not None
+            ):
+                request["financial_confirmation_binding_hash"] = (
+                    confirmation.financial_binding_hash
+                )
         if authoritative_snapshot is not None:
             request["authoritative_risk_snapshot"] = dict(authoritative_snapshot)
         if journal_sequence_cut is not None:
@@ -3552,6 +3812,41 @@ class AuthorityService:
         notional,
         expires_at: str,
     ) -> bool:
+        """Add a legacy/non-financial confirmation.
+
+        Durable financial admission intentionally rejects this weaker shape.
+        Use add_financial_confirmation() for an executable financial approval.
+        """
+
+        return self._add_confirmation(
+            confirmation_id=confirmation_id,
+            policy_id=policy_id,
+            intent_hash=intent_hash,
+            account_id=account_id,
+            environment=environment,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            action=action,
+            notional=notional,
+            expires_at=expires_at,
+            financial_binding_hash=None,
+        )
+
+    def _add_confirmation(
+        self,
+        *,
+        confirmation_id: str,
+        policy_id: str,
+        intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
+        expires_at: str,
+        financial_binding_hash: str | None,
+    ) -> bool:
         cid = _text(confirmation_id, name="confirmation_id")
         pid = _text(policy_id, name="policy_id")
         if pid not in self._policies:
@@ -3571,6 +3866,7 @@ class AuthorityService:
             action=_text(action, name="action").upper(),
             notional=confirmation_notional,
             expires_at=expires_at,
+            financial_binding_hash=financial_binding_hash,
         )
         _instant(expires_at, name="expires_at")
         existing = self._confirmations.get(cid)
@@ -3586,6 +3882,51 @@ class AuthorityService:
         )
         self._confirmations[cid] = confirmation
         return True
+
+    def add_financial_confirmation(
+        self,
+        *,
+        confirmation_id: str,
+        policy_id: str,
+        intent_hash: str,
+        account_id: str,
+        environment: str,
+        instrument_id: str,
+        instrument_version: int,
+        action: str,
+        notional,
+        expires_at: str,
+        risk_intent: RiskIntent,
+        risk_policy: RiskPolicy,
+        reservation_requirements,
+    ) -> bool:
+        """Persist confirmation bound to the exact financial/risk envelope."""
+
+        pid = _text(policy_id, name="policy_id")
+        policy = self._policies.get(pid)
+        if policy is None:
+            raise KeyError(pid)
+        binding = _financial_confirmation_binding_hash(
+            authority_policy_version=policy.version,
+            risk_intent=_canonical_risk_intent(risk_intent),
+            risk_policy_fingerprint=_risk_policy_fingerprint(
+                canonical_risk_policy(risk_policy)
+            ),
+            reservation_requirements=reservation_requirements,
+        )
+        return self._add_confirmation(
+            confirmation_id=confirmation_id,
+            policy_id=pid,
+            intent_hash=intent_hash,
+            account_id=account_id,
+            environment=environment,
+            instrument_id=instrument_id,
+            instrument_version=instrument_version,
+            action=action,
+            notional=notional,
+            expires_at=expires_at,
+            financial_binding_hash=binding,
+        )
 
     def _policy_active(self, policy: AuthorityPolicy, now: str) -> tuple[bool, str]:
         current = _instant(now, name="now")
@@ -3617,6 +3958,7 @@ class AuthorityService:
         now: str,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
+        financial_confirmation_binding_hash: str | None = None,
     ) -> AdmissionRecord:
         aid = _text(admission_id, name="admission_id")
         pid = _text(policy_id, name="policy_id")
@@ -3703,6 +4045,21 @@ class AuthorityService:
                     or confirmation.notional != amount
                 ):
                     outcome, failure_reason = "REJECTED", "confirmation_scope_mismatch"
+                elif financial_confirmation_binding_hash is not None and (
+                    confirmation.financial_binding_hash is None
+                ):
+                    outcome, failure_reason = (
+                        "REJECTED",
+                        "confirmation_financial_binding_missing",
+                    )
+                elif financial_confirmation_binding_hash is not None and (
+                    confirmation.financial_binding_hash
+                    != financial_confirmation_binding_hash
+                ):
+                    outcome, failure_reason = (
+                        "REJECTED",
+                        "confirmation_financial_binding_mismatch",
+                    )
                 elif _instant(now, name="now") >= _instant(confirmation.expires_at, name="confirmation.expires_at"):
                     outcome, failure_reason = "REJECTED", "confirmation_expired"
                 else:
@@ -3734,6 +4091,7 @@ class AuthorityService:
             confirmation_id=used_confirmation,
             reason=failure_reason,
             request_fingerprint=request_fingerprint,
+            requested_confirmation_id=confirmation_id,
         )
         self._persist(
             "AuthorityAdmissionRecorded",
@@ -4108,7 +4466,8 @@ class AuthorityService:
                 != (rid if existing.outcome == "ADMITTED" else None)
                 or existing.capability_snapshot_id != capability
                 or existing.policy_version != policy.version
-                or existing.confirmation_id != current_confirmation_id
+                or existing.requested_confirmation_id
+                != current_confirmation_id
                 or existing.risk_reducing != risk_reducing
             ):
                 raise AuthorityConflict(
@@ -4855,6 +5214,14 @@ class AuthorityService:
             capability_snapshot_id, name="capability_snapshot_id"
         )
         rid = _text(reservation_id, name="reservation_id")
+        requested_confirmation_id = (
+            None
+            if confirmation_id is None
+            else _text(
+                confirmation_id,
+                name="confirmation_id",
+            )
+        )
         scoped_command_id = _authority_event_id(
             "FinancialAdmissionCommand", f"{env}:{account}:{cid}"
         )
@@ -4966,7 +5333,8 @@ class AuthorityService:
                 and existing.capability_snapshot_id == capability
                 and existing.risk_valid_until == risk_decision.valid_until
                 and existing.policy_version == policy.version
-                and existing.confirmation_id == confirmation_id
+                and existing.requested_confirmation_id
+                == requested_confirmation_id
                 and existing.risk_reducing == risk_reducing
             )
             if not same_command:
@@ -5032,16 +5400,28 @@ class AuthorityService:
         if risk_decision.capability_snapshot_id != capability:
             raise AuthorityConflict("risk decision capability snapshot is stale")
 
-        reservation_plan = None
-        if risk_decision.admitted:
-            reservation_plan = reservation_book.prepare_reserve_mutation(
-                event_key=cid,
-                idempotency_key=idem,
-                reservation_id=rid,
-                intent_id=iid,
-                requirements=reservation_requirements,
-                available=reservation_available,
-                committed_at=now,
+        # Per-order confirmation must bind the authoritative financial envelope,
+        # not merely a caller-supplied opaque intent label.
+        financial_confirmation_binding_hash = None
+        if not policy.autonomous:
+            if risk_snapshot_binding is None:
+                raise AuthorityConflict(
+                    "confirmed financial admission requires authoritative risk evidence"
+                )
+            risk_policy_fingerprint = risk_snapshot_binding.get(
+                "risk_policy_fingerprint"
+            )
+            if not isinstance(risk_policy_fingerprint, str):
+                raise AuthorityConflict(
+                    "authoritative risk snapshot lacks risk policy fingerprint"
+                )
+            financial_confirmation_binding_hash = (
+                _financial_confirmation_binding_hash(
+                    authority_policy_version=policy.version,
+                    risk_intent=canonical_risk_intent,
+                    risk_policy_fingerprint=risk_policy_fingerprint,
+                    reservation_requirements=normalized_requirements,
+                )
             )
 
         # Evaluate authority/confirmation semantics against an isolated copy.
@@ -5061,13 +5441,23 @@ class AuthorityService:
             state_version=current_state_version,
             risk_admitted=risk_decision.admitted,
             now=now,
-            confirmation_id=confirmation_id,
+            confirmation_id=requested_confirmation_id,
             risk_reducing=risk_reducing,
+            financial_confirmation_binding_hash=(
+                financial_confirmation_binding_hash
+            ),
         )
 
-        if candidate.outcome == "ADMITTED" and reservation_plan is None:
-            raise AuthorityConflict(
-                "admitted command is missing an atomic reservation plan"
+        reservation_plan = None
+        if candidate.outcome == "ADMITTED":
+            reservation_plan = reservation_book.prepare_reserve_mutation(
+                event_key=cid,
+                idempotency_key=idem,
+                reservation_id=rid,
+                intent_id=iid,
+                requirements=reservation_requirements,
+                available=reservation_available,
+                committed_at=now,
             )
 
         request = {
@@ -5094,11 +5484,19 @@ class AuthorityService:
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
             ),
-            "reservation_availability_evidence": reservation_availability_evidence,
+            "reservation_availability_evidence": (
+                reservation_availability_evidence
+                if candidate.outcome == "ADMITTED"
+                else None
+            ),
             "authoritative_risk_snapshot": risk_snapshot_binding,
-            "confirmation_id": candidate.confirmation_id,
+            "confirmation_id": candidate.requested_confirmation_id,
             "risk_reducing": risk_reducing,
         }
+        if financial_confirmation_binding_hash is not None:
+            request["financial_confirmation_binding_hash"] = (
+                financial_confirmation_binding_hash
+            )
         if journal_sequence_cut is not None:
             request["journal_sequence_cut"] = journal_sequence_cut
         if allocation_binding is not None:
@@ -5132,7 +5530,11 @@ class AuthorityService:
             "reservation_requirements": reservation_requirements_payload(
                 risk_decision.reservation_requirements
             ),
-            "reservation_availability_evidence": reservation_availability_evidence,
+            "reservation_availability_evidence": (
+                reservation_availability_evidence
+                if candidate.outcome == "ADMITTED"
+                else None
+            ),
             "journal_sequence_cut": journal_sequence_cut,
             "capability_snapshot_id": risk_decision.capability_snapshot_id,
             "authoritative_risk_snapshot": risk_snapshot_binding,
@@ -5638,6 +6040,14 @@ class AuthorityService:
                     "action": confirmation.action,
                     "notional": _canonical_decimal_text(confirmation.notional),
                     "expires_at": confirmation.expires_at,
+                    **(
+                        {
+                            "financial_binding_hash":
+                                confirmation.financial_binding_hash
+                        }
+                        if confirmation.financial_binding_hash is not None
+                        else {}
+                    ),
                 }
             )
 
@@ -5669,6 +6079,18 @@ class AuthorityService:
                     "risk_valid_until": record.risk_valid_until,
                     "policy_version": record.policy_version,
                     "financial_command_id": record.financial_command_id,
+                    **(
+                        {
+                            "requested_confirmation_id":
+                                record.requested_confirmation_id
+                        }
+                        if (
+                            record.requested_confirmation_id is not None
+                            and record.requested_confirmation_id
+                            != record.confirmation_id
+                        )
+                        else {}
+                    ),
                 }
             )
 
@@ -5773,7 +6195,7 @@ class AuthorityService:
             if cid in seen_confirmation_ids:
                 raise AuthorityConflict("duplicate confirmation in authority snapshot")
             seen_confirmation_ids.add(cid)
-            service.add_confirmation(
+            service._add_confirmation(
                 confirmation_id=cid,
                 policy_id=item.get("policy_id"),
                 intent_hash=item.get("intent_hash"),
@@ -5784,6 +6206,9 @@ class AuthorityService:
                 action=item.get("action"),
                 notional=item.get("notional"),
                 expires_at=item.get("expires_at"),
+                financial_binding_hash=item.get(
+                    "financial_binding_hash"
+                ),
             )
 
         restored_admissions: dict[str, AdmissionRecord] = {}
@@ -5863,6 +6288,9 @@ class AuthorityService:
                 risk_valid_until=item.get("risk_valid_until"),
                 policy_version=item.get("policy_version"),
                 financial_command_id=item.get("financial_command_id"),
+                requested_confirmation_id=item.get(
+                    "requested_confirmation_id"
+                ),
             )
             restored_admissions[admission_id] = record
 

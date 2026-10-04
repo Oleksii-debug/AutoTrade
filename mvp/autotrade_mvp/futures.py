@@ -381,19 +381,6 @@ def _require_settlement_contract(
 ) -> None:
     if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
-    snapshot = contract._lifecycle_authority_snapshot
-    current_lifecycle = (
-        contract.instrument,
-        contract.settlement_method,
-        contract.expiry,
-        contract.last_trade_at,
-        contract.delivery_cutoff,
-    )
-    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
-        raise FuturesError(
-            "futures lifecycle contract no longer matches construction authority"
-        )
-
     version = contract.canonical_instrument
     if version is None:
         raise FuturesError(
@@ -931,6 +918,19 @@ def lifecycle_gate(
             raise FuturesError(
                 f"lifecycle contract {field_name} must be exact datetime"
             )
+
+    snapshot = contract._lifecycle_authority_snapshot
+    current_lifecycle = (
+        contract.instrument,
+        contract.settlement_method,
+        contract.expiry,
+        contract.last_trade_at,
+        contract.delivery_cutoff,
+    )
+    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
+        raise FuturesError(
+            "futures lifecycle contract no longer matches construction authority"
+        )
 
     version = contract.canonical_instrument
     if version is not None:

@@ -31,7 +31,12 @@ from .corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
-from .exact_decimal import ExactDecimalError, exact_subtract, exact_sum
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_subtract,
+    exact_sum,
+)
 from .persistence import (
     JournalStore,
     canonical_json,
@@ -188,6 +193,7 @@ def _canonical_entitlement_position_proof(
             if position_amounts
             else Decimal("0")
         )
+        quantity_text = canonical_decimal_text(quantity)
     except ExactDecimalError as error:
         raise AccountingConflict(
             "corporate-action entitlement position exceeds exact arithmetic resource envelope"
@@ -211,7 +217,7 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": str(quantity),
+        "quantity": quantity_text,
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)

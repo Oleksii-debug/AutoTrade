@@ -2,11 +2,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, localcontext
 from hashlib import sha256
+import gc
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import UUID
+from weakref import ref as weakref_ref
 
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
@@ -1188,6 +1190,33 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
+
+    def test_policy_binding_releases_registry_with_dead_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority = AblationQualificationAuthority(
+                scientific_registry=ScientificRegistry(root / "science.sqlite3"),
+                experience_memory=ExperienceMemory(root / "memory.sqlite3"),
+                artifact_store=ArtifactStore(root / "artifacts"),
+                protocol_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="9" * 40,
+                causal_cutoff=CUT + timedelta(hours=1),
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            registry = authority.scientific_registry
+            authority_reference = weakref_ref(authority)
+            registry_reference = weakref_ref(registry)
+
+            del registry
+            del authority
+            for _ in range(3):
+                gc.collect()
+
+            self.assertIsNone(authority_reference())
+            self.assertIsNone(registry_reference())
 
     def test_terminal_interlock_validates_inputs_without_resolving_authority(self):
         authority = object.__new__(AblationQualificationAuthority)

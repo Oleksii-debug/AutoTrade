@@ -537,10 +537,9 @@
   function captureTableSelection(body) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return null;
-    const range = selection.getRangeAt(0);
-    const start = selectedCellEndpoint(body, range.startContainer, range.startOffset);
-    const end = selectedCellEndpoint(body, range.endContainer, range.endOffset);
-    return start !== null && end !== null ? Object.freeze({start, end}) : null;
+    const anchor = selectedCellEndpoint(body, selection.anchorNode, selection.anchorOffset);
+    const focus = selectedCellEndpoint(body, selection.focusNode, selection.focusOffset);
+    return anchor !== null && focus !== null ? Object.freeze({anchor, focus}) : null;
   }
 
   function textPointAtOffset(cell, requestedOffset) {
@@ -570,19 +569,32 @@
       const cell = row.cells[endpoint.cellIndex];
       return cell ? textPointAtOffset(cell, endpoint.textOffset) : null;
     };
-    const start = findPoint(bookmark.start);
-    const end = findPoint(bookmark.end);
-    if (start === null || end === null) return;
-    const range = document.createRange();
-    try {
-      range.setStart(start.node, start.offset);
-      range.setEnd(end.node, end.offset);
-    } catch {
-      return;
-    }
+    const anchor = findPoint(bookmark.anchor);
+    const focus = findPoint(bookmark.focus);
+    if (anchor === null || focus === null) return;
     const selection = window.getSelection();
     if (!selection) return;
     selection.removeAllRanges();
+    if (typeof selection.setBaseAndExtent === "function") {
+      try {
+        selection.setBaseAndExtent(
+          anchor.node, anchor.offset, focus.node, focus.offset);
+      } catch {
+        return;
+      }
+      return;
+    }
+    const range = document.createRange();
+    try {
+      range.setStart(anchor.node, anchor.offset);
+      range.setEnd(focus.node, focus.offset);
+      if (range.collapsed) {
+        range.setStart(focus.node, focus.offset);
+        range.setEnd(anchor.node, anchor.offset);
+      }
+    } catch {
+      return;
+    }
     selection.addRange(range);
   }
 

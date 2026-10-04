@@ -203,13 +203,24 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
                 FORWARD_PAPER,
             ),
         )
-        self.assertEqual(result.evaluation_status, "PASS")
-        self.assertTrue(result.all_three_layers_passed)
+        self.assertEqual(result.historical_status, "INCONCLUSIVE")
+        self.assertEqual(result.evaluation_status, "INCONCLUSIVE")
+        self.assertFalse(result.all_three_layers_passed)
 
     def test_all_three_pass_still_does_not_establish_economic_edge(self):
         result = self.compose()
         self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
         self.assertTrue(result.forward_required_for_complete_evaluation)
+
+    def test_self_authored_historical_pass_stays_inconclusive_without_issuer(self):
+        receipt = historical(
+            BLINDED_MARKET_REPLAY,
+            "PASS",
+            evidence_char="1",
+            protocol_char="2",
+        )
+        self.assertEqual(receipt.status, "INCONCLUSIVE")
+        self.assertEqual(receipt.economic_edge_status, "NOT_ESTABLISHED")
 
     def test_historical_pass_cannot_substitute_for_forward_layer(self):
         a, b, _ = complete_layers()
@@ -457,7 +468,7 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
         )
         c = forward_receipt(minimum_predictions=2)
         result = self.compose((a, b, c))
-        self.assertEqual(result.historical_status, "PASS")
+        self.assertEqual(result.historical_status, "INCONCLUSIVE")
         self.assertEqual(result.forward_status, "INCONCLUSIVE")
         self.assertEqual(result.evaluation_status, "INCONCLUSIVE")
 

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import unittest
 from unittest.mock import Mock, patch
 
 from mvp.autotrade_mvp import production_trading_host as trading_host
+from mvp.autotrade_mvp.dispatch import DispatchOutcome
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import ProductionHostConfig
 from mvp.autotrade_mvp.recovery import HostState, OwnerFence, RecoveryController
+from mvp.autotrade_mvp.recovery_dispatch import RecoveryBoundDispatcher
 
 
 class _Fence:
@@ -118,11 +121,22 @@ class ProductionTradingHostTests(unittest.TestCase):
 
             self.assertIs(runtime.journal, store)
             self.assertIs(vars(runtime.recovery)["_owner_store"], store)
-            self.assertIs(vars(runtime.dispatcher)["_store"], store)
+            self.assertIs(
+                object.__getattribute__(runtime.dispatcher, "_store"),
+                store,
+            )
             self.assertEqual(runtime.recovery.owner_scope, "PAPER:acct")
             self.assertEqual(runtime.dispatcher.owner_id, "owner-a")
             self.assertEqual(runtime.dispatcher.owner_epoch, 1)
             self.assertEqual(runtime.recovery.state, HostState.RECOVERING)
+            self.assertIs(
+                host._terminal_finalizer.__self__,
+                runtime.dispatcher,
+            )
+            self.assertIs(
+                host._terminal_finalizer.__func__,
+                RecoveryBoundDispatcher.stop_and_drain,
+            )
 
             wire_calls = []
 
@@ -182,6 +196,89 @@ class ProductionTradingHostTests(unittest.TestCase):
             )
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(wire_calls, [])
+
+    def test_close_drains_active_retained_dispatch_before_process_fence_release(self):
+        with TemporaryDirectory() as directory:
+            runtime, host, _store = self._build_with_fake_host(Path(directory))
+            dispatcher = runtime.dispatcher
+            controller = runtime.recovery
+            inner_dispatcher = object.__getattribute__(dispatcher, "_dispatcher")
+            entered = Event()
+            release_dispatch = Event()
+            close_entered = Event()
+            close_finished = Event()
+            outcomes = []
+            errors = []
+
+            def active_dispatch(**kwargs):
+                del kwargs
+                entered.set()
+                if not release_dispatch.wait(5):
+                    raise AssertionError("test dispatch was not released")
+                return DispatchOutcome(
+                    "SENT",
+                    "client-order",
+                    {"status": "accepted"},
+                    "sent_confirmed",
+                )
+
+            original_finalizer = host._terminal_finalizer
+
+            def observed_finalizer():
+                close_entered.set()
+                original_finalizer()
+
+            host._terminal_finalizer = observed_finalizer
+
+            def run_dispatch():
+                try:
+                    outcomes.append(
+                        dispatcher.dispatch(
+                            attempt_id="active-close",
+                            intent_id="intent-active-close",
+                            intent_hash="hash-active-close",
+                            provider="SIMULATED",
+                            request={},
+                            now="2026-10-04T03:01:30Z",
+                            authority_check=lambda _hash, _now: (True, "allowed"),
+                            transport_send=Mock(),
+                        )
+                    )
+                except BaseException as error:
+                    errors.append(error)
+
+            def run_close():
+                try:
+                    runtime.close()
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    close_finished.set()
+
+            with patch.object(inner_dispatcher, "dispatch", side_effect=active_dispatch):
+                dispatch_thread = Thread(target=run_dispatch, name="active-retained-dispatch")
+                dispatch_thread.start()
+                self.assertTrue(entered.wait(5))
+
+                close_thread = Thread(target=run_close, name="production-host-close")
+                close_thread.start()
+                self.assertTrue(close_entered.wait(5))
+                self.assertFalse(close_finished.wait(0.05))
+                self.assertFalse(host._instance_fence.released)
+                self.assertIsNotNone(controller.owner)
+
+                release_dispatch.set()
+                dispatch_thread.join(5)
+                close_thread.join(5)
+
+            self.assertFalse(dispatch_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual([outcome.status for outcome in outcomes], ["SENT"])
+            self.assertTrue(close_finished.is_set())
+            self.assertTrue(host._instance_fence.released)
+            self.assertIsNone(controller.owner)
+            self.assertEqual(controller.state, HostState.STOPPED)
 
     def test_close_revokes_dispatcher_before_later_host_cleanup_failure(self):
         with TemporaryDirectory() as directory:

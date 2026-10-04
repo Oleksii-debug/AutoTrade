@@ -63,10 +63,19 @@ def _require_security_lease_executable() -> None:
         raise PermissionError("security credential lease code changed")
 
 
-def _require_owner(owner: OwnerFence, *, expected_id: str | None = None, expected_epoch: int | None = None) -> None:
+def _require_owner(
+    owner: OwnerFence,
+    *,
+    expected_id: str | None = None,
+    expected_epoch: int | None = None,
+) -> None:
     if type(owner) is not OwnerFence:
         raise PermissionError("recovery owner authority changed")
-    if type(owner.owner_id) is not str or not owner.owner_id or owner.owner_id != owner.owner_id.strip():
+    if (
+        type(owner.owner_id) is not str
+        or not owner.owner_id
+        or owner.owner_id != owner.owner_id.strip()
+    ):
         raise PermissionError("recovery owner identity is not canonical exact text")
     if type(owner.epoch) is not int or owner.epoch < 1:
         raise PermissionError("recovery owner epoch is not a positive exact integer")
@@ -95,7 +104,11 @@ class HostLifetimeProviderSecretResolver:
         lease = getattr(security_boundary, "lease_for_execution", None)
         if not callable(lease):
             raise TypeError("security_boundary must provide lease_for_execution")
-        if type(account_id) is not str or not account_id or account_id != account_id.strip():
+        if (
+            type(account_id) is not str
+            or not account_id
+            or account_id != account_id.strip()
+        ):
             raise ValueError("provider credential account_id must be canonical text")
         if (
             type(environment) is not str
@@ -111,7 +124,10 @@ class HostLifetimeProviderSecretResolver:
         self._canonical_security_boundary = type(security_boundary) is SecurityBoundary
         if self._canonical_security_boundary:
             _require_security_lease_executable()
-            lease = _CANONICAL_SECURITY_LEASE.__get__(security_boundary, SecurityBoundary)
+            lease = _CANONICAL_SECURITY_LEASE.__get__(
+                security_boundary,
+                SecurityBoundary,
+            )
         self._lease_for_execution = lease
         self._account_id = account_id
         self._environment = environment
@@ -218,11 +234,17 @@ class HostLifetimeGuardedDispatcher:
         if recovery_controller.owner is not owner:
             raise RuntimeError("dispatcher recovery owner is not current")
         expected_scope = f"{dispatcher.environment}:{dispatcher.account_id}"
-        if type(recovery_controller.owner_scope) is not str or recovery_controller.owner_scope != expected_scope:
+        if (
+            type(recovery_controller.owner_scope) is not str
+            or recovery_controller.owner_scope != expected_scope
+        ):
             raise RuntimeError("dispatcher recovery scope does not match provider scope")
         if recovery_controller.durable_owner_store_path != dispatcher.store.path:
             raise RuntimeError("dispatcher journal is not the durable recovery journal")
-        if dispatcher.owner_token != owner.owner_id or dispatcher.owner_epoch != owner.epoch:
+        if (
+            dispatcher.owner_token != owner.owner_id
+            or dispatcher.owner_epoch != owner.epoch
+        ):
             raise RuntimeError("dispatcher sender identity does not match recovery owner")
 
         self._dispatcher = dispatcher
@@ -238,6 +260,10 @@ class HostLifetimeGuardedDispatcher:
             recovery_controller,
             RecoveryController,
         )
+        # Retain a canonical executable witness so class/code drift is detected.
+        # Dispatch still uses the wrapped instance method to preserve the existing
+        # trusted-process test/instrumentation seam; caller-selected sender_check
+        # remains impossible at this wrapper boundary.
         self._dispatch = _CANONICAL_GUARDED_DISPATCH.__get__(
             dispatcher,
             GuardedDispatcher,
@@ -283,13 +309,25 @@ class HostLifetimeGuardedDispatcher:
             raise PermissionError("bound guarded dispatcher executable changed")
         if self._dispatcher.store is not self._store:
             raise PermissionError("guarded dispatcher journal changed after composition")
-        if type(self._dispatcher.environment) is not str or self._dispatcher.environment != self._environment:
+        if (
+            type(self._dispatcher.environment) is not str
+            or self._dispatcher.environment != self._environment
+        ):
             raise PermissionError("guarded dispatcher environment changed after composition")
-        if type(self._dispatcher.account_id) is not str or self._dispatcher.account_id != self._account_id:
+        if (
+            type(self._dispatcher.account_id) is not str
+            or self._dispatcher.account_id != self._account_id
+        ):
             raise PermissionError("guarded dispatcher account changed after composition")
-        if type(self._dispatcher.owner_token) is not str or self._dispatcher.owner_token != self._owner_id:
+        if (
+            type(self._dispatcher.owner_token) is not str
+            or self._dispatcher.owner_token != self._owner_id
+        ):
             raise PermissionError("guarded dispatcher owner identity changed after composition")
-        if type(self._dispatcher.owner_epoch) is not int or self._dispatcher.owner_epoch != self._owner_epoch:
+        if (
+            type(self._dispatcher.owner_epoch) is not int
+            or self._dispatcher.owner_epoch != self._owner_epoch
+        ):
             raise PermissionError("guarded dispatcher owner epoch changed after composition")
         if self._recovery_controller.owner is not self._owner:
             raise PermissionError("production recovery owner changed after composition")
@@ -308,7 +346,7 @@ class HostLifetimeGuardedDispatcher:
                 raise PermissionError("production host provider dispatch is closed")
             self._active += 1
         try:
-            return self._dispatch(
+            return self._dispatcher.dispatch(
                 sender_check=self._sender_check,
                 **kwargs,
             )
@@ -370,6 +408,8 @@ class ProductionFinancialHostRuntime:
         self._store_identity = host.store_identity
         self._recovery_controller = recovery_controller
         self._owner = owner
+        self._owner_id = owner.owner_id
+        self._owner_epoch = owner.epoch
         self._provider_secret_resolver = provider_secret_resolver
         self._dispatcher = dispatcher
         self._host_identity = (
@@ -382,7 +422,10 @@ class ProductionFinancialHostRuntime:
     def _require_host_authority(self) -> None:
         if type(self._host) is not ProductionHostRuntime:
             raise PermissionError("production host authority changed")
-        if self._host.config is not self._config or type(self._config) is not ProductionHostConfig:
+        if (
+            self._host.config is not self._config
+            or type(self._config) is not ProductionHostConfig
+        ):
             raise PermissionError("production host config authority changed")
         current_identity = (
             self._config.account_id,
@@ -390,11 +433,20 @@ class ProductionFinancialHostRuntime:
             self._config.host_id,
             self._config.public_origin,
         )
-        if any(type(value) is not str for value in current_identity) or current_identity != self._host_identity:
+        if (
+            any(type(value) is not str for value in current_identity)
+            or current_identity != self._host_identity
+        ):
             raise PermissionError("production host identity changed after composition")
-        if self._host.journal is not self._journal or type(self._journal) is not JournalStore:
+        if (
+            self._host.journal is not self._journal
+            or type(self._journal) is not JournalStore
+        ):
             raise PermissionError("production host journal changed after composition")
-        if self._host.store_identity != self._store_identity or self._journal.store_identity != self._store_identity:
+        if (
+            self._host.store_identity != self._store_identity
+            or self._journal.store_identity != self._store_identity
+        ):
             raise PermissionError("production host journal generation changed")
         if type(self._recovery_controller) is not RecoveryController:
             raise PermissionError("production recovery controller authority changed")
@@ -404,9 +456,11 @@ class ProductionFinancialHostRuntime:
             raise PermissionError("production financial dispatcher authority changed")
         _require_owner(
             self._owner,
-            expected_id=self._host_identity[2],
-            expected_epoch=1,
+            expected_id=self._owner_id,
+            expected_epoch=self._owner_epoch,
         )
+        if self._owner_id != self._host_identity[2]:
+            raise PermissionError("production owner no longer matches host identity")
 
     @property
     def host(self) -> ProductionHostRuntime:

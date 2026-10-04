@@ -733,10 +733,12 @@ def load_account_resource_availability_evidence(
 
     if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
+    if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
+        raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
         max_age = (
             max_age_seconds
-            if isinstance(max_age_seconds, Decimal)
+            if type(max_age_seconds) is Decimal
             else Decimal(max_age_seconds)
         )
     except Exception as error:

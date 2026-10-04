@@ -63,8 +63,12 @@ def economic_book(store: JournalStore) -> DurableProviderEconomicBook:
     )
 
 
+def artifact_root_for(store: JournalStore) -> Path:
+    return store.path.parent / "settlement-evidence"
+
+
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
-    return ArtifactStore(store.path.parent / "settlement-evidence")
+    return ArtifactStore(artifact_root_for(store))
 
 
 def settlement_book(store: JournalStore) -> DurableSettlementBook:
@@ -73,6 +77,7 @@ def settlement_book(store: JournalStore) -> DurableSettlementBook:
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root_for(store),
         evidence_artifact_store=artifact_store_for(store),
     )
 

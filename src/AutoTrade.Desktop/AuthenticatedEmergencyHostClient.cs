@@ -314,6 +314,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     SessionReference: currentSessionReference,
                     AccountId: snapshot.Status.AccountId,
                     Environment: snapshot.Status.Environment,
+                    HostId: snapshot.Status.HostId,
                     ExpectedStateVersion: snapshot.Status.StateVersion);
                 PersistPendingCommand(pending);
             }
@@ -510,6 +511,15 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         EmergencyHostSession currentSession,
         CancellationToken cancellationToken)
     {
+        if (pending.HostId is null)
+        {
+            throw new EmergencyCommandUncertainException(
+                pending.CommandId,
+                "The unresolved emergency command predates durable host-identity binding. "
+                + "A replacement session cannot prove that it is attached to the same host, so "
+                + "the command remains unresolved and will not be resent or retargeted.");
+        }
+
         Snapshot snapshot;
         try
         {
@@ -532,6 +542,10 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
 
         if (!string.Equals(
+                snapshot.Status.HostId,
+                pending.HostId,
+                StringComparison.Ordinal)
+            || !string.Equals(
                 snapshot.Status.AccountId,
                 pending.AccountId,
                 StringComparison.Ordinal)
@@ -604,18 +618,23 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     private static string SerializePendingCommand(PendingCommand pending)
     {
-        return JsonSerializer.Serialize(
-            new
-            {
-                schema_version = "2",
-                command_id = pending.CommandId,
-                idempotency_key = pending.IdempotencyKey,
-                actor = pending.Actor,
-                session = pending.SessionReference,
-                account_id = pending.AccountId,
-                environment = pending.Environment,
-                expected_state_version = pending.ExpectedStateVersion,
-            });
+        Dictionary<string, string> payload = new(StringComparer.Ordinal)
+        {
+            ["schema_version"] = pending.HostId is null ? "2" : "3",
+            ["command_id"] = pending.CommandId,
+            ["idempotency_key"] = pending.IdempotencyKey,
+            ["actor"] = pending.Actor,
+            ["session"] = pending.SessionReference,
+            ["account_id"] = pending.AccountId,
+            ["environment"] = pending.Environment,
+            ["expected_state_version"] = pending.ExpectedStateVersion,
+        };
+        if (pending.HostId is not null)
+        {
+            payload["host_id"] = pending.HostId;
+        }
+
+        return JsonSerializer.Serialize(payload);
     }
 
     private PendingCommand? LoadPendingCommand()
@@ -645,17 +664,37 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 error);
         }
 
-        string[] expectedFields =
-        [
-            "schema_version",
-            "command_id",
-            "idempotency_key",
-            "actor",
-            "session",
-            "account_id",
-            "environment",
-            "expected_state_version",
-        ];
+        string schemaVersion = RequiredString(value, "schema_version");
+        if (schemaVersion is not ("1" or "2" or "3"))
+        {
+            throw new InvalidOperationException(
+                "Persisted emergency command schema version is unsupported.");
+        }
+
+        string[] expectedFields = schemaVersion == "3"
+            ?
+            [
+                "schema_version",
+                "command_id",
+                "idempotency_key",
+                "actor",
+                "session",
+                "account_id",
+                "environment",
+                "host_id",
+                "expected_state_version",
+            ]
+            :
+            [
+                "schema_version",
+                "command_id",
+                "idempotency_key",
+                "actor",
+                "session",
+                "account_id",
+                "environment",
+                "expected_state_version",
+            ];
         string[] actualFields = value.EnumerateObject()
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
@@ -667,13 +706,6 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         {
             throw new InvalidOperationException(
                 "Persisted emergency command has an unexpected schema.");
-        }
-
-        string schemaVersion = RequiredString(value, "schema_version");
-        if (schemaVersion is not ("1" or "2"))
-        {
-            throw new InvalidOperationException(
-                "Persisted emergency command schema version is unsupported.");
         }
 
         string storedSession = RequiredString(value, "session");
@@ -692,6 +724,9 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             SessionReference: sessionReference,
             AccountId: RequiredString(value, "account_id"),
             Environment: RequiredString(value, "environment"),
+            HostId: schemaVersion == "3"
+                ? RequiredString(value, "host_id")
+                : null,
             ExpectedStateVersion: CanonicalSequence(
                 RequiredString(value, "expected_state_version"),
                 "expected_state_version"));
@@ -699,7 +734,8 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         if (schemaVersion == "1")
         {
             // V1 persisted the reusable bearer. Rewrite the same unresolved
-            // command identity immediately to the v2 public-reference record.
+            // command identity immediately to the bearer-free v2 record. Host
+            // identity is intentionally not invented for legacy unresolved work.
             _pendingCommandStore.Save(SerializePendingCommand(pending));
         }
 
@@ -1197,6 +1233,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string SessionReference,
         string AccountId,
         string Environment,
+        string? HostId,
         string ExpectedStateVersion);
 }
 

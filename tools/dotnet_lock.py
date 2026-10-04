@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import shlex
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -26,20 +27,159 @@ def _strict_json(text: str):
     )
 
 
+def _xml_local_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ''
+    return tag.rsplit('}', 1)[-1]
+
+
+def _xml_elements(tree: ET.ElementTree, local_name: str):
+    return tuple(
+        node for node in tree.iter()
+        if _xml_local_name(node.tag) == local_name
+    )
+
+
+def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
+    """Parse one canonical YAML run-line dotnet restore command."""
+    if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
+        raise ValueError('not a canonical dotnet restore run line')
+    try:
+        tokens = tuple(shlex.split(command.removeprefix('run: '), comments=True))
+    except ValueError as error:
+        raise ValueError('malformed dotnet restore command') from error
+    if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):
+        raise ValueError('not a canonical dotnet restore command')
+    return tokens
+
+
+def dotnet_restore_targets_project(
+    tokens: tuple[str, ...] | list[str],
+    project: str,
+) -> bool:
+    """Require the release project as the canonical restore positional target."""
+    if not isinstance(project, str) or not project or project.startswith('-'):
+        return False
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+    return bool(arguments) and arguments[0] == project
+
+
+def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:
+    """Accept only effective locked-restore authority before any -- sentinel."""
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+
+    locked_flag = '--locked-mode' in arguments
+    property_values: list[str] = []
+    prefixes = ('-p:', '/p:', '-property:', '/property:')
+    for token in arguments:
+        lowered = token.casefold()
+        prefix = next(
+            (candidate for candidate in prefixes if lowered.startswith(candidate)),
+            None,
+        )
+        if prefix is None:
+            continue
+        payload = token[len(prefix):]
+        for assignment in payload.split(';'):
+            if '=' not in assignment:
+                continue
+            name, value = assignment.split('=', 1)
+            if name.casefold() == 'restorelockedmode':
+                property_values.append(value.casefold())
+
+    # Any explicit contradictory/non-true assignment defeats the assertion,
+    # including a later value that could override --locked-mode.
+    if property_values and any(value != 'true' for value in property_values):
+        return False
+    return locked_flag or bool(property_values)
+
+
+def dotnet_project_package_references(project: Path) -> list[tuple[str | None, str | None]]:
+    """Read effective-in-file PackageReference declarations namespace-agnostically."""
+    tree = ET.parse(project)
+    references: list[tuple[str | None, str | None]] = []
+    for node in _xml_elements(tree, 'PackageReference'):
+        name = node.attrib.get('Include') or node.attrib.get('Update')
+        version = node.attrib.get('Version')
+        if version is None:
+            child = next(
+                (item for item in node if _xml_local_name(item.tag) == 'Version'),
+                None,
+            )
+            version = (
+                child.text.strip()
+                if child is not None and child.text
+                else None
+            )
+        references.append((name, version))
+    return references
+
+
+def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
+    """Reject release dependency declarations hidden in imported MSBuild files.
+
+    Static release provenance currently binds PackageReference declarations that
+    live in src/*.csproj.  A PackageReference injected by a root/source .props or
+    .targets file would otherwise bypass project discovery and the lock gate.
+    Fail closed until evaluated MSBuild dependency discovery is authoritative.
+    """
+    candidates: set[Path] = set()
+    for pattern in ('*.props', '*.targets'):
+        candidates.update(root.glob(pattern))
+        source_root = root / 'src'
+        if source_root.is_dir():
+            candidates.update(source_root.rglob(pattern))
+
+    blockers: list[str] = []
+
+    # The static release graph does not evaluate arbitrary explicit MSBuild
+    # imports. An imported file can inject PackageReference items from outside
+    # the root/src .props/.targets scan, so any explicit project Import is a
+    # dependency-authority boundary until evaluated MSBuild discovery exists.
+    source_root = root / 'src'
+    if source_root.is_dir():
+        for project in sorted(source_root.rglob('*.csproj')):
+            relative = project.relative_to(root).as_posix()
+            try:
+                tree = ET.parse(project)
+            except (OSError, ET.ParseError):
+                blockers.append(f'DOTNET_MSBUILD_PROJECT_INVALID:{relative}')
+                continue
+            if _xml_elements(tree, 'Import'):
+                blockers.append(
+                    f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
+                )
+
+    for path in sorted(candidates):
+        relative = path.relative_to(root).as_posix()
+        try:
+            tree = ET.parse(path)
+        except (OSError, ET.ParseError):
+            blockers.append(f'DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:{relative}')
+            continue
+        if _xml_elements(tree, 'Import'):
+            blockers.append(
+                f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
+            )
+        if _xml_elements(tree, 'PackageReference'):
+            blockers.append(
+                f'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:{relative}'
+            )
+    return blockers
+
+
 def _package_references(project: Path) -> dict[str, str]:
     """Return canonical direct PackageReference identities for one project.
 
     This mirrors the repository's existing Include/Update + Version handling but
     additionally rejects duplicate identities and case-insensitive ambiguity.
     """
-    tree = ET.parse(project)
     refs: dict[str, tuple[str, str]] = {}
-    for node in tree.findall('.//PackageReference'):
-        name = node.attrib.get('Include') or node.attrib.get('Update')
-        version = node.attrib.get('Version')
-        if version is None:
-            child = node.find('Version')
-            version = child.text.strip() if child is not None and child.text else None
+    for name, version in dotnet_project_package_references(project):
         if not name or not version:
             raise ValueError('PackageReference must have canonical name and exact version')
         folded = name.casefold()
@@ -286,6 +426,13 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
     csproj name/version pairs are insufficient release provenance because they
     omit transitive packages and NuGet's content integrity identity.
     """
+    imported_blockers = dotnet_imported_package_reference_blockers(root)
+    if imported_blockers:
+        raise ValueError(
+            'imported MSBuild PackageReference is outside the static release graph: '
+            + ';'.join(imported_blockers)
+        )
+
     graph: list[dict[str, str]] = []
     for project in sorted(set(package_projects)):
         relative = project.relative_to(root).as_posix()

@@ -36,3 +36,15 @@ Section 10 is DONE only if exact-head qualification confirms:
 7. merge and post-merge readback confirm accepted source identity.
 
 No real physical delivery, provider/PAPER/LIVE, profitability, release or NVDA qualification is implied.
+
+## Follow-up source review: canonical lifecycle binding
+
+Exact source review after the initial boolean-bypass repair found a second provider-neutral self-authorization path: lifecycle_gate accepted an exact FuturesContract whose canonical_instrument was absent. A caller could therefore supply its own lifecycle dates/settlement method without any InstrumentVersion binding and receive OPEN.
+
+The canonical Section 10 candidate now also:
+- requires an exact canonical InstrumentVersion for lifecycle_gate and require_open_for_new_exposure;
+- fails closed if canonical_instrument is removed after FuturesContract construction;
+- retains the construction-time lifecycle snapshot and exact InstrumentVersion consistency checks;
+- includes regressions for both an initially unbound self-authored contract and post-construction removal of the canonical binding.
+
+This is still provider-neutral safety only. It does not prove that a provider-origin InstrumentVersion was issued, does not enable physical delivery, and does not grant PAPER/LIVE authority.

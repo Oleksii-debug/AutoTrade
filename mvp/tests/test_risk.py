@@ -1991,7 +1991,7 @@ class IndependentRiskTests(unittest.TestCase):
             expected_state_version=7,
         )
 
-        future_store = _LiquidationEvidenceStore()
+        future_store = _real_liquidation_store()
         future = liquidation_evidence(
             future_store,
             headroom="0.50",
@@ -2011,7 +2011,7 @@ class IndependentRiskTests(unittest.TestCase):
             ).passed
         )
 
-        stale_store = _LiquidationEvidenceStore()
+        stale_store = _real_liquidation_store()
         stale = liquidation_evidence(
             stale_store,
             headroom="0.50",

@@ -1,4 +1,4 @@
-"""Authority-free Bybit credential probe evidence for WP-49.
+"""Authority-free Bybit credential probe evidence for Bybit/security qualification.
 
 The live probe is generation-locked to the exact TRADE credential leased from
 ``ProtectedCredentialVault`` and endpoint-locked to Bybit's environment-specific

@@ -446,7 +446,7 @@ class ExecutionOracleTests(unittest.TestCase):
         waiting = simulate_execution(o, q, m)
         forged = replace(
             waiting,
-            status="FILLED",
+            status="PARTIAL",
             filled_quantity=Decimal("1"),
             fill_price=Decimal("101"),
             fee=Decimal("0.101"),
@@ -468,7 +468,7 @@ class ExecutionOracleTests(unittest.TestCase):
         waiting = simulate_execution(o, q, m)
         forged = replace(
             waiting,
-            status="FILLED",
+            status="PARTIAL",
             filled_quantity=Decimal("1"),
             fill_price=Decimal("110"),
             fee=Decimal("0.110"),
@@ -498,7 +498,7 @@ class ExecutionOracleTests(unittest.TestCase):
         waiting = simulate_execution(o, q, m)
         forged = replace(
             waiting,
-            status="FILLED",
+            status="PARTIAL",
             filled_quantity=Decimal("1"),
             fill_price=Decimal("110"),
             fee=Decimal("0.110"),

@@ -159,7 +159,7 @@ class ExecutionQualificationTests(unittest.TestCase):
         self._temp = TemporaryDirectory()
         self.store = ArtifactStore(Path(self._temp.name) / "artifacts")
         with patch(
-            "autotrade_research.artifacts.store.datetime",
+            "autotrade_research.artifacts._crash_atomic_publication.datetime",
             _FixedArtifactClock,
         ):
             self.store.publish_bytes(
@@ -407,7 +407,7 @@ class ExecutionQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             late_store = ArtifactStore(Path(directory) / "artifacts")
             with patch(
-                "autotrade_research.artifacts.store.datetime",
+                "autotrade_research.artifacts._crash_atomic_publication.datetime",
                 _LateArtifactClock,
             ):
                 late_store.publish_bytes(

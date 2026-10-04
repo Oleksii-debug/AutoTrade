@@ -102,6 +102,54 @@ class ReservationFoundationTests(unittest.TestCase):
             )
         self.assertEqual(book.active(), ())
 
+    def test_reservation_text_authority_rejects_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile reservation text callback")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile reservation text callback")
+
+        book = ReservationBook()
+        with self.assertRaisesRegex(ValueError, "reservation_id"):
+            book.reserve(
+                reservation_id=HostileText("r-hostile"),
+                intent_id="i-hostile",
+                requirements={"CASH:USD": "1"},
+                available={"CASH:USD": "10"},
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.active(), ())
+
+        with self.assertRaisesRegex(ValueError, "resource"):
+            book.reserve(
+                reservation_id="r-hostile-resource",
+                intent_id="i-hostile-resource",
+                requirements={HostileText("CASH:USD"): "1"},
+                available={"CASH:USD": "10"},
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.active(), ())
+
+        book.reserve(
+            reservation_id="r-terminal",
+            intent_id="i-terminal",
+            requirements={"CASH:USD": "1"},
+            available={"CASH:USD": "10"},
+        )
+        with self.assertRaisesRegex(ValueError, "outcome"):
+            book.mark_terminal(
+                "r-terminal",
+                outcome=HostileText("CANCELED"),
+                resolution_evidence="provider-terminal",
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.get("r-terminal").state, "WORKING")
+
     def test_two_concurrent_intents_cannot_double_spend_cash(self):
         book = ReservationBook()
         book.reserve(

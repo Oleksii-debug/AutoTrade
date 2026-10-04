@@ -604,6 +604,8 @@ class DurableReservationBook:
                         client_order_id=request.get("client_order_id"),
                         resolution_evidence=request.get("resolution_evidence"),
                     )
+                elif operation == "CONSUME_AND_MARK_FILLED":
+                    self._verify_durable_order_fill_terminal_evidence(request)
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
                 raise ReservationConflict(
@@ -657,6 +659,84 @@ class DurableReservationBook:
                 resolution_evidence=request["resolution_evidence"],
             )
         raise ReservationConflict(f"unsupported reservation operation: {operation}")
+
+    def _verify_durable_order_fill_terminal_evidence(
+        self,
+        request: Mapping[str, object],
+    ) -> str:
+        """Verify the referenced exact OMS RECORD_FILL is durable and FILLED."""
+
+        expected_evidence = _filled_resolution_evidence(request)
+        event_id = _text(
+            request.get("order_fill_event_id"),
+            name="order_fill_event_id",
+        )
+        order_event = _reservation_store_get_event(self, event_id)
+        if order_event is None:
+            raise ReservationConflict(
+                "FILLED reservation requires the referenced durable OMS fill event"
+            )
+        if (
+            order_event.get("event_id") != event_id
+            or order_event.get("event_type") != "OrderProjectionMutationCommitted"
+            or order_event.get("aggregate_type") != "order_projection_book"
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill event has invalid durable identity"
+            )
+        payload = order_event.get("payload")
+        if type(payload) is not dict:
+            raise ReservationConflict(
+                "referenced OMS fill event payload is invalid"
+            )
+        if payload_digest(payload) != order_event.get("payload_hash"):
+            raise ReservationConflict(
+                "referenced OMS fill event payload hash is invalid"
+            )
+        scope = payload.get("scope")
+        order_request = payload.get("request")
+        order_snapshot = payload.get("snapshot")
+        evidence_refs = order_event.get("evidence_refs")
+        if (
+            type(scope) is not dict
+            or scope.get("account_id") != self.account_id
+            or scope.get("environment") != self.environment
+            or payload.get("operation") != "RECORD_FILL"
+            or type(order_request) is not dict
+            or type(order_snapshot) is not dict
+            or order_snapshot.get("state") != "FILLED"
+            or type(evidence_refs) is not list
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill event is not an exact terminal fill for this scope"
+            )
+        request_hash = _text(
+            payload.get("request_hash"),
+            name="OMS fill request_hash",
+        )
+        if request_hash != payload_digest(order_request):
+            raise ReservationConflict(
+                "referenced OMS fill request hash is invalid"
+            )
+        actual_snapshot_digest = payload_digest(order_snapshot)
+        if (
+            actual_snapshot_digest
+            != request.get("order_fill_snapshot_digest")
+        ):
+            raise ReservationConflict(
+                "referenced OMS fill snapshot differs from reservation authority"
+            )
+        actual_mutation_hash = payload_digest(
+            {
+                "request_hash": request_hash,
+                "evidence_refs": evidence_refs,
+            }
+        )
+        if actual_mutation_hash != request.get("order_fill_mutation_hash"):
+            raise ReservationConflict(
+                "referenced OMS fill mutation differs from reservation authority"
+            )
+        return expected_evidence
 
     def _reload(self) -> None:
         self._book, self._idempotency = self._replay(self._events())

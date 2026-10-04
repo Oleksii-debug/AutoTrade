@@ -93,7 +93,18 @@ def _value(mapping: dict[str, Any] | None, key: str, default: str = "Unavailable
     return _safe_text(mapping.get(key), default)
 
 
-def _canonical_economic_report_is_readable(report: dict[str, Any]) -> bool:
+def _canonical_economic_report_is_readable(
+    report: dict[str, Any],
+    *,
+    expected_journal_sequence: str,
+) -> bool:
+    report_journal_sequence = report.get("journal_sequence")
+    if (
+        not is_valid_common_scalar("Sequence", expected_journal_sequence)
+        or not is_valid_common_scalar("Sequence", report_journal_sequence)
+        or report_journal_sequence != expected_journal_sequence
+    ):
+        return False
     valuation_status = _safe_text(report.get("valuation_status"), "")
     required = ("total_fees", "turnover")
     if valuation_status == "CASH_ONLY":
@@ -275,7 +286,14 @@ def format_accessible_status(
             lines.append("Economic report: unavailable; malformed state")
         else:
             canonical_report_readable = (
-                _canonical_economic_report_is_readable(economic_report)
+                _canonical_economic_report_is_readable(
+                    economic_report,
+                    expected_journal_sequence=_canonical_sequence_value(
+                        status,
+                        "journal_sequence",
+                        "",
+                    ),
+                )
                 if state_format == "canonical_journal"
                 else True
             )

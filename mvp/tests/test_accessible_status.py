@@ -178,6 +178,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "total_fees": "0",
                 "turnover": "0",
                 "reconciled": True,
+                "journal_sequence": "7",
             },
         )
         self.assertIn("Economic reconciliation: passed", text)
@@ -204,6 +205,7 @@ class AccessibleStatusTests(unittest.TestCase):
                 "total_fees": "1",
                 "turnover": "100",
                 "reconciled": True,
+                "journal_sequence": "8",
             },
         )
         self.assertIn("Economic reconciliation: passed", text)
@@ -212,6 +214,74 @@ class AccessibleStatusTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("Economic report validation: unavailable", text)
+
+    def test_canonical_economic_report_must_match_status_journal_cut(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "9",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "CASH_ONLY",
+                "final_equity": "987654321",
+                "net_pnl": "876543210",
+                "total_fees": "765432109",
+                "turnover": "654321098",
+                "max_drawdown": "543210987",
+                "reconciled": True,
+                "journal_sequence": "8",
+            },
+        )
+
+        for untrusted_value in (
+            "987654321",
+            "876543210",
+            "765432109",
+            "654321098",
+            "543210987",
+        ):
+            self.assertNotIn(untrusted_value, text)
+        self.assertIn("Journal sequence: 9", text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn(
+            "Economic report validation: unavailable; malformed or incomplete canonical state",
+            text,
+        )
+
+    def test_canonical_economic_report_sequence_must_be_canonical(self):
+        for report_sequence in (None, True, 8, "08", "latest"):
+            with self.subTest(report_sequence=report_sequence):
+                text = format_accessible_status(
+                    {
+                        "status": "running",
+                        "state_format": "canonical_journal",
+                        "symbol": "SIM",
+                        "initial_cash": "1000",
+                        "cash": "1000",
+                        "position": "0",
+                        "journal_sequence": "8",
+                        "fills": {},
+                        "active_reservations": [],
+                    },
+                    {
+                        "valuation_status": "CASH_ONLY",
+                        "final_equity": "1000",
+                        "net_pnl": "0",
+                        "total_fees": "0",
+                        "turnover": "0",
+                        "reconciled": True,
+                        "journal_sequence": report_sequence,
+                    },
+                )
+                self.assertIn("Economic reconciliation: not confirmed", text)
+                self.assertIn("Final equity: Unavailable", text)
 
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(

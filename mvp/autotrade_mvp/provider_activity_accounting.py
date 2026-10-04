@@ -13,7 +13,9 @@ from uuid import NAMESPACE_URL, uuid5
 
 from . import _provider_activity_accounting_impl as _impl
 from ._provider_activity_accounting_impl import *  # noqa: F401,F403
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore, journal_store_authority_scope, require_exact_journal_store_authority,
+)
 
 
 def __getattr__(name: str):
@@ -24,6 +26,106 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | set(dir(_impl)))
+
+
+_original_economic_store_load_command_event_batch = (
+    _impl._economic_store_load_command_event_batch
+)
+
+
+def _economic_store_load_command_event_batch(
+    economic_book: object,
+    **kwargs: Any,
+):
+    """Require an OMS-bound EVENT_BATCH to own the OMS event it names.
+
+    JournalStore authenticates the stored EVENT_BATCH descriptors and returns
+    their integrity-checked events. The atomic fill request/result also names
+    the canonical OMS event. Exact replay is authoritative only when those two
+    provenance statements join on the same durable event rather than merely on
+    command metadata that happens to mention its identifier.
+    """
+
+    request_value = kwargs.get("request")
+    order_value = request_value.get("order_fill") if type(request_value) is dict else None
+    if type(order_value) is dict and type(order_value.get("event_id")) is str:
+        kwargs["referenced_event_ids"] = (order_value["event_id"],)
+    authority = _original_economic_store_load_command_event_batch(
+        economic_book,
+        **kwargs,
+    )
+    if authority is None:
+        return None
+
+    request = kwargs.get("request")
+    if not isinstance(request, Mapping):
+        return authority
+    order_fill = request.get("order_fill")
+    if order_fill is None:
+        return authority
+    if not isinstance(order_fill, Mapping):
+        raise ValueError("atomic OMS command request has invalid order fill authority")
+
+    event_id = order_fill.get("event_id")
+    event_key = order_fill.get("event_key")
+    operation = order_fill.get("operation")
+    order_request = order_fill.get("request")
+    if (
+        not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(event_key, str)
+        or not event_key
+        or operation != "RECORD_FILL"
+        or not isinstance(order_request, Mapping)
+    ):
+        raise ValueError("atomic OMS command request has invalid order fill authority")
+
+    raw_events = authority.get("events")
+    if not isinstance(raw_events, tuple):
+        raise ValueError("atomic OMS command authority has invalid event batch")
+    matching = tuple(
+        event
+        for event in raw_events
+        if isinstance(event, Mapping) and event.get("event_id") == event_id
+    )
+    if not matching:
+        references = authority.get("referenced_events", ())
+        matching = tuple(
+            event for event in references
+            if type(event) is dict and event.get("event_id") == event_id
+        ) if type(references) is tuple else ()
+        if len(matching) != 1 or not raw_events or matching[0]["journal_sequence"] >= min(
+            event["journal_sequence"] for event in raw_events
+        ):
+            raise ValueError("atomic OMS command authority does not own the OMS fill event")
+    if len(matching) != 1:
+        raise ValueError("atomic OMS command authority does not own the OMS fill event")
+
+    event = matching[0]
+    payload = event.get("payload")
+    if (
+        event.get("event_type") != "OrderProjectionMutationCommitted"
+        or event.get("aggregate_type") != "order_projection_book"
+        or not isinstance(payload, Mapping)
+        or payload.get("event_key") != event_key
+        or payload.get("operation") != "RECORD_FILL"
+        or payload.get("request") != order_request
+        or payload_digest({"request_hash": payload.get("request_hash"), "evidence_refs": event.get("evidence_refs", [])}) != order_fill.get("mutation_hash")
+        or payload_digest(payload.get("snapshot")) != order_fill.get("snapshot_digest")
+        or payload.get("scope", {}).get("provider_id") != economic_book.provider_id
+        or payload.get("scope", {}).get("account_id") != economic_book.account_id
+        or payload.get("scope", {}).get("environment") != economic_book.environment
+    ):
+        raise ValueError("atomic OMS command authority has invalid OMS semantic owner")
+    return authority
+
+
+# The retained implementation's atomic fill replay resolves this helper through
+# its module globals. Install the stronger ownership join once at facade import
+# so provider-evidence and direct SIMULATION/REPLAY paths share one authority.
+_impl._economic_store_load_command_event_batch = (
+    _economic_store_load_command_event_batch
+)
 
 
 def book_external_provider_cash_activity(
@@ -43,10 +145,14 @@ def book_external_provider_cash_activity(
     a partial financial effect.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(activity, _impl.ProviderActivityEvidence):
-        raise TypeError("activity must be ProviderActivityEvidence")
+    store_identity = require_exact_journal_store_authority(
+        store, subject="provider cash JournalStore",
+    )
+    activity = _impl._snapshot_external_cash_activity(activity)
+
+    def durable_call(method, *args, **kwargs):
+        with journal_store_authority_scope(store, store_identity):
+            return method(store, *args, **kwargs)
 
     provider = _impl._text(provider_id, name="provider_id").upper()
     account = _impl._text(account_id, name="account_id")
@@ -197,7 +303,7 @@ def book_external_provider_cash_activity(
 
     def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
         try:
-            snapshot = store.load_command_event_batch(
+            snapshot = durable_call(JournalStore.load_command_event_batch,
                 command_id=command_identity,
                 actor=actor,
                 environment=scope,
@@ -292,7 +398,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        saved_result, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -322,10 +428,10 @@ def book_external_provider_cash_activity(
     if resolved is not None:
         return resolved
 
-    activity_version = store.next_aggregate_version(
+    activity_version = durable_call(JournalStore.next_aggregate_version,
         "provider_activity", identity
     )
-    book_version = store.next_aggregate_version("economic_book", book_id)
+    book_version = durable_call(JournalStore.next_aggregate_version,"economic_book", book_id)
 
     imported_payload = {
         **request,
@@ -364,7 +470,7 @@ def book_external_provider_cash_activity(
     }
 
     try:
-        saved_result, inserted, _ = store.commit_command(
+        saved_result, inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -399,3 +505,7 @@ def book_external_provider_cash_activity(
             )
         return resolved
     return transaction, True
+
+# Install provider-fill provenance only when the financial surface is loaded.
+# Foundation-only JournalStore imports must remain independent of research.
+from . import _provider_fill_atomic_authority as _provider_fill_atomic_authority  # noqa: E402,F401

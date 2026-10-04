@@ -34,7 +34,7 @@ class ArtifactGenerationBoundReadTests(unittest.TestCase):
         original_validate = store._validate_object_entry
         swapped = False
 
-        def inject(path):
+        def inject(_selected_store, path):
             nonlocal swapped
             if not swapped:
                 prefix.rename(detached)
@@ -62,7 +62,7 @@ class ArtifactGenerationBoundReadTests(unittest.TestCase):
             )
             try:
                 with mock.patch.object(
-                    store, "_validate_object_entry", side_effect=inject
+                    ArtifactStore, "_validate_object_entry", autospec=True, side_effect=inject
                 ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,
@@ -83,7 +83,7 @@ class ArtifactGenerationBoundReadTests(unittest.TestCase):
             )
             try:
                 with mock.patch.object(
-                    store, "_validate_object_entry", side_effect=inject
+                    ArtifactStore, "_validate_object_entry", autospec=True, side_effect=inject
                 ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,
@@ -105,7 +105,7 @@ class ArtifactGenerationBoundReadTests(unittest.TestCase):
             )
             try:
                 with mock.patch.object(
-                    store, "_validate_object_entry", side_effect=inject
+                    ArtifactStore, "_validate_object_entry", autospec=True, side_effect=inject
                 ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,

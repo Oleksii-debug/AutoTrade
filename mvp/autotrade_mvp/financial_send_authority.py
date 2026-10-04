@@ -197,14 +197,16 @@ def _require_durable_prepared_financial_request(
 def _risk_payload(
     journal: JournalStore,
     binding: FinancialRequestBindingMaterial,
+    *,
+    load_events: Callable[..., Any],
 ) -> Mapping[str, Any]:
-    events = journal.load_events("risk_decision", binding.risk_decision_id)
-    if len(events) != 1:
+    events = load_events(journal, "risk_decision", binding.risk_decision_id)
+    if type(events) is not list or len(events) != 1:
         raise FinancialSendAuthorityError(
             "financial binding risk decision is not one durable canonical event"
         )
     payload = events[0].get("payload")
-    if not isinstance(payload, Mapping):
+    if type(payload) is not dict:
         raise FinancialSendAuthorityError("durable risk decision payload is malformed")
     return payload
 
@@ -213,17 +215,20 @@ def _require_binding_matches_durable_admission(
     *,
     service: AuthorityService,
     journal: JournalStore,
+    historical_admission: Callable[..., Any],
+    load_events: Callable[..., Any],
+    risk_payload_function: Callable[..., Mapping[str, Any]],
     admission_id: str,
     intent_hash: str,
     action: str,
     binding: FinancialRequestBindingMaterial,
 ) -> Mapping[str, Any]:
-    admission = service.historical_admission(admission_id)
-    if not isinstance(admission, Mapping) or admission.get("outcome") != "ADMITTED":
+    admission = historical_admission(service, admission_id)
+    if type(admission) is not dict or admission.get("outcome") != "ADMITTED":
         raise FinancialSendAuthorityError("financial send requires an admitted durable record")
 
     instrument = admission.get("instrument")
-    if not isinstance(instrument, Mapping):
+    if type(instrument) is not dict:
         raise FinancialSendAuthorityError("durable admission instrument is malformed")
 
     expected = (
@@ -253,13 +258,13 @@ def _require_binding_matches_durable_admission(
             "financial request binding differs from durable admission scope"
         )
 
-    risk_payload = _risk_payload(journal, binding)
+    risk_payload = risk_payload_function(journal, binding, load_events=load_events)
     if risk_payload.get("journal_sequence_cut") != binding.admitted_journal_sequence_cut:
         raise FinancialSendAuthorityError(
             "financial request binding journal cut differs from durable risk decision"
         )
     snapshot = risk_payload.get("authoritative_risk_snapshot")
-    if not isinstance(snapshot, Mapping):
+    if type(snapshot) is not dict:
         raise FinancialSendAuthorityError(
             "durable risk decision lacks authoritative risk snapshot"
         )
@@ -269,7 +274,7 @@ def _require_binding_matches_durable_admission(
         )
 
     durable_intent = risk_payload.get("risk_intent")
-    if not isinstance(durable_intent, Mapping):
+    if type(durable_intent) is not dict:
         raise FinancialSendAuthorityError("durable risk decision lacks canonical risk intent")
     durable_side = durable_intent.get("side")
     durable_quantity = durable_intent.get("quantity")
@@ -477,6 +482,10 @@ class FinancialSendAuthorityIssuer:
         "__historical_code",
         "__journal_load_events_function",
         "__journal_load_events_code",
+        "__risk_payload_function",
+        "__risk_payload_code",
+        "__durable_binding_function",
+        "__durable_binding_code",
         "__submission_attempt_id_function",
         "__submission_attempt_id_code",
         "__prepared_request_function",
@@ -562,17 +571,29 @@ class FinancialSendAuthorityIssuer:
         dispatch_guard_function = AuthorityService.dispatch_guard
         historical_function = AuthorityService.historical_admission
         journal_load_events_function = JournalStore.load_events
+        risk_payload_function = _risk_payload
+        durable_binding_function = _require_binding_matches_durable_admission
         submission_attempt_id_function = submission_attempt_aggregate_id
         prepared_request_function = _require_durable_prepared_financial_request
         route_authority_function = compose_selected_provider_route_authority
         route_scope_function = bind_selected_provider_route_submission_scope
         financial_route_binding_function = require_financial_binding_matches_selected_route
         journal_load_events_code = getattr(journal_load_events_function, "__code__", None)
+        risk_payload_code = getattr(risk_payload_function, "__code__", None)
+        durable_binding_code = getattr(durable_binding_function, "__code__", None)
         submission_attempt_id_code = getattr(submission_attempt_id_function, "__code__", None)
         prepared_request_code = getattr(prepared_request_function, "__code__", None)
         if journal_load_events_code is None:
             raise FinancialSendAuthorityError(
                 "JournalStore load-events executable authority is unavailable"
+            )
+        if risk_payload_code is None:
+            raise FinancialSendAuthorityError(
+                "durable risk-payload executable authority is unavailable"
+            )
+        if durable_binding_code is None:
+            raise FinancialSendAuthorityError(
+                "durable admission-binding executable authority is unavailable"
             )
         if submission_attempt_id_code is None:
             raise FinancialSendAuthorityError(
@@ -604,6 +625,10 @@ class FinancialSendAuthorityIssuer:
         self.__historical_code = historical_function.__code__
         self.__journal_load_events_function = journal_load_events_function
         self.__journal_load_events_code = journal_load_events_code
+        self.__risk_payload_function = risk_payload_function
+        self.__risk_payload_code = risk_payload_code
+        self.__durable_binding_function = durable_binding_function
+        self.__durable_binding_code = durable_binding_code
         self.__submission_attempt_id_function = submission_attempt_id_function
         self.__submission_attempt_id_code = submission_attempt_id_code
         self.__prepared_request_function = prepared_request_function
@@ -675,6 +700,16 @@ class FinancialSendAuthorityIssuer:
             is not self.__journal_load_events_code
         ):
             raise FinancialSendAuthorityError("JournalStore load-events code changed")
+        if _risk_payload is not self.__risk_payload_function:
+            raise FinancialSendAuthorityError("durable risk-payload authority changed")
+        if self.__risk_payload_function.__code__ is not self.__risk_payload_code:
+            raise FinancialSendAuthorityError("durable risk-payload authority code changed")
+        if _require_binding_matches_durable_admission is not self.__durable_binding_function:
+            raise FinancialSendAuthorityError("durable admission-binding authority changed")
+        if self.__durable_binding_function.__code__ is not self.__durable_binding_code:
+            raise FinancialSendAuthorityError(
+                "durable admission-binding authority code changed"
+            )
         if submission_attempt_aggregate_id is not self.__submission_attempt_id_function:
             raise FinancialSendAuthorityError("submission attempt identity authority changed")
         if (
@@ -764,9 +799,13 @@ class FinancialSendAuthorityIssuer:
         self._require_current()
         if type(binding) is not FinancialRequestBindingMaterial:
             raise TypeError("binding must be exact FinancialRequestBindingMaterial")
-        admission = _require_binding_matches_durable_admission(
+        durable_binding_function = self.__durable_binding_function
+        admission = durable_binding_function(
             service=self.__service,
             journal=self.__journal,
+            historical_admission=self.__historical_function,
+            load_events=self.__journal_load_events_function,
+            risk_payload_function=self.__risk_payload_function,
             admission_id=_exact_text(admission_id, name="admission_id"),
             intent_hash=_exact_text(intent_hash, name="intent_hash"),
             action=_exact_text(action, name="action"),
@@ -833,9 +872,13 @@ class FinancialSendAuthorityIssuer:
         binding, admission_id, intent_id, intent_hash, action = self._capability_material(
             authority
         )
-        admission = _require_binding_matches_durable_admission(
+        durable_binding_function = self.__durable_binding_function
+        admission = durable_binding_function(
             service=self.__service,
             journal=self.__journal,
+            historical_admission=self.__historical_function,
+            load_events=self.__journal_load_events_function,
+            risk_payload_function=self.__risk_payload_function,
             admission_id=admission_id,
             intent_hash=intent_hash,
             action=action,

@@ -180,6 +180,33 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=injected_result,
             )
 
+        class HostileStateField(str):
+            armed = False
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                if type(self).armed:
+                    raise AssertionError("hostile result state-field equality executed")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_key_result = simulate_execution(o, q, m)
+        hostile_state = dict(hostile_key_result.__dict__)
+        filled_quantity = hostile_state.pop("filled_quantity")
+        hostile_state[HostileStateField("filled_quantity")] = filled_quantity
+        object.__setattr__(hostile_key_result, "__dict__", hostile_state)
+        HostileStateField.armed = True
+        with self.assertRaisesRegex(TypeError, "non-canonical state field names"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=hostile_key_result,
+            )
+        self.assertEqual(HostileStateField.equality_calls, 0)
+
         mutated_order = order()
         object.__setattr__(mutated_order, "quantity", Decimal("-1"))
         with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):

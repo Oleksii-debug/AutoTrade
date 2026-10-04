@@ -248,7 +248,11 @@ class ForwardPaperQualificationTests(unittest.TestCase):
     def test_missing_provider_capability_prevents_complete_evidence(self):
         result = assess_forward_paper(
             self.protocol(),
-            self.evidence(predictions=(self.predictions()[0],), outcomes=(self.outcomes()[0],)),
+            self.evidence(
+                predictions=(self.predictions()[0],),
+                outcomes=(self.outcomes()[0],),
+                paper_economics=(self.economics()[0],),
+            ),
         )
         self.assertEqual(result.evidence_status, "INCONCLUSIVE")
         self.assertIn("minimum_prediction_count_not_reached", result.reasons)

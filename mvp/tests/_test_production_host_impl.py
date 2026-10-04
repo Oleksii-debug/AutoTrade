@@ -314,6 +314,71 @@ class ProductionHostRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             runtime.serve_forever()
 
+    def test_terminal_finalizer_runs_after_command_drain_before_listener_and_fence(self):
+        ordering = []
+        gate = Mock()
+        server = Mock()
+        fence = Mock()
+        gate.stop_and_drain.side_effect = lambda: ordering.append("commands")
+        server.server_close.side_effect = lambda: ordering.append("listener")
+        fence.release.side_effect = lambda: ordering.append("fence")
+        runtime = self._runtime(server=server, gate=gate, fence=fence)
+        runtime.bind_terminal_finalizer(lambda: ordering.append("authority"))
+
+        runtime.close()
+
+        self.assertEqual(
+            ordering,
+            ["commands", "authority", "listener", "fence"],
+        )
+        self.assertTrue(runtime.closed)
+
+    def test_terminal_finalizer_failure_fails_closed_before_listener_or_fence_release(self):
+        gate = Mock()
+        server = Mock()
+        fence = Mock()
+        runtime = self._runtime(server=server, gate=gate, fence=fence)
+        failure = RuntimeError("authority teardown failed")
+        runtime.bind_terminal_finalizer(Mock(side_effect=failure))
+
+        with self.assertRaises(RuntimeError) as raised:
+            runtime.close()
+
+        self.assertIs(raised.exception, failure)
+        server.server_close.assert_not_called()
+        fence.release.assert_not_called()
+        with self.assertRaises(RuntimeError) as repeated:
+            runtime.close()
+        self.assertIs(repeated.exception, failure)
+
+    def test_terminal_finalizer_runs_before_listener_close_failure(self):
+        ordering = []
+        gate = Mock()
+        server = Mock()
+        fence = Mock()
+        gate.stop_and_drain.side_effect = lambda: ordering.append("commands")
+
+        def fail_listener():
+            ordering.append("listener")
+            raise RuntimeError("listener close failed")
+
+        server.server_close.side_effect = fail_listener
+        runtime = self._runtime(server=server, gate=gate, fence=fence)
+        runtime.bind_terminal_finalizer(lambda: ordering.append("authority"))
+
+        with self.assertRaisesRegex(RuntimeError, "listener close failed"):
+            runtime.close()
+
+        self.assertEqual(ordering, ["commands", "authority", "listener"])
+        fence.release.assert_not_called()
+
+    def test_terminal_finalizer_is_single_assignment_before_lifecycle_start(self):
+        runtime = self._runtime()
+        runtime.bind_terminal_finalizer(lambda: None)
+        with self.assertRaisesRegex(RuntimeError, "already bound"):
+            runtime.bind_terminal_finalizer(lambda: None)
+        runtime.close()
+
     def _assert_close_waits_for_pre_io_hook(self, hook_name):
         server = Mock()
         gate = Mock()

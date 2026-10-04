@@ -163,7 +163,11 @@ class RuntimeLoadMeasurementTests(unittest.TestCase):
                     observed_duration_us=1_000_000,
                 )
             )
-            self.assertEqual(decision.status, "PASS")
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(
+                decision.reasons,
+                ("unverified_runtime_measurement_provenance",),
+            )
             self.assertEqual(tuple(item.latency_us for item in samples), (100, 200))
             self.assertEqual(evidence.missing_event_ids, ())
             self.assertEqual(loaded_plan.digest, plan.digest)

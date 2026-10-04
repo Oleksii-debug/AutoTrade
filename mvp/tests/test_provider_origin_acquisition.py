@@ -198,6 +198,54 @@ class ProviderOriginAcquisitionBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(ProviderOriginError, "changed after durable journal load"):
                 require_provider_origin_response_binding_authority(response)
 
+    def test_cross_store_content_identical_acquisition_cannot_consume_origin(self):
+        with TemporaryDirectory() as first_directory, TemporaryDirectory() as second_directory:
+            (
+                _first_journal,
+                first_origin,
+                first_authority,
+                first_acquisition,
+                _first_q,
+                first_binding,
+            ) = self._fixture(first_directory)
+            (
+                _second_journal,
+                _second_origin,
+                second_authority,
+                second_acquisition,
+                _second_q,
+                _second_binding,
+            ) = self._fixture(second_directory)
+            self.assertEqual(
+                first_acquisition.acquisition_id,
+                second_acquisition.acquisition_id,
+            )
+            attempt_id = first_origin.prepare_direct(
+                first_binding,
+                recorded_at=NOW,
+                account_acquisition_authority=first_authority,
+                account_acquisition=first_acquisition,
+            )
+            response = first_origin._record_provider_origin(
+                attempt_id,
+                first_binding,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=NOW,
+                _origin_token=_TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            from mvp.autotrade_mvp.provider_origin import (
+                require_current_provider_origin_account_acquisition,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError, "same exact JournalStore generation"
+            ):
+                require_current_provider_origin_account_acquisition(
+                    response_binding=response,
+                    account_acquisition_authority=second_authority,
+                    account_acquisition=second_acquisition,
+                )
+
     def test_current_acquisition_consumer_fence_accepts_exact_bound_response(self):
         with TemporaryDirectory() as directory:
             _journal, origin, authority, acquisition, _q1, binding = self._fixture(directory)

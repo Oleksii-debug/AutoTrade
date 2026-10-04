@@ -142,7 +142,21 @@ class ImmutableWebAssetBundle:
         if any(type(asset) is not ImmutableWebAsset for asset in self.assets):
             raise TypeError("web bundle accepts only exact ImmutableWebAsset values")
 
-        ordered = tuple(sorted(self.assets, key=lambda asset: asset.path))
+        # Frozen dataclasses are not a sufficient trust boundary: callers holding
+        # an asset alias can still rewrite slots with object.__setattr__. Re-admit
+        # every field into a fresh exact asset before sorting, hashing, set
+        # membership or any other operation that could dispatch a hostile scalar
+        # callback from post-construction tampering.
+        admitted_assets = tuple(
+            ImmutableWebAsset(
+                path=asset.path,
+                body=asset.body,
+                sha256_hex=asset.sha256_hex,
+                content_type=asset.content_type,
+            )
+            for asset in self.assets
+        )
+        ordered = tuple(sorted(admitted_assets, key=lambda asset: asset.path))
         if len({asset.path for asset in ordered}) != len(ordered):
             raise ValueError("web bundle asset paths must be unique")
         if sum(len(asset.body) for asset in ordered) > _MAX_BUNDLE_BYTES:

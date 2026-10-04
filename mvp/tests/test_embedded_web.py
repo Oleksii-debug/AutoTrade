@@ -361,6 +361,37 @@ class EmbeddedWebTests(unittest.TestCase):
             load_immutable_web_bundle(self.web_bundle.manifest_bytes, bodies)
         self.assertEqual(touched, [])
 
+    def test_bundle_readmits_tampered_asset_before_sort_or_hash_callbacks(self):
+        tampered = asset("app.js", b"console.log('trusted');")
+        touched = []
+
+        class HostilePath(str):
+            def __lt__(self, other):
+                touched.append("lt")
+                return super().__lt__(other)
+
+            def __hash__(self):
+                touched.append("hash")
+                return super().__hash__()
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return super().__eq__(other)
+
+        object.__setattr__(tampered, "path", HostilePath("app.js"))
+        other_assets = tuple(
+            item for item in self.web_bundle.assets if item.path != "app.js"
+        )
+        touched.clear()
+
+        with self.assertRaisesRegex(TypeError, "asset path"):
+            ImmutableWebAssetBundle(
+                source_revision="a" * 40,
+                host_api_contract_version=HOST_API_CONTRACT_VERSION,
+                assets=other_assets + (tampered,),
+            )
+        self.assertEqual(touched, [])
+
     def test_manifest_size_field_is_authoritative(self):
         manifest = json.loads(self.web_bundle.manifest_bytes.decode("utf-8"))
         manifest["assets"][0]["size"] += 1

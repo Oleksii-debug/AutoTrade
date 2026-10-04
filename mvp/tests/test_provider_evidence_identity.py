@@ -144,7 +144,7 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
 
     def test_artifact_uuid_must_already_be_canonical_lowercase(self):
         raw = evidence_ref(
-            ARTIFACT_A.upper(),
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
             "https://provider.example/evidence/a",
         )
         with self.assertRaisesRegex(

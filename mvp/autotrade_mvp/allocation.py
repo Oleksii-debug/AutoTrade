@@ -1749,44 +1749,58 @@ def _canonical_evidence_value(
 ):
     """Reduce untrusted evidence to exact built-in JSON-domain values.
 
-    Mapping provenance is checked before any mapping operation.  In particular,
-    a MappingProxyType wrapped around a caller-defined Mapping is not equivalent
-    to a proxy minted by ImmutableAllocationEvidence.
+    Mapping provenance is checked before any mapping operation.  Recursive
+    normalization stays inside this invocation so post-import rebinding of the
+    module helper cannot retarget already-issued evidence.
     """
 
-    if type(value) is Decimal:
-        return str(value)
-    if value is None or type(value) is bool:
-        return value
-    if type(value) is str or type(value) is int:
-        return value
-    if type(value) is float:
-        raise TypeError("allocation evidence cannot contain binary floating-point values")
-    if type(value) is dict:
-        normalized = {}
-        for raw_key, raw_value in dict.items(value):
-            if type(raw_key) is not str:
-                raise TypeError("allocation evidence payload keys must be exact strings")
-            key = _text(raw_key, name="allocation evidence payload key")
-            if key in normalized:
-                raise ValueError("allocation evidence payload keys must be unique")
-            normalized[key] = _canonical_evidence_value(raw_value)
-        return normalized
-    if type(value) is _MAPPING_PROXY_TYPE:
-        sealed = _sealed_lookup(value)
-        if sealed is None:
+    def canonicalize(item):
+        if type(item) is Decimal:
+            return str(item)
+        if item is None or type(item) is bool:
+            return item
+        if type(item) is str or type(item) is int:
+            return item
+        if type(item) is float:
             raise TypeError(
-                "allocation evidence mappingproxy lacks sealed canonical provenance"
+                "allocation evidence cannot contain binary floating-point values"
             )
-        _, canonical_json = sealed
-        decoded = _json_loads(canonical_json)
-        if type(decoded) is not dict:
-            raise RuntimeError("sealed allocation payload provenance is invalid")
-        return decoded
-    if type(value) is list or type(value) is tuple:
-        return [_canonical_evidence_value(item) for item in value]
-    raise TypeError(f"unsupported allocation evidence value type: {type(value).__name__}")
+        if type(item) is dict:
+            normalized = {}
+            for raw_key, raw_value in dict.items(item):
+                if type(raw_key) is not str:
+                    raise TypeError(
+                        "allocation evidence payload keys must be exact strings"
+                    )
+                key = str.strip(raw_key)
+                if not key:
+                    raise ValueError(
+                        "allocation evidence payload keys must be non-empty"
+                    )
+                if key in normalized:
+                    raise ValueError(
+                        "allocation evidence payload keys must be unique"
+                    )
+                normalized[key] = canonicalize(raw_value)
+            return normalized
+        if type(item) is _MAPPING_PROXY_TYPE:
+            sealed = _sealed_lookup(item)
+            if sealed is None:
+                raise TypeError(
+                    "allocation evidence mappingproxy lacks sealed canonical provenance"
+                )
+            _, canonical_json = sealed
+            decoded = _json_loads(canonical_json)
+            if type(decoded) is not dict:
+                raise RuntimeError("sealed allocation payload provenance is invalid")
+            return decoded
+        if type(item) is list or type(item) is tuple:
+            return [canonicalize(nested) for nested in item]
+        raise TypeError(
+            f"unsupported allocation evidence value type: {type(item).__name__}"
+        )
 
+    return canonicalize(value)
 
 def _canonical_evidence_json(
     value,
@@ -1812,6 +1826,7 @@ def _allocation_evidence_digest(
     valid_until: str,
     payload: Mapping[str, object],
     _canonical_json=_canonical_evidence_json,
+    _sha256=sha256,
 ) -> str:
     body = {
         "evidence_id": evidence_id,
@@ -1822,7 +1837,7 @@ def _allocation_evidence_digest(
         "valid_until": valid_until,
         "payload": payload,
     }
-    return sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+    return _sha256(_canonical_json(body).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

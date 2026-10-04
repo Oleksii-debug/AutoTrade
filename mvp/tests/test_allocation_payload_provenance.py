@@ -396,6 +396,11 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         original_canonicalize = allocation_module._canonical_evidence_value
         original_canonical_json = allocation_module._canonical_evidence_json
         original_digest = allocation_module._allocation_evidence_digest
+        original_sha256 = allocation_module.sha256
+
+        class ForgedHash:
+            def hexdigest(self):
+                return evidence.digest
 
         class ForgedJson:
             @staticmethod
@@ -412,6 +417,7 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         allocation_module._allocation_evidence_digest = (
             lambda **_kwargs: evidence.digest
         )
+        allocation_module.sha256 = lambda _value: ForgedHash()
         try:
             self.assertEqual(
                 allocation_module._allocation_payload_snapshot(evidence),
@@ -426,6 +432,7 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module._canonical_evidence_value = original_canonicalize
             allocation_module._canonical_evidence_json = original_canonical_json
             allocation_module._allocation_evidence_digest = original_digest
+            allocation_module.sha256 = original_sha256
 
 
 if __name__ == "__main__":

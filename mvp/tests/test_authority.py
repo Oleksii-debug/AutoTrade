@@ -541,6 +541,75 @@ class AuthorityTests(unittest.TestCase):
                 reservation_requirements={},
             )
 
+    def test_durable_financial_binding_revalidates_confirmation_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(environments={"SIMULATION"})
+            authority.register_policy(item)
+            authority.add_financial_confirmation(
+                confirmation_id="bound-durable-scope",
+                policy_id=item.policy_id,
+                intent_hash=PUBLIC_INTENT_HASH,
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                expires_at="2026-09-24T23:00:00Z",
+                risk_intent=public_risk_intent(),
+                risk_policy=public_risk_policy(),
+                reservation_requirements={"CASH:USD": "100"},
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="cmd-bound-durable-scope",
+                idempotency_key="idem-bound-durable-scope",
+                admission_id="admission-bound-durable-scope",
+                policy_id=item.policy_id,
+                intent_id="intent-bound-durable-scope",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-bound-durable-scope",
+                confirmation_id="bound-durable-scope",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            risk_payload = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]["payload"]
+            tampered = replace(
+                authority._confirmations["bound-durable-scope"],
+                account_id="different-account",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "confirmation scope is inconsistent",
+            ):
+                authority_module._validate_confirmation_financial_binding(
+                    confirmation=tampered,
+                    record=admitted,
+                    authority_policy_version=item.version,
+                    durable_risk_intent=risk_payload["risk_intent"],
+                    authoritative_risk_snapshot=risk_payload[
+                        "authoritative_risk_snapshot"
+                    ],
+                    reservation_requirements=risk_payload[
+                        "reservation_requirements"
+                    ],
+                )
+
     def test_financial_confirmation_invalidates_material_envelope_changes(self):
         variants = (
             (

@@ -24,7 +24,6 @@ from autotrade_research.artifacts import (
 from .execution_oracle import assert_conservative_execution
 from .exact_decimal import ExactDecimalError, is_exact_decimal_multiple
 from .instruments import (
-    InstrumentRegistry,
     InstrumentRegistryError,
     InstrumentVersion,
     _detached_instrument_version,
@@ -66,10 +65,12 @@ def _validate_instrument_metadata_authority(
 ) -> None:
     """Authenticate the exact InstrumentVersion facts behind execution rules.
 
-    Storage integrity alone is not enough: the canonical instrument authority
-    binds price/quantity grids and lifecycle facts to immutable metadata
-    evidence. Qualified replay additionally requires that evidence to have been
-    knowable no later than the order submission cut.
+    The instrument registry still has legacy callers under a second package
+    import identity, while this qualified execution boundary intentionally uses
+    the canonical autotrade_research package. Reusing its private exact-type
+    helper across those module identities would reject the canonical store.
+    Keep this boundary on one canonical ArtifactStore/reader generation while
+    enforcing the same immutable instrument-metadata contract.
     """
 
     cutoff = (
@@ -77,21 +78,75 @@ def _validate_instrument_metadata_authority(
         if knowledge_cutoff is None
         else _instant(knowledge_cutoff, name="instrument_knowledge_cutoff")
     )
+    if not instrument.metadata_evidence:
+        raise ExecutionQualificationError(
+            "qualified execution requires authenticated instrument metadata evidence"
+        )
+
     try:
         trusted_read = trusted_authenticated_reader(
             artifact_store.root,
             publication_store=artifact_store,
         )
-        known = InstrumentRegistry._metadata_known_by(
-            instrument,
-            cutoff,
-            artifact_store=artifact_store,
-            trusted_read=trusted_read,
-        )
+        binding = instrument.metadata_evidence_binding()
+        known_at = []
+        for evidence in instrument.metadata_evidence:
+            artifact_id = evidence["artifact_id"]
+            expected_digest = evidence["sha256"]
+            observed_raw = evidence["observed_at"]
+            manifest, _data = trusted_read(artifact_id)
+
+            if manifest.get("sha256") != expected_digest:
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence digest mismatch"
+                )
+            if (
+                manifest.get("media_type")
+                != "application/vnd.autotrade.instrument-metadata+json"
+            ):
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence media type is invalid"
+                )
+            metadata = manifest.get("metadata")
+            if (
+                type(metadata) is not dict
+                or metadata.get("kind") != "instrument-metadata"
+                or metadata.get("instrument_version_binding") != binding
+            ):
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence is not bound to this instrument version"
+                )
+            if (
+                "rights_id" in evidence
+                and manifest.get("rights", {}).get("rights_id")
+                != evidence["rights_id"]
+            ):
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence rights identity mismatch"
+                )
+
+            observed = datetime.fromisoformat(
+                observed_raw[:-1] + "+00:00"
+            ).astimezone(timezone.utc)
+            committed_raw = manifest.get("created_at")
+            if type(committed_raw) is not str:
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence lacks trusted commit time"
+                )
+            committed = datetime.fromisoformat(
+                committed_raw.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            if observed > committed:
+                raise ExecutionQualificationError(
+                    "instrument metadata evidence observation follows immutable commit"
+                )
+            known_at.append(max(observed, committed))
+    except ExecutionQualificationError:
+        raise
     except (
         ArtifactIntegrityError,
-        InstrumentRegistryError,
         FileNotFoundError,
+        KeyError,
         OSError,
         TypeError,
         ValueError,
@@ -99,11 +154,11 @@ def _validate_instrument_metadata_authority(
         raise ExecutionQualificationError(
             "instrument metadata evidence cannot be authenticated"
         ) from error
-    if not known:
+
+    if max(known_at) > cutoff:
         raise ExecutionQualificationError(
             "qualified execution requires authenticated instrument metadata evidence"
         )
-
 
 def _text(value: object, *, name: str) -> str:
     if type(value) is not str:

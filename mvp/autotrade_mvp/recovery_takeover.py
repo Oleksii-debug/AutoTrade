@@ -86,6 +86,7 @@ _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
 )
 _CANONICAL_JOURNAL_GET_EVENT = JournalStore.get_event
 _CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_TAKEOVER_AUTHORITY_WINDOW = takeover_authority_window
 _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR = (
     record_current_trade_credential_transition_anchor
 )
@@ -766,6 +767,7 @@ def execute_durable_takeover(
 ) -> DurableTakeoverResult:
     """Issue or resume one freeze-first durable owner takeover."""
 
+    takeover_window = _CANONICAL_TAKEOVER_AUTHORITY_WINDOW
     record_credential_transition_anchor = (
         _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR
     )
@@ -791,7 +793,7 @@ def execute_durable_takeover(
     )
 
     # Phase 1: durable freeze. Do not touch the vault under this sender gate.
-    with takeover_authority_window(
+    with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
         pending = _pending_for_scope(
@@ -1066,7 +1068,7 @@ def execute_durable_takeover(
     # Phase 3: old credential is durably inactive; now reacquire the same sender
     # gate, rescan ambiguity, and advance durable sender authority only if the
     # complete validation interval still ends on the exact JournalStore cut.
-    with takeover_authority_window(
+    with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
         owner_validation_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(

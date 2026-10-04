@@ -603,7 +603,7 @@ def measure_declared_financial_operation(
                     "measurement JournalStore dependency changed during financial "
                     f"operation: {name}"
                 )
-        if journal_store_type.SCHEMA_VERSION != journal_schema_version:
+        if journal_store_type.SCHEMA_VERSION is not journal_schema_version:
             raise error_type(
                 "measurement JournalStore schema authority changed during financial operation"
             )

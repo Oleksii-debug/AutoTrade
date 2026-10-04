@@ -880,7 +880,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             finally:
                 client.close()
 
-    def test_paired_owner_session_idle_window_matches_cookie_lifetime(self):
+    def test_paired_owner_session_preserves_canonical_short_rolling_idle_window(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)
             boundary = client.runtime.application._boundary
@@ -888,15 +888,20 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 token = client.cookie.split('=', 1)[1]
                 issued = boundary._sessions[token]
                 issued_at = issued.expires_at - 3600
-                self.assertEqual(issued.idle_timeout_seconds, 3600)
-                self.assertEqual(issued.idle_expires_at, issued.expires_at)
+                self.assertEqual(issued.idle_timeout_seconds, 300)
+                self.assertEqual(issued.idle_expires_at, issued_at + 300)
+                self.assertEqual(issued.expires_at, issued_at + 3600)
 
-                boundary._now = lambda: issued_at + 301
+                boundary._now = lambda: issued_at + 299
                 status, state, _ = client.request('GET', '/api/v1/state')
                 self.assertEqual(status, 200)
                 self.assertEqual(state['environment'], 'SIMULATION')
+                refreshed = boundary._sessions[token]
+                self.assertEqual(refreshed.idle_timeout_seconds, 300)
+                self.assertEqual(refreshed.idle_expires_at, issued_at + 599)
+                self.assertEqual(refreshed.expires_at, issued_at + 3600)
 
-                boundary._now = lambda: issued.expires_at
+                boundary._now = lambda: issued_at + 599
                 status, body, _ = client.request('GET', '/api/v1/state')
                 self.assertEqual(status, 403)
                 self.assertEqual(body, {'error': 'FORBIDDEN'})

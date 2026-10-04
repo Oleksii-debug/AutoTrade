@@ -81,6 +81,51 @@ class ProviderEconomicHistoricalCutTests(unittest.TestCase):
             self.assertNotEqual(second.cut_digest, first.cut_digest)
             self.assertEqual(len(second.transaction_digests), 2)
 
+    def test_verified_historical_cut_reconstructs_owned_postings(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            book_cash(store, activity_id="cash-1", amount="100")
+            owner = DurableProviderEconomicBook(
+                store,
+                provider_id="ALPACA",
+                account_id="cut-account",
+                environment="PAPER",
+            )
+            first = owner.resolve_historical_cut(1)
+            book_cash(store, activity_id="cash-2", amount="25")
+
+            reconstructed = owner.read_historical_cut(
+                first,
+                expected_visibility_journal_sequence=(
+                    first.visibility_journal_sequence
+                ),
+            )
+
+            self.assertEqual(reconstructed.aggregate_version, 1)
+            self.assertEqual(reconstructed.provider_id, first.provider_id)
+            self.assertEqual(reconstructed.account_id, first.account_id)
+            self.assertEqual(reconstructed.environment, first.environment)
+            self.assertEqual(reconstructed.book_digest, first.resulting_book_digest)
+            self.assertEqual(len(reconstructed.transactions), 1)
+            self.assertEqual(
+                tuple(
+                    transaction.transaction_id
+                    for transaction in reconstructed.transactions
+                ),
+                tuple(item[0] for item in first.transaction_digests),
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "visibility does not match expected authority",
+            ):
+                owner.read_historical_cut(
+                    first,
+                    expected_visibility_journal_sequence=(
+                        first.visibility_journal_sequence + 1
+                    ),
+                )
+
     def test_frozen_pre_correction_cut_reverifies_after_later_append(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

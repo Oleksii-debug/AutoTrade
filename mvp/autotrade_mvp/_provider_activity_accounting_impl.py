@@ -2204,6 +2204,59 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             "windows_file_index_low": exact.windows_file_index_low,
         }
 
+    def read_historical_cut(
+        self,
+        cut: ProviderEconomicCut,
+        *,
+        expected_visibility_journal_sequence: int,
+    ) -> EconomicBookCut:
+        """Reconstruct the exact descriptive book owned by one verified cut.
+
+        ProviderEconomicCut intentionally carries only durable identities and
+        digests.  Scientific/economic consumers that need canonical postings
+        must re-enter through the owning DurableProviderEconomicBook rather than
+        treating copied transaction payloads as authority.  This read seam
+        reverifies the independently selected global visibility cut first, then
+        returns only the immutable prefix whose transaction and book digests
+        exactly match that authority.
+        """
+
+        verified = reverify_provider_economic_cut(
+            self,
+            cut,
+            expected_visibility_journal_sequence=(
+                expected_visibility_journal_sequence
+            ),
+        )
+        events = self._events()
+        if len(events) < verified.aggregate_version:
+            raise AccountingConflict(
+                "verified historical economic prefix disappeared from durable history"
+            )
+        prefix = events[: verified.aggregate_version]
+        current = self._replay(prefix)
+        ordered = tuple(
+            (transaction.transaction_id, transaction_digest(transaction))
+            for transaction in current.transactions
+        )
+        resulting = current.audit_digest()
+        if ordered != verified.transaction_digests:
+            raise AccountingConflict(
+                "historical economic postings do not match verified cut"
+            )
+        if resulting != verified.resulting_book_digest:
+            raise AccountingConflict(
+                "historical economic book digest does not match verified cut"
+            )
+        return EconomicBookCut(
+            provider_id=verified.provider_id,
+            account_id=verified.account_id,
+            environment=verified.environment,
+            transactions=current.transactions,
+            book_digest=resulting,
+            aggregate_version=verified.aggregate_version,
+        )
+
     def resolve_historical_cut(
         self,
         aggregate_version: int,

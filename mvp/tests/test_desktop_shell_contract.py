@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -12,6 +13,7 @@ AUTHENTICATED_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmerge
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
 OPENAPI = ROOT / "contracts" / "openapi" / "host-api.yaml"
+COMMON_SCHEMA = ROOT / "contracts" / "jsonschema" / "common.schema.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
@@ -43,9 +45,12 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("HasCanonicalEventQuery(target.Query)", text)
         self.assertIn('const string prefix = "?after=";', text)
         self.assertIn("value.Contains('&')", text)
+        self.assertIn('string.Equals(method, "GET", StringComparison.Ordinal)', text)
+        self.assertIn('string.Equals(method, "POST", StringComparison.Ordinal)', text)
         self.assertNotIn("CanonicalApiRoot", text)
         self.assertIn("AllowsWebMessageCommandAuthority => false", text)
         self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsServiceWorkers => false", text)
         self.assertIn("AllowsDownloads => false", text)
         self.assertIn("AllowsNewWindow(Uri target) => false", text)
         self.assertNotIn("Authorization", text)
@@ -66,21 +71,21 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
             session,
         )
 
-    def test_event_credential_query_grammar_is_pinned_to_openapi_after_parameter(self):
+    def test_event_credential_query_grammar_matches_canonical_sequence_contract(self):
         policy = WEB_POLICY.read_text(encoding="utf-8")
-        openapi = OPENAPI.read_text(encoding="utf-8")
-        event = openapi.split("  /api/v1/events:", 1)[1].split(
-            "  /api/v1/health:",
-            1,
-        )[0]
-        self.assertIn('const string prefix = "?after=";', policy)
-        self.assertIn("name: after", event)
-        self.assertIn("in: query", event)
-        self.assertIn("required: false", event)
-        self.assertIn(
-            "$ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence",
-            event,
+        common = json.loads(COMMON_SCHEMA.read_text(encoding="utf-8"))
+        sequence = common["$defs"]["Sequence"]
+
+        self.assertEqual(sequence["type"], "string")
+        self.assertEqual(
+            sequence["pattern"],
+            r"^(0|[1-9][0-9]*)$(?![\s\S])",
         )
+        self.assertIn('const string prefix = "?after=";', policy)
+        self.assertIn('if (value == "0")', policy)
+        self.assertIn("value[0] is < '1' or > '9'", policy)
+        self.assertIn("character is < '0' or > '9'", policy)
+        self.assertIn("value.Contains('&')", policy)
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")

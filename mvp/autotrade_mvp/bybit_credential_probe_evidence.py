@@ -641,7 +641,7 @@ def _probe_headers(
     credential_plaintext: str,
     timestamp_ms: object,
     recv_window_ms: object,
-) -> Mapping[str, str]:
+) -> dict[str, str]:
     timestamp_ms = _exact_request_timestamp(timestamp_ms)
     recv_window_ms = _exact_recv_window(recv_window_ms)
     try:
@@ -658,24 +658,27 @@ def _probe_headers(
         signing_material,
         sha256,
     ).hexdigest()
-    return MappingProxyType(
-        {
-            "Accept": "application/json",
-            "X-BAPI-API-KEY": credential.api_key,
-            "X-BAPI-TIMESTAMP": str(timestamp_ms),
-            "X-BAPI-RECV-WINDOW": str(recv_window_ms),
-            "X-BAPI-SIGN": signature,
-        }
-    )
+    return {
+        "Accept": "application/json",
+        "X-BAPI-API-KEY": credential.api_key,
+        "X-BAPI-TIMESTAMP": str(timestamp_ms),
+        "X-BAPI-RECV-WINDOW": str(recv_window_ms),
+        "X-BAPI-SIGN": signature,
+    }
 
 
-def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
-    if not isinstance(headers, Mapping) or set(headers) != _PROBE_HEADER_NAMES:
+def _validate_probe_wire_headers(headers: object) -> dict[str, str]:
+    if type(headers) is not dict:
+        raise ProviderCoreError(
+            "Bybit credential probe wire headers must be an exact built-in object"
+        )
+    held = headers.copy()
+    if set(held) != _PROBE_HEADER_NAMES:
         raise ProviderCoreError(
             "Bybit credential probe wire headers must have exact auth shape"
         )
     normalized: dict[str, str] = {}
-    for raw_key, raw_value in headers.items():
+    for raw_key, raw_value in held.items():
         if type(raw_key) is not str or raw_key not in _PROBE_HEADER_NAMES:
             raise ProviderCoreError(
                 "Bybit credential probe wire header names must be exact canonical text"
@@ -706,7 +709,7 @@ def _validate_probe_wire_headers(headers: object) -> Mapping[str, str]:
     _exact_recv_window(int(recv_window))
     if _HEX_SHA256.fullmatch(normalized["X-BAPI-SIGN"]) is None:
         raise ProviderCoreError("Bybit credential probe signature header is not canonical")
-    return MappingProxyType(normalized)
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,7 +724,7 @@ class BybitCredentialProbeHttpRequest:
             raise ProviderCoreError(
                 "Bybit credential probe request URL is outside exact query-api origins"
             )
-        headers = _validate_probe_wire_headers(self.headers)
+        headers = MappingProxyType(_validate_probe_wire_headers(self.headers))
         if (
             type(self.timeout_seconds) is not int
             or not 1 <= self.timeout_seconds <= 120

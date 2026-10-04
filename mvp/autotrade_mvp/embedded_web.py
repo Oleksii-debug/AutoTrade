@@ -352,6 +352,8 @@ class EmbeddedWebHostApplication(AuthenticatedHostApplication):
             return super().dispatch(
                 method=method, target=target, headers=headers, body=body
             )
+        if type(headers) is not dict:
+            return _static_error(400, "INVALID_STATIC_REQUEST")
 
         try:
             if type(method) is not str or method != "GET":

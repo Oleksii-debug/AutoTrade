@@ -438,8 +438,7 @@ class JournalBackedHostCommandStore:
             return self._command_result(saved_result)
 
         current = self.state_version
-        expected = int(expected_raw)
-        if expected != current:
+        if expected_raw != str(current):
             conflict = CommandResult(
                 command_id=command_id,
                 status="CONFLICT",
@@ -909,9 +908,15 @@ class JournalBackedHostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
+        current = self.state_version
         if isinstance(after, str):
             if not is_valid_common_scalar("Sequence", after):
                 raise ValueError("Cursor must be a canonical Sequence")
+            current_text = str(current)
+            if len(after) > len(current_text) or (
+                len(after) == len(current_text) and after > current_text
+            ):
+                raise ValueError("Cursor is ahead of host state")
             cursor = int(after)
         elif type(after) is int:
             cursor = after
@@ -919,7 +924,6 @@ class JournalBackedHostCommandStore:
             raise ValueError("Cursor must be a canonical Sequence")
         if cursor < 0:
             raise ValueError("Cursor must be non-negative")
-        current = self.state_version
         if cursor > current:
             raise ValueError("Cursor is ahead of host state")
 

@@ -257,6 +257,11 @@ class PauseDecision:
         )
         object.__setattr__(
             self,
+            "champion_artifact_hash",
+            _digest(self.champion_artifact_hash, name="champion_artifact_hash"),
+        )
+        object.__setattr__(
+            self,
             "source_cut_hash",
             _digest(self.source_cut_hash, name="source_cut_hash"),
         )
@@ -469,6 +474,7 @@ class CandidateWave:
         )
         if overlap:
             raise ValueError("validation observations must be disjoint from candidate training")
+
     @property
     def promotion_mode(self) -> str:
         return self.policy.promotion_mode

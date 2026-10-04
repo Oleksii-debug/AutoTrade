@@ -490,6 +490,15 @@ public partial class MainWindow : Window
         {
             return;
         }
+        catch (EmergencySnapshotBusyException)
+        {
+            EmergencyOperationValue.Text = "Unavailable";
+            SetLiveRegionText(
+                EmergencyResult,
+                "The host is responding, but one coherent state snapshot is temporarily busy. "
+                + "No emergency command was created or sent, and no durable block has been confirmed. "
+                + "Retry the same Block new exposure action after the snapshot becomes available.");
+        }
         catch (EmergencyCommandUncertainException uncertain)
         {
             EmergencyOperationValue.Text = uncertain.CommandId;

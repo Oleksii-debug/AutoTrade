@@ -29,11 +29,11 @@ paths:
                   maxLength: 128
       responses:
         "200":
-          description: Local owner paired; browser receives an HttpOnly cookie and the Windows ZERO launcher stores the same short-lived session in current-user Credential Manager for the native safety shell
+          description: Local owner paired; browser receives an HttpOnly SameSite cookie. Standalone ZERO launch may hand the same short-lived session to the native safety shell through current-user Credential Manager; an owned WPF desktop child receives the bearer directly in its pairing response and does not persist it
         "403":
           description: Pairing rejected
         "503":
-          description: Windows current-user session handoff failed; the minted bearer session is revoked and the pairing code remains retryable
+          description: Configured persistent Windows current-user session handoff failed; the minted bearer session is revoked and the pairing code remains retryable
   /api/v1/state:
     get:
       operationId: getState

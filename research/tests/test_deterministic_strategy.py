@@ -292,6 +292,50 @@ class DeterministicStrategyTests(unittest.TestCase):
         restored = ReturnThresholdBaseline.restore(canonical)
         self.assertEqual(restored.snapshot(), canonical)
 
+
+    def test_snapshot_restore_rejects_coercive_descriptor_container_shapes(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        base_payload = json.loads(strategy.snapshot())
+        mutations = (
+            ("market_requirements", "AB"),
+            ("supported_regimes", "AB"),
+            ("parameter_bounds", {"name": "threshold", "minimum": "0", "maximum": "1"}),
+        )
+        for field, value in mutations:
+            payload = json.loads(strategy.snapshot())
+            payload["descriptor"][field] = value
+            # Recompute descriptor hashes is intentionally not enough: the
+            # descriptor JSON shape itself must remain canonical.
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError,
+                "descriptor",
+            ):
+                ReturnThresholdBaseline.restore(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                )
+
+        payload = base_payload
+        payload["descriptor"]["unexpected"] = "field"
+        with self.assertRaisesRegex(ValueError, "descriptor"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
+    def test_snapshot_restore_rejects_noncanonical_parameter_bound_document(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        payload = json.loads(strategy.snapshot())
+        payload["descriptor"]["parameter_bounds"][0]["extra"] = "x"
+        with self.assertRaisesRegex(ValueError, "parameter bound"):
+            ReturnThresholdBaseline.restore(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+
     def test_snapshot_restore_normalizes_deep_json_recursion_failure(self):
         raw = "[" * 4000 + "0" + "]" * 4000
         # Decoder recursion thresholds vary by Python build/platform. Force the

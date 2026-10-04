@@ -212,6 +212,62 @@ class StrategyDescriptor:
         return "sha256:" + sha256(payload).hexdigest()
 
 
+
+def _strategy_descriptor_from_document(payload: object) -> StrategyDescriptor:
+    """Decode one exact canonical descriptor document without coercive containers."""
+
+    expected = {
+        "strategy_id",
+        "version",
+        "family",
+        "feature_schema",
+        "market_requirements",
+        "minimum_history",
+        "horizon_seconds",
+        "decision_schedule",
+        "proposal_semantics",
+        "parameter_bounds",
+        "resource_profile",
+        "supported_regimes",
+        "source_license",
+        "evaluation_protocol_sha256",
+        "artifact_sha256",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise ValueError("strategy descriptor snapshot is invalid")
+    if type(payload["market_requirements"]) is not list:
+        raise ValueError("strategy descriptor market_requirements must be an array")
+    if type(payload["supported_regimes"]) is not list:
+        raise ValueError("strategy descriptor supported_regimes must be an array")
+    if type(payload["parameter_bounds"]) is not list:
+        raise ValueError("strategy descriptor parameter_bounds must be an array")
+    bounds: list[tuple[str, str, str]] = []
+    for item in payload["parameter_bounds"]:
+        if type(item) is not dict or set(item) != {"name", "minimum", "maximum"}:
+            raise ValueError("strategy descriptor parameter bound is invalid")
+        bounds.append((item["name"], item["minimum"], item["maximum"]))
+    try:
+        return StrategyDescriptor(
+            strategy_id=payload["strategy_id"],
+            version=payload["version"],
+            family=payload["family"],
+            feature_schema=payload["feature_schema"],
+            market_requirements=tuple(payload["market_requirements"]),
+            minimum_history=payload["minimum_history"],
+            horizon_seconds=payload["horizon_seconds"],
+            decision_schedule=payload["decision_schedule"],
+            proposal_semantics=payload["proposal_semantics"],
+            parameter_bounds=tuple(bounds),
+            resource_profile=payload["resource_profile"],
+            supported_regimes=tuple(payload["supported_regimes"]),
+            source_license=payload["source_license"],
+            evaluation_protocol_sha256=payload["evaluation_protocol_sha256"],
+            artifact_sha256=payload["artifact_sha256"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("strategy descriptor snapshot is invalid") from error
+
+
 def _readmit_strategy_descriptor(value: StrategyDescriptor) -> StrategyDescriptor:
     """Detach and revalidate the exact registered strategy descriptor."""
 
@@ -1514,38 +1570,7 @@ class ReturnThresholdBaseline:
             raise ValueError("strategy seen-event snapshot is invalid")
         descriptor = None
         if version in {3, 4, 5, 6} and payload["descriptor"] is not None:
-            raw_descriptor = payload["descriptor"]
-            if not isinstance(raw_descriptor, dict):
-                raise ValueError("strategy descriptor snapshot is invalid")
-            try:
-                descriptor = StrategyDescriptor(
-                    strategy_id=raw_descriptor["strategy_id"],
-                    version=raw_descriptor["version"],
-                    family=raw_descriptor["family"],
-                    feature_schema=raw_descriptor["feature_schema"],
-                    market_requirements=tuple(raw_descriptor["market_requirements"]),
-                    minimum_history=raw_descriptor["minimum_history"],
-                    horizon_seconds=raw_descriptor["horizon_seconds"],
-                    decision_schedule=raw_descriptor["decision_schedule"],
-                    proposal_semantics=raw_descriptor["proposal_semantics"],
-                    parameter_bounds=tuple(
-                        (
-                            item["name"],
-                            item["minimum"],
-                            item["maximum"],
-                        )
-                        for item in raw_descriptor["parameter_bounds"]
-                    ),
-                    resource_profile=raw_descriptor["resource_profile"],
-                    supported_regimes=tuple(raw_descriptor["supported_regimes"]),
-                    source_license=raw_descriptor["source_license"],
-                    evaluation_protocol_sha256=raw_descriptor[
-                        "evaluation_protocol_sha256"
-                    ],
-                    artifact_sha256=raw_descriptor["artifact_sha256"],
-                )
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError("strategy descriptor snapshot is invalid") from error
+            descriptor = _strategy_descriptor_from_document(payload["descriptor"])
         if version in {4, 5, 6}:
             declared_fingerprint = payload["descriptor_fingerprint"]
             if descriptor is None:

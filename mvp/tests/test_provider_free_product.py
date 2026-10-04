@@ -544,7 +544,7 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             probe = socket.socket(); probe.bind(('127.0.0.1', 0))
             port = probe.getsockname()[1]; probe.close()
             origin = f'http://127.0.0.1:{port}'
-            runtime, url = build_product(directory, port=port)
+            runtime, url = build_product(\n                directory,\n                port=port,\n                desktop_session_sink=lambda **_kwargs: None,\n            )
             worker = Thread(target=runtime.serve_forever)
             worker.start()
             pairing_code = url.split('#pair=')[1]

@@ -17,7 +17,12 @@ from uuid import UUID
 from autotrade_research.artifacts import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
-from .instruments import InstrumentVersion, _detached_instrument_version
+from .exact_decimal import ExactDecimalError, is_exact_decimal_multiple
+from .instruments import (
+    InstrumentRegistryError,
+    InstrumentVersion,
+    _detached_instrument_version,
+)
 from .execution_realism import (
     ExecutionModel,
     ExecutionPriceProjectionPolicy,
@@ -252,6 +257,61 @@ def validate_execution_qualification(
         )
 
 
+def _validate_qualified_instrument_rules(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    instrument: InstrumentVersion,
+) -> None:
+    """Bind qualified order/liquidity scalars to canonical instrument rules."""
+
+    if type(instrument) is not InstrumentVersion:
+        raise TypeError("instrument must be exact InstrumentVersion")
+    detached = _detached_instrument_version(instrument)
+    failures: list[str] = []
+
+    try:
+        lot_is_on_step = is_exact_decimal_multiple(
+            order.lot_size,
+            detached.quantity_step,
+        )
+    except ExactDecimalError as error:
+        raise ExecutionQualificationError(
+            "qualified lot-size check exceeds exact arithmetic resource envelope"
+        ) from error
+    if not lot_is_on_step:
+        failures.append("instrument_quantity_step")
+
+    try:
+        detached.validate_quantity(order.quantity)
+    except InstrumentRegistryError:
+        failures.append("instrument_quantity_rules")
+
+    for field_name in ("limit_price", "stop_price"):
+        price = getattr(order, field_name)
+        if price is None:
+            continue
+        try:
+            detached.validate_price(price)
+        except InstrumentRegistryError:
+            failures.append(f"instrument_{field_name}_rules")
+
+    for field_name in ("bid", "ask", "bar_high", "bar_low"):
+        price = getattr(observation, field_name)
+        if price is None:
+            continue
+        try:
+            detached.validate_price(price)
+        except InstrumentRegistryError:
+            failures.append(f"instrument_{field_name}_rules")
+
+    if failures:
+        raise ExecutionQualificationError(
+            "qualified execution violates canonical instrument rules: "
+            + ", ".join(sorted(set(failures)))
+        )
+
+
 def simulate_qualified_execution(
     *,
     order: SimulatedOrder,
@@ -289,6 +349,11 @@ def simulate_qualified_execution(
         artifact_store=artifact_store,
         evidence_artifact_id=evidence_artifact_id,
         purpose=purpose,
+    )
+    _validate_qualified_instrument_rules(
+        order=order,
+        observation=observation,
+        instrument=instrument,
     )
     result = simulate_execution(order, observation, model)
     assert_conservative_execution(

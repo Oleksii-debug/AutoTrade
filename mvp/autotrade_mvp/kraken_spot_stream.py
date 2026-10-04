@@ -422,6 +422,10 @@ def _bounded_decimal(
     name: str,
     positive: bool = False,
 ) -> Decimal:
+    if type(value) not in (Decimal, int):
+        raise KrakenSpotStreamError(
+            f"{name} must be an exact JSON number"
+        )
     try:
         admitted = parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:

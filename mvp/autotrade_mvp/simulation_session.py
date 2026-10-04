@@ -1092,7 +1092,6 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     len(obligations) != 1
                     or obligations[0].cause_event_id != result.get("fill_id")
                     or obligations[0].amount >= 0
-                    or settlements.settled_obligation_evidence
                 ):
                     raise ValueError(
                         "completed BUY session does not match durable settlement provenance"

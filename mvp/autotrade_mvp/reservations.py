@@ -49,9 +49,15 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Reservation identifiers and resource names are financial authority.
+    # Reject polymorphic text before caller-controlled strip/normalization code
+    # can execute while an immutable reservation identity is being derived.
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:

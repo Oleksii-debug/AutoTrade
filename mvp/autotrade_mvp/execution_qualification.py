@@ -14,7 +14,7 @@ from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
 from .instruments import InstrumentVersion, _detached_instrument_version

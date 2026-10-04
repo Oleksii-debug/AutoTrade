@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.aider.chat.history.md
+.aider.input.history
+.aider.llm.history
+
+# .NET
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Local runtime/secrets
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+secrets/
+credentials/
+
+# Generated artifacts
+artifacts/
+build/
+dist/

@@ -1,0 +1,650 @@
+using AutoTrade.Engine.Lean;
+using QuantConnect;
+using QuantConnect.Orders;
+using QuantConnect.Orders.Fees;
+using QuantConnect.Securities;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Xml.Linq;
+
+static string RehashRestartState(string source, Action<JsonObject> mutate)
+{
+    var root = JsonNode.Parse(source)?.AsObject()
+        ?? throw new InvalidOperationException("Restart-state test fixture is not a JSON object.");
+    mutate(root);
+
+    var payload = new JsonObject
+    {
+        ["SchemaVersion"] = root["SchemaVersion"]?.DeepClone(),
+        ["ArrivalHighWaterUtc"] = root["ArrivalHighWaterUtc"]?.DeepClone(),
+        ["Callbacks"] = root["Callbacks"]?.DeepClone(),
+    };
+    var canonical = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+    var digest = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+    root["StateHash"] = "sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
+    return root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+}
+
+static void Require(bool condition, string message)
+{
+    if (!condition)
+    {
+        throw new InvalidOperationException(message);
+    }
+}
+
+static void ExpectFailure<TException>(Action action, string name)
+    where TException : Exception
+{
+    try
+    {
+        action();
+    }
+    catch (TException)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException($"Expected {typeof(TException).Name}: {name}");
+}
+
+Require(
+    LeanBoundaryProbe.ExpectedLeanRevision ==
+        "985ef30ad3ac774218c5ac516b4cb0aa2655730f",
+    "The probe is not bound to the approved LEAN revision.");
+
+var instant = new DateTime(2026, 9, 24, 20, 0, 0, DateTimeKind.Utc);
+
+if (args.Length > 0)
+{
+    Require(args.Length == 2, "Restart probe requires exactly one state-file path.");
+    var restartStatePath = args[1];
+    var restartSymbol = new Symbol(
+        SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+        "SPY");
+
+    if (args[0] == "--write-restart-state")
+    {
+        var checkpointCallbacks = new LeanCallbackCharacterizer();
+        checkpointCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 1,
+            Symbol = restartSymbol,
+            UtcTime = instant,
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        checkpointCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            Direction = OrderDirection.Buy,
+            FillQuantity = 0.25m,
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+            Quantity = 1m
+        });
+        File.WriteAllText(
+            restartStatePath,
+            checkpointCallbacks.ExportRestartState());
+        Console.WriteLine("WP02_LEAN_RESTART_CHECKPOINT_WRITTEN");
+        return;
+    }
+
+    if (args[0] == "--resume-restart-state")
+    {
+        var resumedCallbacks = LeanCallbackCharacterizer.RestoreRestartState(
+            File.ReadAllText(restartStatePath));
+
+        var repeated = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            Direction = OrderDirection.Buy,
+            FillQuantity = 0.25m,
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+            Quantity = 1m
+        });
+        Require(
+            repeated.DuplicateIdentity && !repeated.IdentityConflict,
+            "Restart lost an identical callback identity.");
+
+        var conflicting = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            FillQuantity = 0.25m,
+            FillPrice = 451.500m
+        });
+        Require(
+            conflicting.DuplicateIdentity && conflicting.IdentityConflict,
+            "Restart hid conflicting economics for the same callback identity.");
+
+        var regressedAfterRestart = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 3,
+            Symbol = restartSymbol,
+            UtcTime = instant,
+            Status = OrderStatus.Filled,
+            FillQuantity = 0.75m,
+            FillPrice = 451.125m
+        });
+        Require(
+            regressedAfterRestart.TimeRegressed,
+            "Restart lost the previous arrival-time boundary.");
+        Require(
+            regressedAfterRestart.HasEconomicFill,
+            "Restart characterization lost the economic fill.");
+
+        var stillBelowRestartHighWater = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 4,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddTicks(5000),
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        Require(
+            stillBelowRestartHighWater.TimeRegressed,
+            "Restart forgot the callback arrival high-water after one regressed event.");
+
+        Console.WriteLine("WP02_LEAN_RESTART_RESUME_PASS");
+        return;
+    }
+
+    throw new InvalidOperationException($"Unknown restart probe mode: {args[0]}");
+}
+var buy = LeanBoundaryProbe.CreateOrderProjection(
+    "SPY",
+    "usa",
+    "123.45",
+    "451.125",
+    instant);
+
+Require(buy.Symbol == "SPY", "LEAN changed the equity symbol identity.");
+Require(buy.Market == "usa", "Market identity changed across the boundary.");
+Require(buy.Quantity == "123.45", "Decimal quantity did not round-trip exactly.");
+Require(buy.Price == "451.125", "Decimal price did not round-trip exactly.");
+
+var sell = LeanBoundaryProbe.CreateOrderProjection(
+    "SPY",
+    "usa",
+    "-2.5",
+    "451.125",
+    instant);
+Require(sell.Quantity == "-2.5", "Signed quantity did not round-trip exactly.");
+
+ExpectFailure<ArgumentException>(
+    () => LeanBoundaryProbe.CreateOrderProjection("SPY", "usa", "1e2", "10", instant),
+    "exponent form must not enter the financial boundary");
+ExpectFailure<ArgumentException>(
+    () => LeanBoundaryProbe.CreateOrderProjection("SPY", "usa", "1.0", "10", instant),
+    "non-canonical trailing zero must be rejected");
+ExpectFailure<ArgumentOutOfRangeException>(
+    () => LeanBoundaryProbe.CreateOrderProjection("SPY", "usa", "0", "10", instant),
+    "zero quantity must be rejected");
+ExpectFailure<ArgumentOutOfRangeException>(
+    () => LeanBoundaryProbe.CreateOrderProjection("SPY", "usa", "1", "-1", instant),
+    "non-positive price must be rejected");
+ExpectFailure<ArgumentException>(
+    () => LeanBoundaryProbe.CreateOrderProjection(
+        "SPY",
+        "usa",
+        "1",
+        "10",
+        DateTime.SpecifyKind(instant, DateTimeKind.Unspecified)),
+    "ambiguous wall-clock time must be rejected");
+
+var symbol = new Symbol(
+    SecurityIdentifier.GenerateEquity("SPY", Market.USA, mapSymbol: false),
+    "SPY");
+var callbacks = new LeanCallbackCharacterizer();
+
+var submitted = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(submitted.Status == "Submitted", "Acknowledgement status was not preserved.");
+Require(!submitted.HasEconomicFill, "Acknowledgement must not be characterized as a fill.");
+Require(!submitted.DuplicateIdentity, "First callback identity was marked duplicate.");
+Require(!submitted.IdentityConflict, "First callback identity cannot conflict.");
+Require(!submitted.TimeRegressed, "First callback cannot regress time.");
+
+var partial = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
+});
+Require(partial.Status == "PartiallyFilled", "Partial-fill status was not preserved.");
+Require(partial.HasEconomicFill, "Non-zero fill quantity was lost.");
+Require(partial.FillQuantity == "0.25", "Callback fill quantity changed.");
+Require(partial.FillPrice == "451.125", "Callback fill price changed.");
+Require(partial.FillPriceCurrency == "USD", "Callback fill currency was lost.");
+Require(partial.Direction == "Buy", "Callback direction was lost.");
+Require(partial.HasOrderFee, "Callback fee presence was lost.");
+Require(partial.FeeAmount == "0.01", "Callback fee amount changed.");
+Require(partial.FeeCurrency == "USD", "Callback fee currency changed.");
+Require(partial.Quantity == "1", "Callback order quantity changed.");
+Require(!partial.DuplicateIdentity, "New callback identity was marked duplicate.");
+
+var duplicate = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
+});
+Require(duplicate.DuplicateIdentity, "Duplicate callback identity was not surfaced.");
+Require(!duplicate.IdentityConflict, "Identical duplicate callback was marked conflicting.");
+
+var zeroFeeCallbacks = new LeanCallbackCharacterizer();
+var zeroFeeBaseline = zeroFeeCallbacks.Observe(new OrderEvent
+{
+    OrderId = 43,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(2),
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    Quantity = 1m
+});
+var zeroFeeEquivalent = zeroFeeCallbacks.Observe(new OrderEvent
+{
+    OrderId = 43,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(2),
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+Require(!zeroFeeBaseline.HasOrderFee, "Default LEAN no-fee callback must canonicalize as no economic fee.");
+Require(
+    zeroFeeEquivalent.DuplicateIdentity && !zeroFeeEquivalent.IdentityConflict,
+    "LEAN OrderFee.Zero must be identical to default/no-fee economics.");
+Require(!zeroFeeEquivalent.HasOrderFee, "LEAN OrderFee.Zero must canonicalize as no economic fee.");
+Require(zeroFeeEquivalent.FeeAmount == "0", "Canonical zero fee amount changed.");
+Require(zeroFeeEquivalent.FeeCurrency == string.Empty, "Canonical zero fee currency must be empty.");
+
+var zeroFeeRealCurrency = zeroFeeCallbacks.Observe(new OrderEvent
+{
+    OrderId = 43,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(2),
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = new OrderFee(new CashAmount(decimal.Zero, "USD")),
+    Quantity = 1m
+});
+Require(
+    zeroFeeRealCurrency.DuplicateIdentity &&
+    !zeroFeeRealCurrency.IdentityConflict &&
+    !zeroFeeRealCurrency.HasOrderFee &&
+    zeroFeeRealCurrency.FeeAmount == "0" &&
+    zeroFeeRealCurrency.FeeCurrency == string.Empty,
+    "Economically-zero real-currency fee must share the canonical no-fee identity.");
+
+ExpectFailure<ArgumentException>(
+    () => callbacks.Observe(new OrderEvent
+    {
+        OrderId = 43,
+        Id = 1,
+        Symbol = symbol,
+        UtcTime = instant.AddMilliseconds(2),
+        Status = OrderStatus.Filled,
+        Direction = OrderDirection.Buy,
+        FillQuantity = 1m,
+        FillPrice = 451.125m,
+        FillPriceCurrency = "USD",
+        OrderFee = new OrderFee(new CashAmount(0.01m, Currencies.NullCurrency)),
+        Quantity = 1m
+    }),
+    "non-zero fee in LEAN null currency must fail closed");
+
+var zeroFeeCheckpoint = zeroFeeCallbacks.ExportRestartState();
+var zeroFeeResumed = LeanCallbackCharacterizer.RestoreRestartState(zeroFeeCheckpoint);
+var zeroFeeAfterRestart = zeroFeeResumed.Observe(new OrderEvent
+{
+    OrderId = 43,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(2),
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+Require(
+    zeroFeeAfterRestart.DuplicateIdentity && !zeroFeeAfterRestart.IdentityConflict,
+    "Restart must preserve semantic equivalence of null/default fee and LEAN OrderFee.Zero.");
+
+// Prove malformed persisted identity cannot survive even with a recomputed public state hash.
+var rehashedUnchangedZeroFee = RehashRestartState(zeroFeeCheckpoint, _ => { });
+_ = LeanCallbackCharacterizer.RestoreRestartState(rehashedUnchangedZeroFee);
+
+var nullFeeCurrencyCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["FeeCurrency"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullFeeCurrencyCheckpoint),
+    "rehash-valid restart state with null no-fee currency must fail closed");
+
+var nullSymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Symbol"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullSymbolCheckpoint),
+    "rehash-valid restart state with null symbol must fail closed");
+
+var nullFillCurrencyCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["FillPriceCurrency"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullFillCurrencyCheckpoint),
+    "rehash-valid restart state with null fill currency must fail closed");
+
+var missingSymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject().Remove("Symbol"));
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(missingSymbolCheckpoint),
+    "rehash-valid restart state with missing required symbol must fail closed");
+
+var undefinedStatusCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Status"] = 2147483647);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(undefinedStatusCheckpoint),
+    "rehash-valid restart state with undefined order status must fail closed");
+
+var undefinedDirectionCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Direction"] = 2147483647);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(undefinedDirectionCheckpoint),
+    "rehash-valid restart state with undefined order direction must fail closed");
+
+var conflictingDuplicate = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.500m
+});
+Require(
+    conflictingDuplicate.DuplicateIdentity,
+    "Conflicting repeated callback identity was not surfaced as duplicate.");
+Require(
+    conflictingDuplicate.IdentityConflict,
+    "Same callback identity with different economics was not surfaced as conflict.");
+
+var conflictingFee = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.02m, "USD")),
+    Quantity = 1m
+});
+Require(
+    conflictingFee.DuplicateIdentity && conflictingFee.IdentityConflict,
+    "Same callback identity with different fee economics was not surfaced as conflict.");
+
+var conflictingCurrency = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "EUR",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "EUR")),
+    Quantity = 1m
+});
+Require(
+    conflictingCurrency.DuplicateIdentity && conflictingCurrency.IdentityConflict,
+    "Same callback identity with different currency economics was not surfaced as conflict.");
+
+var conflictingDirection = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Sell,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
+});
+Require(
+    conflictingDirection.DuplicateIdentity && conflictingDirection.IdentityConflict,
+    "Same callback identity with different direction was not surfaced as conflict.");
+
+var regressed = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 3,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Filled,
+    FillQuantity = 0.75m,
+    FillPrice = 451.125m
+});
+Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
+Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
+
+var stillBelowHighWater = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 4,
+    Symbol = symbol,
+    UtcTime = instant.AddTicks(5000),
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(
+    stillBelowHighWater.TimeRegressed,
+    "A second callback below the prior arrival high-water was silently accepted.");
+
+var restartIntegrity = new LeanCallbackCharacterizer();
+restartIntegrity.Observe(new OrderEvent
+{
+    OrderId = 73,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.5m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.03m, "USD")),
+    Quantity = 1m
+});
+var restartCheckpoint = restartIntegrity.ExportRestartState();
+var verifiedRestart = LeanCallbackCharacterizer.RestoreRestartState(restartCheckpoint);
+var verifiedDuplicate = verifiedRestart.Observe(new OrderEvent
+{
+    OrderId = 73,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.5m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.03m, "USD")),
+    Quantity = 1m
+});
+Require(
+    verifiedDuplicate.DuplicateIdentity && !verifiedDuplicate.IdentityConflict,
+    "Integrity-bound restart checkpoint did not preserve callback identity.");
+
+var tamperedRestartCheckpoint = restartCheckpoint.Replace(
+    "\"FillPrice\":451.125",
+    "\"FillPrice\":451.5",
+    StringComparison.Ordinal);
+Require(
+    tamperedRestartCheckpoint != restartCheckpoint,
+    "Restart integrity regression did not mutate the serialized callback economics.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(tamperedRestartCheckpoint),
+    "tampered LEAN callback restart economics must fail integrity verification");
+
+var oldSchemaCheckpoint = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"2.2.0\"",
+    "\"SchemaVersion\":\"2.1.0\"",
+    StringComparison.Ordinal);
+Require(
+    oldSchemaCheckpoint != restartCheckpoint,
+    "Restart schema regression did not mutate the schema version.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(oldSchemaCheckpoint),
+    "v2.1 restart state with pre-canonical fee identity semantics must fail closed");
+
+Require(
+    restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
+    "Restart checkpoint must serialize as a JSON object.");
+var checkpointWithUnknownTopLevel = restartCheckpoint.Insert(
+    1,
+    "\"UnexpectedTopLevel\":\"forbidden\",");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownTopLevel),
+    "unknown top-level restart state fields must fail closed");
+
+var checkpointWithUnknownCallbackField = restartCheckpoint.Replace(
+    "\"OrderId\":73",
+    "\"UnexpectedCallbackField\":true,\"OrderId\":73",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithUnknownCallbackField != restartCheckpoint,
+    "Restart schema regression did not mutate the callback object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownCallbackField),
+    "unknown callback restart state fields must fail closed");
+
+var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"2.2.0\"",
+    "\"SchemaVersion\":\"2.2.0\",\"SchemaVersion\":\"2.2.0\"",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithDuplicateTopLevel != restartCheckpoint,
+    "Restart duplicate-member regression did not mutate the top-level object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithDuplicateTopLevel),
+    "duplicate top-level restart members must fail closed");
+
+var checkpointWithDuplicateCallbackMember = restartCheckpoint.Replace(
+    "\"OrderId\":73",
+    "\"OrderId\":73,\"OrderId\":73",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithDuplicateCallbackMember != restartCheckpoint,
+    "Restart duplicate-member regression did not mutate the callback object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithDuplicateCallbackMember),
+    "duplicate callback restart members must fail closed");
+
+var engineIdentity = LeanEngineAssemblyProbe.GetIdentity();
+Require(
+    engineIdentity.TypeName == "QuantConnect.Lean.Engine.Engine",
+    "The real LEAN Engine type was not resolved.");
+Require(
+    engineIdentity.AssemblyName == "QuantConnect.Lean.Engine",
+    "The real LEAN Engine assembly was not compiled into the project graph.");
+
+var integrationProjectPath = Path.Combine(
+    Directory.GetCurrentDirectory(),
+    "src",
+    "AutoTrade.Engine.Lean",
+    "AutoTrade.Engine.Lean.csproj");
+var integrationProject = XDocument.Load(integrationProjectPath);
+var directProjectReferences = integrationProject
+    .Descendants("ProjectReference")
+    .Select(element => element.Attribute("Include")?.Value ?? string.Empty)
+    .ToHashSet(StringComparer.Ordinal);
+
+Require(
+    directProjectReferences.SetEquals(new[]
+    {
+        "$(LeanRoot)/Common/QuantConnect.csproj",
+        "$(LeanRoot)/Engine/QuantConnect.Lean.Engine.csproj"
+    }),
+    "LEAN boundary direct project references drifted from the approved isolation set.");
+Require(
+    !integrationProject.Descendants("PackageReference").Any(),
+    "LEAN boundary must not introduce direct package dependencies.");
+Require(
+    directProjectReferences.All(reference =>
+        !reference.Contains("Brokerages", StringComparison.OrdinalIgnoreCase)),
+    "LEAN boundary must not directly reference a brokerage sender project.");
+
+Console.WriteLine("WP02_LEAN_ADOPTION_PROBE_PASS");

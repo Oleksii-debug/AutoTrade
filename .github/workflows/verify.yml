@@ -1,0 +1,50 @@
+name: Verify AutoTrade
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # Windows consistently needs more time for the retained runtime-load/recovery suite;
+    # keep Ubuntu's tighter hang budget while preserving the complete Windows verification.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 10 }}
+    env:
+      AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.10'
+          cache: pip
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.100"
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Run cross-platform core verification
+        run: python tools/verify.py
+      - name: Write exact-head core verification evidence
+        run: python tools/write_ci_evidence.py --suite core-repository --command "python tools/verify.py" --output "artifacts/verify-${{ runner.os }}.json"
+      - name: Upload exact-head verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-evidence-${{ runner.os }}
+          path: artifacts/verify-${{ runner.os }}.json
+          if-no-files-found: error

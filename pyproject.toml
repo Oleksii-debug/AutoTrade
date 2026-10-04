@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotrade-exact-numeric"
+version = "0.0.1"
+description = "One schema-generated v5 bounded exact numeric runtime for AutoTrade product and research"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autotrade_numeric*"]

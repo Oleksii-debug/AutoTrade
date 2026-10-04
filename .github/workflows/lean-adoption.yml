@@ -1,0 +1,265 @@
+name: lean-adoption
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
+      - "tools/qualification/prepare_lean_composition.py"
+      - "tests/test_prepare_lean_composition.py"
+      - "provenance/components.json"
+      - "global.json"
+      - "Directory.Build.props"
+      - ".github/workflows/lean-adoption.yml"
+  pull_request:
+    paths:
+      - "src/AutoTrade.Engine.Lean/**"
+      - "tests/Integration/LeanAdoption/**"
+      - "tools/qualification/prepare_lean_composition.py"
+      - "tests/test_prepare_lean_composition.py"
+      - "provenance/components.json"
+      - "global.json"
+      - "Directory.Build.props"
+      - ".github/workflows/lean-adoption.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  exact-revision-probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact AutoTrade source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+          path: autotrade
+
+      - name: Load approved LEAN provenance
+        id: lean-provenance
+        shell: pwsh
+        run: |
+          $document = Get-Content -Raw autotrade/provenance/components.json | ConvertFrom-Json
+          $matches = @($document.components | Where-Object { $_.name -eq "QuantConnect LEAN" })
+          if ($matches.Count -ne 1) {
+            throw "Expected exactly one QuantConnect LEAN provenance record."
+          }
+          $lean = $matches[0]
+          if ($lean.repository -ne "QuantConnect/Lean" -or $lean.license -ne "Apache-2.0") {
+            throw "LEAN provenance repository/license is not the approved baseline."
+          }
+          "revision=$($lean.revision)" >> $env:GITHUB_OUTPUT
+          "tree=$($lean.tree)" >> $env:GITHUB_OUTPUT
+          "license_blob=$($lean.license_blob_sha)" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout approved LEAN revision
+        uses: actions/checkout@v7
+        with:
+          repository: QuantConnect/Lean
+          ref: ${{ steps.lean-provenance.outputs.revision }}
+          path: lean
+          fetch-depth: 1
+
+      - name: Verify exact LEAN source identity
+        shell: pwsh
+        env:
+          LEAN_REVISION: ${{ steps.lean-provenance.outputs.revision }}
+          LEAN_TREE: ${{ steps.lean-provenance.outputs.tree }}
+          LEAN_LICENSE_BLOB: ${{ steps.lean-provenance.outputs.license_blob }}
+        run: |
+          $actualCommit = (git -C lean rev-parse HEAD).Trim()
+          if ($actualCommit -ne $env:LEAN_REVISION) {
+            throw "LEAN checkout mismatch: expected $env:LEAN_REVISION, got $actualCommit"
+          }
+          $actualTree = (git -C lean rev-parse "HEAD^{tree}").Trim()
+          if ($actualTree -ne $env:LEAN_TREE) {
+            throw "LEAN tree mismatch: expected $env:LEAN_TREE, got $actualTree"
+          }
+          $actualLicense = (git -C lean hash-object LICENSE).Trim()
+          if ($actualLicense -ne $env:LEAN_LICENSE_BLOB) {
+            throw "LEAN license blob mismatch: expected $env:LEAN_LICENSE_BLOB, got $actualLicense"
+          }
+
+      - name: Prepare exact security-qualified LEAN composition
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+        run: |
+          $evidenceDir = "artifacts/lean-adoption"
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          python tools/qualification/prepare_lean_composition.py --lean-root "$env:LEAN_ROOT" --manifest (Join-Path $evidenceDir "lean-composition.json")
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN security composition preparation failed."
+          }
+
+          $expected = @(
+            "Common/QuantConnect.csproj",
+            "Compression/QuantConnect.Compression.csproj"
+          )
+          $actual = @(
+            git -C $env:LEAN_ROOT diff --name-only |
+              Where-Object { $_ -and $_.Trim() } |
+              Sort-Object
+          )
+          if (($actual -join "|") -ne (($expected | Sort-Object) -join "|")) {
+            throw "LEAN composition changed an unexpected source set: $($actual -join ', ')"
+          }
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.100"
+
+      - name: Build and run repeatable non-sending adoption probe
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+        run: |
+          $project = "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj"
+          dotnet build $project --configuration Release "-p:LeanRoot=$env:LEAN_ROOT"
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN adoption build failed."
+          }
+
+          $first = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT")
+          if ($LASTEXITCODE -ne 0) {
+            throw "First LEAN adoption probe failed."
+          }
+          $second = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Second LEAN adoption probe failed."
+          }
+
+          # LEAN emits timestamped TRACE lines to stdout while composing assemblies.
+          # Those diagnostics are expected and intentionally non-deterministic, so they
+          # must not be confused with the probe's machine-readable verdict.
+          $firstLines = @($first | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $secondLines = @($second | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $firstVerdicts = @($firstLines | Where-Object { $_ -eq "WP02_LEAN_ADOPTION_PROBE_PASS" })
+          $secondVerdicts = @($secondLines | Where-Object { $_ -eq "WP02_LEAN_ADOPTION_PROBE_PASS" })
+          if ($firstVerdicts.Count -ne 1) {
+            throw "First probe did not emit exactly one PASS verdict. Output: $($firstLines -join ' | ')"
+          }
+          if ($secondVerdicts.Count -ne 1) {
+            throw "Second probe did not emit exactly one PASS verdict. Output: $($secondLines -join ' | ')"
+          }
+
+          $restartState = Join-Path $env:RUNNER_TEMP "autotrade-lean-callback-state.json"
+          if (Test-Path $restartState) {
+            Remove-Item $restartState -Force
+          }
+
+          $checkpoint = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --write-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart checkpoint process failed."
+          }
+          $checkpointLines = @($checkpoint | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $checkpointVerdicts = @($checkpointLines | Where-Object { $_ -eq "WP02_LEAN_RESTART_CHECKPOINT_WRITTEN" })
+          if ($checkpointVerdicts.Count -ne 1 -or !(Test-Path $restartState)) {
+            throw "LEAN restart checkpoint evidence was not created exactly once. Output: $($checkpointLines -join ' | ')"
+          }
+
+          $resume = @(& dotnet run --project $project --configuration Release --no-build "-p:LeanRoot=$env:LEAN_ROOT" -- --resume-restart-state $restartState)
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN restart resume process failed."
+          }
+          $resumeLines = @($resume | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+          $resumeVerdicts = @($resumeLines | Where-Object { $_ -eq "WP02_LEAN_RESTART_RESUME_PASS" })
+          if ($resumeVerdicts.Count -ne 1) {
+            throw "LEAN restart resume probe did not emit exactly one PASS verdict. Output: $($resumeLines -join ' | ')"
+          }
+          Remove-Item $restartState -Force
+
+          $autoTradeTrackedChanges = @(git status --porcelain --untracked-files=no)
+          if ($autoTradeTrackedChanges.Count -ne 0) {
+            throw "LEAN adoption probe mutated tracked AutoTrade source."
+          }
+          $leanTrackedChanges = @(
+            git -C $env:LEAN_ROOT diff --name-only |
+              Where-Object { $_ -and $_.Trim() } |
+              Sort-Object
+          )
+          $expectedLeanChanges = @(
+            "Common/QuantConnect.csproj",
+            "Compression/QuantConnect.Compression.csproj"
+          ) | Sort-Object
+          if (($leanTrackedChanges -join "|") -ne ($expectedLeanChanges -join "|")) {
+            throw "LEAN adoption probe changed source outside the approved security composition."
+          }
+
+          Write-Output $firstVerdicts[0]
+
+
+      - name: Write exact-head adoption evidence
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+          LEAN_REVISION: ${{ steps.lean-provenance.outputs.revision }}
+          LEAN_TREE: ${{ steps.lean-provenance.outputs.tree }}
+          LEAN_LICENSE_BLOB: ${{ steps.lean-provenance.outputs.license_blob }}
+        run: |
+          $evidenceDir = "artifacts/lean-adoption"
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $assetRows = Get-ChildItem -Path $env:LEAN_ROOT -Filter project.assets.json -Recurse |
+            Sort-Object FullName |
+            ForEach-Object {
+              $relative = [IO.Path]::GetRelativePath($env:LEAN_ROOT, $_.FullName)
+              $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+              "$hash  $relative"
+            }
+          $assetManifest = Join-Path $evidenceDir "lean-project-assets-sha256.txt"
+          $assetRows | Set-Content -Encoding utf8 $assetManifest
+          $assetManifestHash = (Get-FileHash -Algorithm SHA256 $assetManifest).Hash.ToLowerInvariant()
+          $compositionManifest = Join-Path $evidenceDir "lean-composition.json"
+          if (!(Test-Path $compositionManifest)) {
+            throw "LEAN composition manifest is missing."
+          }
+          $composition = Get-Content -Raw $compositionManifest | ConvertFrom-Json
+          if ($composition.composition_id -ne "autotrade-lean-security-composition-v1") {
+            throw "Unexpected LEAN composition identity."
+          }
+          $actualSource = (git rev-parse HEAD).Trim()
+          if ($actualSource -ne $env:AUTOTRADE_SOURCE_SHA) {
+            throw "AutoTrade checkout mismatch: expected $env:AUTOTRADE_SOURCE_SHA, got $actualSource"
+          }
+          $evidence = [ordered]@{
+            schema_version = "1.0.0"
+            source_sha = $actualSource
+            lean_revision = $env:LEAN_REVISION
+            lean_tree = $env:LEAN_TREE
+            lean_license_blob = $env:LEAN_LICENSE_BLOB
+            runner_os = $env:RUNNER_OS
+            dotnet_version = (dotnet --version).Trim()
+            probe_result = "PASS"
+            restart_callback_identity_probe = "PASS"
+            lean_composition_id = $composition.composition_id
+            lean_composition_sha256 = $composition.composition_sha256
+            dependency_asset_manifest_sha256 = "sha256:$assetManifestHash"
+          }
+          $evidence |
+            ConvertTo-Json -Depth 4 |
+            Set-Content -Encoding utf8 (Join-Path $evidenceDir "evidence.json")
+
+      - name: Upload exact-head adoption evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-adoption-evidence-${{ runner.os }}
+          path: autotrade/artifacts/lean-adoption/*
+          if-no-files-found: error

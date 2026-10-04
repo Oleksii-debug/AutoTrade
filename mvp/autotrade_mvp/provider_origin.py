@@ -2352,7 +2352,15 @@ class ProviderOriginJournal:
 
 
 def _install_provider_origin_response_binding_authority():
-    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+            JournalStore,
+            object,
+        ],
+    ] = {}
     field_names = (
         "attempt_id",
         "provider_id",
@@ -2399,18 +2407,36 @@ def _install_provider_origin_response_binding_authority():
             )
         return tuple(getattr(value, name) for name in field_names)
 
-    def register(value: AuthenticatedReadResponseBinding) -> None:
+    def register(
+        value: AuthenticatedReadResponseBinding,
+        store: JournalStore,
+    ) -> None:
+        if type(store) is not JournalStore:
+            raise ProviderOriginError(
+                "provider-origin response binding requires exact JournalStore"
+            )
         snapshot = material(value)
+        store_identity = store.store_identity
         prune()
         object_id = id(value)
         current = states.get(object_id)
         if current is not None and current[0]() is not None:
-            if current[0]() is value and current[1] == snapshot:
+            if (
+                current[0]() is value
+                and current[1] == snapshot
+                and current[2] is store
+                and current[3] == store_identity
+            ):
                 return
             raise ProviderOriginError(
                 "provider-origin response binding authority identity collision"
             )
-        states[object_id] = (weakref.ref(value), snapshot)
+        states[object_id] = (
+            weakref.ref(value),
+            snapshot,
+            store,
+            store_identity,
+        )
 
     def require(value: AuthenticatedReadResponseBinding) -> AuthenticatedReadResponseBinding:
         snapshot = material(value)
@@ -2424,14 +2450,44 @@ def _install_provider_origin_response_binding_authority():
             raise ProviderOriginError(
                 "provider-origin response binding changed after durable journal load"
             )
+        if (
+            type(state[2]) is not JournalStore
+            or state[2].store_identity != state[3]
+        ):
+            raise ProviderOriginError(
+                "provider-origin response binding JournalStore generation changed"
+            )
         return value
 
-    return register, require
+    def require_store(
+        value: AuthenticatedReadResponseBinding,
+        store: JournalStore,
+    ) -> AuthenticatedReadResponseBinding:
+        require(value)
+        if type(store) is not JournalStore:
+            raise ProviderOriginError(
+                "provider-origin account consumer requires exact JournalStore"
+            )
+        state = states.get(id(value))
+        if (
+            state is None
+            or state[0]() is not value
+            or state[2] is not store
+            or store.store_identity != state[3]
+        ):
+            raise ProviderOriginError(
+                "provider-origin response and account authority must share "
+                "the same exact JournalStore generation"
+            )
+        return value
+
+    return register, require, require_store
 
 
 (
     _register_provider_origin_response_binding_authority,
     require_provider_origin_response_binding_authority,
+    require_provider_origin_response_binding_store,
 ) = _install_provider_origin_response_binding_authority()
 del _install_provider_origin_response_binding_authority
 
@@ -2439,7 +2495,7 @@ del _install_provider_origin_response_binding_authority
 def _bind_provider_origin_response_load(load_impl, register_authority):
     def load_response_binding(self, attempt_id, query_binding):
         value = load_impl(self, attempt_id, query_binding)
-        register_authority(value)
+        register_authority(value, self._require_store())
         return value
 
     return load_response_binding
@@ -2728,6 +2784,10 @@ def require_current_provider_origin_account_acquisition(
         raise TypeError(
             "account_acquisition must be exact SerializedProviderAccountAcquisition"
         )
+    require_provider_origin_response_binding_store(
+        response_binding,
+        account_acquisition_authority.store,
+    )
     try:
         current = account_acquisition_authority.require_current(account_acquisition)
     except ProviderAccountAcquisitionError as error:

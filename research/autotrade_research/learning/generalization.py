@@ -412,6 +412,7 @@ class MarketRegimeEvidence:
 
     asset_class: str
     regime: str
+    exact_build_sha: str
     population: PopulationCoverageManifest
     execution_adjusted_net_score: Decimal
     observations: int
@@ -428,6 +429,11 @@ class MarketRegimeEvidence:
             self,
             "regime",
             _text(self.regime, name="regime"),
+        )
+        object.__setattr__(
+            self,
+            "exact_build_sha",
+            _git_sha(self.exact_build_sha, name="exact_build_sha"),
         )
         if type(self.population) is not PopulationCoverageManifest:
             raise TypeError(
@@ -465,6 +471,7 @@ class MarketRegimeEvidence:
         *,
         asset_class: str,
         regime: str,
+        exact_build_sha: str,
         population: PopulationCoverageManifest,
         execution_adjusted_net_score: object,
         observations: int,
@@ -478,6 +485,7 @@ class MarketRegimeEvidence:
         return cls(
             asset_class=asset_class,
             regime=regime,
+            exact_build_sha=exact_build_sha,
             population=population,
             execution_adjusted_net_score=_decimal(
                 execution_adjusted_net_score,
@@ -504,6 +512,7 @@ class MarketRegimeEvidence:
                 "schema_version": 1,
                 "asset_class": self.asset_class,
                 "regime": self.regime,
+                "exact_build_sha": self.exact_build_sha,
                 "population_digest": self.population.digest,
                 "execution_adjusted_net_score":
                     self.execution_adjusted_net_score,
@@ -553,6 +562,7 @@ def _detach_evidence(value: MarketRegimeEvidence) -> MarketRegimeEvidence:
     return MarketRegimeEvidence(
         asset_class=value.asset_class,
         regime=value.regime,
+        exact_build_sha=value.exact_build_sha,
         population=_detach_population(value.population),
         execution_adjusted_net_score=value.execution_adjusted_net_score,
         observations=value.observations,
@@ -703,6 +713,8 @@ def assess_cross_market_generalization(
         cell_incomplete: list[str] = []
         population = item.population
 
+        if item.exact_build_sha != protocol.exact_build_sha:
+            cell_failures.append("evidence exact build mismatch")
         if population.candidate_hash != protocol.candidate_hash:
             cell_failures.append("population candidate hash mismatch")
         if (

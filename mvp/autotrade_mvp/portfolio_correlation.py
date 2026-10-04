@@ -383,15 +383,23 @@ def _policy(policy: CorrelationConcentrationPolicy, _type=CorrelationConcentrati
 
 
 def _evidence_by_pair(evidence, resolved_evidence, *, active, environment, decision_time):
-    if type(evidence) not in (tuple, list):
+    if type(evidence) is tuple:
+        evidence_snapshot = evidence
+    elif type(evidence) is list:
+        evidence_snapshot = tuple(list.copy(evidence))
+    else:
         raise TypeError("correlation evidence must be an exact tuple or list")
-    if not isinstance(resolved_evidence, Mapping):
-        raise TypeError("resolved_evidence must be a mapping")
-    resolver = dict(resolved_evidence)
+    if type(resolved_evidence) is not dict:
+        raise TypeError("resolved_evidence must be an exact dict")
+    # Detach both caller-owned containers before any evidence traversal.  This
+    # keeps resolver/container callbacks outside the assessment boundary and
+    # prevents a resolver conversion from mutating the evidence sequence that
+    # will be assessed.
+    resolver = dict.copy(resolved_evidence)
     point = _instant(decision_time)
     result = {}
     stale = []
-    for item in evidence:
+    for item in evidence_snapshot:
         record = _record(item)
         evidence_id = record["evidence_id"]
         resolved = resolver.get(evidence_id)

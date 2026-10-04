@@ -333,7 +333,7 @@ def assess_reconvergence(
             and (
                 change.path in SELF_PROTECTING_TRUST_ROOTS
                 or change.path in BOOTSTRAP_TRUST_ROOTS
-                or change.path in WORKFLOW_AUTHORITY_ROOTS
+                or _is_workflow_authority_path(change.path)
                 or change.path in INTEGRATION_HARNESS_ROOTS
             )
             and not exactly_authorized(change.path)

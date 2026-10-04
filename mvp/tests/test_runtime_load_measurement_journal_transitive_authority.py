@@ -160,6 +160,37 @@ class RuntimeLoadMeasurementJournalTransitiveAuthorityTests(unittest.TestCase):
                 store.get_event(self._measurement_id(plan_id, expected.event_id))
             )
 
+    def test_operation_cannot_mutate_json_dumps_code_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            dumps = json_module.dumps
+            original_code = dumps.__code__
+
+            def forged_dumps(*_args, **_kwargs):
+                return "{}"
+
+            def attack() -> None:
+                _append(store, expected)
+                dumps.__code__ = forged_dumps.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"transitive executable authority changed.*json\.dumps",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                dumps.__code__ = original_code
+
+            self.assertIs(json_module.dumps, dumps)
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
     def test_operation_cannot_retarget_json_loads_below_journal_decoder(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

@@ -1547,6 +1547,74 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertEqual(str(rebuilt), checkpoint["state"]["net_quantity"])
 
+    def test_projection_checkpoint_freezes_mutating_state_before_hashing(self):
+        class MutatingState(dict):
+            def __init__(self):
+                super().__init__(net_quantity="1")
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    self["net_quantity"] = "999"
+                return items
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+
+            state = MutatingState()
+            self.assertTrue(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state=state,
+                )
+            )
+            self.assertEqual(state["net_quantity"], "999")
+            checkpoint = JournalStore(path).load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(checkpoint["state"], {"net_quantity": "1"})
+
+    def test_global_checkpoint_freezes_mutating_state_before_hashing(self):
+        class MutatingState(dict):
+            def __init__(self):
+                super().__init__(net="1")
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    self["net"] = "999"
+                return items
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+
+            state = MutatingState()
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state=state,
+                )
+            )
+            self.assertEqual(state["net"], "999")
+            checkpoint = JournalStore(path).load_global_projection_checkpoint(
+                projection_name="portfolio"
+            )
+            self.assertEqual(checkpoint["state"], {"net": "1"})
+
     def test_journal_tail_rejects_cut_ahead_of_same_snapshot(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

@@ -332,23 +332,50 @@ def _validated_origin(
     return binding, neutral, qualified, qualified_ref
 
 
-def _bybit_funding_income_observations_impl(
-    source: ProviderOriginObservation,
-    *,
-    _issue_income,
-) -> tuple[ProviderFundingIncomeObservation, ...]:
-    binding, neutral, qualified, qualified_ref = _validated_origin(source)
-    payload = neutral.payload
+@dataclass(frozen=True, slots=True)
+class _ParsedBybitFundingIncomeRow:
+    """Normalized provider content only; this value carries no origin authority."""
+
+    provider_transaction_id: str
+    instrument_id: str
+    product_category: str
+    settlement_currency: str
+    transaction_time_ms: str
+    provider_transaction_at: datetime
+    side: str
+    funding_amount: Decimal
+
+
+def _parse_bybit_funding_income_rows(
+    payload: object,
+    query: object,
+) -> tuple[_ParsedBybitFundingIncomeRow, ...]:
+    """Parse exact Bybit funding rows without minting financial authority."""
+
     if type(payload) is not dict:
         raise ProviderFundingIncomeError("Bybit transaction-log payload must be an object")
+    if type(query) is not dict:
+        raise ProviderFundingIncomeError("qualified funding query must be an exact object")
+
     ret_code = payload.get("retCode")
-    if type(ret_code) is not int or ret_code != 0 or type(payload.get("retMsg")) is not str:
+    if (
+        type(ret_code) is not int
+        or ret_code != 0
+        or type(payload.get("retMsg")) is not str
+    ):
         raise ProviderFundingIncomeError("Bybit transaction-log response is not successful")
     result = payload.get("result")
     if type(result) is not dict or type(result.get("list")) is not list:
         raise ProviderFundingIncomeError("Bybit transaction-log result shape is invalid")
 
-    query = qualified.query_binding.query_binding.query
+    if (
+        query.get("accountType") != "UNIFIED"
+        or query.get("type") != "SETTLEMENT"
+        or query.get("category") not in {"linear", "inverse"}
+    ):
+        raise ProviderFundingIncomeError(
+            "funding transaction-log query is not narrowed to one derivative settlement domain"
+        )
     expected_category = query["category"]
     expected_currency = query.get("currency")
     if expected_currency is not None:
@@ -380,7 +407,8 @@ def _bybit_funding_income_observations_impl(
         raise ProviderFundingIncomeError(
             "qualified funding query endTime precedes startTime"
         )
-    observations: list[ProviderFundingIncomeObservation] = []
+
+    rows: list[_ParsedBybitFundingIncomeRow] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(result["list"]):
         if type(item) is not dict:
@@ -398,6 +426,7 @@ def _bybit_funding_income_observations_impl(
             )
         if funding == "":
             continue
+
         provider_transaction_id = _text(item.get("id"), name="id")
         if provider_transaction_id in seen_ids:
             raise ProviderFundingIncomeError(
@@ -411,7 +440,15 @@ def _bybit_funding_income_observations_impl(
                 "Bybit funding row escaped the qualified currency scope"
             )
         side = _text(item.get("side"), name="side")
-        transaction_time_text = item.get("transactionTime")
+        if side not in {"Buy", "Sell", "None"}:
+            raise ProviderFundingIncomeError(
+                "Bybit funding row side is not canonical"
+            )
+
+        transaction_time_text = _text(
+            item.get("transactionTime"),
+            name="transactionTime",
+        )
         transaction_millis = _epoch_millis(
             transaction_time_text,
             name="transactionTime",
@@ -428,6 +465,7 @@ def _bybit_funding_income_observations_impl(
             transaction_millis,
             name="transactionTime",
         )
+
         funding_amount = _decimal(funding, name="funding")
         fee = _decimal(item.get("fee"), name="fee")
         cash_flow = _decimal(item.get("cashFlow"), name="cashFlow")
@@ -439,17 +477,44 @@ def _bybit_funding_income_observations_impl(
             raise ProviderFundingIncomeError(
                 "Bybit funding row violates change = cashFlow + funding - fee"
             )
+
+        rows.append(
+            _ParsedBybitFundingIncomeRow(
+                provider_transaction_id=provider_transaction_id,
+                instrument_id=symbol,
+                product_category=category,
+                settlement_currency=currency,
+                transaction_time_ms=transaction_time_text,
+                provider_transaction_at=provider_transaction_at,
+                side=side,
+                funding_amount=funding_amount,
+            )
+        )
+    return tuple(rows)
+
+
+def _bybit_funding_income_observations_impl(
+    source: ProviderOriginObservation,
+    *,
+    _issue_income,
+) -> tuple[ProviderFundingIncomeObservation, ...]:
+    binding, neutral, qualified, qualified_ref = _validated_origin(source)
+    base = qualified.query_binding.query_binding
+    rows = _parse_bybit_funding_income_rows(neutral.payload, dict(base.query))
+
+    observations: list[ProviderFundingIncomeObservation] = []
+    for row in rows:
         material = {
             "schema_version": "1.0.0",
             "origin_ref": binding.origin_ref,
             "qualified_evidence_ref": qualified_ref,
-            "provider_transaction_id": provider_transaction_id,
-            "instrument_id": symbol,
-            "product_category": category,
-            "settlement_currency": currency,
-            "transaction_time_ms": item.get("transactionTime"),
-            "side": side,
-            "funding_amount": format(funding_amount, "f"),
+            "provider_transaction_id": row.provider_transaction_id,
+            "instrument_id": row.instrument_id,
+            "product_category": row.product_category,
+            "settlement_currency": row.settlement_currency,
+            "transaction_time_ms": row.transaction_time_ms,
+            "side": row.side,
+            "funding_amount": format(row.funding_amount, "f"),
             "qualification_id": binding.qualification_id,
             "qualified_query_digest": binding.qualified_query_digest,
             "qualified_route_rule_digest": binding.qualified_route_rule_digest,
@@ -464,13 +529,13 @@ def _bybit_funding_income_observations_impl(
                 account_id=binding.account_id,
                 runtime_environment=binding.environment,
                 provider_environment=binding.provider_environment,
-                instrument_id=symbol,
-                product_category=category,
-                settlement_currency=currency,
-                provider_transaction_id=provider_transaction_id,
-                provider_transaction_at=provider_transaction_at,
-                side=side,
-                funding_amount=funding_amount,
+                instrument_id=row.instrument_id,
+                product_category=row.product_category,
+                settlement_currency=row.settlement_currency,
+                provider_transaction_id=row.provider_transaction_id,
+                provider_transaction_at=row.provider_transaction_at,
+                side=row.side,
+                funding_amount=row.funding_amount,
                 origin_ref=binding.origin_ref,
                 qualified_evidence_ref=qualified_ref,
                 response_sha256=binding.response_sha256,
@@ -483,7 +548,6 @@ def _bybit_funding_income_observations_impl(
             )
         )
     return tuple(observations)
-
 
 def _bind_bybit_funding_income_observations(impl, issue_income):
     def bybit_funding_income_observations(

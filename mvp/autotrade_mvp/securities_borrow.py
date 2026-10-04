@@ -993,13 +993,54 @@ class DurableBorrowRecallProjection:
     def version(self) -> int:
         return len(self._events())
 
+    def _remaining_from_current_cut(self, recall_id: str) -> Decimal:
+        recall = self._recalls.get(recall_id)
+        if recall is None:
+            raise KeyError(recall_id)
+        return _exact(
+            exact_subtract,
+            recall.quantity,
+            self._resolved.get(recall_id, Decimal("0")),
+        )
+
+    def _remaining_at_current_cut(
+        self,
+        recall_id: str,
+        point: datetime,
+    ) -> Decimal:
+        recall = self._recalls.get(recall_id)
+        if recall is None:
+            raise KeyError(recall_id)
+        if _dt(recall.effective_at) > point or _dt(recall.observed_at) > point:
+            return Decimal("0")
+        resolved = _exact(
+            exact_sum,
+            (
+                evidence.resolved_quantity
+                for evidence in self._resolutions.values()
+                if evidence.recall_id == recall_id
+                and _dt(evidence.effective_at) <= point
+                and _dt(evidence.observed_at) <= point
+            ),
+        )
+        if resolved > recall.quantity:
+            raise BorrowRecallConflict(
+                "decision-cut resolution exceeds recalled quantity"
+            )
+        return _exact(exact_subtract, recall.quantity, resolved)
+
     def remaining(self, recall_id: str) -> Decimal:
         DurableBorrowRecallProjection._reload(self)
         rid = _text(recall_id, name="recall_id")
-        recall = self._recalls.get(rid)
-        if recall is None:
-            raise KeyError(rid)
-        return _exact(exact_subtract, recall.quantity, self._resolved.get(rid, Decimal("0")))
+        return self._remaining_from_current_cut(rid)
+
+    def remaining_at(self, recall_id: str, now: str) -> Decimal:
+        """Return only recall truth causally visible at one financial cut."""
+
+        DurableBorrowRecallProjection._reload(self)
+        rid = _text(recall_id, name="recall_id")
+        point = _dt(_instant(now, name="now"))
+        return self._remaining_at_current_cut(rid, point)
 
     @property
     def active_quantity(self) -> Decimal:
@@ -1007,22 +1048,50 @@ class DurableBorrowRecallProjection:
         return _exact(
             exact_sum,
             (
-                _exact(
-                    exact_subtract,
-                    recall.quantity,
-                    self._resolved.get(rid, Decimal("0")),
-                )
-                for rid, recall in self._recalls.items()
+                self._remaining_from_current_cut(rid)
+                for rid in self._recalls
+            ),
+        )
+
+    def active_quantity_at(self, now: str) -> Decimal:
+        DurableBorrowRecallProjection._reload(self)
+        point = _dt(_instant(now, name="now"))
+        return _exact(
+            exact_sum,
+            (
+                self._remaining_at_current_cut(rid, point)
+                for rid in self._recalls
             ),
         )
 
     @property
     def active_recall_ids(self) -> tuple[str, ...]:
-        return tuple(sorted(rid for rid in self._recalls if self.remaining(rid) > 0))
+        DurableBorrowRecallProjection._reload(self)
+        return tuple(
+            sorted(
+                rid
+                for rid in self._recalls
+                if self._remaining_from_current_cut(rid) > 0
+            )
+        )
+
+    def active_recall_ids_at(self, now: str) -> tuple[str, ...]:
+        DurableBorrowRecallProjection._reload(self)
+        point = _dt(_instant(now, name="now"))
+        return tuple(
+            sorted(
+                rid
+                for rid in self._recalls
+                if self._remaining_at_current_cut(rid, point) > 0
+            )
+        )
 
     @property
     def active_blocking_resources(self) -> tuple[str, ...]:
         return (self.resource_key,) if self.active_quantity > 0 else ()
+
+    def active_blocking_resources_at(self, now: str) -> tuple[str, ...]:
+        return (self.resource_key,) if self.active_quantity_at(now) > 0 else ()
 
     def _append(self, *, event_type: str, identity: str, payload: dict[str, object], committed_at: str) -> None:
         event_id = str(

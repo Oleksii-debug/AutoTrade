@@ -89,6 +89,18 @@ class EvidencedBorrowRecallProjection:
     def remaining(self, recall_id):
         return self._projection.remaining(recall_id)
 
+    def remaining_at(self, recall_id, now):
+        return self._projection.remaining_at(recall_id, now)
+
+    def active_quantity_at(self, now):
+        return self._projection.active_quantity_at(now)
+
+    def active_recall_ids_at(self, now):
+        return self._projection.active_recall_ids_at(now)
+
+    def active_blocking_resources_at(self, now):
+        return self._projection.active_blocking_resources_at(now)
+
     def record_recall(self, evidence):
         return self._projection.record_recall(self._bound(evidence))
 

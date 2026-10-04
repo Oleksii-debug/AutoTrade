@@ -346,6 +346,76 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                         )
                         self.assertEqual(projection.active_quantity, Decimal("1"))
 
+    def test_future_recall_is_invisible_before_provider_fact_is_observed(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:00:30Z"), Decimal("0"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:00:50Z"), Decimal("0"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:01:00Z"), Decimal("3"))
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:01:00Z"),
+            (availability().resource_key,),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:00:50Z"), Decimal("0"))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:01:00Z"), Decimal("3"))
+
+    def test_future_resolution_cannot_release_before_observation_cut_and_survives_restart(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+        projection.resolve_recall(
+            resolution(
+                resolved_quantity="3",
+                effective_at="2026-09-25T05:09:30Z",
+                observed_at="2026-09-25T05:10:00Z",
+            )
+        )
+
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:02:00Z"), Decimal("3"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:09:45Z"), Decimal("3"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:10:00Z"), Decimal("0"))
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:09:45Z"), Decimal("3"))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:10:00Z"), Decimal("0"))
+
+    def test_partial_future_resolution_chain_is_projected_at_decision_cut(self):
+        projection = self.projection()
+        projection.record_recall(recall(quantity="5"))
+        projection.resolve_recall(
+            resolution(
+                resolved_quantity="2",
+                effective_at="2026-09-25T05:04:00Z",
+                observed_at="2026-09-25T05:05:00Z",
+            )
+        )
+        projection.resolve_recall(
+            resolution(
+                resolution_id="resolution-2",
+                provider_revision="recall-r3",
+                resolved_quantity="3",
+                effective_at="2026-09-25T05:11:00Z",
+                observed_at="2026-09-25T05:12:00Z",
+                evidence_ref="provider:recall-r3",
+            )
+        )
+
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:04:30Z"), Decimal("5"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:05:00Z"), Decimal("3"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:11:30Z"), Decimal("3"))
+        self.assertEqual(projection.active_quantity_at("2026-09-25T05:12:00Z"), Decimal("0"))
+        self.assertEqual(
+            projection.active_recall_ids_at("2026-09-25T05:05:00Z"),
+            ("recall-1",),
+        )
+        self.assertEqual(projection.active_recall_ids_at("2026-09-25T05:12:00Z"), ())
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:05:00Z"), Decimal("3"))
+        self.assertEqual(restarted.active_quantity_at("2026-09-25T05:12:00Z"), Decimal("0"))
+
     def test_partial_resolution_is_evidence_bound_and_idempotent(self):
         projection = self.projection()
         projection.record_recall(recall())

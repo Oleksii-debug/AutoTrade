@@ -1084,6 +1084,12 @@ def execute_bybit_credential_probe_wire_query(
     )
 
 
+# Retain the canonical direct wire entry point once. A caller-supplied callback may
+# exercise deterministic rejection/inconclusive paths, but it cannot claim provider
+# transport provenance merely by returning a response carrying module-level tokens.
+_DIRECT_PROVIDER_WIRE_QUERY = execute_bybit_credential_probe_wire_query
+
+
 def probe_bybit_credential_with_vault(
     *,
     vault: ProtectedCredentialVault,
@@ -1121,6 +1127,7 @@ def probe_bybit_credential_with_vault(
     )
     if not callable(wire_query):
         raise TypeError("wire_query must be callable")
+    direct_wire_query = wire_query is _DIRECT_PROVIDER_WIRE_QUERY
     if not callable(clock_millis) or not callable(clock_utc):
         raise TypeError("probe clocks must be callable")
     recv_window_ms = _exact_recv_window(recv_window_ms)
@@ -1167,6 +1174,16 @@ def probe_bybit_credential_with_vault(
         if type(wire_response) is not BybitCredentialProbeWireResponse:
             raise TypeError(
                 "wire_query must return exact BybitCredentialProbeWireResponse"
+            )
+        if (
+            not direct_wire_query
+            and (
+                wire_response._provider_transport_proof is not None
+                or wire_response._provider_echo_proof is not None
+            )
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe provider attestation requires canonical direct wire query"
             )
         if wire_response.http_status != 200:
             raise ProviderCoreError(
@@ -1224,18 +1241,21 @@ def probe_bybit_credential_with_shared_wire(
     recv_window_ms: int = 5000,
     wire_client: object | None = None,
 ) -> BybitCredentialProbeEvidence:
-    def wire_query(
-        *,
-        source_uri: str,
-        headers: Mapping[str, str],
-        timeout_seconds: int,
-    ) -> BybitCredentialProbeWireResponse:
-        return execute_bybit_credential_probe_wire_query(
-            source_uri=source_uri,
-            headers=headers,
-            timeout_seconds=timeout_seconds,
-            wire_client=wire_client,
-        )
+    if wire_client is None:
+        wire_query = _DIRECT_PROVIDER_WIRE_QUERY
+    else:
+        def wire_query(
+            *,
+            source_uri: str,
+            headers: Mapping[str, str],
+            timeout_seconds: int,
+        ) -> BybitCredentialProbeWireResponse:
+            return _DIRECT_PROVIDER_WIRE_QUERY(
+                source_uri=source_uri,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+                wire_client=wire_client,
+            )
 
     return probe_bybit_credential_with_vault(
         vault=vault,

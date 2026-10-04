@@ -1058,5 +1058,34 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_event_cursor_rejects_noncanonical_query_aliases(self):
+        targets = (
+            "/api/v1/events?after=01",
+            "/api/v1/events?after=%2B1",
+            "/api/v1/events?after=-0",
+            "/api/v1/events?after=%200",
+            "/api/v1/events?after=0%20",
+            "/api/v1/events?after=",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                response = self.app.dispatch(
+                    method="GET",
+                    target=target,
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_EVENT_CURSOR"},
+                )
+
+        canonical = self.app.dispatch(
+            method="GET",
+            target="/api/v1/events?after=0",
+            headers=self.headers(),
+        )
+        self.assertEqual(canonical.status, 200)
+
 if __name__ == "__main__":
     unittest.main()

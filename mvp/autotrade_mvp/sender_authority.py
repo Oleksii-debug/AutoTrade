@@ -2,18 +2,19 @@
 
 The gate serializes the terminal provider-send window with an owner takeover.
 It is deliberately not an ownership claim by itself: callers must validate the
-journal-backed owner fence while holding the gate.  The gate exists so that a
+journal-backed owner fence while holding the gate. The gate exists so that a
 validated old sender cannot cross its durable SubmissionSending barrier, lose
 ownership, and only then emit provider bytes.
 
 The lock is scoped to the canonical JournalStore backing file plus recovery
-owner scope.  Process death releases the OS advisory lock; the durable journal
+owner scope. Process death releases the OS advisory lock; the durable journal
 remains the source of ownership and UNKNOWN-send truth.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import os
@@ -27,6 +28,25 @@ from .persistence import JournalStore
 
 class SenderAuthorityError(PermissionError):
     """Raised when the sender authority gate cannot be established safely."""
+
+
+_LEASE_FACTORY = object()
+
+
+@dataclass(frozen=True)
+class SenderAuthorityLease:
+    """Ephemeral proof that code is executing inside the sender gate window."""
+
+    owner_scope: str
+    journal_path: str
+    gate_path: str
+    _factory: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory is not _LEASE_FACTORY:
+            raise SenderAuthorityError(
+                "sender authority leases are issued only by the process-shared gate"
+            )
 
 
 def _canonical_scope(owner_scope: object) -> str:
@@ -70,16 +90,27 @@ def sender_authority_gate_path(store: JournalStore, *, owner_scope: str) -> Path
     )
 
 
+def _lease(
+    *, owner_scope: str, journal_path: Path, gate_path: Path
+) -> SenderAuthorityLease:
+    return SenderAuthorityLease(
+        owner_scope=owner_scope,
+        journal_path=str(journal_path),
+        gate_path=str(gate_path),
+        _factory=_LEASE_FACTORY,
+    )
+
+
 @contextmanager
 def sender_authority_window(
     store: JournalStore,
     *,
     owner_scope: str,
-) -> Iterator[None]:
+) -> Iterator[SenderAuthorityLease]:
     """Hold the process-shared terminal-send/takeover exclusion window.
 
     Lock ordering for WP-49 is sender authority gate first, then any provider
-    credential-vault lease.  Takeover must use the same order.  This avoids a
+    credential-vault lease. Takeover must use the same order. This avoids a
     sender-vault deadlock while ensuring credential rotation/revocation cannot
     race an already-authorized provider call.
     """
@@ -103,13 +134,15 @@ def sender_authority_window(
                 authority,
                 lock_name=lock_path.name,
             ):
-                # Re-check the selected journal generation only after the
-                # process-shared exclusion window is held.
                 if _canonical_store_path(store) != journal_path:
                     raise SenderAuthorityError(
                         "sender authority journal changed while acquiring gate"
                     )
-                yield
+                yield _lease(
+                    owner_scope=scope,
+                    journal_path=journal_path,
+                    gate_path=lock_path,
+                )
         return
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +177,11 @@ def sender_authority_window(
                     raise SenderAuthorityError(
                         "sender authority journal changed while acquiring gate"
                     )
-                yield
+                yield _lease(
+                    owner_scope=scope,
+                    journal_path=journal_path,
+                    gate_path=lock_path,
+                )
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     finally:

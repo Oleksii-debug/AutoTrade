@@ -64,6 +64,39 @@ def _append(store: JournalStore, expected: ExpectedJournalEvent) -> None:
 
 
 class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
+    def _measure(
+        self,
+        store: JournalStore,
+        expected: ExpectedJournalEvent,
+        plan_id: str,
+        operation,
+    ) -> None:
+        with patch(
+            "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+            side_effect=(100, 200),
+        ):
+            measure_declared_financial_operation(
+                store,
+                _spec(),
+                plan_id=plan_id,
+                event_id=expected.event_id,
+                operation=operation,
+            )
+
+    def _fixture(self, root: str) -> tuple[JournalStore, ExpectedJournalEvent, str]:
+        store = JournalStore(Path(root) / "latency-schema-authority.sqlite")
+        expected = _expected()
+        plan_id = declare_runtime_event_plan(
+            store,
+            plan_id="latency-schema-authority-plan",
+            spec=_spec(),
+            expected_events=(expected,),
+        ).plan_id
+        return store, expected, plan_id
+
+    def _measurement_id(self, plan_id: str, event_id: str) -> str:
+        return measurement_module._measurement_event_id(plan_id, event_id)
+
     def test_operation_cannot_execute_hostile_schema_version_comparison(self) -> None:
         class HostileSchemaVersion:
             def __init__(self) -> None:
@@ -78,14 +111,7 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
                 raise AssertionError("hostile schema inequality executed after callback")
 
         with tempfile.TemporaryDirectory() as root:
-            store = JournalStore(Path(root) / "latency-schema-authority.sqlite")
-            expected = _expected()
-            plan_id = declare_runtime_event_plan(
-                store,
-                plan_id="latency-schema-authority-plan",
-                spec=_spec(),
-                expected_events=(expected,),
-            ).plan_id
+            store, expected, plan_id = self._fixture(root)
             hostile = HostileSchemaVersion()
             original = JournalStore.SCHEMA_VERSION
 
@@ -94,30 +120,50 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
                 JournalStore.SCHEMA_VERSION = hostile
 
             try:
-                with patch(
-                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
-                    side_effect=(100, 200),
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"JournalStore schema authority changed",
                 ):
-                    with self.assertRaisesRegex(
-                        RuntimeLoadMeasurementError,
-                        r"JournalStore schema authority changed",
-                    ):
-                        measure_declared_financial_operation(
-                            store,
-                            _spec(),
-                            plan_id=plan_id,
-                            event_id=expected.event_id,
-                            operation=attack,
-                        )
+                    self._measure(store, expected, plan_id, attack)
             finally:
                 JournalStore.SCHEMA_VERSION = original
 
             self.assertEqual(hostile.comparisons, 0)
-            measurement_id = measurement_module._measurement_event_id(
-                plan_id,
-                expected.event_id,
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
             )
-            self.assertIsNone(store.get_event(measurement_id))
+
+    def test_operation_cannot_retarget_json_encoder_below_json_dumps(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            original_encoder = json_module.JSONEncoder
+            touched = False
+
+            class ForgedEncoder:
+                def __init__(self, *_args, **_kwargs) -> None:
+                    nonlocal touched
+                    touched = True
+                    raise AssertionError("forged JSONEncoder executed after callback")
+
+            def attack() -> None:
+                _append(store, expected)
+                json_module.JSONEncoder = ForgedEncoder
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"transitive global dependency changed.*JSONEncoder",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                json_module.JSONEncoder = original_encoder
+
+            self.assertFalse(touched)
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
 
 
 if __name__ == "__main__":

@@ -8,11 +8,13 @@ finish Retained -> Observed without a provider re-query.
 
 Important authority boundary: the module-local record token exists only so
 deterministic tests can exercise Prepared/Retained/Observed recovery as
-``TEST_INJECTED`` evidence.  It can never mint ``PROVIDER_ORIGIN``.
-PAPER/LIVE provider-origin observation remains unavailable until a canonical
-provider transport supplies a non-self-mintable independently authenticated
-wire execution receipt.  Consequently this module by itself makes no
-PAPER/LIVE provenance or release-readiness claim.
+``TEST_INJECTED`` evidence. It can never mint ``PROVIDER_ORIGIN``.
+The production path is ``execute_qualified_provider_origin_read``: it writes
+Prepared first, re-resolves the exact durable Q/C authority at the terminal
+wire barrier, requires the canonical direct transport execution receipt, and
+persists that receipt identity/cut with Retained/Observed. This establishes
+provider-origin provenance only for that exact response; it is not provider
+qualification, economic-edge evidence, or release-readiness by itself.
 """
 
 from __future__ import annotations

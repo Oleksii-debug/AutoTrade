@@ -103,10 +103,10 @@ def _publication_bound_trusted_authenticated_reader(
         pins = _duplicate_exact_store_generation_pins(publication_store)
         expected_generation = _root._pinned_generation(pins)
         configured_generation = _root._immutable_configured_generation(root_key)
-        _root._assert_expected_generation(
-            configured_generation,
-            expected_generation,
-        )
+        if configured_generation != expected_generation:
+            raise _store.ArtifactIntegrityError(
+                "publication store does not match trusted artifact root"
+            )
 
         reader = _root._TrustedAuthenticatedReader()
         reader_id = id(reader)

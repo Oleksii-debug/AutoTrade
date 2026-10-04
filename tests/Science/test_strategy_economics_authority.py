@@ -6,6 +6,7 @@ import unittest
 from uuid import UUID
 
 from mvp.autotrade_mvp.instruments import (
+    InstrumentNotFound,
     InstrumentRegistry,
     InstrumentVersion,
     TradingCalendar,
@@ -180,6 +181,10 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             "dimension_fx",
             assessment.unresolved_owners,
         )
+        self.assertIn(
+            "provider_scope_binding",
+            assessment.unresolved_owners,
+        )
         with self.assertRaisesRegex(
             StrategyEconomicsAuthorityError,
             "terminal strategy economics is INCONCLUSIVE",
@@ -280,7 +285,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 TradingCalendar.continuous_24_7(),
             )
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(InstrumentNotFound):
             assess_strategy_economics_authority(
                 item,
                 _binding(item),

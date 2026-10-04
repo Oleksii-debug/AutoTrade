@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import shlex
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -36,6 +37,32 @@ def _xml_elements(tree: ET.ElementTree, local_name: str):
     return tuple(
         node for node in tree.iter()
         if _xml_local_name(node.tag) == local_name
+    )
+
+
+def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
+    """Parse one canonical YAML run-line dotnet restore command."""
+    if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
+        raise ValueError('not a canonical dotnet restore run line')
+    try:
+        tokens = tuple(shlex.split(command.removeprefix('run: ')))
+    except ValueError as error:
+        raise ValueError('malformed dotnet restore command') from error
+    if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):
+        raise ValueError('not a canonical dotnet restore command')
+    return tokens
+
+
+def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:
+    """Accept only exact locked-restore switches, never substring lookalikes."""
+    canonical_properties = {
+        '-p:RestoreLockedMode=true',
+        '/p:RestoreLockedMode=true',
+        '-property:RestoreLockedMode=true',
+        '/property:RestoreLockedMode=true',
+    }
+    return '--locked-mode' in tokens or any(
+        token in canonical_properties for token in tokens
     )
 
 

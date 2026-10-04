@@ -321,19 +321,19 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
     def test_operation_rejects_latency_sample_class_shape_before_constructor(self) -> None:
         touched: list[str] = []
         sample_type = measurement_module.DurableFinancialLatencySample
-        had_own_new = "__new__" in sample_type.__dict__
-        original_new = sample_type.__dict__.get("__new__")
+        original_init = sample_type.__dict__["__init__"]
+        marker = "_hostile_class_shape_marker"
 
-        def hostile_new(cls, *_args, **_kwargs):
-            touched.append("__new__")
-            return object.__new__(cls)
+        def hostile_init(self, *_args, **_kwargs):
+            touched.append("__init__")
 
         with tempfile.TemporaryDirectory() as root:
             store, expected, plan_id = self._fixture(root)
 
             def attack() -> None:
                 _append(store, expected)
-                sample_type.__new__ = staticmethod(hostile_new)
+                sample_type.__init__ = hostile_init
+                setattr(sample_type, marker, object())
 
             try:
                 with self.assertRaisesRegex(
@@ -342,11 +342,13 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
                 ):
                     self._measure(store, expected, plan_id, attack)
             finally:
-                if had_own_new:
-                    sample_type.__new__ = original_new
-                else:
-                    del sample_type.__new__
+                sample_type.__init__ = original_init
+                if marker in sample_type.__dict__:
+                    delattr(sample_type, marker)
 
+            # The post-callback class-shape fence must fire before construction.
+            # Avoid mutating __new__: deleting a dynamically installed __new__
+            # leaves CPython's internal tp_new slot poisoned for later tests.
             self.assertEqual(touched, [])
             self.assertIsNone(
                 store.get_event(self._measurement_id(plan_id, expected.event_id))

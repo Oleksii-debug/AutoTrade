@@ -1,18 +1,30 @@
-"""Deterministic provider crosswalk without implicit fallback or live authority.
+"""Fail-closed provider routing from one durable capability/qualification cut.
 
-This module joins the architectural provider registry, exact-code qualification
-evidence and account/instrument capability snapshots. It never sends orders and
-never upgrades non-live qualification into live trading authority.
+Candidates describe static product/build/account composition only. They do not
+carry caller-constructed capability or qualification authority. Selection reads
+current C and current Q from their canonical durable registries at one exact
+global JournalStore sequence and binds that pair into a sealed route value.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 from typing import Iterable
 
-from .capabilities import CapabilitySnapshot
-from .provider_core import QualificationEvidence, provider_definition
+from .capabilities import CapabilityError, CapabilitySnapshot
+from .durable_capabilities import DurableCapabilityRegistry
+from .durable_provider_qualification import DurableProviderQualificationRegistry
+from .provider_core import provider_definition
+from .provider_domain import ProviderDomainError, ProviderFinancialScope
+from .provider_qualification_authority import (
+    AcceptedProviderQualification,
+    ProviderQualificationError,
+)
+from .provider_qualification_current_scope import (
+    ProviderQualificationCurrentScope,
+    ProviderQualificationCurrentScopeError,
+)
 
 
 ASSET_FAMILY_COMPATIBILITY = {
@@ -40,57 +52,65 @@ ASSET_FAMILY_COMPATIBILITY = {
         ("KRAKEN", "DERIVATIVES"),
         ("BINANCE", "COIN_M"),
     },
-    "LISTED_FUTURE": {
-        ("IBKR", "FUTURES"),
-    },
-    "EQUITY": {
-        ("IBKR", "EQUITIES"),
-        ("ALPACA", "EQUITIES"),
-    },
+    "LISTED_FUTURE": {("IBKR", "FUTURES")},
+    "EQUITY": {("IBKR", "EQUITIES"), ("ALPACA", "EQUITIES")},
     "OPTION": {
         ("BYBIT", "OPTIONS"),
         ("BINANCE", "OPTIONS"),
         ("IBKR", "OPTIONS"),
         ("ALPACA", "OPTIONS"),
     },
-    "FX": {
-        ("IBKR", "FX"),
-    },
+    "FX": {("IBKR", "FX")},
 }
+
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SELECTED_ROUTE_TOKEN = object()
 
 
 class ProviderSelectionError(ValueError):
     pass
 
 
-def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ProviderSelectionError(f"{name} is required")
-    return value.strip()
+def _text(value: object, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ProviderSelectionError(f"{name} is required as canonical text")
+    return value
 
 
-def _code_sha(value: str) -> str:
+def _code_sha(value: object) -> str:
     text = _text(value, "adapter_code_sha")
-    if len(text) != 40:
+    if _GIT_SHA_RE.fullmatch(text) is None:
         raise ProviderSelectionError(
-            "adapter_code_sha must be a canonical 40-character Git SHA"
+            "adapter_code_sha must be a canonical lowercase 40-character Git SHA"
         )
-    try:
-        int(text, 16)
-    except ValueError as error:
-        raise ProviderSelectionError("adapter_code_sha must be hexadecimal") from error
-    if text != text.lower():
-        raise ProviderSelectionError("adapter_code_sha must use canonical lowercase hex")
+    return text
+
+
+def _digest(value: object, name: str) -> str:
+    text = _text(value, name)
+    if _SHA256_RE.fullmatch(text) is None:
+        raise ProviderSelectionError(f"{name} must be canonical sha256:<64-hex>")
     return text
 
 
 def _instant(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise ProviderSelectionError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ProviderSelectionError(f"{name} must be an exact timezone-aware datetime")
     return value.astimezone(timezone.utc)
 
 
-@dataclass(frozen=True)
+def _journal_cut(store: object) -> int:
+    value = store.whole_store_state_cut()
+    if type(value) is not dict:
+        raise ProviderSelectionError("whole-store decision cut is non-canonical")
+    sequence = value.get("journal_sequence")
+    if type(sequence) is not int or sequence < 0:
+        raise ProviderSelectionError("whole-store decision cut lacks canonical sequence")
+    return sequence
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderRouteRequest:
     asset_class: str
     environment: str
@@ -112,11 +132,19 @@ class ProviderRouteRequest:
             )
         object.__setattr__(self, "environment", environment)
         object.__setattr__(
-            self, "instrument_version", _text(self.instrument_version, "instrument_version")
+            self,
+            "instrument_version",
+            _text(self.instrument_version, "instrument_version"),
         )
-        object.__setattr__(self, "order_type", _text(self.order_type, "order_type").upper())
         object.__setattr__(
-            self, "time_in_force", _text(self.time_in_force, "time_in_force").upper()
+            self,
+            "order_type",
+            _text(self.order_type, "order_type").upper(),
+        )
+        object.__setattr__(
+            self,
+            "time_in_force",
+            _text(self.time_in_force, "time_in_force").upper(),
         )
         object.__setattr__(
             self,
@@ -131,47 +159,161 @@ class ProviderRouteRequest:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProviderCandidate:
+    """Static composition only; contains no financial authority values."""
+
     provider_id: str
     product_family: str
+    provider_environment: str
+    account_id: str
+    entity_id: str
+    entity_policy_id: str
     adapter_code_sha: str
-    qualification: QualificationEvidence
-    capability: CapabilitySnapshot
+    packaged_artifact_digest: str
+    protocol_id: str
+    protocol_version: str
 
     def __post_init__(self) -> None:
         provider = _text(self.provider_id, "provider_id").upper()
         definition = provider_definition(provider)
-        family = _text(self.product_family, "product_family")
+        family = _text(self.product_family, "product_family").upper()
         if family not in definition.product_families:
             raise ProviderSelectionError("product_family is not declared for provider")
-        if self.qualification.provider_id != provider:
-            raise ProviderSelectionError("qualification provider does not match candidate")
-        if self.qualification.product_family != family:
-            raise ProviderSelectionError("qualification product family does not match candidate")
-        if self.capability.provider_id.upper() != provider:
-            raise ProviderSelectionError("capability provider does not match candidate")
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "product_family", family)
         object.__setattr__(
-            self, "adapter_code_sha", _code_sha(self.adapter_code_sha)
+            self,
+            "provider_environment",
+            _text(self.provider_environment, "provider_environment").upper(),
+        )
+        for field in ("account_id", "entity_id"):
+            object.__setattr__(self, field, _text(getattr(self, field), field))
+        object.__setattr__(
+            self,
+            "entity_policy_id",
+            _text(self.entity_policy_id, "entity_policy_id").upper(),
+        )
+        object.__setattr__(self, "adapter_code_sha", _code_sha(self.adapter_code_sha))
+        object.__setattr__(
+            self,
+            "packaged_artifact_digest",
+            _digest(self.packaged_artifact_digest, "packaged_artifact_digest"),
+        )
+        for field in ("protocol_id", "protocol_version"):
+            object.__setattr__(self, field, _text(getattr(self, field), field))
+
+    @property
+    def identity(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.provider_id,
+            self.product_family,
+            self.provider_environment,
+            self.account_id,
+            self.entity_id,
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, init=False)
+class SelectedProviderRoute:
+    """Sealed binding of static route composition to one exact current C/Q pair."""
+
+    candidate: ProviderCandidate
+    capability: CapabilitySnapshot
+    qualification: AcceptedProviderQualification
+    decision_journal_sequence_cut: int
+
+    def __init__(
+        self,
+        *,
+        candidate: ProviderCandidate,
+        capability: CapabilitySnapshot,
+        qualification: AcceptedProviderQualification,
+        decision_journal_sequence_cut: int,
+        _selection_token: object | None = None,
+    ) -> None:
+        if _selection_token is not _SELECTED_ROUTE_TOKEN:
+            raise ProviderSelectionError(
+                "SelectedProviderRoute must come from canonical provider selection"
+            )
+        if type(candidate) is not ProviderCandidate:
+            raise TypeError("candidate must be exact ProviderCandidate")
+        if type(capability) is not CapabilitySnapshot:
+            raise TypeError("capability must be exact CapabilitySnapshot")
+        if type(qualification) is not AcceptedProviderQualification:
+            raise TypeError(
+                "qualification must be exact AcceptedProviderQualification"
+            )
+        if (
+            type(decision_journal_sequence_cut) is not int
+            or decision_journal_sequence_cut < 0
+        ):
+            raise ProviderSelectionError("decision cut must be a non-negative exact integer")
+        object.__setattr__(self, "candidate", candidate)
+        object.__setattr__(self, "capability", capability)
+        object.__setattr__(self, "qualification", qualification)
+        object.__setattr__(
+            self,
+            "decision_journal_sequence_cut",
+            decision_journal_sequence_cut,
+        )
+
+    @property
+    def qualification_id(self) -> str:
+        return self.qualification.qualification_id
+
+    @property
+    def capability_snapshot_id(self) -> str:
+        return self.capability.snapshot_id
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateDecision:
     provider_id: str
     product_family: str
+    provider_environment: str
     eligible: bool
     reasons: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProviderSelection:
     status: str
-    selected: ProviderCandidate | None
-    eligible: tuple[ProviderCandidate, ...]
+    selected: SelectedProviderRoute | None
+    eligible: tuple[SelectedProviderRoute, ...]
     decisions: tuple[CandidateDecision, ...]
+    decision_journal_sequence_cut: int
+
+
+def _qualification_scope(
+    candidate: ProviderCandidate,
+    request: ProviderRouteRequest,
+) -> ProviderQualificationCurrentScope:
+    provider_scope = ProviderFinancialScope(
+        provider_id=candidate.provider_id,
+        runtime_environment=request.environment,
+        provider_environment=candidate.provider_environment,
+        entity_policy_id=candidate.entity_policy_id,
+    )
+    return ProviderQualificationCurrentScope(
+        provider_scope=provider_scope,
+        product_family=candidate.product_family,
+        adapter_source_git_sha=candidate.adapter_code_sha,
+        packaged_artifact_digest=candidate.packaged_artifact_digest,
+        protocol_id=candidate.protocol_id,
+        protocol_version=candidate.protocol_version,
+    )
+
+
+def _unsupported_features(request: ProviderRouteRequest) -> frozenset[str]:
+    return frozenset(
+        {
+            f"ASSET_CLASS:{request.asset_class}",
+            f"ORDER_TYPE:{request.order_type}",
+            f"TIF:{request.time_in_force}",
+            f"SCOPE:{request.permission_scope}",
+        }
+    )
 
 
 def select_provider(
@@ -179,52 +321,87 @@ def select_provider(
     candidates: Iterable[ProviderCandidate],
     *,
     at: datetime,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
 ) -> ProviderSelection:
-    """Resolve one exact route or fail closed.
+    """Resolve one exact route from durable C/Q authority or fail closed.
 
-    Multiple eligible external providers are intentionally ambiguous unless a
-    policy supplies an explicit preferred_provider_id. A LIVE request is never
-    admitted by the current non-live qualification evidence type.
+    C and Q are both replayed at one captured global journal sequence. If the
+    shared JournalStore advances while selection is evaluating candidates, no
+    route is returned; the caller must retry against a fresh decision cut.
     """
 
-    if not isinstance(request, ProviderRouteRequest):
-        raise TypeError("request must be ProviderRouteRequest")
+    if type(request) is not ProviderRouteRequest:
+        raise TypeError("request must be exact ProviderRouteRequest")
+    if type(capability_registry) is not DurableCapabilityRegistry:
+        raise TypeError("capability_registry must be exact DurableCapabilityRegistry")
+    if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        raise TypeError(
+            "qualification_registry must be exact DurableProviderQualificationRegistry"
+        )
+    if capability_registry.store is not qualification_registry.store:
+        raise ProviderSelectionError(
+            "capability and qualification authorities must share one JournalStore instance"
+        )
+
     point = _instant(at, "at")
     materialized = tuple(candidates)
-    if any(not isinstance(candidate, ProviderCandidate) for candidate in materialized):
-        raise TypeError("candidates must contain ProviderCandidate values")
-    identities = [(c.provider_id, c.product_family) for c in materialized]
+    if any(type(candidate) is not ProviderCandidate for candidate in materialized):
+        raise TypeError("candidates must contain exact ProviderCandidate values")
+    identities = [candidate.identity for candidate in materialized]
     if len(identities) != len(set(identities)):
-        raise ProviderSelectionError("provider/product candidate identities must be unique")
+        raise ProviderSelectionError("provider route candidate identities must be unique")
 
+    decision_cut = _journal_cut(capability_registry.store)
     allowed_pairs = ASSET_FAMILY_COMPATIBILITY[request.asset_class]
-    eligible: list[ProviderCandidate] = []
+    requested_features = _unsupported_features(request)
+    eligible: list[SelectedProviderRoute] = []
     decisions: list[CandidateDecision] = []
 
-    for candidate in sorted(
-        materialized, key=lambda item: (item.provider_id, item.product_family)
-    ):
+    for candidate in sorted(materialized, key=lambda item: item.identity):
         reasons: list[str] = []
-        pair = (candidate.provider_id, candidate.product_family)
-        if pair not in allowed_pairs:
-            reasons.append("ASSET_PRODUCT_MISMATCH")
-        if candidate.qualification.environment.upper() != request.environment:
-            reasons.append("QUALIFICATION_ENVIRONMENT_MISMATCH")
-        qualification_status = candidate.qualification.status(
-            now=point,
-            exact_code_sha=candidate.adapter_code_sha,
-        )
-        if qualification_status != "QUALIFIED_FOR_NONLIVE":
-            reasons.append(f"QUALIFICATION_{qualification_status}")
-        if request.environment == "LIVE":
-            reasons.append("LIVE_QUALIFICATION_NOT_ESTABLISHED")
+        capability: CapabilitySnapshot | None = None
+        qualification: AcceptedProviderQualification | None = None
 
-        capability = candidate.capability
-        if capability.environment.upper() != request.environment:
-            reasons.append("CAPABILITY_ENVIRONMENT_MISMATCH")
-        if capability.instrument_version != request.instrument_version:
-            reasons.append("CAPABILITY_INSTRUMENT_MISMATCH")
-        if not capability.admits(
+        if (candidate.provider_id, candidate.product_family) not in allowed_pairs:
+            reasons.append("ASSET_PRODUCT_MISMATCH")
+
+        try:
+            scope = _qualification_scope(candidate, request)
+        except (ProviderDomainError, ProviderQualificationCurrentScopeError, ValueError):
+            scope = None
+            reasons.append("PROVIDER_DOMAIN_MISMATCH")
+
+        if scope is not None:
+            try:
+                current_q = qualification_registry.current(
+                    scope=scope,
+                    at=point,
+                    journal_sequence_cut=decision_cut,
+                )
+                if current_q.journal_sequence_cut != decision_cut:
+                    raise ProviderSelectionError(
+                        "qualification authority did not honor decision cut"
+                    )
+                qualification = current_q.qualification
+            except ProviderQualificationError:
+                reasons.append("QUALIFICATION_NOT_CURRENT")
+
+        try:
+            capability = capability_registry.require_verified(
+                provider_id=candidate.provider_id,
+                account_id=candidate.account_id,
+                entity_id=candidate.entity_id,
+                environment=request.environment,
+                provider_environment=candidate.provider_environment,
+                instrument_version=request.instrument_version,
+                at=point,
+                journal_sequence_cut=decision_cut,
+            )
+        except CapabilityError:
+            reasons.append("CAPABILITY_NOT_CURRENT_VERIFIED")
+
+        if capability is not None and not capability.admits(
             at=point,
             order_type=request.order_type,
             time_in_force=request.time_in_force,
@@ -232,41 +409,61 @@ def select_provider(
         ):
             reasons.append("CAPABILITY_DOES_NOT_ADMIT_ACTION")
 
-        unsupported = set(candidate.qualification.unsupported_features)
-        requested_features = {
-            f"ASSET_CLASS:{request.asset_class}",
-            f"ORDER_TYPE:{request.order_type}",
-            f"TIF:{request.time_in_force}",
-            f"SCOPE:{request.permission_scope}",
-        }
-        if unsupported & requested_features:
+        if (
+            qualification is not None
+            and frozenset(qualification.unsupported_features) & requested_features
+        ):
             reasons.append("QUALIFICATION_EXPLICITLY_UNSUPPORTED")
 
         decision = CandidateDecision(
             provider_id=candidate.provider_id,
             product_family=candidate.product_family,
+            provider_environment=candidate.provider_environment,
             eligible=not reasons,
             reasons=tuple(reasons),
         )
         decisions.append(decision)
         if not reasons:
-            eligible.append(candidate)
+            if capability is None or qualification is None:
+                raise ProviderSelectionError(
+                    "eligible route lacks resolved canonical authority"
+                )
+            eligible.append(
+                SelectedProviderRoute(
+                    candidate=candidate,
+                    capability=capability,
+                    qualification=qualification,
+                    decision_journal_sequence_cut=decision_cut,
+                    _selection_token=_SELECTED_ROUTE_TOKEN,
+                )
+            )
+
+    if _journal_cut(capability_registry.store) != decision_cut:
+        return ProviderSelection(
+            status="DECISION_CUT_ADVANCED_RETRY_REQUIRED",
+            selected=None,
+            eligible=(),
+            decisions=tuple(decisions),
+            decision_journal_sequence_cut=decision_cut,
+        )
 
     preferred = request.preferred_provider_id
     if preferred is not None:
-        matching = [candidate for candidate in eligible if candidate.provider_id == preferred]
+        matching = [route for route in eligible if route.candidate.provider_id == preferred]
         if len(matching) == 1:
             return ProviderSelection(
                 status="SELECTED_BY_EXPLICIT_POLICY",
                 selected=matching[0],
                 eligible=tuple(eligible),
                 decisions=tuple(decisions),
+                decision_journal_sequence_cut=decision_cut,
             )
         return ProviderSelection(
             status="NO_ELIGIBLE_PREFERRED_PROVIDER",
             selected=None,
             eligible=tuple(eligible),
             decisions=tuple(decisions),
+            decision_journal_sequence_cut=decision_cut,
         )
 
     if len(eligible) == 1:
@@ -275,6 +472,7 @@ def select_provider(
             selected=eligible[0],
             eligible=tuple(eligible),
             decisions=tuple(decisions),
+            decision_journal_sequence_cut=decision_cut,
         )
     if len(eligible) > 1:
         return ProviderSelection(
@@ -282,10 +480,12 @@ def select_provider(
             selected=None,
             eligible=tuple(eligible),
             decisions=tuple(decisions),
+            decision_journal_sequence_cut=decision_cut,
         )
     return ProviderSelection(
         status="NO_ELIGIBLE_PROVIDER",
         selected=None,
         eligible=(),
         decisions=tuple(decisions),
+        decision_journal_sequence_cut=decision_cut,
     )

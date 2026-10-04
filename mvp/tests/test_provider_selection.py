@@ -1,91 +1,48 @@
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
-from uuid import uuid5, NAMESPACE_URL
+from unittest.mock import patch
 
-from mvp.autotrade_mvp.capabilities import (
-    CapabilityClaim,
-    EvidenceVerification,
-    derive_capability_snapshot,
-)
-from mvp.autotrade_mvp.provider_core import (
-    QualificationEvidence,
-    REQUIRED_QUALIFICATION_CASES,
+from autotrade_runtime.artifacts import ArtifactStore
+
+from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.durable_provider_qualification import DurableProviderQualificationRegistry
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_qualification_authority import (
+    _derive_accepted_provider_qualification,
+    parse_provider_qualification_campaign,
 )
 from mvp.autotrade_mvp.provider_selection import (
     ProviderCandidate,
     ProviderRouteRequest,
+    ProviderSelectionError,
+    SelectedProviderRoute,
     select_provider,
+)
+from mvp.autotrade_mvp.qualification_attestation import (
+    AcceptedQualificationAttestation,
+    EvidenceArtifactRef,
+    QualificationAttestation,
+    SignedQualificationAttestation,
+)
+from mvp.tests.test_durable_capabilities import verified
+from mvp.tests.test_provider_qualification_authority import (
+    CAMPAIGN_KIND,
+    PACKAGE_DIGEST,
+    POLICY_ID,
+    ROOT_ID,
+    SOURCE_SHA,
+    _artifact_id,
+    _campaign_payload,
+    _protocol,
+    _raw_ref,
 )
 
 
-NOW = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 4, 5, 5, tzinfo=timezone.utc)
 INSTRUMENT = "instrument-v1"
-
-
-def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MARKET")):
-    claims = []
-    for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"):
-        artifact_id = str(uuid5(NAMESPACE_URL, f"{provider}:{source}:{environment}"))
-        claims.append(
-            CapabilityClaim(
-                source=source,
-                provider_id=provider,
-                account_id=f"{provider.lower()}-account",
-                entity_id="entity-1",
-                environment=environment,
-                instrument_version=INSTRUMENT,
-                observed_at=NOW - timedelta(minutes=1),
-                expires_at=NOW + timedelta(hours=1),
-                supported_order_types=frozenset(order_types),
-                time_in_force=frozenset({"GTC", "IOC"}),
-                permission_scopes=frozenset({"ORDER.WRITE", "ORDER.READ"}),
-                position_mode="NET",
-                native_protection=frozenset(),
-                rate_limit_policy_id=f"{provider.lower()}-limits",
-                data_entitlements=frozenset({"QUOTE", "TRADE"}),
-                evidence_ref={
-                    "artifact_id": artifact_id,
-                    "sha256": "sha256:" + "a" * 64,
-                    "observed_at": "2026-09-24T17:59:00Z",
-                },
-            )
-        )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid5(NAMESPACE_URL, f"snapshot:{provider}:{environment}")),
-        claims=claims,
-        observed_at=NOW,
-        evidence_verifier=lambda claim: EvidenceVerification(valid=True),
-    )
-
-
-def candidate(
-    provider: str,
-    family: str,
-    *,
-    environment="PAPER",
-    code_sha=None,
-    qualified_sha=None,
-    unsupported=(),
-):
-    code = code_sha or "1" * 40
-    evidence_sha = qualified_sha or code
-    return ProviderCandidate(
-        provider_id=provider,
-        product_family=family,
-        adapter_code_sha=code,
-        qualification=QualificationEvidence(
-            provider_id=provider,
-            product_family=family,
-            environment=environment,
-            adapter_code_sha=evidence_sha,
-            documentation_ref=f"official:{provider.lower()}:{family.lower()}",
-            observed_at=NOW - timedelta(hours=1),
-            expires_at=NOW + timedelta(days=1),
-            passed_cases=REQUIRED_QUALIFICATION_CASES,
-            unsupported_features=tuple(unsupported),
-        ),
-        capability=capability(provider, environment=environment),
-    )
 
 
 def request(**overrides):
@@ -94,105 +51,282 @@ def request(**overrides):
         environment="PAPER",
         instrument_version=INSTRUMENT,
         order_type="LIMIT",
-        time_in_force="GTC",
+        time_in_force="DAY",
         permission_scope="ORDER.WRITE",
     )
     values.update(overrides)
     return ProviderRouteRequest(**values)
 
 
+def candidate(*, provider_environment="TESTNET", package_digest=PACKAGE_DIGEST):
+    return ProviderCandidate(
+        provider_id="BYBIT",
+        product_family="SPOT",
+        provider_environment=provider_environment,
+        account_id="paper-account",
+        entity_id="entity-1",
+        entity_policy_id="LINEAR_ORDER_V1",
+        adapter_code_sha=SOURCE_SHA,
+        packaged_artifact_digest=package_digest,
+        protocol_id="provider-route-v1",
+        protocol_version="1.0.0",
+    )
+
+
+def accepted_spot_q(
+    *,
+    ordinal=40,
+    unsupported=(),
+    valid_until="2026-10-05T05:00:00Z",
+):
+    protocol = _protocol()
+    raw_ref = _raw_ref(100 + ordinal)
+    payload = _campaign_payload(raw_ref=raw_ref, valid_until=valid_until)
+    payload["product_family"] = "SPOT"
+    payload["unsupported_features"] = sorted(unsupported)
+    campaign_raw = canonical_json(payload).encode("utf-8")
+    campaign_ref = EvidenceArtifactRef(
+        artifact_id=_artifact_id(ordinal),
+        sha256="sha256:" + sha256(campaign_raw).hexdigest(),
+        media_type="application/json",
+        evidence_kind=CAMPAIGN_KIND,
+        source_sha=SOURCE_SHA,
+    )
+    campaign = parse_provider_qualification_campaign(campaign_raw)
+    attestation = QualificationAttestation(
+        attestation_id=_artifact_id(500 + ordinal),
+        source_sha=SOURCE_SHA,
+        domain=protocol.domain,
+        gate=protocol.gate,
+        package_id=protocol.package_id,
+        protocol_id=protocol.protocol_id,
+        protocol_version=protocol.protocol_version,
+        requirement_ids=(protocol.requirement_id,),
+        evidence_refs=(campaign_ref, raw_ref),
+        producer_id="qualification-producer",
+        verifier_id="qualification-verifier",
+        trust_root_id=ROOT_ID,
+        runner_id="runner-1",
+        harness_version="1.0.0",
+        started_at="2026-10-04T04:59:00Z",
+        completed_at="2026-10-04T05:00:00Z",
+        signed_at="2026-10-04T05:01:00Z",
+        result="PASS",
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+    )
+    receipt = SignedQualificationAttestation(
+        attestation=attestation,
+        signature_b64="eA==",
+    )
+    accepted = AcceptedQualificationAttestation(
+        attestation_id=attestation.attestation_id,
+        attestation_digest=attestation.content_digest,
+        policy_id=POLICY_ID,
+        policy_version="1.0.0",
+        trust_root_id=ROOT_ID,
+        result="PASS",
+        source_sha=SOURCE_SHA,
+        domain=protocol.domain,
+        gate=protocol.gate,
+        package_id=protocol.package_id,
+        protocol_id=protocol.protocol_id,
+        protocol_version=protocol.protocol_version,
+        requirement_id=protocol.requirement_id,
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+    )
+    record = _derive_accepted_provider_qualification(
+        protocol=protocol,
+        campaign=campaign,
+        campaign_artifact_ref=campaign_ref,
+        accepted_attestation=accepted,
+        receipt=receipt,
+    )
+    return record, receipt, protocol
+
+
 class ProviderSelectionTests(unittest.TestCase):
-    def test_single_exact_candidate_is_selected(self):
-        bybit = candidate("BYBIT", "SPOT")
-        result = select_provider(request(), [bybit], at=NOW)
-        self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
-        self.assertIs(result.selected, bybit)
-
-    def test_multiple_eligible_providers_never_trigger_implicit_fallback(self):
-        bybit = candidate("BYBIT", "SPOT")
-        binance = candidate("BINANCE", "SPOT")
-        result = select_provider(request(), [bybit, binance], at=NOW)
-        self.assertEqual(result.status, "AMBIGUOUS_REQUIRES_POLICY")
-        self.assertIsNone(result.selected)
-        self.assertEqual(
-            {(item.provider_id, item.product_family) for item in result.eligible},
-            {("BYBIT", "SPOT"), ("BINANCE", "SPOT")},
+    def setUp(self):
+        # Unit route-selection tests intentionally bypass external qualification
+        # evidence verification, but they must still exercise the production
+        # exact-registry type boundary. Patch only the verifier method on the
+        # canonical class instead of substituting a permissive subclass.
+        self._qualification_auth_patch = patch.object(
+            DurableProviderQualificationRegistry,
+            "_authenticate_record",
+            new=lambda _registry, *, protocol_key, record, receipt: record,
         )
+        self._qualification_auth_patch.start()
+        self.addCleanup(self._qualification_auth_patch.stop)
 
-    def test_explicit_provider_policy_resolves_ambiguity_only_if_eligible(self):
-        bybit = candidate("BYBIT", "SPOT")
-        binance = candidate("BINANCE", "SPOT")
-        result = select_provider(
-            request(preferred_provider_id="binance"),
-            [bybit, binance],
-            at=NOW,
+    def authorities(self, directory: str, *, unsupported=()):
+        journal = JournalStore(Path(directory) / "journal.sqlite3")
+        capabilities = DurableCapabilityRegistry(journal)
+        capabilities.add(
+            verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW - timedelta(minutes=1),
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
         )
-        self.assertEqual(result.status, "SELECTED_BY_EXPLICIT_POLICY")
-        self.assertEqual(result.selected.provider_id, "BINANCE")
-
-        missing = select_provider(
-            request(preferred_provider_id="kraken"),
-            [bybit, binance],
-            at=NOW,
+        evidence_root = Path(directory) / "evidence"
+        evidence = ArtifactStore(evidence_root)
+        qualifications = DurableProviderQualificationRegistry(
+            journal,
+            evidence_store=evidence,
+            evidence_root=evidence_root,
         )
-        self.assertEqual(missing.status, "NO_ELIGIBLE_PREFERRED_PROVIDER")
-        self.assertIsNone(missing.selected)
-
-    def test_asset_product_mismatch_is_rejected_even_with_valid_capability(self):
-        bybit_spot = candidate("BYBIT", "SPOT")
-        result = select_provider(
-            request(asset_class="OPTION"),
-            [bybit_spot],
-            at=NOW,
+        record, receipt, protocol = accepted_spot_q(unsupported=unsupported)
+        qualifications._append_accepted(
+            protocol_key=protocol.key,
+            record=record,
+            receipt=receipt,
         )
-        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
-        self.assertIn("ASSET_PRODUCT_MISMATCH", result.decisions[0].reasons)
+        return capabilities, qualifications, record
 
-    def test_exact_adapter_code_is_required(self):
-        stale = candidate(
-            "BYBIT",
-            "SPOT",
-            code_sha="2" * 40,
-            qualified_sha="3" * 40,
-        )
-        result = select_provider(request(), [stale], at=NOW)
-        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
-        self.assertIn("QUALIFICATION_CODE_MISMATCH", result.decisions[0].reasons)
+    def test_candidate_contains_no_caller_capability_or_qualification_authority(self):
+        route = candidate()
+        self.assertFalse(hasattr(route, "capability"))
+        self.assertFalse(hasattr(route, "qualification"))
+        with self.assertRaises(TypeError):
+            ProviderCandidate(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                provider_environment="TESTNET",
+                account_id="paper-account",
+                entity_id="entity-1",
+                entity_policy_id="LINEAR_ORDER_V1",
+                adapter_code_sha=SOURCE_SHA,
+                packaged_artifact_digest=PACKAGE_DIGEST,
+                protocol_id="provider-route-v1",
+                protocol_version="1.0.0",
+                capability=object(),
+            )
 
-    def test_candidate_requires_actual_hex_code_sha_shape(self):
-        with self.assertRaisesRegex(
-            ValueError, "canonical 40- or 64-character lowercase Git object id"
-        ):
-            candidate("BYBIT", "SPOT", code_sha="build-label")
+    def test_exact_current_c_and_q_are_selected_at_one_journal_cut(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
+            self.assertIsNotNone(result.selected)
+            self.assertEqual(result.selected.qualification_id, record.qualification_id)
+            self.assertEqual(
+                result.selected.decision_journal_sequence_cut,
+                result.decision_journal_sequence_cut,
+            )
+            self.assertEqual(result.selected.capability.provider_environment, "TESTNET")
+            self.assertTrue(result.selected.capability.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            ))
 
-    def test_adapter_code_sha_requires_canonical_lowercase_hex(self):
-        with self.assertRaisesRegex(ValueError, "lowercase"):
-            candidate("BYBIT", "SPOT", code_sha="A" * 40)
-        with self.assertRaisesRegex(ValueError, "40-character"):
-            candidate("BYBIT", "SPOT", code_sha="a" * 64)
+    def test_selected_route_constructor_is_sealed(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            route = result.selected
+            self.assertIsNotNone(route)
+            with self.assertRaisesRegex(ProviderSelectionError, "canonical provider selection"):
+                SelectedProviderRoute(
+                    candidate=route.candidate,
+                    capability=route.capability,
+                    qualification=route.qualification,
+                    decision_journal_sequence_cut=route.decision_journal_sequence_cut,
+                )
 
-    def test_live_never_inherits_nonlive_qualification(self):
-        live = candidate("BYBIT", "SPOT", environment="LIVE")
-        result = select_provider(
-            request(environment="LIVE"),
-            [live],
-            at=NOW,
-        )
-        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
-        self.assertIn("LIVE_QUALIFICATION_NOT_ESTABLISHED", result.decisions[0].reasons)
+    def test_testnet_authority_does_not_admit_demo_route(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate(provider_environment="DEMO")],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+            self.assertIn("QUALIFICATION_NOT_CURRENT", result.decisions[0].reasons)
+            self.assertIn("CAPABILITY_NOT_CURRENT_VERIFIED", result.decisions[0].reasons)
+
+    def test_exact_build_digest_is_part_of_current_q_scope(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            result = select_provider(
+                request(),
+                [candidate(package_digest="sha256:" + "9" * 64)],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+            self.assertIn("QUALIFICATION_NOT_CURRENT", result.decisions[0].reasons)
 
     def test_explicit_unsupported_feature_blocks_route(self):
-        bybit = candidate(
-            "BYBIT",
-            "SPOT",
-            unsupported=("ORDER_TYPE:LIMIT",),
-        )
-        result = select_provider(request(), [bybit], at=NOW)
-        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
-        self.assertIn(
-            "QUALIFICATION_EXPLICITLY_UNSUPPORTED",
-            result.decisions[0].reasons,
-        )
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(
+                directory,
+                unsupported=("ORDER_TYPE:LIMIT",),
+            )
+            result = select_provider(
+                request(),
+                [candidate()],
+                at=NOW,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+            self.assertIn(
+                "QUALIFICATION_EXPLICITLY_UNSUPPORTED",
+                result.decisions[0].reasons,
+            )
+
+    def test_different_journal_store_instances_are_not_one_decision_authority(self):
+        with TemporaryDirectory() as directory:
+            capabilities, qualifications, _record = self.authorities(directory)
+            other = DurableProviderQualificationRegistry(
+                JournalStore(Path(directory) / "journal.sqlite3"),
+                evidence_store=qualifications.evidence_store,
+                evidence_root=qualifications.evidence_root,
+            )
+            with self.assertRaisesRegex(ProviderSelectionError, "share one JournalStore"):
+                select_provider(
+                    request(),
+                    [candidate()],
+                    at=NOW,
+                    capability_registry=capabilities,
+                    qualification_registry=other,
+                )
+
+    def test_adapter_sha_is_exact_lowercase_40_hex(self):
+        with self.assertRaisesRegex(ProviderSelectionError, "40-character"):
+            ProviderCandidate(
+                provider_id="BYBIT",
+                product_family="SPOT",
+                provider_environment="TESTNET",
+                account_id="paper-account",
+                entity_id="entity-1",
+                entity_policy_id="LINEAR_ORDER_V1",
+                adapter_code_sha="A" * 40,
+                packaged_artifact_digest=PACKAGE_DIGEST,
+                protocol_id="provider-route-v1",
+                protocol_version="1.0.0",
+            )
 
 
 if __name__ == "__main__":

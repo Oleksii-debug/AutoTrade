@@ -221,7 +221,7 @@ class StrategyContextTests(unittest.TestCase):
         s = study()
         rows = outcomes(s)
         object.__setattr__(s, "economic_unit", "EUR")
-        with self.assertRaisesRegex(ValueError, "economic_unit"):
+        with self.assertRaisesRegex(ValueError, "study_hash"):
             assess_strategy_families(s, rows)
 
     def test_mutated_outcome_is_revalidated_at_use(self):
@@ -230,6 +230,29 @@ class StrategyContextTests(unittest.TestCase):
         object.__setattr__(rows[0], "net_value", Decimal("999"))
         with self.assertRaisesRegex(ValueError, "net_value"):
             assess_strategy_families(s, tuple(rows))
+
+
+
+    def test_semantically_valid_economic_mutation_breaks_stored_evidence_hash(self):
+        s = study()
+        rows = list(outcomes(s))
+        object.__setattr__(
+            rows[0], "gross_value", rows[0].gross_value + Decimal("100")
+        )
+        object.__setattr__(
+            rows[0], "net_value", rows[0].net_value + Decimal("100")
+        )
+        with self.assertRaisesRegex(ValueError, "evidence_hash"):
+            assess_strategy_families(s, tuple(rows))
+
+    def test_semantically_valid_registered_case_mutation_breaks_study_hash(self):
+        s = study()
+        rows = outcomes(s)
+        object.__setattr__(
+            s.cases[0], "strategy_family", "posthoc_winner"
+        )
+        with self.assertRaisesRegex(ValueError, "study_hash"):
+            assess_strategy_families(s, rows)
 
 
 if __name__ == "__main__":

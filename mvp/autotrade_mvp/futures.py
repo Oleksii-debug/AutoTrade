@@ -978,34 +978,33 @@ def lifecycle_gate(
             )
 
     version = contract.canonical_instrument
-    if version is not None:
-        if type(version) is not InstrumentVersion:
-            raise FuturesError(
-                "canonical_instrument must be exact InstrumentVersion"
-            )
-        if (
-            type(version.instrument_id) is not str
-            or type(version.version) is not int
-            or type(version.asset_class) is not str
-            or type(version.settlement_method) is not str
-            or type(version.expiry) is not datetime
-            or type(version.last_trade_at) is not datetime
-            or type(version.delivery_cutoff) is not datetime
-        ):
-            raise FuturesError(
-                "canonical lifecycle instrument fields must retain exact types"
-            )
-        if (
-            version.asset_class != "FUTURE"
-            or contract.instrument != f"{version.instrument_id}@{version.version}"
-            or contract.expiry != version.expiry
-            or contract.last_trade_at != version.last_trade_at
-            or contract.delivery_cutoff != version.delivery_cutoff
-            or contract.settlement_method != version.settlement_method
-        ):
-            raise FuturesError(
-                "futures lifecycle contract no longer matches canonical InstrumentVersion"
-            )
+    if type(version) is not InstrumentVersion:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentVersion"
+        )
+    if (
+        type(version.instrument_id) is not str
+        or type(version.version) is not int
+        or type(version.asset_class) is not str
+        or type(version.settlement_method) is not str
+        or type(version.expiry) is not datetime
+        or type(version.last_trade_at) is not datetime
+        or type(version.delivery_cutoff) is not datetime
+    ):
+        raise FuturesError(
+            "canonical lifecycle instrument fields must retain exact types"
+        )
+    if (
+        version.asset_class != "FUTURE"
+        or contract.instrument != f"{version.instrument_id}@{version.version}"
+        or contract.expiry != version.expiry
+        or contract.last_trade_at != version.last_trade_at
+        or contract.delivery_cutoff != version.delivery_cutoff
+        or contract.settlement_method != version.settlement_method
+    ):
+        raise FuturesError(
+            "futures lifecycle contract no longer matches canonical InstrumentVersion"
+        )
 
     snapshot = _futures_contract_lifecycle_snapshot_for(contract)
     current_lifecycle = (

@@ -1895,7 +1895,6 @@ def _canonical_evidence_value(
                 or type.__getattribute__(_json_decoder, "__bases__") is not _json_decoder_bases
                 or "__getattribute__" in decoder_type_dict
                 or "__getattr__" in decoder_type_dict
-                or type(object.__getattribute__(_json_default_decoder, "scan_once")).__name__ != "Scanner"
                 or "decode" in default_decoder_dict
                 or "raw_decode" in default_decoder_dict
                 or dict.get(default_decoder_dict, "scan_once")

@@ -92,7 +92,12 @@ class CorporateActionEvidenceError(ValueError):
 
 
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
+    if type(value) is not str:
+        raise CorporateActionEvidenceError(
+            f"{name} must be canonical non-empty text"
+        )
+    normalized = str.strip(value)
+    if not normalized or value != normalized:
         raise CorporateActionEvidenceError(
             f"{name} must be canonical non-empty text"
         )
@@ -394,8 +399,8 @@ def _resolve_authoritative_corporate_action_unsealed(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if not isinstance(instrument_registry, InstrumentRegistry):
-        raise TypeError("instrument_registry must be InstrumentRegistry")
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -415,8 +420,8 @@ def _resolve_authoritative_corporate_action_unsealed(
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
-    if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
-        raise TypeError("allowed_endpoints must be a non-empty frozenset")
+    if type(allowed_endpoints) is not frozenset or not allowed_endpoints:
+        raise TypeError("allowed_endpoints must be an exact non-empty frozenset")
     endpoints = frozenset(
         _text(value, "allowed endpoint") for value in allowed_endpoints
     )
@@ -435,9 +440,9 @@ def _resolve_authoritative_corporate_action_unsealed(
         raise CorporateActionEvidenceError(
             "corporate-action evidence could not be resolved"
         ) from error
-    if not isinstance(source, ProviderResponseObservation):
+    if type(source) is not ProviderResponseObservation:
         raise CorporateActionEvidenceError(
-            "corporate-action evidence must be a sealed ProviderResponseObservation"
+            "corporate-action evidence must be an exact sealed ProviderResponseObservation"
         )
     if source.evidence_ref != reference:
         raise CorporateActionEvidenceError(

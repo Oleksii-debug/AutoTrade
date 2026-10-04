@@ -3,9 +3,11 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 import sqlite3
 import unittest
+from unittest.mock import Mock, patch
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
@@ -660,6 +662,475 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "cancel-command-durable",
             )
 
+
+    def test_provider_evidence_uses_authenticated_snapshot_not_split_reads(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-authenticated-evidence",
+                client_order_id="authenticated-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "authenticated-evidence",
+                "provider_order_id": "provider-authenticated-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            with (
+                patch.object(
+                    ArtifactStore,
+                    "load_manifest",
+                    side_effect=AssertionError("legacy manifest read must not run"),
+                ),
+                patch.object(
+                    ArtifactStore,
+                    "read_bytes",
+                    side_effect=AssertionError("legacy object read must not run"),
+                ),
+            ):
+                acknowledged = book.acknowledge(
+                    event_key="ack-authenticated-evidence",
+                    client_order_id="authenticated-evidence",
+                    provider_order_id="provider-authenticated-evidence",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+
+    def test_provider_evidence_instance_snapshot_shadow_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-shadow-evidence",
+                client_order_id="shadow-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "shadow-evidence",
+                "provider_order_id": "provider-shadow-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            artifacts.read_authenticated_snapshot = lambda _artifact_id: (
+                {"sha256": "sha256:" + "0" * 64},
+                b"shadow provider evidence",
+            )
+
+            acknowledged = book.acknowledge(
+                event_key="ack-shadow-evidence",
+                client_order_id="shadow-evidence",
+                provider_order_id="provider-shadow-evidence",
+                status="ACCEPTED",
+                committed_at=T1,
+                evidence_refs=[ref],
+            )
+
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+
+    def test_provider_evidence_class_snapshot_replacement_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-class-shadow-evidence",
+                client_order_id="class-shadow-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "class-shadow-evidence",
+                "provider_order_id": "provider-class-shadow-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = publish_provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=AssertionError(
+                    "public class snapshot replacement must not become authority"
+                ),
+            ):
+                acknowledged = book.acknowledge(
+                    event_key="ack-class-shadow-evidence",
+                    client_order_id="class-shadow-evidence",
+                    provider_order_id="provider-class-shadow-evidence",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+
+    def test_provider_evidence_store_public_binding_is_read_only(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            replacement = ArtifactStore(f"{directory}/replacement-artifacts")
+            with self.assertRaises(AttributeError):
+                book.evidence_artifact_store = replacement
+            self.assertIs(book.evidence_artifact_store, artifacts)
+
+    def test_provider_evidence_store_private_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-store-retarget",
+                client_order_id="store-retarget",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "store-retarget",
+                "provider_order_id": "provider-store-retarget",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            replacement = ArtifactStore(f"{directory}/replacement-artifacts")
+            book._evidence_artifact_store = replacement
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "namespace authority changed",
+            ):
+                book.acknowledge(
+                    event_key="ack-store-retarget",
+                    client_order_id="store-retarget",
+                    provider_order_id="provider-store-retarget",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+    def test_provider_evidence_store_fake_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-store-fake-retarget",
+                client_order_id="store-fake-retarget",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "store-fake-retarget",
+                "provider_order_id": "provider-store-fake-retarget",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            class FakeStore:
+                pass
+
+            book._evidence_artifact_store = FakeStore()
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "ArtifactStore authority changed",
+            ):
+                book.acknowledge(
+                    event_key="ack-store-fake-retarget",
+                    client_order_id="store-fake-retarget",
+                    provider_order_id="provider-store-fake-retarget",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+    def test_provider_evidence_store_subclass_is_rejected(self):
+        class DerivedArtifactStore(ArtifactStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = DerivedArtifactStore(f"{directory}/artifacts")
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical ArtifactStore",
+            ):
+                durable(
+                    store,
+                    environment="PAPER",
+                    evidence_artifact_store=artifacts,
+                )
+
+    def test_provider_evidence_module_reader_replacement_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-evidence-rehash",
+                client_order_id="evidence-rehash",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "evidence-rehash",
+                "provider_order_id": "provider-evidence-rehash",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            manifest = artifacts.load_manifest(ref["artifact_id"])
+            authentic_bytes = artifacts.read_bytes(ref["artifact_id"])
+            forged_reader = Mock(
+                return_value=(manifest, authentic_bytes),
+            )
+            with patch.object(
+                durable_order_projection_module,
+                "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
+                forged_reader,
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "snapshot reader authority changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-evidence-rehash",
+                        client_order_id="evidence-rehash",
+                        provider_order_id="provider-evidence-rehash",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+            forged_reader.assert_not_called()
+
+    def test_provider_evidence_rehashes_bytes_returned_by_canonical_reader(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-evidence-rehash-canonical",
+                client_order_id="evidence-rehash-canonical",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "evidence-rehash-canonical",
+                "provider_order_id": "provider-evidence-rehash-canonical",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            with patch.object(
+                ArtifactStore,
+                "_read_verified_object_bytes",
+                return_value=b"different provider evidence bytes",
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "digest differs from immutable artifact",
+                ):
+                    book.acknowledge(
+                        event_key="ack-evidence-rehash-canonical",
+                        client_order_id="evidence-rehash-canonical",
+                        provider_order_id="provider-evidence-rehash-canonical",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+
+    def test_provider_evidence_retained_reader_code_retarget_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-reader-code-evidence",
+                client_order_id="reader-code-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "reader-code-evidence",
+                "provider_order_id": "provider-reader-code-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            reader = durable_order_projection_module._CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+            original_code = reader.__code__
+
+            def forged_reader(self, artifact_id):
+                del self, artifact_id
+                raise AssertionError("forged retained reader executed")
+
+            try:
+                reader.__code__ = forged_reader.__code__
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "snapshot reader authority changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-reader-code-evidence",
+                        client_order_id="reader-code-evidence",
+                        provider_order_id="provider-reader-code-evidence",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+            finally:
+                reader.__code__ = original_code
+
+    def test_provider_evidence_io_failure_is_domain_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-evidence-io",
+                client_order_id="evidence-io",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "evidence-io",
+                "provider_order_id": "provider-evidence-io",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            with patch.object(
+                ArtifactStore,
+                "_open_manifest_descriptor",
+                side_effect=OSError("simulated evidence I/O failure"),
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "not resolvable and intact",
+                ):
+                    book.acknowledge(
+                        event_key="ack-evidence-io",
+                        client_order_id="evidence-io",
+                        provider_order_id="provider-evidence-io",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
 
     def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):
         with TemporaryDirectory() as directory:

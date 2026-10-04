@@ -24,6 +24,14 @@ from .dispatch import (
     _has_exact_response_markers,
     submission_attempt_aggregate_id,
 )
+# Retain the installed authenticated reader once so later mutation of the public
+# ArtifactStore class attribute cannot redirect provider-evidence authority.
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE = (
+    ArtifactStore.read_authenticated_snapshot.__code__
+)
+
+
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
@@ -48,9 +56,19 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _evidence_text(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+    ):
+        raise ValueError(f"{name} must be canonical non-empty text")
+    return value
 
 
 def _environment(value: str) -> str:
@@ -102,26 +120,37 @@ def _canonical_evidence_refs(
 ) -> tuple[dict[str, str], ...]:
     if value is None:
         return ()
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise TypeError("evidence_refs must be a sequence of EvidenceRef mappings")
+    if type(value) is list:
+        evidence_items = tuple(list.copy(value))
+    elif type(value) is tuple:
+        evidence_items = value
+    else:
+        raise TypeError("evidence_refs must be an exact list or tuple of EvidenceRef mappings")
     normalized: list[dict[str, str]] = []
-    identities: set[str] = set()
+    seen_artifact_ids: set[str] = set()
     allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
-    for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"evidence_refs[{index}] must be a mapping")
-        unknown = set(raw) - allowed
+    for index, raw in enumerate(evidence_items):
+        if type(raw) is not dict:
+            raise TypeError(f"evidence_refs[{index}] must be an exact dict")
+        if any(type(key) is not str for key in raw):
+            raise TypeError(
+                f"evidence_refs[{index}] keys must be exact strings"
+            )
+        item = dict.copy(raw)
+        unknown = set(item) - allowed
         if unknown:
             raise ValueError(
                 "evidence ref contains unsupported fields: "
                 + ", ".join(sorted(str(item) for item in unknown))
             )
-        artifact_id = _text(raw.get("artifact_id"), name="artifact_id")
+        artifact_id = _evidence_text(item.get("artifact_id"), name="artifact_id")
         try:
-            artifact_id = str(UUID(artifact_id))
+            canonical_artifact_id = str(UUID(artifact_id))
         except ValueError as error:
             raise ValueError("artifact_id must be a UUID") from error
-        digest = _text(raw.get("sha256"), name="sha256")
+        if artifact_id != canonical_artifact_id:
+            raise ValueError("artifact_id must be a canonical lowercase UUID")
+        digest = _evidence_text(item.get("sha256"), name="sha256")
         if (
             len(digest) != 71
             or not digest.startswith("sha256:")
@@ -131,15 +160,17 @@ def _canonical_evidence_refs(
         ref: dict[str, str] = {
             "artifact_id": artifact_id,
             "sha256": digest,
-            "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
+            "observed_at": _instant(
+                _evidence_text(item.get("observed_at"), name="observed_at"),
+                name="observed_at",
+            ),
         }
         for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
-        identity = canonical_json(ref)
-        if identity in identities:
-            raise ValueError("evidence_refs must be unique")
-        identities.add(identity)
+            if item.get(optional) is not None:
+                ref[optional] = _evidence_text(item.get(optional), name=optional)
+        if artifact_id in seen_artifact_ids:
+            raise ValueError("evidence_refs must have unique artifact_id values")
+        seen_artifact_ids.add(artifact_id)
         normalized.append(ref)
     return tuple(normalized)
 
@@ -229,11 +260,28 @@ class DurableOrderBookProjection:
         self.environment = _environment(environment)
         self.host_id = _text(host_id, name="host_id")
         self.owner_epoch = _text(owner_epoch, name="owner_epoch")
-        if evidence_artifact_store is not None and not isinstance(
-            evidence_artifact_store, ArtifactStore
+        if (
+            evidence_artifact_store is not None
+            and type(evidence_artifact_store) is not ArtifactStore
         ):
-            raise TypeError("evidence_artifact_store must be ArtifactStore")
-        self.evidence_artifact_store = evidence_artifact_store
+            raise TypeError(
+                "evidence_artifact_store must be the exact canonical ArtifactStore"
+            )
+        self._evidence_artifact_store = evidence_artifact_store
+        self._evidence_artifact_store_namespace = (
+            None
+            if evidence_artifact_store is None
+            else tuple(
+                (type(value), value)
+                for value in (
+                    evidence_artifact_store.root,
+                    evidence_artifact_store.objects,
+                    evidence_artifact_store.manifests,
+                    evidence_artifact_store.staging,
+                    evidence_artifact_store.lock_path,
+                )
+            )
+        )
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -245,6 +293,10 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         self._reload()
+
+    @property
+    def evidence_artifact_store(self) -> ArtifactStore | None:
+        return self._evidence_artifact_store
 
     def _new_book(self) -> OrderBookProjection:
         return OrderBookProjection(
@@ -273,6 +325,8 @@ class DurableOrderBookProjection:
         request: Mapping[str, object],
         evidence_refs: Sequence[Mapping[str, object]] | None,
         committed_at: str,
+        _expected_authenticated_snapshot_read=_CANONICAL_AUTHENTICATED_SNAPSHOT_READ,
+        _expected_authenticated_snapshot_read_code=_CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE,
     ) -> tuple[dict[str, str], ...]:
         refs = _canonical_evidence_refs(evidence_refs)
         requires = self._requires_provider_evidence(operation, request)
@@ -286,7 +340,8 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "local lifecycle mutation must not claim provider-result evidence"
             )
-        if self.evidence_artifact_store is None:
+        artifact_store = self._evidence_artifact_store
+        if artifact_store is None:
             if self.environment in {"PAPER", "LIVE"}:
                 raise OrderProjectionConflict(
                     "provider evidence requires the trusted ArtifactStore boundary"
@@ -296,11 +351,49 @@ class DurableOrderBookProjection:
             # real provider artifact has been qualified by the trusted store.
             return refs
 
+        if type(artifact_store) is not ArtifactStore:
+            raise OrderProjectionConflict(
+                "provider evidence ArtifactStore authority changed after construction"
+            )
+        expected_namespace = self._evidence_artifact_store_namespace
+        current_namespace_values = (
+            artifact_store.root,
+            artifact_store.objects,
+            artifact_store.manifests,
+            artifact_store.staging,
+            artifact_store.lock_path,
+        )
+        if (
+            expected_namespace is None
+            or len(expected_namespace) != len(current_namespace_values)
+            or any(
+                type(current) is not expected_type or current != expected_value
+                for current, (expected_type, expected_value) in zip(
+                    current_namespace_values,
+                    expected_namespace,
+                    strict=True,
+                )
+            )
+        ):
+            raise OrderProjectionConflict(
+                "provider evidence ArtifactStore namespace authority changed after construction"
+            )
+
         committed = _instant(committed_at, name="committed_at")
         committed_dt = datetime.fromisoformat(
             committed.replace("Z", "+00:00")
         )
         request_hash = payload_digest(dict(request))
+        if (
+            _CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+            is not _expected_authenticated_snapshot_read
+            or _expected_authenticated_snapshot_read.__code__
+            is not _expected_authenticated_snapshot_read_code
+        ):
+            raise OrderProjectionConflict(
+                "provider evidence authenticated snapshot reader authority changed"
+            )
+        authenticated_snapshot_read = _expected_authenticated_snapshot_read
         for ref in refs:
             observed_dt = datetime.fromisoformat(
                 ref["observed_at"].replace("Z", "+00:00")
@@ -310,15 +403,28 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest = self.evidence_artifact_store.load_manifest(
-                    ref["artifact_id"]
+                if (
+                    _CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+                    is not authenticated_snapshot_read
+                    or authenticated_snapshot_read.__code__
+                    is not _expected_authenticated_snapshot_read_code
+                ):
+                    raise OrderProjectionConflict(
+                        "provider evidence authenticated snapshot reader authority changed"
+                    )
+                manifest, artifact_bytes = authenticated_snapshot_read(
+                    artifact_store,
+                    ref["artifact_id"],
                 )
-                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
-            except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
+            except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
                 ) from error
-            if manifest.get("sha256") != ref["sha256"]:
+            artifact_digest = "sha256:" + sha256(artifact_bytes).hexdigest()
+            if (
+                manifest.get("sha256") != ref["sha256"]
+                or artifact_digest != ref["sha256"]
+            ):
                 raise OrderProjectionConflict(
                     "provider evidence digest differs from immutable artifact"
                 )

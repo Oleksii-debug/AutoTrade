@@ -366,7 +366,7 @@ def _build_reservation_store_binding_accessors():
             # any other thread can acquire it.
             try:
                 DurableReservationBook._reload(value)
-            except Exception:
+            except BaseException:
                 entry = bindings.get(object_id)
                 if entry is not None and entry[0]() is value:
                     bindings.pop(object_id, None)

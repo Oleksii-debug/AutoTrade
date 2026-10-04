@@ -230,6 +230,52 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
             self.assertIsNone(store_ref())
             self.assertIsNone(artifacts_ref())
 
+    def test_nonlocal_initial_reload_failure_releases_binding_for_retry(self):
+        class ForcedAbort(BaseException):
+            pass
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            book = object.__new__(DurableReservationBook)
+            original_reload = DurableReservationBook._reload
+
+            def abort_reload(_value) -> None:
+                raise ForcedAbort("forced reservation initialization abort")
+
+            DurableReservationBook._reload = abort_reload
+            try:
+                with self.assertRaisesRegex(
+                    ForcedAbort,
+                    "forced reservation initialization abort",
+                ):
+                    reservation_authority._initialize_reservation_store_binding(
+                        book,
+                        selected,
+                        environment="PAPER",
+                        account_id="acct-reservation-authority",
+                    )
+            finally:
+                DurableReservationBook._reload = original_reload
+
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "authority is not established",
+            ):
+                reservation_authority._require_reservation_store_binding(book)
+
+            reservation_authority._initialize_reservation_store_binding(
+                book,
+                selected,
+                environment="PAPER",
+                account_id="acct-reservation-authority",
+            )
+            bound_store, _identity, _scope = (
+                reservation_authority._require_reservation_store_binding(book)
+            )
+            self.assertIs(bound_store, selected)
+            book._reload()
+
     def test_binding_is_not_observable_until_initial_reload_completes(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

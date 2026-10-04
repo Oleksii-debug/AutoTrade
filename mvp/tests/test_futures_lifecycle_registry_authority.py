@@ -92,6 +92,74 @@ class FuturesLifecycleRegistryAuthorityTests(unittest.TestCase):
             instrument_registry=registry,
         )
 
+    def test_superseded_registry_version_cannot_authorize_new_exposure(self):
+        instrument_id = "77777777-7777-4777-8777-777777777777"
+        version_1 = InstrumentVersion(
+            instrument_id=instrument_id,
+            version=1,
+            provider_id="TEST_CLEARER",
+            venue_id="TEST_VENUE",
+            provider_symbol="FUT-EFFECTIVE-202609",
+            asset_class="FUTURE",
+            base_currency="TEST",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("10"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(1),
+            payoff="LINEAR",
+            underlying_id="abababab-abab-4bab-8bab-abababababab@1",
+            expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
+        )
+        version_2 = InstrumentVersion(
+            instrument_id=instrument_id,
+            version=2,
+            provider_id="TEST_CLEARER",
+            venue_id="TEST_VENUE",
+            provider_symbol="FUT-EFFECTIVE-202609",
+            asset_class="FUTURE",
+            base_currency="TEST",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="CONTRACT",
+            contract_multiplier=Decimal("10"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=utc(20),
+            payoff="LINEAR",
+            underlying_id="abababab-abab-4bab-8bab-abababababab@1",
+            expiry=utc(30, 21),
+            last_trade_at=utc(30, 20),
+            delivery_cutoff=utc(29, 12),
+            settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
+        )
+        registry = InstrumentRegistry(versions=(version_1, version_2))
+        selected_old = InstrumentRegistry.exact(registry, f"{instrument_id}@1")
+        contract = FuturesContract.from_instrument_version(selected_old)
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "not effective at requested instant",
+        ):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 11),
+                instrument_registry=registry,
+            )
+
     def test_wrong_registry_cannot_authorize_bound_contract(self):
         version = InstrumentVersion(
             instrument_id="55555555-5555-4555-8555-555555555555",
@@ -184,7 +252,6 @@ class FuturesLifecycleRegistryAuthorityTests(unittest.TestCase):
                 utc(29, 11),
                 instrument_registry=hostile_registry,
             )
-
 
 
 if __name__ == "__main__":

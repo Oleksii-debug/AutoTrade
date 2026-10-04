@@ -52,29 +52,27 @@ class SelectedProviderRouteProvenanceTests(unittest.TestCase):
                     _selection_token=token,
                 )
 
-    def test_financial_issuer_rejects_route_without_canonical_selection_provenance(self):
-        """Exact C/Q consistency alone must not replace route-selection provenance."""
+    def test_financial_issuer_rejects_unissued_exact_route_object(self):
+        """Exact type plus genuine C/Q values still do not prove canonical selection."""
 
         with TemporaryDirectory() as directory:
             journal, capabilities, qualifications, selected, _dispatcher, _q1, _harness = (
                 self._fixture(directory)
             )
-            token = getattr(provider_selection, "_SELECTED_ROUTE_TOKEN", None)
-            if token is None:
-                self.skipTest("importable selection token already removed")
-
-            forged = SelectedProviderRoute(
-                candidate=selected.candidate,
-                capability=selected.capability,
-                qualification=selected.qualification,
-                decision_journal_sequence_cut=selected.decision_journal_sequence_cut,
-                _selection_token=token,
+            forged = object.__new__(SelectedProviderRoute)
+            object.__setattr__(forged, "candidate", selected.candidate)
+            object.__setattr__(forged, "capability", selected.capability)
+            object.__setattr__(forged, "qualification", selected.qualification)
+            object.__setattr__(
+                forged,
+                "decision_journal_sequence_cut",
+                selected.decision_journal_sequence_cut,
             )
             runtime = SelectedRouteAuthorityCompositionTests._runtime(directory, journal)
 
             with self.assertRaisesRegex(
                 FinancialSendAuthorityError,
-                "selection|selected provider route|provenance|authority",
+                "selected provider route|route authority|changed",
             ):
                 build_financial_send_authority_issuer(
                     AuthorityService(journal),

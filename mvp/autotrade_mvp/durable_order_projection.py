@@ -256,14 +256,12 @@ def _order_projection_binding_operations():
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
             evidence = state["evidence_artifact_store"]
             key = id(value)
-
-            def release(reference, *, key=key):
-                with lock:
-                    entry = bindings.get(key)
-                    if entry is not None and entry[0] is reference:
-                        bindings.pop(key, None)
-
-            projection_ref = weakref.ref(value, release)
+            # Keep the owner weakref callback-free. Python exposes weakref
+            # callbacks through weakref.getweakrefs(), so a cleanup callback
+            # would become a caller-invokable trust-binding removal capability.
+            # The selected store/evidence entries are themselves weakrefs, so
+            # a stale dead-owner row cannot retain authority resources.
+            projection_ref = weakref.ref(value)
             bindings[key] = (
                 projection_ref,
                 weakref.ref(store),

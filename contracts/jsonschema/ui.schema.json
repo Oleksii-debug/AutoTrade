@@ -26,8 +26,7 @@
           "$ref": "common.schema.json#/$defs/Sequence"
         },
         "event_cursor": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "common.schema.json#/$defs/Sequence"
         },
         "server_time": {
           "$ref": "common.schema.json#/$defs/UtcInstant"

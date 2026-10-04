@@ -205,6 +205,13 @@ class ContractSchemaTests(unittest.TestCase):
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
         self.assertFalse(validator.is_valid(fixture))
 
+    def test_ui_snapshot_sequences_share_canonical_sequence_contract(self):
+        schema = self.schemas["ui.schema.json"]
+        properties = schema["$defs"]["UiSnapshot"]["properties"]
+        canonical = {"$ref": "common.schema.json#/$defs/Sequence"}
+        self.assertEqual(properties["state_version"], canonical)
+        self.assertEqual(properties["event_cursor"], canonical)
+
     def test_ui_snapshot_and_command_share_public_session_reference_contract(self):
         schema = self.schemas["ui.schema.json"]
         self.assertEqual(

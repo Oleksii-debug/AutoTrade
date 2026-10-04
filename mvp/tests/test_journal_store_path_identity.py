@@ -1,0 +1,595 @@
+from __future__ import annotations
+
+from contextlib import contextmanager
+import os
+import sqlite3
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from mvp.autotrade_mvp import store_identity as store_identity_module
+from mvp.autotrade_mvp.store_identity import (
+    JournalStoreIdentity,
+    observe_database_identity,
+    same_journal_backing_object,
+)
+
+
+class JournalStorePathIdentityRegressionTests(unittest.TestCase):
+    def test_raw_state_non_string_key_is_rejected_without_reentry(self) -> None:
+        touched = []
+
+        class PoisonKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("append_event")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "append_event"
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            key = PoisonKey()
+            vars(store)[key] = "poison"
+            touched.clear()
+
+            with self.assertRaisesRegex(TypeError, "state keys must be exact str"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(TypeError, "state keys must be exact str"):
+                store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+    def test_direct_store_io_seals_path_before_callback_or_sqlite(self) -> None:
+        touched = []
+
+        class PoisonPath:
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("unexpected fspath")
+
+            def __str__(self):
+                touched.append("str")
+                raise AssertionError("unexpected str")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            store.path = PoisonPath()
+
+            with patch("mvp.autotrade_mvp.persistence.sqlite3.connect") as connect:
+                with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                    store.current_journal_sequence()
+                connect.assert_not_called()
+            self.assertEqual(touched, [])
+
+            payload = {"probe": "write"}
+            with patch("mvp.autotrade_mvp.persistence.sqlite3.connect") as connect:
+                with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                    store.append_event(
+                        {
+                            "event_id": "path-fence-write",
+                            "event_type": "Probe",
+                            "aggregate_type": "probe",
+                            "aggregate_id": "probe",
+                            "aggregate_version": "1",
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": "2026-09-30T19:30:00Z",
+                            "owner_epoch": "1",
+                        }
+                    )
+                connect.assert_not_called()
+            self.assertEqual(touched, [])
+
+    def test_store_identity_rejects_post_construction_path_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite")
+            store.path = root / "other.sqlite"
+            with self.assertRaisesRegex(RuntimeError, "path and identity disagree"):
+                _ = store.store_identity
+
+    def test_persistence_owned_authority_rejects_method_shadow_before_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            touched = []
+            store.__dict__["current_journal_sequence"] = (
+                lambda *_args, **_kwargs: touched.append("sequence")
+            )
+
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+    def test_persistence_owned_authority_rejects_mutated_or_polymorphic_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite")
+            original_path = store.path
+
+            store.path = root / "other.sqlite"
+            with self.assertRaisesRegex(RuntimeError, "path and identity disagree"):
+                require_exact_journal_store_authority(store)
+
+            touched = []
+
+            class HostilePath:
+                def __fspath__(self):
+                    touched.append("fspath")
+                    return str(original_path)
+
+                def __str__(self):
+                    touched.append("str")
+                    return str(original_path)
+
+            store.path = HostilePath()
+            with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+    def test_exact_identity_with_hostile_field_fails_before_sqlite_or_equality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            genuine = store.store_identity
+            touched = []
+
+            class HostileField:
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            store._store_identity = JournalStoreIdentity(
+                canonical_path=HostileField(),
+                filesystem_device=genuine.filesystem_device,
+                filesystem_inode=genuine.filesystem_inode,
+                identity_source=genuine.identity_source,
+                windows_volume_serial=genuine.windows_volume_serial,
+                windows_file_index_high=genuine.windows_file_index_high,
+                windows_file_index_low=genuine.windows_file_index_low,
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical_path must be exact non-empty str",
+            ):
+                _ = store.store_identity
+            self.assertEqual(touched, [])
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=AssertionError("poisoned exact identity reached sqlite"),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "canonical_path must be exact non-empty str",
+                ):
+                    store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+    def test_mutated_identity_type_fails_before_hostile_comparison_or_sqlite_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            touched = []
+
+            class HostileIdentity:
+                canonical_path = str(path.resolve())
+
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            store._store_identity = HostileIdentity()
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "journal store identity must be exact JournalStoreIdentity",
+            ):
+                _ = store.store_identity
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "selected journal store identity must be exact JournalStoreIdentity",
+            ):
+                store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=AssertionError("poisoned identity reached sqlite"),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "selected journal store identity must be exact JournalStoreIdentity",
+                ):
+                    store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+    def test_relative_backing_path_is_frozen_at_construction(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+                (second / "state").mkdir()
+
+                os.chdir(first)
+                store = JournalStore("state/journal.sqlite")
+                expected = (first / "state" / "journal.sqlite").resolve()
+                frozen_path = Path(store.path)
+
+                self.assertTrue(
+                    frozen_path.is_absolute(),
+                    "JournalStore must freeze relative durable-state authority to an absolute path at construction",
+                )
+                if sys.platform == "win32":
+                    self.assertEqual(
+                        store.store_identity.identity_source,
+                        "windows_by_handle",
+                    )
+                    self.assertTrue(
+                        same_journal_backing_object(
+                            store.store_identity,
+                            observe_database_identity(expected),
+                        )
+                    )
+                else:
+                    self.assertEqual(frozen_path, expected)
+
+                os.chdir(second)
+                self.assertEqual(
+                    Path(store.path),
+                    frozen_path,
+                    "changing process CWD must not retarget an already-constructed JournalStore",
+                )
+                os.chdir(original_cwd)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_construction_captures_cwd_before_parent_creation(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                cwd_changed = False
+                os.chdir(first)
+
+                if sys.platform == "win32":
+                    real_guard = store_identity_module.retain_windows_parent_namespace
+
+                    @contextmanager
+                    def parent_guard_after_cwd_change(path, *args, **kwargs):
+                        nonlocal cwd_changed
+                        if not cwd_changed:
+                            cwd_changed = True
+                            os.chdir(second)
+                        with real_guard(path, *args, **kwargs) as authority:
+                            yield authority
+
+                    with patch.object(
+                        store_identity_module,
+                        "retain_windows_parent_namespace",
+                        new=parent_guard_after_cwd_change,
+                    ):
+                        store = JournalStore("state/journal.sqlite")
+                else:
+                    real_mkdir = Path.mkdir
+
+                    def mkdir_after_cwd_change(path, *args, **kwargs):
+                        nonlocal cwd_changed
+                        if not cwd_changed:
+                            cwd_changed = True
+                            os.chdir(second)
+                        return real_mkdir(path, *args, **kwargs)
+
+                    with patch.object(Path, "mkdir", new=mkdir_after_cwd_change):
+                        store = JournalStore("state/journal.sqlite")
+
+                expected = (first / "state" / "journal.sqlite").resolve()
+                unexpected = second / "state" / "journal.sqlite"
+                self.assertTrue(cwd_changed)
+                if sys.platform == "win32":
+                    self.assertTrue(
+                        same_journal_backing_object(
+                            store.store_identity,
+                            observe_database_identity(expected),
+                        )
+                    )
+                else:
+                    self.assertEqual(Path(store.path), expected)
+                self.assertTrue(expected.exists())
+                self.assertFalse(
+                    unexpected.exists(),
+                    "construction-time CWD changes must not select a second journal authority",
+                )
+                os.chdir(original_cwd)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_same_relative_text_in_different_cwds_is_not_same_store_identity(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+                (second / "state").mkdir()
+
+                os.chdir(first)
+                first_store = JournalStore("state/journal.sqlite")
+
+                os.chdir(second)
+                second_store = JournalStore("state/journal.sqlite")
+
+                self.assertNotEqual(
+                    Path(first_store.path),
+                    Path(second_store.path),
+                    "equal caller path text in different CWDs must not alias two durable-state authorities",
+                )
+                os.chdir(original_cwd)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_store_identity_is_stable_across_cwd_change_and_restart(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+
+                os.chdir(first)
+                first_store = JournalStore("state/journal.sqlite")
+                identity = first_store.store_identity
+
+                os.chdir(second)
+                self.assertEqual(first_store.store_identity, identity)
+
+                restarted = JournalStore(first / "state" / "journal.sqlite")
+                self.assertEqual(restarted.store_identity, identity)
+                os.chdir(original_cwd)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_windows_connect_forwards_primary_body_exception_to_authority_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            observed = {}
+
+            @contextmanager
+            def recording_guard(database_path, *, create):
+                self.assertEqual(Path(database_path), Path(store.path))
+                self.assertFalse(create)
+                try:
+                    yield store.store_identity
+                except BaseException as primary:
+                    observed["primary"] = primary
+                    raise
+
+            primary = ValueError("injected sqlite body failure")
+            with patch(
+                "mvp.autotrade_mvp.persistence.guard_windows_database_authority",
+                new=recording_guard,
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    with store._connect_windows():
+                        raise primary
+
+            self.assertIs(caught.exception, primary)
+            self.assertIs(observed["primary"], primary)
+
+    def test_windows_connect_preserves_authority_error_cause_on_body_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            observed = {}
+
+            @contextmanager
+            def changing_guard(database_path, *, create):
+                self.assertEqual(Path(database_path), Path(store.path))
+                self.assertFalse(create)
+                try:
+                    yield store.store_identity
+                except BaseException as primary:
+                    observed["primary"] = primary
+                    raise RuntimeError(
+                        "injected authority changed while guarded"
+                    ) from primary
+
+            primary = ValueError("injected sqlite body failure")
+            with patch(
+                "mvp.autotrade_mvp.persistence.guard_windows_database_authority",
+                new=changing_guard,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected authority changed while guarded",
+                ) as caught:
+                    with store._connect_windows():
+                        raise primary
+
+            self.assertIs(observed["primary"], primary)
+            self.assertIs(caught.exception.__cause__, primary)
+
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows uses retained native namespace/file guards instead of post-open detection",
+    )
+    def test_first_open_replacement_between_anchor_and_sqlite_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            replacement = root / "replacement.sqlite"
+            real_connect = sqlite3.connect
+            raced = False
+
+            def racing_connect(database, *args, **kwargs):
+                nonlocal raced
+                database_path = Path(database)
+                if not raced and database_path == path:
+                    raced = True
+                    real_connect(replacement).close()
+                    path.unlink()
+                    replacement.replace(path)
+                return real_connect(database, *args, **kwargs)
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=racing_connect,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "first open does not match the anchored journal backing file",
+                ):
+                    JournalStore(path)
+
+            self.assertTrue(raced)
+            self.assertTrue(path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only namespace guard")
+    def test_windows_connect_guard_denies_file_and_parent_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "state"
+            parent.mkdir()
+            path = parent / "journal.sqlite"
+            moved_file = parent / "moved.sqlite"
+            moved_parent = root / "state-moved"
+            real_connect = sqlite3.connect
+            observed = {"file": False, "parent": False}
+
+            def guarded_connect(database, *args, **kwargs):
+                database_path = Path(database).resolve(strict=False)
+                if database_path == path.resolve(strict=False):
+                    with self.assertRaises(OSError):
+                        path.replace(moved_file)
+                    observed["file"] = True
+                    with self.assertRaises(OSError):
+                        parent.replace(moved_parent)
+                    observed["parent"] = True
+                return real_connect(database, *args, **kwargs)
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=guarded_connect,
+            ):
+                store = JournalStore(path)
+
+            self.assertEqual(observed, {"file": True, "parent": True})
+            self.assertEqual(store.store_identity.identity_source, "windows_by_handle")
+            self.assertTrue(path.exists())
+            self.assertTrue(parent.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only native identity")
+    def test_windows_replacement_after_guard_release_changes_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            store = JournalStore(path)
+            original = store.store_identity
+            detached = root / "detached.sqlite"
+
+            path.replace(detached)
+            sqlite3.connect(path).close()
+
+            with self.assertRaises(RuntimeError):
+                store.current_journal_sequence()
+            replacement = JournalStore(path)
+            self.assertNotEqual(replacement.store_identity, original)
+
+    def test_hard_link_aliases_are_rejected_before_wal_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            original = JournalStore(path)
+            original_identity = original.store_identity
+            alias = root / "hardlink.sqlite"
+            try:
+                os.link(path, alias)
+            except OSError:
+                self.skipTest("filesystem does not permit hard-link creation")
+
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                original.current_journal_sequence()
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                JournalStore(alias)
+
+            alias.unlink()
+            self.assertEqual(original.current_journal_sequence(), 0)
+            self.assertEqual(original.store_identity, original_identity)
+
+    def test_replacing_backing_file_after_construction_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            original_identity = store.store_identity
+
+            replacement = Path(directory) / "replacement.sqlite"
+            JournalStore(replacement)
+            path.unlink()
+            replacement.replace(path)
+
+            with self.assertRaises((RuntimeError, ValueError, OSError)):
+                store.current_journal_sequence()
+
+            self.assertEqual(store.store_identity, original_identity)
+
+    def test_deleted_backing_file_is_not_silently_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            identity = store.store_identity
+            path.unlink()
+
+            with self.assertRaises(RuntimeError):
+                store.current_journal_sequence()
+
+            self.assertFalse(path.exists())
+            self.assertEqual(store.store_identity, identity)
+
+    def test_replacement_while_connection_is_open_is_detected_on_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            store = JournalStore(path)
+            original_identity = store.store_identity
+
+            replacement = root / "replacement.sqlite"
+            JournalStore(replacement)
+
+            with self.assertRaises(RuntimeError):
+                with store._connect():
+                    try:
+                        replacement.replace(path)
+                    except OSError:
+                        self.skipTest(
+                            "platform forbids replacing an open SQLite database path"
+                        )
+
+            self.assertEqual(store.store_identity, original_identity)
+
+
+if __name__ == "__main__":
+    unittest.main()

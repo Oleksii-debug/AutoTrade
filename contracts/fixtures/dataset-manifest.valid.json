@@ -1,0 +1,16 @@
+{
+  "dataset_id":"66666666-6666-4666-8666-666666666666",
+  "version":"1",
+  "content_hashes":["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+  "instrument_universe_version":"universe-1",
+  "calendar_version":"calendar-1",
+  "coverage":{"from":"2024-01-01","to":"2024-12-31"},
+  "availability_policy":{"mode":"point-in-time"},
+  "revision_policy":{"mode":"preserve-vintages"},
+  "normalization_version":"1",
+  "adjustment_policy":{"mode":"raw-plus-explicit-actions"},
+  "rights":{"storage":true,"replay":true},
+  "missingness_report":{"status":"recorded"},
+  "source_evidence":[],
+  "created_at":"2026-09-22T06:40:00Z"
+}

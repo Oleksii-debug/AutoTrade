@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AutoTrade control</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header>
+    <h1>AutoTrade control</h1>
+    <p id="connection-summary">Host connection has not been established.</p>
+  </header>
+
+  <nav aria-label="Primary">
+    <ul>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#accounts">Accounts and host</a></li>
+      <li><a href="#opportunities">Opportunities and decisions</a></li>
+      <li><a href="#portfolio">Portfolio and orders</a></li>
+      <li><a href="#risk">Risk and authority</a></li>
+      <li><a href="#research">Research and replay</a></li>
+      <li><a href="#learning">Learning and memory</a></li>
+      <li><a href="#models">Models and costs</a></li>
+      <li><a href="#history">History and diagnostics</a></li>
+      <li><a href="#settings">Settings</a></li>
+    </ul>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <div id="polite-status" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div id="urgent-status" role="alert" aria-live="assertive" aria-atomic="true"></div>
+
+    <section id="overview" aria-labelledby="overview-heading">
+      <h2 id="overview-heading">Overview</h2>
+      <dl>
+        <dt>State version</dt><dd><span id="state-version">Unavailable</span></dd>
+        <dt>Event cursor</dt><dd><span id="event-cursor">Unavailable</span></dd>
+        <dt>Freshness</dt><dd><span id="freshness">Unavailable</span></dd>
+        <dt>Host evidence time</dt><dd><span id="server-time">Unavailable</span></dd>
+      </dl>
+    </section>
+
+    <section id="accounts" aria-labelledby="accounts-heading">
+      <h2 id="accounts-heading">Accounts and host</h2>
+      <dl>
+        <dt>Active host</dt><dd><span id="active-host">Unavailable</span></dd>
+        <dt>Account</dt><dd><span id="active-account">Unavailable</span></dd>
+        <dt>Environment</dt><dd><span id="active-environment">Unavailable</span></dd>
+      </dl>
+      <div id="permissions-region" class="table-scroll" role="region" aria-label="Authenticated permission and capability evidence" tabindex="0">
+        <table>
+          <caption>Authenticated permission and capability evidence</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="permissions-body"><tr><td colspan="2">No permission evidence loaded.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="opportunities" aria-labelledby="opportunities-heading">
+      <h2 id="opportunities-heading">Opportunities and decisions</h2>
+      <p>This is the canonical strategy projection from the host snapshot; it is not an instruction to trade.</p>
+      <div class="table-tools" aria-label="Strategy and decision table tools">
+        <label for="strategy-filter">Filter strategy and decision rows</label>
+        <input id="strategy-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="strategy-filter-status">
+        <button id="strategy-copy" type="button">Copy visible strategy and decision rows</button>
+        <p id="strategy-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
+      <div id="strategy-region" class="table-scroll" role="region" aria-label="Strategy and decision projection" tabindex="0">
+        <table>
+          <caption>Strategy and decision projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="strategy-body"><tr><td colspan="2">No strategy projection loaded.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="portfolio" aria-labelledby="portfolio-heading">
+      <h2 id="portfolio-heading">Portfolio and orders</h2>
+      <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
+      <div class="table-tools" aria-label="Portfolio table tools">
+        <label for="portfolio-filter">Filter portfolio rows</label>
+        <input id="portfolio-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="portfolio-filter-status">
+        <button id="portfolio-copy" type="button">Copy visible portfolio rows</button>
+        <p id="portfolio-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
+      <div id="portfolio-region" class="table-scroll" role="region" aria-label="Portfolio projection" tabindex="0">
+        <table>
+          <caption>Portfolio projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="portfolio-body"><tr><td colspan="2">No portfolio projection loaded.</td></tr></tbody>
+        </table>
+      </div>
+      <div id="operations-region" class="table-scroll" role="region"
+           aria-label="Current host operations table" tabindex="0">
+        <table>
+          <caption>Current host operations</caption>
+          <thead><tr><th scope="col">Operation</th><th scope="col">Phase</th><th scope="col">Updated</th><th scope="col">Remaining uncertainty</th></tr></thead>
+          <tbody id="operations-body">
+            <tr><td colspan="4">No operation state loaded.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="risk" aria-labelledby="risk-heading">
+      <h2 id="risk-heading">Risk and authority</h2>
+      <div class="table-tools" aria-label="Risk and authority table tools">
+        <label for="risk-filter">Filter risk and authority rows</label>
+        <input id="risk-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="risk-filter-status">
+        <button id="risk-copy" type="button">Copy visible risk and authority rows</button>
+        <p id="risk-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
+      <div id="risk-region" class="table-scroll" role="region" aria-label="Risk and authority projection" tabindex="0">
+        <table>
+          <caption>Risk and authority projection</caption>
+          <thead><tr><th scope="col">Field</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="risk-body"><tr><td colspan="2">No risk projection loaded.</td></tr></tbody>
+        </table>
+      </div>
+      <form id="host-command-form">
+        <input id="expected-state-version" name="expected_state_version" type="hidden" value="0">
+        <fieldset>
+          <legend>Host safety command</legend>
+          <label for="host-action">Action</label>
+          <select id="host-action" name="action" required>
+            <option value="BLOCK_NEW_EXPOSURE">Block new exposure</option>
+            <option value="REVOKE_AUTHORITY">Revoke active authority</option>
+          </select>
+          <button id="submit-command" type="submit" disabled>Submit command</button>
+          <button id="refresh-state" type="button">Refresh host state</button>
+        </fieldset>
+      </form>
+      <p id="command-result" tabindex="-1" aria-describedby="command-validation-details">No host command has been submitted.</p>
+      <div id="command-validation-details" role="region" aria-labelledby="command-validation-heading">
+        <h3 id="command-validation-heading">Command validation details</h3>
+        <ul id="command-validation-list">
+          <li>No confirmed host field-validation details are available yet.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="research" aria-labelledby="research-heading">
+      <h2 id="research-heading">Research and replay</h2>
+      <p>Background job evidence is read-only here until canonical research control contracts are exposed.</p>
+      <div class="table-tools" aria-label="Research and replay job table tools">
+        <label for="jobs-filter">Filter background research and replay jobs</label>
+        <input id="jobs-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="jobs-filter-status">
+        <button id="jobs-copy" type="button">Copy visible research and replay job rows</button>
+        <p id="jobs-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
+      <div id="jobs-region" class="table-scroll" role="region" aria-label="Background research and replay jobs" tabindex="0">
+        <table>
+          <caption>Background research and replay jobs</caption>
+          <thead><tr><th scope="col">Job</th><th scope="col">Host evidence</th></tr></thead>
+          <tbody id="jobs-body"><tr><td colspan="2">No job projection loaded.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="learning" aria-labelledby="learning-heading"><h2 id="learning-heading">Learning and memory</h2><p>No canonical learning projection is exposed in the current UiSnapshot. No learning state is inferred by the browser.</p></section>
+    <section id="models" aria-labelledby="models-heading"><h2 id="models-heading">Models and costs</h2><p>No canonical model-cost projection is exposed in the current UiSnapshot. No model availability or budget is inferred by the browser.</p></section>
+
+    <section id="history" aria-labelledby="history-heading">
+      <h2 id="history-heading">History and diagnostics</h2>
+      <h3>Canonical host events received by this session</h3>
+      <p>This table shows only events actually received from the canonical host event stream in this page session. A cursor gap triggers a fresh snapshot; missing events are not invented or reconstructed in the browser.</p>
+      <div class="table-tools" aria-label="Canonical host event history table tools">
+        <label for="event-history-filter">Filter received host events</label>
+        <input id="event-history-filter" type="search" autocomplete="off" spellcheck="false" aria-describedby="event-history-filter-status">
+        <button id="event-history-copy" type="button">Copy visible host event rows</button>
+        <p id="event-history-filter-status" class="table-filter-status">No host rows are available to filter.</p>
+      </div>
+      <div id="event-history-region" class="table-scroll" role="region"
+           aria-label="Canonical host event history received by this session" tabindex="0">
+        <table>
+          <caption>Canonical host event history received by this session</caption>
+          <thead><tr><th scope="col">Cursor</th><th scope="col">State version</th><th scope="col">Kind</th><th scope="col">Host payload</th></tr></thead>
+          <tbody id="event-history-body">
+            <tr><td colspan="4">No canonical host events received in this page session.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Material notifications</h3>
+      <ol id="notification-history">
+        <li>No material notifications recorded in this page session.</li>
+      </ol>
+    </section>
+
+    <section id="settings" aria-labelledby="settings-heading"><h2 id="settings-heading">Settings</h2><p>Browser session settings are host-controlled.</p></section>
+  </main>
+
+  <noscript>AutoTrade requires JavaScript for live host synchronization. No financial action has been performed.</noscript>
+  <script src="/host-api-routes.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

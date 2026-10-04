@@ -1,0 +1,197 @@
+{
+  "schema_version": "1.0.0",
+  "date": "2026-09-22",
+  "environment": {
+    "os": "Linux",
+    "python": "3.12.14",
+    "git": "git version 2.51.1"
+  },
+  "source_identity": "Per-file SHA-256 of exercised bootstrap inputs; final evidence commit necessarily follows test execution.",
+  "starting_commit": "adee949cb7023505285d26cf1da3cd61f8e53341",
+  "code_fix_commit": "e7a00c95a71223d85035cce04b3ed588b7ebe4f2",
+  "commands": [
+    {
+      "command": "python tools/verify.py",
+      "exit_code": 0,
+      "baseline": "65 unique packages; acyclic graph; INDEX targets and generated bank current",
+      "suites": {
+        "contracts": 11,
+        "control": 21,
+        "research": 6
+      },
+      "total_tests": 38
+    }
+  ],
+  "not_run": [
+    "Windows CI",
+    "dotnet build (SDK unavailable locally)",
+    "real NVDA",
+    "external SDK upstream suites",
+    "live broker calls",
+    "deployed authenticated registry service qualification"
+  ],
+  "remote_configuration_observed": {
+    "main_protected": false,
+    "registry_protected": false,
+    "rulesets": [],
+    "github_actions": "QUEUED at initial inspection; inspect live exact-head results"
+  },
+  "files": [
+    {
+      "path": "contracts/fixtures/dataset-manifest.valid.json",
+      "sha256": "404d7919fa4af08d8f5defb979c73aa8bcd488c65a46f34fae8531dc28edfe8b"
+    },
+    {
+      "path": "contracts/fixtures/event-envelope.valid.json",
+      "sha256": "bf428f2790c40ae9f59e10f455a6a8de71421ea13576c896ed1d50d1f859e618"
+    },
+    {
+      "path": "contracts/fixtures/model-request.valid.json",
+      "sha256": "5d01ff6afc88e4d135eb57837cb3f4d581830a83e0285da984bb686c21f5d92a"
+    },
+    {
+      "path": "contracts/fixtures/order-intent.valid.json",
+      "sha256": "3359811c5436da6de3b8dfc89727b1412eff5f2e7b5fa053b95473cdb60e581a"
+    },
+    {
+      "path": "contracts/fixtures/ui-command.valid.json",
+      "sha256": "b2c24f6cc0850f82adad692c8ceb8b328d1429bfad667657fe4c7f1da3ad68ad"
+    },
+    {
+      "path": "contracts/jsonschema/authority.schema.json",
+      "sha256": "03e4c964ee970d3c1af823b45f8c8bf749b649defe7945dcf77f41c5cc7e3798"
+    },
+    {
+      "path": "contracts/jsonschema/common.schema.json",
+      "sha256": "ed9e4217e4416cf0a7548e62cbee59378349f103ed4a76fc01d1273cf9bb79b6"
+    },
+    {
+      "path": "contracts/jsonschema/data.schema.json",
+      "sha256": "95e4b73992d11ccc8cbabadba08121a5dd45324ace88d06bc46ca051b9860686"
+    },
+    {
+      "path": "contracts/jsonschema/decision.schema.json",
+      "sha256": "178a41450eb7b4b378128e4de884b8ba26a1a61481c43d7c02664b03352a5287"
+    },
+    {
+      "path": "contracts/jsonschema/event.schema.json",
+      "sha256": "10a14d4b43b4c05dd19046b1c9e455f14df90a0c145d7616e007758eb338c248"
+    },
+    {
+      "path": "contracts/jsonschema/execution.schema.json",
+      "sha256": "bc05ddbfc0a65ffe513b19348311d268235d4846dca785dc6cb87661872a5d4b"
+    },
+    {
+      "path": "contracts/jsonschema/learning.schema.json",
+      "sha256": "5e0227fbd5693fd244f9f02c386b4c86933d73c9a17dab8a39fca8bc0f0230e2"
+    },
+    {
+      "path": "contracts/jsonschema/market.schema.json",
+      "sha256": "fdde9deebe6a764487395ab3677dd6d6f856031f4a57882b4d525da71680fc05"
+    },
+    {
+      "path": "contracts/jsonschema/model.schema.json",
+      "sha256": "7594b62be87970b4aced7bc846a8b375ce20a63b22869d28d2748f7061c3beef"
+    },
+    {
+      "path": "contracts/jsonschema/persistence.schema.json",
+      "sha256": "b88c0a8aa51fc36d4abf131a71feebdd381fc37fd6950d7ea0d132a54b6a94d5"
+    },
+    {
+      "path": "contracts/jsonschema/provider.schema.json",
+      "sha256": "f6465bb213f7a60bbe6bdaeda6b833d5b2c325f761f50f4a4c8762a87777fa04"
+    },
+    {
+      "path": "contracts/jsonschema/ui.schema.json",
+      "sha256": "8ecb3ccd7822e400c712f254321e15fbafa927e4186afa2bd5aa02e500c0e2ff"
+    },
+    {
+      "path": "contracts/openapi/host-api.yaml",
+      "sha256": "cf5c59ef44c64877b1652babb32d58a063343efab9f7bfea2e9474db2b3407cd"
+    },
+    {
+      "path": "control/INDEX.json",
+      "sha256": "b036ed266f6d5d4529edfa6835f421f298e1244b5688c3df1ae7d807a73179f2"
+    },
+    {
+      "path": "control/qualification.json",
+      "sha256": "ed4fee345d2d1458e0cac8fb5e20a447f64d28537539aaf7abadad1161225652"
+    },
+    {
+      "path": "control/tools/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "control/tools/branch_lease_guard.py",
+      "sha256": "ce328be35a87d3a4a1dc61d68c3ebda1cc0b900efd9b7693c7745164c75dc03e"
+    },
+    {
+      "path": "control/tools/registry_state.py",
+      "sha256": "0d2d5a4e281843d838e96cb462c7f21f34678116a7c59bb8f5c04e029fa44aaf"
+    },
+    {
+      "path": "control/tools/registry_store.py",
+      "sha256": "95f60664796fe60be734512c69b30b7edba0c61bc64cf5d65717c72fa48e5dab"
+    },
+    {
+      "path": "control/work-packages/bank.json",
+      "sha256": "e73c68567f9b7cc4451432b7a3a3f15ae99bc7b0c71f90c78e3711b136014f1f"
+    },
+    {
+      "path": "research/autotrade_research/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "research/autotrade_research/artifacts/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "research/autotrade_research/artifacts/durable_publish.py",
+      "sha256": "e67d99a300800dc6f6940bb6ca915c159ed890f1a5e027b779f5d7b50656b303"
+    },
+    {
+      "path": "research/autotrade_research/artifacts/resource_lock.py",
+      "sha256": "2b54ccc26bc6d52e46ad4ca98fab9dc06be43ecacfd2652992483e1e408b51e1"
+    },
+    {
+      "path": "research/autotrade_research/io/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "research/autotrade_research/io/strict_json.py",
+      "sha256": "f86fde0c35773d07544a908e383fb245f8cf04c4bcf4cdd5b80ee3e5f08d7a70"
+    },
+    {
+      "path": "research/pyproject.toml",
+      "sha256": "2bcb86b1794aa980b6a30a6a24714179ffc40a6121effb1c34f41a9180277854"
+    },
+    {
+      "path": "research/tests/test_migrated_primitives.py",
+      "sha256": "75f877e71aedf36df1267ae01e0945e5854daf33cd2e0aeaffe18265896747ae"
+    },
+    {
+      "path": "tests/Contracts/test_json_schemas.py",
+      "sha256": "820690e5e984e591e6cde4fbe32332c2a41ea80247f30069417c4a49d83c8f2c"
+    },
+    {
+      "path": "tests/Control/test_registry_regressions.py",
+      "sha256": "2f3e31a6ebd6107b68da475942c248a9632121e03624c1f70518eee2e9e418e0"
+    },
+    {
+      "path": "tests/Control/test_registry_state.py",
+      "sha256": "671ca758b5070f3e8f1e14df2bcb6bfcb9c9efbc275ee50e928580730477fc6f"
+    },
+    {
+      "path": "tests/Control/test_registry_store.py",
+      "sha256": "b966ab519c6bcd7f1fa480bc68681f299261e8978a32d5c5d2166049dabf4d13"
+    },
+    {
+      "path": "tools/baseline.py",
+      "sha256": "4668b763b08601056aaa2566a08824b47806409c03ff584c4c4594d9f4b6393d"
+    },
+    {
+      "path": "tools/verify.py",
+      "sha256": "0a4f34b59cd3839fe3cfcbca9d56425db5e02824517069cadb105bfb09e039ce"
+    }
+  ]
+}

@@ -3,9 +3,6 @@ import json
 import unittest
 
 from autotrade_research.evaluation.replay.blinding import (
-    BlindDatasetView if False else BlindedReplayDataset,
-)
-from autotrade_research.evaluation.replay.blinding import (
     BlindedEvent,
     BlindingError,
     BlindingProfile,

@@ -106,7 +106,7 @@ def observation(**overrides):
 def qualification(exec_model, **overrides):
     values = dict(
         qualification_id="q-1",
-        asset_class="EQUITY",
+        asset_class="CASH_EQUITY",
         data_fidelity=exec_model.data_fidelity,
         scenario=exec_model.scenario,
         purpose="REPLAY",
@@ -142,7 +142,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             model=exec_model,
             qualification=qualification(exec_model),
             instrument=instrument(),
-            asset_class="EQUITY",
+            asset_class="CASH_EQUITY",
             instrument_version=INSTRUMENT_REF,
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
@@ -168,7 +168,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                 model=model(),
                 qualification=qualification(model()),
                 instrument=instrument(),
-                asset_class="EQUITY",
+                asset_class="CASH_EQUITY",
                 protocol_sha256=PROTOCOL,
                 artifact_store=self.store,
                 evidence_artifact_id=ARTIFACT_ID,
@@ -224,7 +224,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             model=exec_model,
             qualification=qualification(exec_model),
             instrument=instrument(),
-            asset_class="EQUITY",
+            asset_class="CASH_EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
@@ -261,7 +261,24 @@ class ExecutionQualificationTests(unittest.TestCase):
             validate_execution_qualification(
                 **self.validation_kwargs(
                     exec_model,
-                    qualification=qualification(exec_model, asset_class="SPOT"),
+                    qualification=qualification(exec_model, asset_class="CRYPTO_SPOT"),
+                )
+            )
+
+    def test_caller_asset_class_must_match_canonical_instrument(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "instrument_asset_class",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    asset_class="CRYPTO_SPOT",
+                    qualification=qualification(
+                        exec_model,
+                        asset_class="CRYPTO_SPOT",
+                    ),
                 )
             )
 
@@ -450,7 +467,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             model=exec_model,
             qualification=qualification(exec_model),
             instrument=instrument(),
-            asset_class="EQUITY",
+            asset_class="CASH_EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
@@ -469,7 +486,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     model=exec_model,
                     qualification=qualification(exec_model),
                     instrument=instrument(),
-                    asset_class="EQUITY",
+                    asset_class="CASH_EQUITY",
                     protocol_sha256=PROTOCOL,
                     artifact_store=self.store,
                     evidence_artifact_id=ARTIFACT_ID,

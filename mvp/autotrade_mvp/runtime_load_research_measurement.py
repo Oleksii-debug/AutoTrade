@@ -545,6 +545,7 @@ def measure_declared_research_interference(
     object_getattribute = object.__getattribute__
     module_type = ModuleType
     str_for = str
+    value_error_type = ValueError
     missing = object()
     error_type = RuntimeLoadResearchMeasurementError
     clock = perf_counter_ns
@@ -565,6 +566,30 @@ def measure_declared_research_interference(
     sample_schema_version = _RESEARCH_SAMPLE_SCHEMA_VERSION
     module_namespace = globals()
 
+    digest_namespace = payload_digest_for.__globals__
+    digest_sha256 = digest_namespace.get("sha256")
+    canonical_json_for = digest_namespace.get("canonical_json")
+    if not callable(digest_sha256) or type_for(canonical_json_for) is not FunctionType:
+        raise error_type("research measurement payload digest authority is not canonical")
+    canonical_json_namespace = canonical_json_for.__globals__
+    json_module = canonical_json_namespace.get("json")
+    if type_for(json_module) is not module_type:
+        raise error_type("research measurement canonical JSON authority is not a module")
+    json_encoder_type = json_module.__dict__.get("JSONEncoder")
+    if type_for(json_encoder_type) is not type_for:
+        raise error_type("research measurement canonical JSON encoder authority is not exact")
+    json_encoder_methods = tuple_for(
+        (name, json_encoder_type.__dict__.get(name))
+        for name in ("__init__", "default", "encode", "iterencode")
+    )
+    if any(
+        type_for(function) is not FunctionType
+        for _name, function in json_encoder_methods
+    ):
+        raise error_type(
+            "research measurement canonical JSON encoder executable authority is unavailable"
+        )
+
     module_bindings = (
         ("perf_counter_ns", clock),
         ("RuntimeLoadResearchMeasurementError", error_type),
@@ -578,6 +603,27 @@ def measure_declared_research_interference(
         ("_RESEARCH_SAMPLE_EVENT_TYPE", sample_event_type),
         ("_RESEARCH_SAMPLE_AGGREGATE_TYPE", sample_aggregate_type),
         ("_RESEARCH_SAMPLE_SCHEMA_VERSION", sample_schema_version),
+    )
+    transitive_bindings = (
+        (digest_namespace, "sha256", digest_sha256, "payload_digest.sha256"),
+        (
+            digest_namespace,
+            "canonical_json",
+            canonical_json_for,
+            "payload_digest.canonical_json",
+        ),
+        (
+            canonical_json_namespace,
+            "json",
+            json_module,
+            "canonical_json.json",
+        ),
+        (
+            json_module.__dict__,
+            "JSONEncoder",
+            json_encoder_type,
+            "canonical_json.json.JSONEncoder",
+        ),
     )
     protected_functions = tuple(
         (
@@ -596,6 +642,11 @@ def measure_declared_research_interference(
             ("JournalStore.append_event", append_event),
             ("_decode_sample", decode_sample),
             ("payload_digest", payload_digest_for),
+            ("payload_digest.canonical_json", canonical_json_for),
+            *(
+                (f"json.JSONEncoder.{name}", function)
+                for name, function in json_encoder_methods
+            ),
             ("DeclaredResearchInterferencePlan.digest", plan_digest_getter),
             ("DurableResearchInterferenceSample.__init__", sample_init),
         )
@@ -640,6 +691,7 @@ def measure_declared_research_interference(
         for label, class_type in (
             ("DeclaredResearchInterferencePlan", plan_type),
             ("DurableResearchInterferenceSample", sample_type),
+            ("json.JSONEncoder", json_encoder_type),
         )
     )
 
@@ -728,6 +780,8 @@ def measure_declared_research_interference(
                     f"{name}"
                 )
 
+        if type_for(plan) is not plan_type:
+            raise error_type("research measurement plan class changed during callback")
         current_plan_state = object_getattribute(plan, "__dict__")
         if type_for(current_plan_state) is not dict_type or tuple_for(current_plan_state) != plan_state_names:
             raise error_type("research measurement plan instance state shape changed during callback")
@@ -781,6 +835,12 @@ def measure_declared_research_interference(
             if module_namespace.get(name, missing) is not expected_value:
                 raise error_type(
                     f"research measurement authority changed during callback: {name}"
+                )
+        for namespace, dependency_name, expected_value, label in transitive_bindings:
+            if namespace.get(dependency_name, missing) is not expected_value:
+                raise error_type(
+                    "research measurement transitive authority changed during callback: "
+                    f"{label}"
                 )
         if (
             store_type.get_event is not get_event
@@ -853,7 +913,7 @@ def measure_declared_research_interference(
         for cell, had_value, expected_value in graph_closures:
             try:
                 current_value = cell.cell_contents
-            except ValueError:
+            except value_error_type:
                 if had_value:
                     raise error_type("research measurement closure authority changed during callback")
                 continue

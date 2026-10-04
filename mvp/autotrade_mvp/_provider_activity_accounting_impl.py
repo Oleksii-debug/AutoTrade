@@ -560,8 +560,8 @@ def _prepare_provider_fill_binding(
     if type(economic_book) is not DurableProviderEconomicBook:
         raise TypeError("economic_book must be exact DurableProviderEconomicBook")
     _require_durable_provider_economic_book_authority(economic_book)
-    if not isinstance(plan, ProviderFillFinancialPlan):
-        raise TypeError("plan must be ProviderFillFinancialPlan")
+    if type(plan) is not ProviderFillFinancialPlan:
+        raise TypeError("plan must be exact ProviderFillFinancialPlan")
     if type(projected_fill) is not ProjectedFillEvidence:
         raise TypeError("projected_fill must be ProjectedFillEvidence")
     if type(provider_fill) is not ProviderFillEvidence:

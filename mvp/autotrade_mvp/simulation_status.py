@@ -632,14 +632,16 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             # not for every already-completed retained observation.
             if (
                 set(payload)
-                != {"episode", "protocol_digest", "provider_state", "fill"}
+                != {"episode", "protocol_digest", "provider_state",
+                    "fills" if protocol.get("execution_profile") == "TWO_EQUAL_PARTIALS" else "fill"}
                 or type(payload.get("provider_state")) is not dict
-                or type(payload.get("fill")) is not dict
             ):
                 raise ValueError(
                     "autonomous retained fill observation is malformed"
                 )
             observed_fill = payload
+            from .simulation_session import _retained_autonomous_fills
+            _retained_autonomous_fills(payload, protocol)
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
             active = None
@@ -650,7 +652,8 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         retained = SimulatedProvider.from_state(
             observed_fill["provider_state"]
         )
-        if observed_fill["fill"] not in retained.activity_fills():
+        from .simulation_session import _retained_autonomous_fills
+        if any(fill not in retained.activity_fills() for fill in _retained_autonomous_fills(observed_fill, protocol)):
             raise ValueError(
                 "autonomous retained fill observation conflicts with provider state"
             )

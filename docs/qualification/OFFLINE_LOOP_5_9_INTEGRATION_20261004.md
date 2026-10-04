@@ -32,7 +32,7 @@
    RNG у цьому детермінованому ZERO-циклі явно `NONE`; модель не викликається.
 6. Приватний випадковий ключ checkpoint залишається прив'язаним до durable start
    і підпису, але не змінює детермінований public protocol digest однакових запусків.
-7. Календарний порядок офлайн-епізоду задекларований у protocol v6:
+7. Календарний порядок офлайн-епізоду задекларований у protocol v7:
    settlement на event time, потім decision/fill на event time + 1 microsecond.
    Затримка settlement рахується від початку ринкового епізоду; майбутня ціна
    або наступний епізод при цьому не відкриваються.
@@ -47,6 +47,19 @@
     settled cash, unsettled receivable/payable, reserved cash, available cash,
     FIFO realized/unrealized P&L і cost basis. Перевіряються cash conservation
     та equity change = gross realized + gross unrealized − fees для цього циклу.
+11. Protocol v7 заморожує `execution_profile` і `target_quantity`. Наявний
+    `SimulatedProvider` виконує ордер одним fill або двома рівними partial fills;
+    крок інструмента лишається 1. Перед створенням стану перевіряються повний
+    обсяг і кожна частина. Кожний fill окремо атомарно змінює OMS, економіку,
+    резерв і settlement obligation. Recovery приймає лише точний фінансовий
+    prefix збережених fills, перевірений проти історичного admission/send.
+    Повторний запуск не створює нових order, fill, fees чи obligations.
+
+Приклад того самого продуктового CLI, без іншого engine:
+
+```text
+python -m mvp.autotrade_mvp.cli --autonomous-simulation --state-dir zero-partials --episode-id partials --at 2026-10-03T00:00:00Z --prices 100,101,103,90,110,120,121 --execution-profile TWO_EQUAL_PARTIALS --target-quantity 2
+```
 
 ## Перевірка
 
@@ -60,6 +73,16 @@
 settled cash 150; receivable 89.91; payable 103.103; available cash 46.897;
 realized P&L −13; fees 0.193; net P&L −13.193. Вектор перевіряється повторно
 при precision=2 і ввімкнених Inexact/Rounded traps.
+
+Для partial fills незалежний вектор: старт 500 USD; buy 2 за 103 й sell 2
+за 90, кожний як 1 + 1. Після першої buy-частини cash 396.897, position 1,
+remaining reserve 103.103, OMS PARTIALLY_FILLED. Після всіх чотирьох fills
+cash 473.614, position 0, payable 206.206, receivable 179.82, available 293.794,
+realized P&L −26, fees 0.386, net P&L −26.386. Справжній process exit
+після першої buy або sell частини відновлює другу без resend/admission.
+Фінансовий звіт дорівнює запуску з одним повним fill того самого обсягу.
+Повний partial loop також проходить при precision=2 та Inexact/Rounded traps.
+Втрата, перестановка чи дублювання retained fill відхиляються без мутації.
 
 Команди кваліфікації:
 
@@ -83,8 +106,9 @@ Queued/pending CI не означає PASS. Після merge необхідни�
 ## Межі приймання
 
 Це інтеграція існуючого synthetic cash-equity ZERO-циклу, а не закриття всіх
-можливих інструментів і розділів 5–9. Універсальний product loop для partial fills,
-кількох валют, funding/borrow/corporate events, ingest реальної історичної бази
+можливих інструментів і розділів 5–9. Partial-fill profile має рівно дві рівні
+частини в одному causally available batch; довільний latency/volume scheduler,
+ордери між епізодами, кілька валют, funding/borrow/corporate events, ingest реальної історичної бази
 та її revision stream потребує окремих composition acceptance gates.
 Наявні domain tests таких компонентів не підміняють ці gates.
 

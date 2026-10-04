@@ -360,6 +360,63 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             )
             self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
 
+    def test_admission_rejects_capital_change_after_projection_before_commit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            original_resolve = authority_module._resolve_authority_service_capital
+
+            def resolve_then_withdraw(*args, **kwargs):
+                capital_cut = original_resolve(*args, **kwargs)
+                economic.append(
+                    book_external_cash_flow(
+                        transaction_id="capital-interleaving-withdrawal",
+                        cause_event_id="capital-interleaving-withdrawal-event",
+                        currency="USD",
+                        amount="-30",
+                    ),
+                    committed_at="2026-09-24T18:00:30Z",
+                )
+                return capital_cut
+
+            with patch.object(
+                authority_module,
+                "_resolve_authority_service_capital",
+                side_effect=resolve_then_withdraw,
+            ):
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "settlement capital cut changed before financial commit",
+                ):
+                    _admit(
+                        authority,
+                        reservations,
+                        checkpoint,
+                        reservation_requirements={"CASH:USD": "40"},
+                    )
+
+            self.assertEqual(economic.cash("USD"), Decimal("20"))
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
     def test_dispatch_rechecks_current_local_settlement_capital(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

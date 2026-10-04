@@ -4501,6 +4501,7 @@ class AuthorityService:
                         },
                     }
 
+        capital_journal_sequence_cut: int | None = None
         if decision.admitted and availability_evidence is not None:
             required_resource_names = tuple(
                 resource for resource, _amount in normalized_requirements
@@ -4548,6 +4549,9 @@ class AuthorityService:
                         **availability_evidence,
                         "settlement_capital_adjustment": canonical_capital_adjustment,
                     }
+                    capital_journal_sequence_cut = canonical_capital_adjustment[
+                        "journal_sequence"
+                    ]
 
         allocation_binding = None
         if allocation_result is not None:
@@ -4569,6 +4573,13 @@ class AuthorityService:
         if existing is None:
             reservation_book.refresh()
             current_cut = _authority_store_call(self, "current_journal_sequence")
+            if (
+                capital_journal_sequence_cut is not None
+                and capital_journal_sequence_cut != current_cut
+            ):
+                raise AuthorityConflict(
+                    "settlement capital cut changed before financial commit"
+                )
             current_risk_authority_request = RiskAuthorityRequest(
                 risk_intent=risk_intent,
                 account_id=account_id,

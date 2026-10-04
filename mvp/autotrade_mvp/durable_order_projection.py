@@ -346,8 +346,17 @@ def _order_projection_binding_operations():
                     raise OrderProjectionConflict(
                         "provider evidence trusted reader authority is unavailable"
                     ) from error
-            bindings[id(value)] = (
-                weakref.ref(value),
+            binding_key = id(value)
+
+            def release_binding(reference, *, binding_key=binding_key):
+                with lock:
+                    entry = bindings.get(binding_key)
+                    if entry is not None and entry[0] is reference:
+                        bindings.pop(binding_key, None)
+
+            reference = weakref.ref(value, release_binding)
+            bindings[binding_key] = (
+                reference,
                 store,
                 identity,
                 scope,

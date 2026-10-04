@@ -2,9 +2,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from uuid import uuid4
+import gc
 import subprocess
 import sys
 import unittest
+import weakref
 
 from autotrade_runtime.artifacts import ArtifactStore
 
@@ -96,6 +98,25 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             artifacts = DerivedArtifactStore(f"{directory}/artifacts")
             with self.assertRaisesRegex(TypeError, "exact canonical ArtifactStore"):
                 durable(store, artifacts)
+
+    def test_collected_projection_releases_selected_authorities_without_successor(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(store, artifacts)
+
+            book_ref = weakref.ref(book)
+            store_ref = weakref.ref(store)
+            artifacts_ref = weakref.ref(artifacts)
+
+            del book
+            del store
+            del artifacts
+            gc.collect()
+
+            self.assertIsNone(book_ref())
+            self.assertIsNone(store_ref())
+            self.assertIsNone(artifacts_ref())
 
     def test_order_projection_import_is_hermetic_without_research_package(self):
         root = Path(__file__).resolve().parents[2]

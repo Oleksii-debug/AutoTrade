@@ -17,12 +17,14 @@ from mvp.autotrade_mvp.execution_qualification import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     LiquidityObservation,
     SimulatedOrder,
 )
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_BINDING = "c" * 64
 PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
@@ -43,6 +45,13 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_projection=ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="ABC@v1",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

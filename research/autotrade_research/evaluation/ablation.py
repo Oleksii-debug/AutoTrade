@@ -1624,16 +1624,19 @@ def _make_ablation_qualification_authority_init(register_policy_binding):
             )
         if type(granted_permissions) is not set or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty exact set")
-        normalized_permissions = tuple(sorted(granted_permissions))
+        if any(type(value) is not str for value in granted_permissions):
+            raise ValueError(
+                "granted_permissions must contain exact canonical text"
+            )
         if any(
-            type(value) is not str
-            or not value
+            not value
             or value != value.strip()
-            for value in normalized_permissions
+            for value in granted_permissions
         ):
             raise ValueError(
                 "granted_permissions must contain canonical non-empty text"
             )
+        normalized_permissions = tuple(sorted(granted_permissions))
         if task is not None and (
             type(task) is not str or not task or task != task.strip()
         ):
@@ -2023,10 +2026,15 @@ def _make_registered_policy_context(resolve_policy_binding):
             raise ProtocolViolation(
                 "ablation qualification authority causal cutoff changed after issuance"
             )
-        if (
-            type(current_permissions) is not set
-            or tuple(sorted(current_permissions)) != permission_classes
-        ):
+        if type(current_permissions) is not set:
+            raise ProtocolViolation(
+                "ablation qualification authority permissions changed after issuance"
+            )
+        if any(type(value) is not str for value in current_permissions):
+            raise ProtocolViolation(
+                "ablation qualification authority permissions are not canonical"
+            )
+        if tuple(sorted(current_permissions)) != permission_classes:
             raise ProtocolViolation(
                 "ablation qualification authority permissions changed after issuance"
             )

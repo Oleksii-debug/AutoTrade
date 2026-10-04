@@ -43,7 +43,7 @@ _PURPOSES = {"RESEARCH", "REPLAY", "PROMOTION"}
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ExecutionQualificationError(f"{name} is required")
     return value.strip()
 
@@ -142,10 +142,12 @@ def validate_execution_qualification(
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
 
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
-    if not isinstance(qualification, ExecutionModelQualification):
-        raise TypeError("qualification must be ExecutionModelQualification")
+    if type(model) is not ExecutionModel:
+        raise TypeError("model must be the exact ExecutionModel")
+    if type(qualification) is not ExecutionModelQualification:
+        raise TypeError(
+            "qualification must be the exact ExecutionModelQualification"
+        )
     if type(artifact_store) is not ArtifactStore:
         raise TypeError("artifact_store must be the exact canonical ArtifactStore")
 
@@ -243,10 +245,10 @@ def simulate_qualified_execution(
     no provider credentials, admission, confirmation or live trading authority.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
+    if type(order) is not SimulatedOrder:
+        raise TypeError("order must be the exact SimulatedOrder")
+    if type(observation) is not LiquidityObservation:
+        raise TypeError("observation must be the exact LiquidityObservation")
 
     validate_execution_qualification(
         model=model,

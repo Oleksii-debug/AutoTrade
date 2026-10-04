@@ -286,6 +286,58 @@ def _registered_trial_payload(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+def _registered_locked_holdout(
+    con: sqlite3.Connection,
+    *,
+    protocol_id: str,
+    protocol_payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Resolve the physical locked-forward identity frozen before trial 1."""
+
+    row = con.execute(
+        """
+        SELECT b.holdout_identity_hash,h.identity_json
+        FROM protocol_locked_holdouts AS b
+        JOIN holdouts AS h
+          ON h.holdout_identity_hash=b.holdout_identity_hash
+        WHERE b.protocol_id=?
+        """,
+        (protocol_id,),
+    ).fetchone()
+    if row is None:
+        raise ProtocolViolation(
+            "protocol locked holdout must be preregistered before the first trial"
+        )
+    try:
+        identity_payload = json.loads(row["identity_json"])
+        identity_hash, identity_json = _holdout_identity(identity_payload)
+    except (json.JSONDecodeError, ProtocolViolation, ValueError) as error:
+        raise ProtocolViolation(
+            "registered protocol locked holdout identity is corrupt"
+        ) from error
+    if (
+        identity_hash != row["holdout_identity_hash"]
+        or identity_json != row["identity_json"]
+    ):
+        raise ProtocolViolation(
+            "registered protocol locked holdout identity integrity mismatch"
+        )
+    forward_start, forward_end = _period(
+        protocol_payload["forward_period"],
+        "forward_period",
+    )
+    if (
+        identity_payload["role"] != "LOCKED_FORWARD"
+        or identity_payload["segment_start"] != forward_start.isoformat()
+        or identity_payload["segment_end"] != forward_end.isoformat()
+    ):
+        raise ProtocolViolation(
+            "registered protocol locked holdout must match forward_period "
+            "with role LOCKED_FORWARD"
+        )
+    return identity_hash, identity_payload
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -374,6 +426,11 @@ class ScientificRegistry:
                     holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS protocol_locked_holdouts(
+                    protocol_id TEXT PRIMARY KEY REFERENCES protocols(protocol_id),
+                    holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
+                    created_at TEXT NOT NULL
+                );
 
                 CREATE TRIGGER IF NOT EXISTS protocols_no_update
                 BEFORE UPDATE ON protocols BEGIN
@@ -422,6 +479,14 @@ class ScientificRegistry:
                 CREATE TRIGGER IF NOT EXISTS holdout_aliases_no_delete
                 BEFORE DELETE ON holdout_aliases BEGIN
                     SELECT RAISE(ABORT, 'holdout aliases are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocol_locked_holdouts_no_update
+                BEFORE UPDATE ON protocol_locked_holdouts BEGIN
+                    SELECT RAISE(ABORT, 'protocol locked holdout bindings are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocol_locked_holdouts_no_delete
+                BEFORE DELETE ON protocol_locked_holdouts BEGIN
+                    SELECT RAISE(ABORT, 'protocol locked holdout bindings are append-only');
                 END;
                 """
             )
@@ -494,6 +559,92 @@ class ScientificRegistry:
             created_at=row["created_at"],
         )
 
+    def preregister_locked_holdout(
+        self,
+        protocol_id: str,
+        *,
+        holdout_identity: dict[str, Any],
+    ) -> str:
+        """Freeze one physical/versioned locked-forward holdout before trial 1."""
+
+        protocol = _id(protocol_id)
+        identity_hash, identity_json = _holdout_identity(holdout_identity)
+        identity_payload = json.loads(identity_json)
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if owner is None:
+                raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
+            forward_start, forward_end = _period(
+                protocol_payload["forward_period"],
+                "forward_period",
+            )
+            if (
+                identity_payload["role"] != "LOCKED_FORWARD"
+                or identity_payload["segment_start"] != forward_start.isoformat()
+                or identity_payload["segment_end"] != forward_end.isoformat()
+            ):
+                raise ProtocolViolation(
+                    "protocol locked holdout must match forward_period "
+                    "with role LOCKED_FORWARD"
+                )
+
+            existing = con.execute(
+                "SELECT holdout_identity_hash FROM protocol_locked_holdouts "
+                "WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if existing is not None:
+                if existing["holdout_identity_hash"] != identity_hash:
+                    raise ProtocolConflict(
+                        "protocol locked holdout identity is immutable"
+                    )
+                _registered_locked_holdout(
+                    con,
+                    protocol_id=protocol,
+                    protocol_payload=protocol_payload,
+                )
+                return identity_hash
+
+            prior_trials = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM trials WHERE protocol_id=?",
+                    (protocol,),
+                ).fetchone()[0]
+            )
+            if prior_trials != 0:
+                raise ProtocolViolation(
+                    "protocol locked holdout must be preregistered before the first trial"
+                )
+
+            holdout = con.execute(
+                "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
+                (identity_hash,),
+            ).fetchone()
+            if holdout is None:
+                con.execute(
+                    "INSERT INTO holdouts(holdout_identity_hash,identity_json,created_at) "
+                    "VALUES(?,?,?)",
+                    (identity_hash, identity_json, _now()),
+                )
+            elif holdout["identity_json"] != identity_json:
+                raise ProtocolConflict(
+                    "holdout identity hash was reused inconsistently"
+                )
+
+            con.execute(
+                "INSERT INTO protocol_locked_holdouts("
+                "protocol_id,holdout_identity_hash,created_at"
+                ") VALUES(?,?,?)",
+                (protocol, identity_hash, _now()),
+            )
+            con.commit()
+        return identity_hash
+
     def record_trial(
         self,
         protocol_id: str,
@@ -520,6 +671,11 @@ class ScientificRegistry:
             if owner is None:
                 raise KeyError(protocol)
             protocol_payload = _registered_protocol_payload(owner)
+            _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
             existing = con.execute("SELECT * FROM trials WHERE trial_id=?", (identifier,)).fetchone()
             if existing is not None:
                 if (
@@ -638,12 +794,23 @@ class ScientificRegistry:
             p = con.execute("SELECT * FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if p is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(p)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
+            supplied_identity_hash, _ = _holdout_identity(holdout_identity)
+            if supplied_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "locked evaluation identity does not match the preregistered "
+                    "protocol holdout"
+                )
             identity_hash = self._bind_holdout_identity(
                 con,
                 holdout_id=holdout,
                 holdout_identity=holdout_identity,
             )
-            protocol_payload = _registered_protocol_payload(p)
             trial_budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """
@@ -843,6 +1010,22 @@ class ScientificRegistry:
         # a protocol-local display alias. Legacy alias-only accesses are counted
         # conservatively so a migration cannot manufacture an untouched holdout.
         with self._connect() as con:
+            protocol_row = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchone()
+            if protocol_row is None:
+                raise KeyError(expected_protocol)
+            protocol_payload = _registered_protocol_payload(protocol_row)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=expected_protocol,
+                protocol_payload=protocol_payload,
+            )
+            if evidence.holdout_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "locked evaluation is not bound to the preregistered protocol holdout"
+                )
             current_access_count = int(
                 con.execute(
                     "SELECT COUNT(*) FROM holdout_access "

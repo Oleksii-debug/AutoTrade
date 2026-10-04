@@ -49,7 +49,7 @@ _QUALIFICATION_REQUIREMENT = "bounded-real-terminal-evidence"
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -78,10 +78,10 @@ def _digest(value: str) -> str:
 
 
 def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in {Decimal, str, int}:
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -354,7 +354,7 @@ class ArtifactStoreEvidenceVerifier:
                 conflicted=True,
                 reason="immutable evidence artifact is unreadable or corrupt",
             )
-        if type(manifest) is not dict or not isinstance(payload, bytes):
+        if type(manifest) is not dict or type(payload) is not bytes:
             return EvidenceVerification(
                 valid=False,
                 conflicted=True,
@@ -362,7 +362,7 @@ class ArtifactStoreEvidenceVerifier:
             )
         manifest_hash = manifest.get("manifest_hash")
         if (
-            not isinstance(manifest_hash, str)
+            type(manifest_hash) is not str
             or manifest_hash != self._manifest_hash(manifest)
         ):
             return EvidenceVerification(
@@ -406,9 +406,9 @@ class ArtifactStoreEvidenceVerifier:
                 reason="immutable evidence semantics do not match qualification scope",
             )
         if (
-            not isinstance(metadata.get("producer_id"), str)
+            type(metadata.get("producer_id")) is not str
             or not metadata["producer_id"].strip()
-            or not isinstance(metadata.get("evidence_version"), str)
+            or type(metadata.get("evidence_version")) is not str
             or not metadata["evidence_version"].strip()
         ):
             return EvidenceVerification(
@@ -455,7 +455,7 @@ class QualificationEvidence:
         source_sha = _sha(self.source_sha, name="source_sha")
         envelope_id = _text(self.envelope_id, name="envelope_id")
         envelope_digest = _digest(self.envelope_digest)
-        if not isinstance(self.evidence_ref, ImmutableEvidenceRef):
+        if type(self.evidence_ref) is not ImmutableEvidenceRef:
             raise TypeError("evidence_ref must be ImmutableEvidenceRef")
         if self.evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
             raise ValueError("prerequisite evidence_ref kind does not match evidence_kind")
@@ -506,7 +506,7 @@ class BoundedRealObservations:
             (self.unauthorized_action_count, "unauthorized_action_count"),
             (self.unresolved_unknown_count, "unresolved_unknown_count"),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         for field_name in (
             "observed_partial_fill",
@@ -521,7 +521,7 @@ class BoundedRealObservations:
         digests: set[str] = set()
         kinds: set[str] = set()
         for ref in refs:
-            if not isinstance(ref, ImmutableEvidenceRef):
+            if type(ref) is not ImmutableEvidenceRef:
                 raise TypeError("evidence_refs must contain ImmutableEvidenceRef")
             if (
                 ref.source_sha != source_sha
@@ -606,9 +606,9 @@ def assess_bounded_real_qualification(
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
-    if not isinstance(envelope, BoundedRealEnvelope):
+    if type(envelope) is not BoundedRealEnvelope:
         raise TypeError("envelope must be BoundedRealEnvelope")
-    if not isinstance(observations, BoundedRealObservations):
+    if type(observations) is not BoundedRealObservations:
         raise TypeError("observations must be BoundedRealObservations")
 
     reasons: list[str] = []
@@ -626,7 +626,7 @@ def assess_bounded_real_qualification(
     all_refs: list[tuple[str, ImmutableEvidenceRef]] = []
     evidence_ids: set[str] = set()
     for evidence in prerequisite_evidence:
-        if not isinstance(evidence, QualificationEvidence):
+        if type(evidence) is not QualificationEvidence:
             raise TypeError(
                 "prerequisite_evidence must contain QualificationEvidence"
             )
@@ -701,7 +701,7 @@ def assess_bounded_real_qualification(
     accepted: AcceptedQualificationAttestation | None = None
     if evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("untrusted_immutable_evidence_verifier")
     else:
         verifier_identity = evidence_verifier.identity
@@ -714,7 +714,7 @@ def assess_bounded_real_qualification(
                     conflicted=True,
                     reason="trusted immutable evidence verifier raised",
                 )
-            if not isinstance(verification, EvidenceVerification):
+            if type(verification) is not EvidenceVerification:
                 raise TypeError(
                     "trusted evidence verifier must return EvidenceVerification"
                 )
@@ -732,7 +732,7 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_unavailable")
     elif any(value is None for value in trust_inputs):
         reasons.append("independent_evidence_trust_incomplete")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"

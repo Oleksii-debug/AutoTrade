@@ -122,11 +122,12 @@ def coverage_assessment(protocol, *, status="PASS"):
 
 def gate(status="PASS", *, provenance=True, source=BUILD, checks=None):
     if checks is None:
-        checks = {
-            "semantic_owner_evidence": (
-                "PASS" if status == "PASS" else status
-            )
-        }
+        if status == "PASS":
+            checks = {"semantic_owner_evidence": "PASS"}
+        elif status == "FAIL":
+            checks = {"net_advantage": "FAIL"}
+        else:
+            checks = {"semantic_owner_evidence": "INCONCLUSIVE"}
     values = {}
     if provenance:
         values = {
@@ -782,6 +783,70 @@ class StrategyToolWeightingTests(unittest.TestCase):
                 gate_value=scientific_gate,
             )
         self.assertEqual(touched["count"], 0)
+
+
+    def test_protocol_integrity_gate_failure_is_invalid_not_strategy_loss(self):
+        p = policy()
+        rows = list(full_evidence(p))
+        strategy = next(
+            item for item in p.registered_strategies
+            if item.family == "FIBONACCI"
+        )
+        rows[2] = evidence(
+            strategy,
+            "bull",
+            "0.05",
+            gate_value=gate(
+                "FAIL",
+                checks={"causality": "FAIL"},
+            ),
+        )
+        result = assess_strategy_tools(p, rows)
+        self.assertEqual(
+            result.cell_statuses["crypto::bull::3600"],
+            "FAIL",
+        )
+        self.assertEqual(
+            result.dispositions["crypto::bull::3600"][
+                strategy.fingerprint
+            ],
+            "INVALID",
+        )
+        self.assertEqual(
+            result.weights["crypto::bull::3600"][
+                strategy.fingerprint
+            ],
+            ExactWeight.zero(),
+        )
+
+    def test_terminal_loss_without_reviewed_provenance_is_inconclusive(self):
+        p = policy()
+        rows = list(full_evidence(p))
+        strategy = next(
+            item for item in p.registered_strategies
+            if item.family == "FIBONACCI"
+        )
+        rows[2] = evidence(
+            strategy,
+            "bull",
+            "0.05",
+            gate_value=gate(
+                "FAIL",
+                provenance=False,
+                checks={"net_advantage": "FAIL"},
+            ),
+        )
+        result = assess_strategy_tools(p, rows)
+        self.assertEqual(
+            result.cell_statuses["crypto::bull::3600"],
+            "INCONCLUSIVE",
+        )
+        self.assertEqual(
+            result.dispositions["crypto::bull::3600"][
+                strategy.fingerprint
+            ],
+            "INCONCLUSIVE",
+        )
 
 
 if __name__ == "__main__":

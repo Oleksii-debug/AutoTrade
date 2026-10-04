@@ -21,6 +21,12 @@ def _forged_require_current_durable_owner():
     _FORGED_CALLS.append("_require_current_durable_owner")
 
 
+class _HostileScope(str):
+    def __eq__(self, other):
+        _FORGED_CALLS.append("scope_eq")
+        return True
+
+
 class RecoveryDispatchInstanceShadowAuthorityTests(unittest.TestCase):
     def _recovery(self, directory: str):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
@@ -67,6 +73,44 @@ class RecoveryDispatchInstanceShadowAuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 PermissionError,
                 "instance state shadows canonical authority",
+            ):
+                dispatcher._require_issued_authority()
+
+            self.assertEqual(_FORGED_CALLS, [])
+
+    def test_issued_dispatcher_rejects_recovery_store_retarget(self):
+        with TemporaryDirectory() as directory:
+            journal, recovery = self._recovery(directory)
+            dispatcher = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            replacement = JournalStore(Path(directory) / "other.sqlite3")
+            recovery._owner_store = replacement
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "recovery owner journal binding changed",
+            ):
+                dispatcher._require_issued_authority()
+
+    def test_issued_dispatcher_rejects_scope_retarget_without_hostile_equality(self):
+        with TemporaryDirectory() as directory:
+            journal, recovery = self._recovery(directory)
+            dispatcher = build_recovery_issued_dispatcher(
+                recovery,
+                journal,
+                environment="PAPER",
+                account_id="acct",
+            )
+            _FORGED_CALLS.clear()
+            recovery._owner_scope = _HostileScope("PAPER:acct")
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "recovery owner scope binding changed",
             ):
                 dispatcher._require_issued_authority()
 

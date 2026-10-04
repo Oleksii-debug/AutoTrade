@@ -8,6 +8,7 @@ on:
       - "mvp/autotrade_mvp/**"
       - "research/autotrade_research/**"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "mvp/autotrade_mvp/**"
       - "research/autotrade_research/**"
       - "mvp/tests/test_zero_model_qualification.py"
+      - "mvp/tests/test_zero_model_economics.py"
       - ".github/workflows/zero-model-qualification.yml"
 
 concurrency:
@@ -34,6 +36,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONPATH: ${{ github.workspace }}/research
     steps:
       - uses: actions/checkout@v4
         with:

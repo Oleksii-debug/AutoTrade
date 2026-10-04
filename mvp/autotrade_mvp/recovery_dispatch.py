@@ -8,7 +8,7 @@ and cannot substitute sender validation per submission.
 
 from __future__ import annotations
 
-from threading import Condition, current_thread
+from threading import Condition, Lock, current_thread
 from typing import Any, Callable, Mapping
 
 from .dispatch import (
@@ -25,6 +25,29 @@ class RecoveryDispatchBindingError(PermissionError):
     """Raised when recovery and dispatch authority are not the same durable scope."""
 
 
+class _RecoveryDispatchLifecycle:
+    """Process-local lifecycle shared by every dispatcher for one controller."""
+
+    __slots__ = (
+        "condition",
+        "active_dispatches",
+        "active_threads",
+        "revoking",
+        "revoked",
+    )
+
+    def __init__(self) -> None:
+        self.condition = Condition()
+        self.active_dispatches = 0
+        self.active_threads: dict[object, int] = {}
+        self.revoking = False
+        self.revoked = False
+
+
+_LIFECYCLE_BIND_LOCK = Lock()
+_LIFECYCLE_STATE_KEY = "_recovery_dispatch_lifecycle"
+
+
 class RecoveryBoundDispatcher:
     """PAPER/LIVE dispatcher sealed to one recovery owner generation.
 
@@ -33,12 +56,14 @@ class RecoveryBoundDispatcher:
     invokes the class-owned ``RecoveryController.validate_sender`` method, so a
     caller cannot replace sender authority with a permissive callback.
 
-    Product shutdown can call :meth:`stop_and_drain` to make recovery revocation
-    linear with this retained dispatch surface. Existing dispatches finish before
-    the controller is stopped; new dispatch entry is held until that stop commits,
-    after which the retained dispatcher is permanently revoked without touching
-    the journal or provider transport. Calling shutdown from inside an active
-    dispatch is rejected rather than self-deadlocking.
+    All dispatcher instances constructed for the same exact controller share one
+    process-local lifecycle. Product shutdown can therefore call
+    :meth:`stop_and_drain` on the canonical dispatcher and still drain accidental
+    duplicate retained dispatchers before recovery revocation and process-fence
+    release. New dispatch entry is held until that stop commits, after which all
+    bound dispatchers are permanently revoked without touching the journal or
+    provider transport. Calling shutdown from inside an active dispatch is
+    rejected rather than self-deadlocking.
 
     A durable takeover intentionally invalidates an existing instance. Product
     composition must construct a new dispatcher from the successor controller;
@@ -52,11 +77,7 @@ class RecoveryBoundDispatcher:
         "_owner_id",
         "_owner_epoch",
         "_dispatcher",
-        "_lifecycle_condition",
-        "_active_dispatches",
-        "_active_threads",
-        "_revoking",
-        "_revoked",
+        "_lifecycle",
     )
 
     def __init__(
@@ -100,6 +121,16 @@ class RecoveryBoundDispatcher:
                 "recovery owner must be started before dispatcher construction"
             )
 
+        with _LIFECYCLE_BIND_LOCK:
+            lifecycle = controller_state.get(_LIFECYCLE_STATE_KEY)
+            if lifecycle is None:
+                lifecycle = _RecoveryDispatchLifecycle()
+                controller_state[_LIFECYCLE_STATE_KEY] = lifecycle
+            elif type(lifecycle) is not _RecoveryDispatchLifecycle:
+                raise RecoveryDispatchBindingError(
+                    "recovery dispatcher lifecycle binding is invalid"
+                )
+
         self._controller = controller
         self._store = store
         self._owner_scope = owner_scope
@@ -113,11 +144,7 @@ class RecoveryBoundDispatcher:
             owner_epoch=self._owner_epoch,
             prepared_lease_seconds=prepared_lease_seconds,
         )
-        self._lifecycle_condition = Condition()
-        self._active_dispatches = 0
-        self._active_threads: dict[object, int] = {}
-        self._revoking = False
-        self._revoked = False
+        self._lifecycle = lifecycle
 
     @property
     def owner_id(self) -> str:
@@ -142,6 +169,10 @@ class RecoveryBoundDispatcher:
             raise RecoveryDispatchBindingError(
                 "recovery JournalStore changed after dispatcher construction"
             )
+        if state.get(_LIFECYCLE_STATE_KEY) is not self._lifecycle:
+            raise RecoveryDispatchBindingError(
+                "recovery dispatcher lifecycle changed after construction"
+            )
         if controller.owner_scope != self._owner_scope:
             raise RecoveryDispatchBindingError(
                 "recovery owner scope changed after dispatcher construction"
@@ -151,36 +182,38 @@ class RecoveryBoundDispatcher:
         RecoveryController.validate_sender(controller, owner_id, owner_epoch)
 
     def stop_and_drain(self) -> None:
-        """Drain this retained send surface, then permanently revoke it.
+        """Drain all dispatchers for this controller, then permanently revoke them.
 
         Entry to new dispatches is paused while draining. The final controller
-        stop happens while that entry gate is still held, so there is no gap in
-        which a new caller can validate the old owner after the drain completed.
-        Once stopped, this dispatcher rejects all future entry before any durable
-        submission or provider-side effect can be attempted.
+        stop happens while that shared entry gate is still held, so there is no
+        gap in which another retained dispatcher can validate the old owner after
+        the drain completed. Once stopped, every dispatcher sharing this exact
+        controller lifecycle rejects future entry before any durable submission
+        or provider-side effect can be attempted.
         """
 
         thread = current_thread()
-        condition = self._lifecycle_condition
+        lifecycle = self._lifecycle
+        condition = lifecycle.condition
         with condition:
-            if self._active_threads.get(thread, 0):
+            if lifecycle.active_threads.get(thread, 0):
                 raise RuntimeError(
                     "cannot revoke recovery dispatcher from an active dispatch"
                 )
-            while self._revoking:
+            while lifecycle.revoking:
                 condition.wait()
-                if self._revoked:
+                if lifecycle.revoked:
                     return
-            if self._revoked:
+            if lifecycle.revoked:
                 return
-            self._revoking = True
+            lifecycle.revoking = True
             try:
-                while self._active_dispatches:
+                while lifecycle.active_dispatches:
                     condition.wait()
                 RecoveryController.stop(self._controller)
-                self._revoked = True
+                lifecycle.revoked = True
             finally:
-                self._revoking = False
+                lifecycle.revoking = False
                 condition.notify_all()
 
     def dispatch(
@@ -202,16 +235,17 @@ class RecoveryBoundDispatcher:
         """Dispatch without exposing a caller-controlled sender-check seam."""
 
         thread = current_thread()
-        condition = self._lifecycle_condition
+        lifecycle = self._lifecycle
+        condition = lifecycle.condition
         with condition:
-            while self._revoking:
+            while lifecycle.revoking:
                 condition.wait()
-            if self._revoked:
+            if lifecycle.revoked:
                 raise RecoveryDispatchBindingError(
                     "recovery-bound dispatcher is permanently revoked"
                 )
-            self._active_dispatches += 1
-            self._active_threads[thread] = self._active_threads.get(thread, 0) + 1
+            lifecycle.active_dispatches += 1
+            lifecycle.active_threads[thread] = lifecycle.active_threads.get(thread, 0) + 1
 
         try:
             return self._dispatcher.dispatch(
@@ -231,11 +265,11 @@ class RecoveryBoundDispatcher:
             )
         finally:
             with condition:
-                self._active_dispatches -= 1
-                remaining = self._active_threads[thread] - 1
+                lifecycle.active_dispatches -= 1
+                remaining = lifecycle.active_threads[thread] - 1
                 if remaining:
-                    self._active_threads[thread] = remaining
+                    lifecycle.active_threads[thread] = remaining
                 else:
-                    self._active_threads.pop(thread, None)
-                if self._active_dispatches == 0:
+                    lifecycle.active_threads.pop(thread, None)
+                if lifecycle.active_dispatches == 0:
                     condition.notify_all()

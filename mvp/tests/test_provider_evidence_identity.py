@@ -118,7 +118,10 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
         )
         raw["artifact_id"] = HostileText(ARTIFACT_A)
 
-        with self.assertRaisesRegex(ValueError, "artifact_id is required"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "artifact_id must be canonical non-empty text",
+        ):
             _canonical_evidence_refs((raw,))
         self.assertEqual(touched, [])
 

@@ -5,6 +5,7 @@ from uuid import uuid4
 import gc
 import subprocess
 import sys
+import threading
 import unittest
 import weakref
 
@@ -240,6 +241,84 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                 evidence_artifact_store=artifacts,
             )
             self.assertEqual(book.snapshots, ())
+
+    def test_binding_is_not_observable_until_initial_replay_completes(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = object.__new__(DurableOrderBookProjection)
+            original_reload = DurableOrderBookProjection._reload
+            reload_started = threading.Event()
+            release_reload = threading.Event()
+            initializer_done = threading.Event()
+            observer_entered = threading.Event()
+            observer_done = threading.Event()
+            outcomes = {}
+            outcomes_lock = threading.Lock()
+
+            def fenced_reload(value):
+                reload_started.set()
+                if not release_reload.wait(5):
+                    raise AssertionError("initial OMS replay rendezvous timed out")
+                original_reload(value)
+
+            def initialize():
+                try:
+                    book.__init__(
+                        store,
+                        provider_id="PROVIDER-A",
+                        account_id="acct-1",
+                        environment="PAPER",
+                        host_id="host-1",
+                        owner_epoch="1",
+                        evidence_artifact_store=artifacts,
+                    )
+                except BaseException as error:
+                    with outcomes_lock:
+                        outcomes["initialize_error"] = error
+                finally:
+                    initializer_done.set()
+
+            def observe():
+                observer_entered.set()
+                try:
+                    snapshots = book.snapshots
+                    with outcomes_lock:
+                        outcomes["snapshots"] = snapshots
+                except BaseException as error:
+                    with outcomes_lock:
+                        outcomes["observe_error"] = error
+                finally:
+                    observer_done.set()
+
+            DurableOrderBookProjection._reload = fenced_reload
+            initializer_thread = threading.Thread(target=initialize)
+            observer_thread = threading.Thread(target=observe)
+            try:
+                initializer_thread.start()
+                self.assertTrue(reload_started.wait(5))
+                self.assertFalse(initializer_done.is_set())
+
+                observer_thread.start()
+                self.assertTrue(observer_entered.wait(5))
+                self.assertFalse(observer_done.wait(0.25))
+
+                release_reload.set()
+                initializer_thread.join(5)
+                observer_thread.join(5)
+            finally:
+                release_reload.set()
+                DurableOrderBookProjection._reload = original_reload
+                initializer_thread.join(5)
+                observer_thread.join(5)
+
+            self.assertFalse(initializer_thread.is_alive())
+            self.assertFalse(observer_thread.is_alive())
+            self.assertTrue(initializer_done.is_set())
+            self.assertTrue(observer_done.is_set())
+            self.assertNotIn("initialize_error", outcomes)
+            self.assertNotIn("observe_error", outcomes)
+            self.assertEqual(outcomes.get("snapshots"), ())
 
     def test_order_projection_import_is_hermetic_without_research_package(self):
         root = Path(__file__).resolve().parents[2]

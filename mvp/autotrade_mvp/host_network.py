@@ -59,6 +59,8 @@ _SNAPSHOT_FIELDS = {
 }
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
+
+
 class _SnapshotUnavailable(RuntimeError):
     """A valid state read could not obtain one coherent journal cut in time."""
 

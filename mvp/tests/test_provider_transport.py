@@ -3365,6 +3365,61 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
+
+    def test_receipt_execution_rejects_signer_rebinding_before_credentials(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_read_transport(events=events, wire=wire)
+
+        def forged_signer(**_kwargs):
+            raise AssertionError("forged signer must never execute")
+
+        with patch.object(
+            BinanceSpotAuthenticatedReadSigner,
+            "sign",
+            new=staticmethod(forged_signer),
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "signer authority changed",
+            ):
+                transport.execute_with_receipt(
+                    authenticated_read_binding(),
+                    final_guard=lambda: object(),
+                )
+
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_receipt_execution_rejects_equal_but_noncanonical_network_policy(self):
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver = self.make_read_transport(events=events, wire=wire)
+        policy = transport.policy
+        transport.policy = ProviderEndpointPolicy(
+            provider_id=policy.provider_id,
+            environment=policy.environment,
+            base_url=policy.base_url,
+            allowed_hosts=policy.allowed_hosts,
+            timeout_seconds=policy.timeout_seconds,
+        )
+        self.assertEqual(transport.policy, policy)
+        self.assertIsNot(transport.policy, policy)
+
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network policy is not canonical",
+        ):
+            transport.execute_with_receipt(
+                authenticated_read_binding(),
+                final_guard=lambda: object(),
+            )
+
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
     def test_read_credential_generation_lease_covers_final_currentness_and_wire(self):
         events = []
         resolver = FakeSecretResolver(events)

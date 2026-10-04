@@ -743,11 +743,15 @@ def _authority_service_capital_operations():
                 "settlement capital provider checkpoint sequence is invalid"
             )
         if (
-            provider_evidence.get("scope_latest_checkpoint_journal_sequence")
+            provider_evidence.get("scope_latest_checkpoint_event_id")
+            != checkpoint_event_id
+            or provider_evidence.get("checkpoint_payload_hash")
+            != checkpoint.get("payload_hash")
+            or provider_evidence.get("scope_latest_checkpoint_journal_sequence")
             != checkpoint_sequence
         ):
             raise AuthorityConflict(
-                "settlement capital requires the current provider checkpoint"
+                "settlement capital requires the exact current provider checkpoint"
             )
         checkpoint_payload = checkpoint.get("payload")
         if not isinstance(checkpoint_payload, Mapping):
@@ -781,14 +785,15 @@ def _authority_service_capital_operations():
                 raise AuthorityConflict(
                     "provider availability predates local economic financial truth"
                 )
-            economic_committed_at = _instant(
-                economic_head.get("committed_at"),
-                name="economic_book.committed_at",
-            )
-            if economic_committed_at >= provider_query_started:
-                raise AuthorityConflict(
-                    "provider availability predates local economic financial truth"
+            for economic_event in economic_events:
+                economic_committed_at = _instant(
+                    economic_event.get("committed_at"),
+                    name="economic_book.committed_at",
                 )
+                if economic_committed_at >= provider_query_started:
+                    raise AuthorityConflict(
+                        "provider availability predates local economic financial truth"
+                    )
 
         before = _authority_store_call(service, "current_journal_sequence")
         DurableProviderEconomicBook.refresh(economic_book)

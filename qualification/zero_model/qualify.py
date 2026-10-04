@@ -28,10 +28,13 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 FIXED_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 PRICES = ("100", "101", "102", "103")
+AUTONOMOUS_PRICES = ("100", "101", "103", "102", "100", "98", "100", "103") * 15
+AUTONOMOUS_NOW = "2026-10-03T00:00:00Z"
 
 
 class UnavailableModelInventory:
@@ -260,6 +263,94 @@ def qualify(source_sha: str) -> dict[str, object]:
             if first_report.economic_edge_claim != "UNPROVEN_SIMULATION_ONLY":
                 raise RuntimeError("zero-model campaign manufactured an economic-edge claim")
 
+        autonomous_prices = list(AUTONOMOUS_PRICES)
+        with (
+            tempfile.TemporaryDirectory(prefix="autotrade-section16-continuous-") as continuous_directory,
+            tempfile.TemporaryDirectory(prefix="autotrade-section16-restarted-") as restarted_directory,
+        ):
+            continuous = run_autonomous_simulation(
+                autonomous_prices,
+                continuous_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+            paused = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+                stop_after_episodes=41,
+            )
+            resumed = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+            replay = run_autonomous_simulation(
+                autonomous_prices,
+                restarted_directory,
+                run_id="section16-zero-model-qualification",
+                now=AUTONOMOUS_NOW,
+            )
+
+            if continuous["status"] != "COMPLETED" or resumed["status"] != "COMPLETED":
+                raise RuntimeError("canonical autonomous ZERO loop did not complete")
+            if paused["status"] != "PAUSED" or paused["completed_episodes"] != 41:
+                raise RuntimeError("canonical autonomous ZERO loop did not produce the frozen pause cut")
+            if continuous["completed_episodes"] != len(autonomous_prices):
+                raise RuntimeError("canonical autonomous ZERO loop did not consume the complete population")
+            if continuous["mode"] != "ZERO" or resumed["mode"] != "ZERO" or replay["mode"] != "ZERO":
+                raise RuntimeError("canonical autonomous loop escaped ZERO mode")
+            if (
+                resumed["decisions"] != continuous["decisions"]
+                or resumed["cash"] != continuous["cash"]
+                or resumed["position"] != continuous["position"]
+            ):
+                raise RuntimeError("pause/resume changed canonical autonomous economics or decisions")
+            if (
+                paused["new_outbound_requests"] + resumed["new_outbound_requests"]
+                != continuous["new_outbound_requests"]
+            ):
+                raise RuntimeError("pause/resume duplicated or lost canonical outbound requests")
+            if replay["new_outbound_requests"] != 0:
+                raise RuntimeError("completed autonomous replay emitted a duplicate outbound request")
+            if replay["decisions"] != continuous["decisions"]:
+                raise RuntimeError("completed autonomous replay changed decisions")
+            if any(
+                result["economic_edge_status"] != "INCONCLUSIVE"
+                for result in (continuous, resumed, replay)
+            ):
+                raise RuntimeError("canonical autonomous qualification manufactured economic edge")
+
+        with tempfile.TemporaryDirectory(prefix="autotrade-section16-partial-fill-") as partial_directory:
+            partial_fill = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                partial_directory,
+                run_id="section16-partial-fill-qualification",
+                now=AUTONOMOUS_NOW,
+                execution_profile="TWO_EQUAL_PARTIALS",
+            )
+            partial_fill_replay = run_autonomous_simulation(
+                list(AUTONOMOUS_PRICES[:8]),
+                partial_directory,
+                run_id="section16-partial-fill-qualification",
+                now=AUTONOMOUS_NOW,
+                execution_profile="TWO_EQUAL_PARTIALS",
+            )
+            if partial_fill["status"] != "COMPLETED":
+                raise RuntimeError("canonical partial-fill ZERO loop did not complete")
+            if partial_fill["mode"] != "ZERO":
+                raise RuntimeError("canonical partial-fill loop escaped ZERO mode")
+            if partial_fill["new_outbound_requests"] <= 0:
+                raise RuntimeError("canonical partial-fill loop did not exercise financial submission")
+            if partial_fill_replay["new_outbound_requests"] != 0:
+                raise RuntimeError("partial-fill replay emitted a duplicate outbound request")
+            if partial_fill_replay["decisions"] != partial_fill["decisions"]:
+                raise RuntimeError("partial-fill replay changed canonical decisions")
+            if partial_fill["economic_edge_status"] != "INCONCLUSIVE":
+                raise RuntimeError("partial-fill qualification manufactured economic edge")
+
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
             "execution_platform": {
@@ -290,6 +381,37 @@ def qualify(source_sha: str) -> dict[str, object]:
                 for name, decision in outage_routes.items()
             },
             "model_cost_total": str(model_cost_total),
+            "canonical_autonomous_zero_loop": {
+                "continuous_status": continuous["status"],
+                "paused_status": paused["status"],
+                "resumed_status": resumed["status"],
+                "replay_status": replay["status"],
+                "mode": continuous["mode"],
+                "episodes": continuous["completed_episodes"],
+                "pause_cut": paused["completed_episodes"],
+                "continuous_outbound_requests": continuous["new_outbound_requests"],
+                "pause_resume_outbound_requests": (
+                    paused["new_outbound_requests"] + resumed["new_outbound_requests"]
+                ),
+                "replay_outbound_requests": replay["new_outbound_requests"],
+                "same_decisions_after_resume": resumed["decisions"] == continuous["decisions"],
+                "same_economics_after_resume": (
+                    resumed["cash"] == continuous["cash"]
+                    and resumed["position"] == continuous["position"]
+                ),
+                "economic_edge_status": continuous["economic_edge_status"],
+            },
+            "canonical_partial_fill_zero_loop": {
+                "status": partial_fill["status"],
+                "mode": partial_fill["mode"],
+                "new_outbound_requests": partial_fill["new_outbound_requests"],
+                "replay_outbound_requests": partial_fill_replay["new_outbound_requests"],
+                "same_decisions_after_replay": (
+                    partial_fill_replay["decisions"] == partial_fill["decisions"]
+                ),
+                "economic_edge_status": partial_fill["economic_edge_status"],
+                "execution_profile": "TWO_EQUAL_PARTIALS",
+            },
             "deterministic_financial_slice": {
                 "first_status": first.status,
                 "restart_status": second.status,

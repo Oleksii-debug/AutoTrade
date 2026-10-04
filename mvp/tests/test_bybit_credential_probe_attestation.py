@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from types import MappingProxyType
 
@@ -10,6 +11,10 @@ from mvp.autotrade_mvp.bybit_credential_probe_evidence import (
 )
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+from mvp.tests.test_bybit_credential_probe_evidence import (
+    _probe,
+    _register_probe_credential,
+)
 
 
 class _FakeWireClient:
@@ -121,6 +126,28 @@ class BybitCredentialProbeAttestationTests(unittest.TestCase):
                 observed_at="2030-01-01T00:00:00Z",
                 api_key_echo_confirmed=True,
             )
+
+    def test_mutated_negative_wire_cannot_be_promoted_to_accepted_evidence(self):
+        forged = BybitCredentialProbeWireResponse(
+            http_status=200,
+            response={"retCode": 10003, "retMsg": "invalid"},
+        )
+        object.__setattr__(forged, "ret_code", 0)
+        object.__setattr__(forged, "api_key_echo_confirmed", True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            vault, handle = _register_probe_credential(directory)
+
+            def wire_query(**kwargs):
+                del kwargs
+                return forged
+
+            with self.assertRaisesRegex(ProviderCoreError, "provider-derived attestation"):
+                _probe(
+                    vault=vault,
+                    handle=handle,
+                    wire_query=wire_query,
+                )
 
     def test_injected_wire_client_cannot_mint_success_attestation(self):
         client = _FakeWireClient(

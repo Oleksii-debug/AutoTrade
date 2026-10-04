@@ -1,16 +1,16 @@
 """Sealed financial authority for one exact provider request.
 
 This module closes the product-level gap between durable financial admission and
-an irreversible provider send without creating another dispatcher.  The
-existing AuthorityService remains the dynamic financial policy/risk authority;
-the existing HostBoundFinancialDispatcher remains the durable send-state owner.
+an irreversible provider send without creating another dispatcher. The existing
+AuthorityService remains the dynamic financial policy/risk authority; the
+existing HostBoundFinancialDispatcher remains the durable send-state owner.
 This module only mints an issuer-bound capability for one immutable
 FinancialRequestBindingMaterial and turns it back into the legacy two-argument
 dispatch guard *inside* trusted composition.
 
-Provider qualification remains an upstream authority.  A qualification digest
-is retained in FinancialRequestBindingMaterial but this module does not upgrade
-or manufacture qualification evidence.
+Provider qualification remains an upstream authority. A qualification digest is
+retained in FinancialRequestBindingMaterial but this module does not upgrade or
+manufacture qualification evidence.
 """
 
 from __future__ import annotations
@@ -31,6 +31,9 @@ class FinancialSendAuthorityError(PermissionError):
 
 
 _ISSUER_FACTORY_TOKEN = object()
+# Kept only as a compatibility sentinel for callers/tests that imported the old
+# name. It is deliberately no longer accepted by FinancialSendAuthority: a
+# module-importable object cannot be the minting boundary for financial sends.
 _CAPABILITY_FACTORY_TOKEN = object()
 _BOUND_BYBIT_FACTORY_TOKEN = object()
 
@@ -38,7 +41,6 @@ _BOUND_BYBIT_FACTORY_TOKEN = object()
 def _mapping_digest(value: Mapping[str, Any], *, name: str) -> str:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a mapping")
-    # payload_digest uses the same canonical-json contract as GuardedDispatcher.
     return payload_digest(dict(value))
 
 
@@ -140,14 +142,11 @@ def _require_binding_matches_durable_admission(
     durable_intent = risk_payload.get("risk_intent")
     if not isinstance(durable_intent, Mapping):
         raise FinancialSendAuthorityError("durable risk decision lacks canonical risk intent")
-    durable_side = durable_intent.get("side")
-    durable_quantity = durable_intent.get("quantity")
-    durable_price = durable_intent.get("price")
-    if durable_side != binding.side:
+    if durable_intent.get("side") != binding.side:
         raise FinancialSendAuthorityError("financial binding side differs from admitted risk")
-    if durable_quantity != binding.quantity:
+    if durable_intent.get("quantity") != binding.quantity:
         raise FinancialSendAuthorityError("financial binding quantity differs from admitted risk")
-    if durable_price != binding.price:
+    if durable_intent.get("price") != binding.price:
         raise FinancialSendAuthorityError("financial binding price differs from admitted risk")
 
     return admission
@@ -160,11 +159,7 @@ def require_exact_bybit_financial_request(
     *,
     provider_environment: str,
 ) -> None:
-    """Prove one Bybit dispatcher request is the exact financial binding.
-
-    This is intentionally pure and public so provider-composition tests can
-    exercise the terminal equality rule without minting live authority.
-    """
+    """Prove one Bybit dispatcher request is the exact financial binding."""
 
     if type(binding) is not FinancialRequestBindingMaterial:
         raise TypeError("binding must be exact FinancialRequestBindingMaterial")
@@ -241,7 +236,12 @@ def require_exact_bybit_financial_request(
 
 
 class FinancialSendAuthority:
-    """One issuer-bound, admission-bound, exact-request send capability."""
+    """One issuer-bound, admission-bound, exact-request send capability.
+
+    Direct construction is never a minting path. The canonical issuer allocates
+    and initializes the exact sealed object only after durable-admission checks.
+    Ordinary post-mint mutation/copy/pickle operations are rejected.
+    """
 
     __slots__ = (
         "__issuer_identity",
@@ -266,18 +266,25 @@ class FinancialSendAuthority:
         action: str,
         _factory_token: object = None,
     ) -> None:
-        if _factory_token is not _CAPABILITY_FACTORY_TOKEN:
-            raise FinancialSendAuthorityError(
-                "FinancialSendAuthority must be minted by canonical issuer"
-            )
-        if type(binding) is not FinancialRequestBindingMaterial:
-            raise TypeError("binding must be exact FinancialRequestBindingMaterial")
-        self.__issuer_identity = issuer_identity
-        self.__binding = binding
-        self.__admission_id = _exact_text(admission_id, name="admission_id")
-        self.__intent_id = _exact_text(intent_id, name="intent_id")
-        self.__intent_hash = _exact_text(intent_hash, name="intent_hash")
-        self.__action = _exact_text(action, name="action").upper()
+        del issuer_identity, binding, admission_id, intent_id, intent_hash, action, _factory_token
+        raise FinancialSendAuthorityError(
+            "FinancialSendAuthority must be minted by canonical issuer"
+        )
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise FinancialSendAuthorityError("FinancialSendAuthority is immutable")
+
+    def __copy__(self):
+        raise FinancialSendAuthorityError("FinancialSendAuthority cannot be copied")
+
+    def __deepcopy__(self, _memo):
+        raise FinancialSendAuthorityError("FinancialSendAuthority cannot be copied")
+
+    def __reduce__(self):
+        raise FinancialSendAuthorityError("FinancialSendAuthority cannot be serialized")
+
+    def __reduce_ex__(self, _protocol):
+        raise FinancialSendAuthorityError("FinancialSendAuthority cannot be serialized")
 
     @property
     def binding(self) -> FinancialRequestBindingMaterial:
@@ -309,6 +316,7 @@ class FinancialSendAuthority:
                 "financial send capability belongs to another authority issuer"
             )
 
+
 class FinancialSendAuthorityIssuer:
     """Product-owned bridge from AuthorityService to exact send capabilities."""
 
@@ -323,6 +331,12 @@ class FinancialSendAuthorityIssuer:
         "__dispatch_guard_code",
         "__historical_function",
         "__historical_code",
+        "__binding_check_function",
+        "__binding_check_code",
+        "__risk_payload_function",
+        "__risk_payload_code",
+        "__exact_text_function",
+        "__exact_text_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -353,6 +367,9 @@ class FinancialSendAuthorityIssuer:
         dispatcher = runtime.financial_dispatcher
         dispatch_guard_function = AuthorityService.dispatch_guard
         historical_function = AuthorityService.historical_admission
+        binding_check_function = _require_binding_matches_durable_admission
+        risk_payload_function = _risk_payload
+        exact_text_function = _exact_text
         self.__service = service
         self.__runtime = runtime
         self.__journal = journal
@@ -363,6 +380,29 @@ class FinancialSendAuthorityIssuer:
         self.__dispatch_guard_code = dispatch_guard_function.__code__
         self.__historical_function = historical_function
         self.__historical_code = historical_function.__code__
+        self.__binding_check_function = binding_check_function
+        self.__binding_check_code = binding_check_function.__code__
+        self.__risk_payload_function = risk_payload_function
+        self.__risk_payload_code = risk_payload_function.__code__
+        self.__exact_text_function = exact_text_function
+        self.__exact_text_code = exact_text_function.__code__
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise FinancialSendAuthorityError("FinancialSendAuthorityIssuer is immutable")
+        object.__setattr__(self, name, value)
+
+    def __copy__(self):
+        raise FinancialSendAuthorityError("FinancialSendAuthorityIssuer cannot be copied")
+
+    def __deepcopy__(self, _memo):
+        raise FinancialSendAuthorityError("FinancialSendAuthorityIssuer cannot be copied")
+
+    def __reduce__(self):
+        raise FinancialSendAuthorityError("FinancialSendAuthorityIssuer cannot be serialized")
+
+    def __reduce_ex__(self, _protocol):
+        raise FinancialSendAuthorityError("FinancialSendAuthorityIssuer cannot be serialized")
 
     def _require_current(self) -> None:
         if type(self.__service) is not AuthorityService:
@@ -386,6 +426,18 @@ class FinancialSendAuthorityIssuer:
             raise FinancialSendAuthorityError("AuthorityService historical authority changed")
         if self.__historical_function.__code__ is not self.__historical_code:
             raise FinancialSendAuthorityError("AuthorityService historical code changed")
+        if _require_binding_matches_durable_admission is not self.__binding_check_function:
+            raise FinancialSendAuthorityError("financial binding authority changed")
+        if self.__binding_check_function.__code__ is not self.__binding_check_code:
+            raise FinancialSendAuthorityError("financial binding authority code changed")
+        if _risk_payload is not self.__risk_payload_function:
+            raise FinancialSendAuthorityError("financial risk payload authority changed")
+        if self.__risk_payload_function.__code__ is not self.__risk_payload_code:
+            raise FinancialSendAuthorityError("financial risk payload authority code changed")
+        if _exact_text is not self.__exact_text_function:
+            raise FinancialSendAuthorityError("financial scalar authority changed")
+        if self.__exact_text_function.__code__ is not self.__exact_text_code:
+            raise FinancialSendAuthorityError("financial scalar authority code changed")
 
     @property
     def runtime(self) -> FinancialProductionHostRuntime:
@@ -404,28 +456,58 @@ class FinancialSendAuthorityIssuer:
         self._require_current()
         if type(binding) is not FinancialRequestBindingMaterial:
             raise TypeError("binding must be exact FinancialRequestBindingMaterial")
-        admission = _require_binding_matches_durable_admission(
+        canonical_admission_id = _exact_text(admission_id, name="admission_id")
+        canonical_intent_id = _exact_text(intent_id, name="intent_id")
+        canonical_intent_hash = _exact_text(intent_hash, name="intent_hash")
+        canonical_action = _exact_text(action, name="action").upper()
+        admission = self.__binding_check_function(
             service=self.__service,
             journal=self.__journal,
-            admission_id=_exact_text(admission_id, name="admission_id"),
-            intent_hash=_exact_text(intent_hash, name="intent_hash"),
-            action=_exact_text(action, name="action"),
+            admission_id=canonical_admission_id,
+            intent_hash=canonical_intent_hash,
+            action=canonical_action,
             binding=binding,
         )
-        canonical_intent_id = _exact_text(intent_id, name="intent_id")
         if admission.get("intent_id") != canonical_intent_id:
             raise FinancialSendAuthorityError(
                 "financial send intent id differs from durable admission"
             )
-        return FinancialSendAuthority(
-            issuer_identity=self.__issuer_identity,
-            binding=binding,
-            admission_id=admission_id,
-            intent_id=canonical_intent_id,
-            intent_hash=intent_hash,
-            action=action,
-            _factory_token=_CAPABILITY_FACTORY_TOKEN,
+
+        # Deliberately bypass FinancialSendAuthority.__init__. The class
+        # constructor is never a minting interface; only this already-validated
+        # issuer path initializes an exact capability instance.
+        authority = object.__new__(FinancialSendAuthority)
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__issuer_identity",
+            self.__issuer_identity,
         )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__binding",
+            binding,
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__admission_id",
+            canonical_admission_id,
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__intent_id",
+            canonical_intent_id,
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__intent_hash",
+            canonical_intent_hash,
+        )
+        object.__setattr__(
+            authority,
+            "_FinancialSendAuthority__action",
+            canonical_action,
+        )
+        return authority
 
     def _require_capability(self, authority: FinancialSendAuthority) -> None:
         self._require_current()
@@ -443,7 +525,7 @@ class FinancialSendAuthorityIssuer:
 
         self._require_capability(authority)
         binding = authority.binding
-        admission = _require_binding_matches_durable_admission(
+        admission = self.__binding_check_function(
             service=self.__service,
             journal=self.__journal,
             admission_id=authority.admission_id,
@@ -483,7 +565,22 @@ def build_financial_send_authority_issuer(
 class FinanciallyBoundBybitOrderSender:
     """Canonical Bybit product sender requiring one sealed financial capability."""
 
-    __slots__ = ("__sender", "__issuer", "__runtime", "__provider_environment")
+    __slots__ = (
+        "__sender",
+        "__issuer",
+        "__runtime",
+        "__provider_environment",
+        "__issuer_guard_function",
+        "__issuer_guard_code",
+        "__request_guard_function",
+        "__request_guard_code",
+        "__snapshot_function",
+        "__snapshot_code",
+        "__mapping_digest_function",
+        "__mapping_digest_code",
+        "__exact_text_function",
+        "__exact_text_code",
+    )
 
     def __init_subclass__(cls, **_kwargs) -> None:
         raise TypeError("FinanciallyBoundBybitOrderSender is sealed")
@@ -509,14 +606,70 @@ class FinanciallyBoundBybitOrderSender:
             raise FinancialSendAuthorityError(
                 "Bybit sender and financial issuer belong to different production hosts"
             )
+        issuer_guard_function = FinancialSendAuthorityIssuer._dispatch_guard_for
+        request_guard_function = require_exact_bybit_financial_request
+        snapshot_function = _detached_mapping_snapshot
+        mapping_digest_function = _mapping_digest
+        exact_text_function = _exact_text
         self.__sender = sender
         self.__issuer = issuer
         self.__runtime = runtime
         self.__provider_environment = sender.provider_environment
+        self.__issuer_guard_function = issuer_guard_function
+        self.__issuer_guard_code = issuer_guard_function.__code__
+        self.__request_guard_function = request_guard_function
+        self.__request_guard_code = request_guard_function.__code__
+        self.__snapshot_function = snapshot_function
+        self.__snapshot_code = snapshot_function.__code__
+        self.__mapping_digest_function = mapping_digest_function
+        self.__mapping_digest_code = mapping_digest_function.__code__
+        self.__exact_text_function = exact_text_function
+        self.__exact_text_code = exact_text_function.__code__
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise FinancialSendAuthorityError(
+                "FinanciallyBoundBybitOrderSender is immutable"
+            )
+        object.__setattr__(self, name, value)
+
+    def __copy__(self):
+        raise FinancialSendAuthorityError("bound Bybit sender cannot be copied")
+
+    def __deepcopy__(self, _memo):
+        raise FinancialSendAuthorityError("bound Bybit sender cannot be copied")
+
+    def __reduce__(self):
+        raise FinancialSendAuthorityError("bound Bybit sender cannot be serialized")
+
+    def __reduce_ex__(self, _protocol):
+        raise FinancialSendAuthorityError("bound Bybit sender cannot be serialized")
 
     @property
     def provider_environment(self) -> str:
         return self.__provider_environment
+
+    def _require_composition_current(self) -> None:
+        if FinancialSendAuthorityIssuer._dispatch_guard_for is not self.__issuer_guard_function:
+            raise FinancialSendAuthorityError("financial issuer dispatch authority changed")
+        if self.__issuer_guard_function.__code__ is not self.__issuer_guard_code:
+            raise FinancialSendAuthorityError("financial issuer dispatch code changed")
+        if require_exact_bybit_financial_request is not self.__request_guard_function:
+            raise FinancialSendAuthorityError("Bybit financial request authority changed")
+        if self.__request_guard_function.__code__ is not self.__request_guard_code:
+            raise FinancialSendAuthorityError("Bybit financial request authority code changed")
+        if _detached_mapping_snapshot is not self.__snapshot_function:
+            raise FinancialSendAuthorityError("financial request snapshot authority changed")
+        if self.__snapshot_function.__code__ is not self.__snapshot_code:
+            raise FinancialSendAuthorityError("financial request snapshot code changed")
+        if _mapping_digest is not self.__mapping_digest_function:
+            raise FinancialSendAuthorityError("financial request digest authority changed")
+        if self.__mapping_digest_function.__code__ is not self.__mapping_digest_code:
+            raise FinancialSendAuthorityError("financial request digest code changed")
+        if _exact_text is not self.__exact_text_function:
+            raise FinancialSendAuthorityError("financial scalar authority changed")
+        if self.__exact_text_function.__code__ is not self.__exact_text_code:
+            raise FinancialSendAuthorityError("financial scalar authority code changed")
 
     def dispatch(
         self,
@@ -532,25 +685,26 @@ class FinanciallyBoundBybitOrderSender:
         final_barrier_clock: Callable[[], str] | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        request_snapshot = _detached_mapping_snapshot(request, name="request")
+        self._require_composition_current()
+        request_snapshot = self.__snapshot_function(request, name="request")
         submission_scope_snapshot = (
             {}
             if submission_scope is None
-            else _detached_mapping_snapshot(
+            else self.__snapshot_function(
                 submission_scope,
                 name="submission_scope",
             )
         )
 
         issuer = self.__issuer
-        authority_check = issuer._dispatch_guard_for(authority)
+        authority_check = self.__issuer_guard_function(issuer, authority)
         if issuer.runtime is not self.__runtime:
             raise FinancialSendAuthorityError("financial issuer production host changed")
         if authority.intent_id != intent_id or authority.intent_hash != intent_hash:
             raise FinancialSendAuthorityError(
                 "dispatch intent differs from sealed financial authority"
             )
-        require_exact_bybit_financial_request(
+        self.__request_guard_function(
             authority.binding,
             request_snapshot,
             submission_scope_snapshot,

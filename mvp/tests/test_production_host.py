@@ -126,6 +126,20 @@ class ProductionHostCompositionTests(unittest.TestCase):
                 runtime.close()
             fence.release.assert_called_once_with()
 
+    def test_runtime_constructor_requires_canonical_issuance(self):
+        with self.assertRaisesRegex(
+            PermissionError,
+            "issued by canonical host composition",
+        ):
+            ProductionHostRuntime(
+                config=Mock(),
+                journal=Mock(),
+                application=Mock(),
+                server=Mock(),
+                instance_fence=Mock(),
+                admission_gate=Mock(),
+            )
+
     def test_runtime_config_reads_return_detached_canonical_snapshots(self):
         with TemporaryDirectory() as directory:
             config = self._config(directory)

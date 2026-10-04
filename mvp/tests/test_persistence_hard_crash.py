@@ -1024,5 +1024,153 @@ class HardCrashPersistenceTests(unittest.TestCase):
             self.assertEqual(reopened.get_event("evt-hard-crash")["payload"]["quantity"], "1")
 
 
+    def test_outbox_ack_process_exit_before_commit_keeps_pending_intent(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(_event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+            outbox_id = pending["outbox_id"]
+            envelope_hash = pending["envelope_hash"]
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path, outbox_id, envelope_hash = sys.argv[1:4]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(89)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashBeforeCommit(connection)
+
+                store._connect = crashing_connect
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                    expected_journal_sequence=1,
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(path),
+                    outbox_id,
+                    envelope_hash,
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 89)
+
+            reopened = JournalStore(path)
+            still_pending = reopened.pending_outbox()
+            self.assertEqual(len(still_pending), 1)
+            self.assertEqual(still_pending[0]["outbox_id"], outbox_id)
+            self.assertTrue(
+                reopened.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                    expected_journal_sequence=1,
+                )
+            )
+            self.assertEqual(reopened.pending_outbox(), [])
+
+    def test_outbox_ack_process_exit_after_commit_is_idempotently_delivered(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(_event(), outbox_topic="events")
+            pending = store.pending_outbox()[0]
+            outbox_id = pending["outbox_id"]
+            envelope_hash = pending["envelope_hash"]
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path, outbox_id, envelope_hash = sys.argv[1:4]
+                store = JournalStore(path)
+                original_connect = store._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(90)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashAfterCommit(connection)
+
+                store._connect = crashing_connect
+                store.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                    expected_journal_sequence=1,
+                )
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(path),
+                    outbox_id,
+                    envelope_hash,
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 90)
+
+            reopened = JournalStore(path)
+            self.assertEqual(reopened.pending_outbox(), [])
+            self.assertFalse(
+                reopened.mark_outbox_delivered(
+                    outbox_id,
+                    expected_envelope_hash=envelope_hash,
+                    expected_journal_sequence=1,
+                )
+            )
+            self.assertEqual(reopened.current_journal_sequence(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

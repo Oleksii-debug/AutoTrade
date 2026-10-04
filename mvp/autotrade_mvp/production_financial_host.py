@@ -1,24 +1,9 @@
 """Host-lifetime composition of recovery-owned financial send authority.
 
 This module is a convergence adapter over the existing production host (#1117)
-and recovery-issued dispatcher lineage (#1453/#1462).  It deliberately creates
+and recovery-issued dispatcher lineage (#1453/#1462). It deliberately creates
 no second listener, journal, recovery state machine, sender lock, or provider
 transport.
-
-The important ordering contract is:
-
-* ``build_production_host`` acquires the canonical host instance fence first;
-* only then is a RecoveryController bound to that exact JournalStore generation;
-* a financial dispatcher is issued only for a current durable recovery owner;
-* every financial dispatch holds the production runtime's existing lifecycle
-  condition for its complete dispatch, so terminal teardown cannot cross the
-  host-fence release while a provider send is in flight;
-* once the host enters CLOSING/CLOSED/FAILED, no new financial dispatch can
-  enter even if process-local recovery state has not yet been cleared.
-
-Fresh journals may create epoch 1 automatically.  Existing durable ownership is
-never silently reused: the runtime starts fail-closed and requires the explicit
-crash-resumable takeover issuer before a financial dispatcher is available.
 """
 
 from __future__ import annotations
@@ -27,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from .dispatch import AuthorityCheck, DispatchOutcome, SenderCheck, TransportSend
+from .persistence import JournalStore
 from .production_host import (
     ProductionHostConfig,
     ProductionHostRuntime,
@@ -46,8 +32,8 @@ from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVaul
 class _HostFinancialAuthority:
     """Exact product composition selected while the host fence is held."""
 
-    config: ProductionHostConfig
-    journal: object
+    config_identity: tuple[object, ...]
+    journal: JournalStore
     store_identity: object
     lifecycle_condition: object
     instance_fence: object
@@ -56,26 +42,57 @@ class _HostFinancialAuthority:
     host_id: str
 
 
+def _config_identity(config: ProductionHostConfig) -> tuple[object, ...]:
+    if type(config) is not ProductionHostConfig:
+        raise PermissionError("production host config authority changed")
+    state = vars(config)
+    if type(state) is not dict:
+        raise PermissionError("production host config state changed")
+    for field_name in (
+        "account_id",
+        "environment",
+        "host_id",
+        "bind_host",
+        "public_origin",
+    ):
+        value = state.get(field_name)
+        if type(value) is not str or not value:
+            raise PermissionError(
+                f"production host {field_name} must be exact non-empty text"
+            )
+    if type(state.get("bind_port")) is not int:
+        raise PermissionError("production host bind_port must be an exact integer")
+    journal_path = state.get("journal_path")
+    if type(journal_path) is not type(config.journal_path):
+        raise PermissionError("production host journal_path authority changed")
+    return (
+        journal_path,
+        state["account_id"],
+        state["environment"],
+        state["host_id"],
+        state["bind_host"],
+        state["bind_port"],
+        state["public_origin"],
+    )
+
+
 def _capture_host_financial_authority(
     host: ProductionHostRuntime,
 ) -> _HostFinancialAuthority:
     if type(host) is not ProductionHostRuntime:
         raise TypeError("host must be exact ProductionHostRuntime")
     config = host.config
-    if type(config) is not ProductionHostConfig:
-        raise PermissionError("production host config authority changed")
-    for field_name in ("environment", "account_id", "host_id"):
-        value = getattr(config, field_name)
-        if type(value) is not str or not value:
-            raise PermissionError(
-                f"production host {field_name} must be exact non-empty text"
-            )
+    identity = _config_identity(config)
     journal = host.journal
+    if type(journal) is not JournalStore:
+        raise PermissionError("production host journal authority changed")
     store_identity = host.store_identity
     if journal.store_identity != store_identity:
         raise PermissionError("production host journal identity is inconsistent")
+    if config.journal_path != journal.path:
+        raise PermissionError("production host config journal does not match host journal")
     return _HostFinancialAuthority(
-        config=config,
+        config_identity=identity,
         journal=journal,
         store_identity=store_identity,
         lifecycle_condition=host._lifecycle_condition,
@@ -89,20 +106,13 @@ def _capture_host_financial_authority(
 def _require_host_financial_authority(
     host: ProductionHostRuntime,
     authority: _HostFinancialAuthority,
-) -> None:
+) -> ProductionHostConfig:
     if type(host) is not ProductionHostRuntime:
         raise PermissionError("production host type changed")
     if type(authority) is not _HostFinancialAuthority:
         raise PermissionError("production host financial authority changed")
     config = host.config
-    if config is not authority.config or type(config) is not ProductionHostConfig:
-        raise PermissionError("production host config authority changed")
-    current_values = (config.environment, config.account_id, config.host_id)
-    if any(type(value) is not str for value in current_values) or current_values != (
-        authority.environment,
-        authority.account_id,
-        authority.host_id,
-    ):
+    if _config_identity(config) != authority.config_identity:
         raise PermissionError("production host identity changed after composition")
     if host.journal is not authority.journal:
         raise PermissionError("production host journal changed after composition")
@@ -115,6 +125,7 @@ def _require_host_financial_authority(
         raise PermissionError("production host lifecycle authority changed")
     if host._instance_fence is not authority.instance_fence:
         raise PermissionError("production host instance-fence authority changed")
+    return config
 
 
 class HostBoundFinancialDispatcher:
@@ -243,11 +254,13 @@ class FinancialProductionHostRuntime:
 
     @property
     def config(self) -> ProductionHostConfig:
-        _require_host_financial_authority(self.__host, self.__host_authority)
-        return self.__host_authority.config
+        return _require_host_financial_authority(
+            self.__host,
+            self.__host_authority,
+        )
 
     @property
-    def journal(self):
+    def journal(self) -> JournalStore:
         _require_host_financial_authority(self.__host, self.__host_authority)
         return self.__host_authority.journal
 
@@ -375,12 +388,7 @@ class FinancialProductionHostRuntime:
 def compose_financial_authority(
     host: ProductionHostRuntime,
 ) -> FinancialProductionHostRuntime:
-    """Bind financial recovery authority to an already-fenced production host.
-
-    This helper exists so the integration can be falsified without creating a
-    second listener. The exact JournalStore retained by ``host`` is always the
-    owner journal and submission journal.
-    """
+    """Bind financial recovery authority to an already-fenced production host."""
 
     if type(host) is not ProductionHostRuntime:
         raise TypeError("host must be exact ProductionHostRuntime")
@@ -410,9 +418,6 @@ def compose_financial_authority(
             )
             dispatcher = HostBoundFinancialDispatcher(host, issued, authority)
         else:
-            # Existing durable ownership grants no sender capability here.
-            # The explicit takeover issuer must advance the owner generation
-            # before this runtime creates a financial dispatcher.
             recovery.owner = chain[-1]
             recovery.state = HostState.RECOVERING
             recovery.provider_reconciled = False

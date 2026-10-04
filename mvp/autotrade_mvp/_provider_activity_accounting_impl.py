@@ -4191,6 +4191,37 @@ def commit_provider_fill_bust_with_economic_reversal(
         },
         "economic_reversal": economic_plan.result,
     }
+    if reservation_plan is not None:
+        assert rid is not None
+        assert initial_fill_binding_event_id is not None
+        assert initial_fill_binding_request_digest is not None
+        request = {
+            **request,
+            "schema_version": "1.1.0",
+            "reservation_restoration": {
+                "reservation_id": rid,
+                "operation": "RESTORE_CONSUMPTION",
+                "idempotency_key": reservation_plan.idempotency_key,
+                "request": reservation_plan.request,
+                "aggregate_version": reservation_plan.aggregate_version,
+                "snapshot_digest": payload_digest(
+                    reservation_plan.snapshot_payload
+                ),
+                "source_fill_binding_event_id": (
+                    initial_fill_binding_event_id
+                ),
+                "source_fill_binding_request_digest": (
+                    initial_fill_binding_request_digest
+                ),
+            },
+        }
+        result = {
+            **result,
+            "reservation_restoration": {
+                "reservation_id": rid,
+                "snapshot": reservation_plan.snapshot_payload,
+            },
+        }
     command_identity = str(
         uuid5(
             NAMESPACE_URL,
@@ -4225,6 +4256,7 @@ def commit_provider_fill_bust_with_economic_reversal(
             )
         order_matches = []
         economic_matches = []
+        reservation_matches = []
         unexpected = []
         for event in raw_events:
             if not isinstance(event, Mapping):
@@ -4266,21 +4298,69 @@ def commit_provider_fill_bust_with_economic_reversal(
             ):
                 economic_matches.append(event)
                 continue
+            if reservation_plan is not None and (
+                event.get("event_type") == "ReservationMutationCommitted"
+                and event.get("aggregate_type") == "reservation_book"
+                and event.get("aggregate_id") == reservation_book.scope_id
+                and event.get("aggregate_version")
+                == reservation_plan.aggregate_version
+                and isinstance(payload, Mapping)
+                and payload.get("environment")
+                == reservation_book.environment
+                and payload.get("account_id") == reservation_book.account_id
+                and payload.get("operation") == "RESTORE_CONSUMPTION"
+                and payload.get("idempotency_key")
+                == reservation_plan.idempotency_key
+                and payload.get("request") == reservation_plan.request
+                and payload.get("request_hash")
+                == payload_digest(reservation_plan.request)
+                and payload.get("snapshot")
+                == reservation_plan.snapshot_payload
+                and payload_digest(payload) == event.get("payload_hash")
+            ):
+                reservation_matches.append(event)
+                continue
             unexpected.append(event)
-        if len(economic_matches) != 1 or len(order_matches) > 1 or unexpected:
-            raise AccountingConflict(
-                "atomic fill bust command is bound to unexpected durable effects"
-            )
-        # Fresh atomic composition owns both events. OMS-only recovery owns the
-        # missing finance event and names the immutable pre-existing OMS event.
-        if len(raw_events) == 2 and len(order_matches) != 1:
-            raise AccountingConflict(
-                "fresh atomic fill bust command does not own its OMS event"
-            )
-        if len(raw_events) not in {1, 2}:
-            raise AccountingConflict(
-                "atomic fill bust command has invalid effect cardinality"
-            )
+
+        if reservation_plan is None:
+            if len(economic_matches) != 1 or len(order_matches) > 1 or unexpected:
+                raise AccountingConflict(
+                    "atomic fill bust command is bound to unexpected durable effects"
+                )
+            # Fresh legacy composition owns both events. OMS-only recovery owns
+            # the missing finance event and names the immutable pre-existing OMS event.
+            if len(raw_events) == 2 and len(order_matches) != 1:
+                raise AccountingConflict(
+                    "fresh atomic fill bust command does not own its OMS event"
+                )
+            if len(raw_events) not in {1, 2}:
+                raise AccountingConflict(
+                    "atomic fill bust command has invalid effect cardinality"
+                )
+        else:
+            if (
+                len(economic_matches) != 1
+                or len(reservation_matches) != 1
+                or len(order_matches) > 1
+                or unexpected
+            ):
+                raise AccountingConflict(
+                    "atomic fill bust command is bound to unexpected durable effects"
+                )
+            # Fresh composition owns OMS + economic + reservation events.
+            # Exact OMS-only recovery owns only the two missing financial effects.
+            if len(raw_events) == 3 and len(order_matches) != 1:
+                raise AccountingConflict(
+                    "fresh reservation-aware fill bust command does not own its OMS event"
+                )
+            if len(raw_events) == 2 and order_matches:
+                raise AccountingConflict(
+                    "reservation-aware OMS recovery has invalid effect ownership"
+                )
+            if len(raw_events) not in {2, 3}:
+                raise AccountingConflict(
+                    "reservation-aware fill bust command has invalid effect cardinality"
+                )
 
     if economic_plan.already_committed and order_plan.already_committed:
         try:

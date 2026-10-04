@@ -594,6 +594,11 @@ class DurableReservationBook:
                 request["reservation_id"],
                 request["usage"],
             )
+        if operation == "RESTORE_CONSUMPTION":
+            return book.restore_consumption(
+                request["reservation_id"],
+                request["usage"],
+            )
         if operation == "MARK_UNKNOWN":
             return book.mark_unknown(request["reservation_id"])
         if operation in {"MARK_TERMINAL", "MARK_ZERO_WIRE_TERMINAL"}:
@@ -786,6 +791,103 @@ class DurableReservationBook:
                 self.environment,
                 self.account_id,
                 "financial-fill-reservation-event",
+                _text(event_key, name="event_key"),
+            ),
+            "event_type": _EVENT_TYPE,
+            "aggregate_type": _AGGREGATE_TYPE,
+            "aggregate_id": self.scope_id,
+            "aggregate_version": str(next_version),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": _text(committed_at, name="committed_at"),
+        }
+        return PreparedReservationMutation(
+            snapshot=snapshot,
+            snapshot_payload=snapshot_value,
+            envelope=envelope,
+            idempotency_key=key,
+            request=request,
+            aggregate_version=next_version,
+        )
+
+    def prepare_restore_consumption_mutation(
+        self,
+        *,
+        event_key: str,
+        idempotency_key: str,
+        reservation_id: str,
+        usage: Mapping[str, object],
+        committed_at: str,
+        expected_snapshot_digest: str | None = None,
+    ) -> PreparedReservationMutation:
+        """Prepare a conservative fill-bust restoration for a shared commit.
+
+        The mutation moves previously consumed amounts back to the active
+        reservation's remaining balance. It therefore restores held capacity;
+        it does not release capacity to availability. No state is mutated until
+        the caller commits this envelope in the canonical JournalStore batch.
+        """
+
+        key = _text(idempotency_key, name="idempotency_key")
+        request = {
+            "reservation_id": _text(reservation_id, name="reservation_id"),
+            "usage": _amount_map(usage, allow_zero=False),
+        }
+        expected_cut = (
+            None
+            if expected_snapshot_digest is None
+            else _text(expected_snapshot_digest, name="expected_snapshot_digest")
+        )
+        events = self._events()
+        candidate, idempotency = self._replay(events)
+        existing = idempotency.get(key)
+        if existing is not None:
+            if existing[0] != payload_digest(request):
+                raise ReservationConflict(
+                    "idempotency_key was already used for a different reservation request"
+                )
+            snapshot = candidate.get(request["reservation_id"])
+            snapshot_value = _snapshot_payload(snapshot)
+            if snapshot_value != existing[1]:
+                raise ReservationConflict(
+                    "committed reservation restoration snapshot does not match replayed state"
+                )
+            return PreparedReservationMutation(
+                snapshot=snapshot,
+                snapshot_payload=snapshot_value,
+                envelope=None,
+                idempotency_key=key,
+                request=request,
+                aggregate_version=(
+                    0 if not events else int(events[-1]["aggregate_version"])
+                ),
+                already_committed=True,
+            )
+
+        if expected_cut is not None:
+            current_snapshot = candidate.get(request["reservation_id"])
+            if reservation_snapshot_digest(current_snapshot) != expected_cut:
+                raise ReservationConflict(
+                    "reservation snapshot changed after fill-bust restoration derivation"
+                )
+
+        snapshot = self._apply(candidate, "RESTORE_CONSUMPTION", request)
+        snapshot_value = _snapshot_payload(snapshot)
+        next_version = 1 if not events else int(events[-1]["aggregate_version"]) + 1
+        payload = {
+            "environment": self.environment,
+            "account_id": self.account_id,
+            "operation": "RESTORE_CONSUMPTION",
+            "request": request,
+            "idempotency_key": key,
+            "request_hash": payload_digest(request),
+            "snapshot": snapshot_value,
+        }
+        envelope = {
+            "event_id": _journal_identity(
+                self.environment,
+                self.account_id,
+                "financial-fill-bust-reservation-event",
                 _text(event_key, name="event_key"),
             ),
             "event_type": _EVENT_TYPE,

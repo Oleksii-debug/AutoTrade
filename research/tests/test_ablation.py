@@ -1616,6 +1616,50 @@ class AblationTests(unittest.TestCase):
             science = ScientificRegistry(root / "science.sqlite3")
             memory = ExperienceMemory(root / "memory.sqlite3")
             artifacts = ArtifactStore(root / "artifacts")
+
+            def projection_ref(
+                artifact_id: str,
+                *,
+                projection_kind: str,
+                owner_authority: str,
+                rule_id: str,
+            ) -> str:
+                payload = {
+                    "schema_version": 1,
+                    "projection_kind": projection_kind,
+                    "value_unit": "USD",
+                    "owner_authority": owner_authority,
+                    "rule_id": rule_id,
+                }
+                raw = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                manifest = artifacts.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=raw,
+                    media_type=(
+                        "application/vnd.autotrade.ablation-value-projection+json"
+                    ),
+                    rights={"storage": True, "export": False},
+                    source_refs=["wp63:preregistered-projection-rule"],
+                )
+                return f"artifact:{artifact_id}@{manifest['sha256']}"
+
+            utility_projection_ref = projection_ref(
+                "33333333-3333-4333-8333-333333333333",
+                projection_kind="UTILITY",
+                owner_authority="CANONICAL_RECONCILED_OUTCOME",
+                rule_id="reconciled-outcome-net-value-v1",
+            )
+            cost_projection_ref = projection_ref(
+                "44444444-4444-4444-8444-444444444444",
+                projection_kind="COST",
+                owner_authority="CANONICAL_PROVIDER_ECONOMIC_BOOK",
+                rule_id="provider-economic-after-cost-v1",
+            )
             protocol_payload = {
                 "hypothesis": "agent adds after-cost value",
                 "strategy": "matched causal ablation",
@@ -1645,14 +1689,8 @@ class AblationTests(unittest.TestCase):
                 "ablation_value_policy": {
                     "schema_version": "1.0.0",
                     "value_unit": "USD",
-                    "utility_projection_ref": (
-                        "artifact:33333333-3333-4333-8333-333333333333@sha256:"
-                        + "3" * 64
-                    ),
-                    "cost_projection_ref": (
-                        "artifact:44444444-4444-4444-8444-444444444444@sha256:"
-                        + "4" * 64
-                    ),
+                    "utility_projection_ref": utility_projection_ref,
+                    "cost_projection_ref": cost_projection_ref,
                     "fx_valuation_ref": None,
                 },
                 "statistical_estimator": "matched-lower-bound",

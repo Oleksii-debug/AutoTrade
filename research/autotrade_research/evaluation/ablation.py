@@ -1131,6 +1131,121 @@ class AblationOutcomeArtifactRef:
 
 
 _ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
+_ABLATION_VALUE_PROJECTION_MEDIA_TYPE = (
+    "application/vnd.autotrade.ablation-value-projection+json"
+)
+_ABLATION_PROJECTION_OWNER = {
+    "UTILITY": "CANONICAL_RECONCILED_OUTCOME",
+    "COST": "CANONICAL_PROVIDER_ECONOMIC_BOOK",
+}
+
+
+@dataclass(frozen=True)
+class RegisteredAblationProjectionDescriptor:
+    """Frozen preregistered rule identity; never an outcome-value authority."""
+
+    artifact_id: str
+    sha256: str
+    projection_kind: str
+    value_unit: str
+    owner_authority: str
+    rule_id: str
+
+
+def _registered_projection_reference(reference: object, field: str) -> tuple[str, str]:
+    """Parse the registry's immutable artifact:<uuid>@sha256:<digest> identity."""
+
+    from uuid import UUID
+
+    if type(reference) is not str or not reference.startswith("artifact:"):
+        raise ValueError(f"{field} must be an immutable artifact reference")
+    material = reference.removeprefix("artifact:")
+    if material.count("@") != 1:
+        raise ValueError(f"{field} must contain one immutable artifact digest")
+    artifact_id, digest = material.split("@", 1)
+    try:
+        canonical_id = str(UUID(artifact_id))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ValueError(f"{field} artifact identity is invalid") from error
+    if canonical_id != artifact_id:
+        raise ValueError(f"{field} artifact identity is not canonical")
+    return canonical_id, _digest(digest, f"{field} digest")
+
+
+def _load_registered_projection_descriptor(
+    artifact_store: ArtifactStore,
+    reference: object,
+    *,
+    projection_kind: str,
+    value_unit: str,
+) -> RegisteredAblationProjectionDescriptor:
+    """Authenticate one preregistered projection rule without trusting its operands.
+
+    The rule may select how a later canonical owner is interpreted, but cannot
+    itself mint utility/cost.  Terminal values remain unavailable until the
+    named independent owner is composed and reverified at the frozen cut.
+    """
+
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("projection descriptor requires exact ArtifactStore")
+    if projection_kind not in _ABLATION_PROJECTION_OWNER:
+        raise ValueError("projection_kind is unsupported")
+    unit = _canonical_identity_text(value_unit, "value_unit")
+    artifact_id, digest = _registered_projection_reference(
+        reference,
+        f"{projection_kind.lower()}_projection_ref",
+    )
+    manifest = ArtifactStore.load_manifest(artifact_store, artifact_id)
+    if manifest.get("sha256") != digest:
+        raise ValueError("registered ablation projection digest mismatch")
+    if manifest.get("media_type") != _ABLATION_VALUE_PROJECTION_MEDIA_TYPE:
+        raise ValueError("registered ablation projection media type is not qualified")
+    data = ArtifactStore.read_bytes(artifact_store, artifact_id)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("registered ablation projection must be UTF-8 JSON") from error
+    try:
+        payload = strict_json_loads(text)
+    except ValueError as error:
+        raise ValueError("registered ablation projection JSON is invalid") from error
+    required = {
+        "schema_version",
+        "projection_kind",
+        "value_unit",
+        "owner_authority",
+        "rule_id",
+    }
+    if type(payload) is not dict or set(payload) != required:
+        raise ValueError("registered ablation projection schema is not canonical")
+    if payload.get("schema_version") != 1:
+        raise ValueError("registered ablation projection schema version is unsupported")
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    if canonical != text:
+        raise ValueError("registered ablation projection JSON must be canonical")
+    if payload.get("projection_kind") != projection_kind:
+        raise ValueError("registered ablation projection kind mismatch")
+    if payload.get("value_unit") != unit:
+        raise ValueError("registered ablation projection value unit mismatch")
+    expected_owner = _ABLATION_PROJECTION_OWNER[projection_kind]
+    if payload.get("owner_authority") != expected_owner:
+        raise ValueError("registered ablation projection owner authority mismatch")
+    rule_id = _canonical_identity_text(payload.get("rule_id"), "projection rule_id")
+    return RegisteredAblationProjectionDescriptor(
+        artifact_id=artifact_id,
+        sha256=digest,
+        projection_kind=projection_kind,
+        value_unit=unit,
+        owner_authority=expected_owner,
+        rule_id=rule_id,
+    )
+
+
 
 
 def _parse_utc_text(value: object, field: str) -> datetime:
@@ -1955,6 +2070,27 @@ def _registered_value_policy(authority: object):
     return policy
 
 
+def _registered_projection_descriptors(authority: object, value_policy: object):
+    """Resolve preregistered rule bytes while keeping utility/cost owners separate."""
+
+    _registry, _memory, artifacts, _protocol_id, _protocol_hash, *_rest = (
+        _registered_policy_context(authority)
+    )
+    utility = _load_registered_projection_descriptor(
+        artifacts,
+        value_policy.utility_projection_ref,
+        projection_kind="UTILITY",
+        value_unit=value_policy.value_unit,
+    )
+    cost = _load_registered_projection_descriptor(
+        artifacts,
+        value_policy.cost_projection_ref,
+        projection_kind="COST",
+        value_unit=value_policy.value_unit,
+    )
+    return utility, cost
+
+
 def _qualified_inconclusive(
     *,
     target_component: str,
@@ -2056,7 +2192,7 @@ def evaluate_qualified_incremental_value(
             )
 
         try:
-            _registered_value_policy(authority)
+            registered_value = _registered_value_policy(authority)
         except (ProtocolViolation, KeyError, TypeError, ValueError):
             return _qualified_inconclusive(
                 target_component=target,
@@ -2104,11 +2240,25 @@ def evaluate_qualified_incremental_value(
                     reason="post_hoc_population_or_protocol_registration",
                 )
 
-        # #718/#1097: protocol and complete mature population are now preflighted,
-        # but the project still lacks an independent authenticated utility
-        # scorer/projection issuer and terminal composition with the canonical
-        # historical economic cut. Never read candidate utility/cost artifacts
-        # merely because their digest strings are well formed.
+        # Projection-rule bytes are safe to authenticate now: they were frozen
+        # in the preregistered protocol before these outcomes.  They still do
+        # not own any utility/cost value, so successful rule preflight must not
+        # remove the terminal economic-evidence interlock.
+        try:
+            _registered_projection_descriptors(authority, registered_value)
+        except (KeyError, TypeError, ValueError):
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_projection_evidence_unavailable",
+            )
+
+        # #718/#1097: protocol, complete mature population and immutable rule
+        # identities are now preflighted.  The project still lacks the later
+        # reconciled utility issuer and terminal composition with the canonical
+        # historical economic cut. Never treat the descriptor itself, or the
+        # candidate-authored utility/cost fields, as an owned economic fact.
         return _qualified_inconclusive(
             target_component=target,
             required_lower_bound=required,

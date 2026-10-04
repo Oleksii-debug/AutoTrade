@@ -561,11 +561,33 @@ def _latest_effectful_submission_sequence(
             raise DurableTakeoverError(
                 "SubmissionPrepared payload is invalid"
             )
+        effectful = any(
+            event.get("event_type") in _EFFECTFUL_SUBMISSION_EVENTS
+            for event in events
+        )
+        durable_environment = payload.get("environment")
+        durable_account = payload.get("account_id")
         if (
-            str(payload.get("environment", "")).strip().upper()
-            != environment
-            or str(payload.get("account_id", "")).strip()
-            != account_id
+            type(durable_environment) is not str
+            or durable_environment not in {
+                "REPLAY",
+                "SIMULATION",
+                "PAPER",
+                "LIVE",
+            }
+            or durable_environment != durable_environment.strip().upper()
+            or type(durable_account) is not str
+            or not durable_account
+            or durable_account != durable_account.strip()
+        ):
+            if effectful:
+                raise DurableTakeoverError(
+                    "effectful SubmissionPrepared durable scope is invalid"
+                )
+            continue
+        if (
+            durable_environment != environment
+            or durable_account != account_id
         ):
             continue
         for event in events:
@@ -691,12 +713,17 @@ def _common_inputs(
         raise DurableTakeoverError(
             "takeover provider does not match credential"
         )
-    store = vars(controller).get("_owner_store")
+    try:
+        store = controller._canonical_owner_store()
+        owner_scope = controller.owner_scope
+    except PermissionError as error:
+        raise DurableTakeoverError(
+            "recovery owner journal or scope authority changed"
+        ) from error
     if type(store) is not JournalStore:
         raise DurableTakeoverError(
             "durable takeover requires canonical JournalStore"
         )
-    owner_scope = controller.owner_scope
     if owner_scope != f"{handle.environment}:{handle.account_id}":
         raise DurableTakeoverError(
             "recovery owner scope does not match credential"

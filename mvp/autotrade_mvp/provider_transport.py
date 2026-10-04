@@ -1414,7 +1414,7 @@ def _install_direct_authenticated_read_execution_authority():
         int,
         tuple[
             weakref.ReferenceType,
-            tuple[str, str, str, int, str, object],
+            tuple[str, str, str, str, int, str, object],
         ],
     ] = {}
 
@@ -1456,15 +1456,31 @@ def _install_direct_authenticated_read_execution_authority():
             "_terminal_qualified_read_authority",
             None,
         )
+        query_binding = getattr(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            None,
+        )
+        provider_environment = getattr(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            None,
+        )
         if terminal_authority is None:
             return None
         request_sha256 = _direct_authenticated_read_request_digest(request)
+        request_semantics_sha256 = _validated_authenticated_read_wire_semantics_digest(
+            request,
+            query_binding,
+            provider_environment=provider_environment,
+        )
         response_sha256 = "sha256:" + sha256(response.body).hexdigest()
         receipt = object.__new__(DirectAuthenticatedReadExecutionReceipt)
         values = (
             _DIRECT_AUTHENTICATED_READ_TRANSPORT_IDENTITY,
             _DIRECT_AUTHENTICATED_READ_NETWORK_POLICY_IDENTITY,
             request_sha256,
+            request_semantics_sha256,
             response.http_status,
             response_sha256,
             terminal_authority,
@@ -1474,6 +1490,7 @@ def _install_direct_authenticated_read_execution_authority():
                 "transport_identity",
                 "network_policy_identity",
                 "request_sha256",
+                "request_semantics_sha256",
                 "http_status",
                 "response_sha256",
                 "terminal_authority",
@@ -1491,7 +1508,7 @@ def _install_direct_authenticated_read_execution_authority():
 
     def snapshot(
         receipt: object,
-    ) -> tuple[str, str, str, int, str, object]:
+    ) -> tuple[str, str, str, str, int, str, object]:
         if type(receipt) is not DirectAuthenticatedReadExecutionReceipt:
             raise ProviderTransportError(
                 "canonical direct authenticated-read execution receipt is required"
@@ -1507,6 +1524,7 @@ def _install_direct_authenticated_read_execution_authority():
             receipt.transport_identity,
             receipt.network_policy_identity,
             receipt.request_sha256,
+            receipt.request_semantics_sha256,
             receipt.http_status,
             receipt.response_sha256,
             receipt.terminal_authority,
@@ -1573,8 +1591,8 @@ def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
         )
         values = snapshot_impl(receipt)
         if (
-            values[3] != response.http_status
-            or values[4] != "sha256:" + sha256(response.body).hexdigest()
+            values[4] != response.http_status
+            or values[5] != "sha256:" + sha256(response.body).hexdigest()
         ):
             raise ProviderTransportError(
                 "direct authenticated-read receipt does not match exact response"
@@ -1590,9 +1608,10 @@ def _bind_direct_authenticated_read_receipt_access(snapshot_impl):
                 "transport_identity": values[0],
                 "network_policy_identity": values[1],
                 "request_sha256": values[2],
-                "http_status": values[3],
-                "response_sha256": values[4],
-                "terminal_authority": values[5],
+                "request_semantics_sha256": values[3],
+                "http_status": values[4],
+                "response_sha256": values[5],
+                "terminal_authority": values[6],
             }
         )
 
@@ -1616,6 +1635,8 @@ def _prepare_terminal_authenticated_read_request(
     request: AuthenticatedReadHttpRequest,
     query_binding: AuthenticatedReadQueryBinding,
     terminal_authority_factory: Callable[[AuthenticatedReadQueryBinding], object] | None,
+    *,
+    provider_environment: str,
 ) -> bool:
     if terminal_authority_factory is None:
         return False
@@ -1626,10 +1647,30 @@ def _prepare_terminal_authenticated_read_request(
         raise ProviderTransportError(
             "terminal authenticated-read authority factory returned no proof"
         )
+    provider_env = _canonical_text(
+        provider_environment,
+        name="provider_environment",
+    ).upper()
+    # Validate the canonical provider/environment policy before the request can
+    # carry terminal authority into the direct wire client.
+    qualified_authenticated_read_expected_wire_semantics_digest(
+        query_binding,
+        provider_environment=provider_env,
+    )
     object.__setattr__(
         request,
         "_terminal_qualified_read_authority",
         terminal_authority,
+    )
+    object.__setattr__(
+        request,
+        "_terminal_authenticated_read_query_binding",
+        query_binding,
+    )
+    object.__setattr__(
+        request,
+        "_terminal_authenticated_read_provider_environment",
+        provider_env,
     )
     return True
 

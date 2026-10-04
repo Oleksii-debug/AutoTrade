@@ -115,19 +115,16 @@ class RecoveryDispatchReconciliationFreshnessTests(unittest.TestCase):
                 "sender_fence_rejected:PermissionError",
             )
             self.assertEqual(second_wire, [])
-            second_events = JournalStore.load_events_by_aggregate_type(
+            inner = dispatcher._RecoveryIssuedDispatcher__dispatcher
+            second_attempt_events = JournalStore.load_events(
                 journal,
                 "submission_attempt",
+                inner._aggregate_id("attempt-stale-reconciliation"),
             )
-            second_attempt_events = [
-                event
-                for event in second_events
-                if event.get("payload", {}).get("attempt_id")
-                == "attempt-stale-reconciliation"
-                or event.get("aggregate_id", "").endswith(
-                    "attempt-stale-reconciliation"
-                )
-            ]
+            self.assertEqual(
+                [event["event_type"] for event in second_attempt_events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
             self.assertNotIn(
                 "SubmissionSending",
                 [event["event_type"] for event in second_attempt_events],

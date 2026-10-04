@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.risk import (
     RiskIntent,
     RiskPolicy,
     RiskRuleResult,
+    RISK_ARITHMETIC_POLICY_ID,
     bind_risk_decision,
 )
 
@@ -89,6 +90,7 @@ def bound_risk_decision(
                 reason="fixture",
             ),
         ),
+        arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
     )
     return bind_risk_decision(
         raw,
@@ -2564,6 +2566,13 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(first.outcome, "ADMITTED")
             self.assertTrue(first.risk_decision_id.startswith("risk:sha256:"))
             self.assertEqual(first.reservation_id, "reservation-public")
+            risk_event = store.load_events(
+                "risk_decision", first.risk_decision_id
+            )[0]
+            self.assertEqual(
+                risk_event["payload"]["arithmetic_policy_id"],
+                RISK_ARITHMETIC_POLICY_ID,
+            )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),
                 Decimal("100"),

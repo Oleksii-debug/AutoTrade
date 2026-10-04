@@ -6,9 +6,11 @@ tests must not monkey-patch the canonical direct network opener or seed a fake
 wire claim and then relabel that state as provider execution.
 """
 
+import json
 import unittest
 from decimal import Decimal
 
+from mvp.autotrade_mvp.provider_core import _decode_exact_json
 from mvp.autotrade_mvp.provider_funding_income import (
     ProviderFundingIncomeError,
     ProviderFundingIncomeObservation,
@@ -114,6 +116,23 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
         self.assertEqual(row.funding_amount, Decimal("-0.003676"))
         self.assertEqual(row.transaction_time_ms, "1672128000000")
         self.assertNotIsInstance(row, ProviderFundingIncomeObservation)
+
+    def test_parser_accepts_canonical_frozen_provider_payload_shape(self):
+        payload = _decode_exact_json(
+            json.dumps(
+                self._payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        self.assertIsNot(type(payload), dict)
+        self.assertIsInstance(payload["result"]["list"], tuple)
+        rows = self._parse(payload=payload)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0].provider_transaction_id,
+            "592324_XRPUSDT_161440249321",
+        )
 
     def test_parser_preserves_exact_millisecond_without_float(self):
         rows = self._parse(

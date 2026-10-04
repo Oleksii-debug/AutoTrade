@@ -919,8 +919,17 @@ def qualify_supply_chain(
         )
     else:
         try:
+            # Authenticate one detached receipt snapshot. A caller retaining
+            # the input object cannot change requirements or evidence between
+            # signature verification and the exact-set comparison below.
+            receipt = parse_signed_qualification_attestation(
+                {
+                    "attestation": trust_receipt.attestation.canonical_payload(),
+                    "signature_b64": trust_receipt.signature_b64,
+                }
+            )
             accepted_review = verify_canonical_qualification_attestation(
-                trust_receipt,
+                receipt,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
                 expected_source_sha=evidence.release_commit_sha,
@@ -945,9 +954,9 @@ def qualify_supply_chain(
             # The accepted result records the one requirement checked above.
             # The signed attestation retains the complete verified requirement
             # set, including this evidence-derived subject when present.
-            if subject_requirement in trust_receipt.attestation.requirement_ids:
+            if subject_requirement in receipt.attestation.requirement_ids:
                 accepted_subject = verify_canonical_qualification_attestation(
-                    trust_receipt,
+                    receipt,
                     evidence_store=evidence_store,
                     evidence_root=evidence_root,
                     expected_source_sha=evidence.release_commit_sha,
@@ -1024,7 +1033,7 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in trust_receipt.attestation.evidence_refs
+                for ref in receipt.attestation.evidence_refs
             }
             if (
                 subject_identity is None
@@ -1184,7 +1193,7 @@ def qualify_supply_chain(
             else {
                 "attestation_digest": accepted_trust.attestation_digest,
                 "signature_sha256": "sha256:"
-                    + sha256(trust_receipt.signature_b64.encode("ascii")).hexdigest(),
+                    + sha256(receipt.signature_b64.encode("ascii")).hexdigest(),
                 "policy_id": accepted_trust.policy_id,
                 "policy_version": accepted_trust.policy_version,
                 "accepted_attestation_id": accepted_trust.attestation_id,

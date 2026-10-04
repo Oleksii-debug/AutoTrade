@@ -576,35 +576,43 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 )
             self.assertTrue(injected)
 
-    def test_bybit_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
-        with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
-            artifact_root = Path(directory) / "settlement-evidence"
-            artifacts = ArtifactStore(artifact_root)
-            settlement = DurableSettlementBook(
-                store,
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-                provider_environment="TESTNET",
-                evidence_artifact_root=artifact_root,
-                evidence_artifact_store=artifacts,
-            )
-            economic = DurableProviderEconomicBook(
-                store,
-                provider_id="BYBIT",
-                account_id="bybit-account",
-                environment="PAPER",
-            )
-            with self.assertRaisesRegex(
-                AuthorityConflict,
-                "requires provider_environment",
-            ):
-                AuthorityService(
+    def test_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
+        cases = (
+            ("BYBIT", "bybit-account", "TESTNET"),
+            ("KRAKEN", "kraken-account", "FUTURES_DEMO"),
+        )
+        for provider_id, account_id, provider_environment in cases:
+            with self.subTest(
+                provider_id=provider_id,
+                provider_environment=provider_environment,
+            ), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                artifact_root = Path(directory) / "settlement-evidence"
+                artifacts = ArtifactStore(artifact_root)
+                settlement = DurableSettlementBook(
                     store,
-                    settlement_book=settlement,
-                    economic_book=economic,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                    evidence_artifact_root=artifact_root,
+                    evidence_artifact_store=artifacts,
                 )
+                economic = DurableProviderEconomicBook(
+                    store,
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment="PAPER",
+                )
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "requires provider_environment",
+                ):
+                    AuthorityService(
+                        store,
+                        settlement_book=settlement,
+                        economic_book=economic,
+                    )
 
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:

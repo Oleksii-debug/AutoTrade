@@ -9,6 +9,7 @@ import unittest
 import weakref
 
 from autotrade_runtime.artifacts import ArtifactStore
+import autotrade_runtime.artifacts._root_authority as root_authority
 
 import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
@@ -103,7 +104,12 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
+            reader_capabilities_before = len(root_authority._READER_CAPABILITIES)
             book = durable(store, artifacts)
+            self.assertEqual(
+                len(root_authority._READER_CAPABILITIES),
+                reader_capabilities_before + 1,
+            )
 
             book_ref = weakref.ref(book)
             store_ref = weakref.ref(store)
@@ -117,6 +123,10 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             self.assertIsNone(book_ref())
             self.assertIsNone(store_ref())
             self.assertIsNone(artifacts_ref())
+            self.assertEqual(
+                len(root_authority._READER_CAPABILITIES),
+                reader_capabilities_before,
+            )
 
     def test_order_projection_import_is_hermetic_without_research_package(self):
         root = Path(__file__).resolve().parents[2]

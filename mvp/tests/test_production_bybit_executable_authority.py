@@ -20,11 +20,17 @@ from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=timezone.utc)
 _TRANSPORT_CODE_CALLS: list[object] = []
 _LEASE_CODE_CALLS: list[object] = []
+_WIRE_CODE_CALLS: list[object] = []
 
 
 def _forged_transport_call(self, client_order_id, request, final_guard):
     _TRANSPORT_CODE_CALLS.append((self, client_order_id, request, final_guard))
     raise AssertionError("forged transport executable ran")
+
+
+def _forged_wire_send(self, request):
+    _WIRE_CODE_CALLS.append((self, request))
+    raise AssertionError("forged wire executable ran")
 
 
 def _forged_lease_generator(
@@ -184,6 +190,97 @@ class ProductionBybitExecutableAuthorityTests(unittest.TestCase):
                 transport_call.__code__ = original_code
 
             self.assertEqual(_TRANSPORT_CODE_CALLS, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_wire_client_replacement_is_zero_callback_zero_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            replacement = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            transport = sender._ProductionBybitOrderSender__transport
+            transport.wire_client = replacement
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "wire client authority changed",
+            ):
+                sender.dispatch(
+                    attempt_id="attempt-wire-client",
+                    intent_id="intent-wire-client",
+                    intent_hash="sha256:" + "9" * 64,
+                    request={"symbol": "BTCUSDT"},
+                    now="2026-10-04T02:00:02Z",
+                    authority_check=lambda *_args: self.fail(
+                        "financial callback ran after wire-client retarget"
+                    ),
+                )
+
+            self.assertEqual(wire.requests, [])
+            self.assertEqual(replacement.requests, [])
+
+    def test_wire_send_class_rebind_is_zero_callback_zero_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            original = _RecordingWire.send
+            forged_calls = []
+
+            def forged(*args, **kwargs):
+                forged_calls.append((args, kwargs))
+                raise AssertionError("forged wire send ran")
+
+            _RecordingWire.send = forged
+            try:
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "wire send authority changed",
+                ):
+                    sender.dispatch(
+                        attempt_id="attempt-wire-rebind",
+                        intent_id="intent-wire-rebind",
+                        intent_hash="sha256:" + "a" * 64,
+                        request={"symbol": "BTCUSDT"},
+                        now="2026-10-04T02:00:03Z",
+                        authority_check=lambda *_args: self.fail(
+                            "financial callback ran after wire-send retarget"
+                        ),
+                    )
+            finally:
+                _RecordingWire.send = original
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_wire_send_same_function_code_mutation_is_zero_callback_zero_wire(self):
+        with TemporaryDirectory() as root:
+            runtime = self._runtime(root)
+            wire = _RecordingWire()
+            sender = self._sender(runtime, wire=wire)
+            wire_send = _RecordingWire.send
+            original_code = wire_send.__code__
+            _WIRE_CODE_CALLS.clear()
+            try:
+                wire_send.__code__ = _forged_wire_send.__code__
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "wire send authority code changed",
+                ):
+                    sender.dispatch(
+                        attempt_id="attempt-wire-code",
+                        intent_id="intent-wire-code",
+                        intent_hash="sha256:" + "b" * 64,
+                        request={"symbol": "BTCUSDT"},
+                        now="2026-10-04T02:00:04Z",
+                        authority_check=lambda *_args: self.fail(
+                            "financial callback ran after wire-send code retarget"
+                        ),
+                    )
+            finally:
+                wire_send.__code__ = original_code
+
+            self.assertEqual(_WIRE_CODE_CALLS, [])
             self.assertEqual(wire.requests, [])
 
     def test_security_lease_wrapper_rebind_fails_before_secret_access(self):

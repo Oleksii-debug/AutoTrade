@@ -82,7 +82,10 @@ _ALLOWED_EXTERNAL_ORIGINS = frozenset({"MANUAL", "EXTERNAL"})
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Trust-sensitive financial identities must be exact built-in text before
+    # normalization. A str subclass can override strip() and execute caller
+    # code while this bridge is establishing durable financial authority.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 

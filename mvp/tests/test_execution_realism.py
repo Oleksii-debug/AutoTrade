@@ -95,10 +95,29 @@ class ExecutionRealismTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
             model(fee_rate=HostileDecimal("0.001"))
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum=HostileDecimal("0.01"),
+                instrument_metadata_binding=INSTRUMENT_BINDING,
+            )
         self.assertEqual(HostileDecimal.finite_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
             order(order_id=HostileText("sim-1"))
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_metadata_binding is required",
+        ):
+            ExecutionPriceProjectionPolicy(
+                policy_id="ADVERSE_INSTRUMENT_TICK",
+                policy_version="1",
+                instrument_version="ABC@v1",
+                price_quantum="0.01",
+                instrument_metadata_binding=HostileText("c" * 64),
+            )
         self.assertEqual(HostileText.strip_calls, 0)
 
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
@@ -158,6 +177,18 @@ class ExecutionRealismTests(unittest.TestCase):
         object.__setattr__(mutated_model, "latency_ms", -1)
         with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
             simulate_execution(order(), exact_observation, mutated_model)
+
+        nested_authority_model = model()
+        object.__setattr__(
+            nested_authority_model.price_projection,
+            "instrument_version",
+            "XYZ@v1",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "projection instrument_version must match",
+        ):
+            simulate_execution(order(), exact_observation, nested_authority_model)
 
         injected_order = order()
         object.__setattr__(injected_order, "shadow_authority", "forged")

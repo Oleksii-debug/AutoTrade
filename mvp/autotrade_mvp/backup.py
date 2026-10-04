@@ -1129,6 +1129,44 @@ def create_backup(
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
 
+    # Freeze autonomous checkpoint presence and bytes before SQLite establishes
+    # the journal snapshot.  This checkpoint is causally bound to a JournalStore
+    # generation; accepting a checkpoint created or advanced after the SQLite cut
+    # would package two different runtime generations in one recovery bundle.
+    runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state)
+    runtime_checkpoint_present_at_cut = (
+        runtime_checkpoint_source.exists()
+        or runtime_checkpoint_source.is_symlink()
+    )
+    runtime_checkpoint_digest_at_cut: str | None = None
+    if runtime_checkpoint_present_at_cut:
+        try:
+            if (
+                runtime_checkpoint_source.is_symlink()
+                or not runtime_checkpoint_source.is_file()
+            ):
+                raise BackupError(
+                    "Autonomous runtime checkpoint source is not a regular file"
+                )
+            digest_before = _sha256_file(runtime_checkpoint_source)
+            if (
+                runtime_checkpoint_source.is_symlink()
+                or not runtime_checkpoint_source.is_file()
+            ):
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before journal snapshot"
+                )
+            digest_after = _sha256_file(runtime_checkpoint_source)
+        except OSError as error:
+            raise BackupError(
+                "Autonomous runtime checkpoint changed before journal snapshot"
+            ) from error
+        if digest_before != digest_after:
+            raise BackupError(
+                "Autonomous runtime checkpoint changed before journal snapshot"
+            )
+        runtime_checkpoint_digest_at_cut = digest_after
+
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
@@ -1166,11 +1204,18 @@ def create_backup(
         # checkpoint authority after recovery/reconciliation has established
         # the new durable generation.
         runtime_checkpoint_evidence = "ABSENT"
-        runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state)
-        if (
+        runtime_checkpoint_present_after_journal = (
             runtime_checkpoint_source.exists()
             or runtime_checkpoint_source.is_symlink()
+        )
+        if (
+            runtime_checkpoint_present_after_journal
+            != runtime_checkpoint_present_at_cut
         ):
+            raise BackupError(
+                "Autonomous runtime checkpoint inventory changed across journal snapshot"
+            )
+        if runtime_checkpoint_present_at_cut:
             evidence_relative = _safe_relative_path(
                 _RUNTIME_CHECKPOINT_EVIDENCE_PATH
             )
@@ -1178,6 +1223,10 @@ def create_backup(
                 runtime_checkpoint_source,
                 stage / evidence_relative,
             )
+            if digest != runtime_checkpoint_digest_at_cut:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed across journal snapshot"
+                )
             entries.append(
                 _entry(
                     _RUNTIME_CHECKPOINT_EVIDENCE_PATH,
@@ -1236,6 +1285,36 @@ def create_backup(
         )
         verify_backup(stage)
         _fsync_directory_tree(stage)
+        # Close the final publication window too.  A checkpoint created,
+        # removed, or advanced after staging validation must abort this attempt;
+        # a later backup can capture the new causal generation coherently.
+        runtime_checkpoint_present_before_publish = (
+            runtime_checkpoint_source.exists()
+            or runtime_checkpoint_source.is_symlink()
+        )
+        if (
+            runtime_checkpoint_present_before_publish
+            != runtime_checkpoint_present_at_cut
+        ):
+            raise BackupError(
+                "Autonomous runtime checkpoint inventory changed before backup commit"
+            )
+        if runtime_checkpoint_present_at_cut:
+            try:
+                checkpoint_unchanged = (
+                    not runtime_checkpoint_source.is_symlink()
+                    and runtime_checkpoint_source.is_file()
+                    and _sha256_file(runtime_checkpoint_source)
+                    == runtime_checkpoint_digest_at_cut
+                )
+            except OSError as error:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before backup commit"
+                ) from error
+            if not checkpoint_unchanged:
+                raise BackupError(
+                    "Autonomous runtime checkpoint changed before backup commit"
+                )
         os.replace(stage, target)
         _fsync_directory(target.parent)
         return target

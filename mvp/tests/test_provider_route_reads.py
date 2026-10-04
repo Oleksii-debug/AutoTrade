@@ -260,6 +260,24 @@ class ProviderRouteReadTests(unittest.TestCase):
             ):
                 self.prepare(route, capabilities, qualifications)
 
+    def test_wallet_q_claim_cannot_authorize_distinct_orders_entitlement(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "does not cover exact authenticated-read endpoint rule",
+            ):
+                prepare_qualified_provider_read(
+                    route,
+                    capabilities,
+                    qualifications,
+                    surface=Surface.AUTHENTICATED_READ,
+                    endpoint="/v5/order/realtime",
+                    query={},
+                    at=NOW,
+                    permission_scope="ORDER.READ",
+                )
+
     def test_canonical_endpoint_policy_rejects_wrong_permission_before_binding(self):
         with TemporaryDirectory() as directory:
             _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)

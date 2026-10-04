@@ -1224,10 +1224,65 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void ManualRefreshDuringAutomaticRefreshIsAnnouncedTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                int transportCalls = 0;
+                InspectingStatusHostClient client = new()
+                {
+                    OnGetStatus = () => transportCalls++,
+                };
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object[] { client },
+                    null)!;
+                typeof(MainWindow).GetField("_hostRefreshInProgress", flags)!
+                    .SetValue(window, true);
+
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                Task task = (Task)refresh.Invoke(window, new object[] { true, true })!;
+                task.GetAwaiter().GetResult();
+
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+                Check.True(
+                    transportCalls == 0,
+                    "manual refresh overlap started a second host request");
+                Check.True(
+                    announcement.Text.StartsWith(
+                        "Host status refresh is already in progress.",
+                        StringComparison.Ordinal),
+                    "manual refresh overlap was silent to keyboard/NVDA users");
+                Check.True(
+                    button.IsEnabled,
+                    "manual refresh overlap disabled the focusable refresh button");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
         AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
+        ManualRefreshDuringAutomaticRefreshIsAnnouncedTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();

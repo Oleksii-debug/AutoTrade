@@ -328,7 +328,7 @@ class RuntimeLoadResearchMeasurementTests(unittest.TestCase):
                     ),
                     self.assertRaisesRegex(
                         RuntimeLoadResearchMeasurementError,
-                        "transitive global authority changed during callback: canonical_json",
+                        "transitive authority changed during callback: payload_digest.canonical_json",
                     ),
                 ):
                     measure_declared_research_interference(
@@ -340,6 +340,83 @@ class RuntimeLoadResearchMeasurementTests(unittest.TestCase):
                     )
             finally:
                 digest_namespace["canonical_json"] = original_canonical_json
+
+    def test_research_callback_cannot_mutate_json_encoder_executable_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            canonical_json = research_measurement_module.payload_digest.__globals__[
+                "canonical_json"
+            ]
+            json_module = canonical_json.__globals__["json"]
+            encoder = json_module.JSONEncoder
+            original_code = encoder.encode.__code__
+
+            def mutate_encoder_code() -> None:
+                encoder.encode.__code__ = (lambda self, value: "{}").__code__
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "class executable authority changed during callback: json.JSONEncoder.encode",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=mutate_encoder_code,
+                    )
+            finally:
+                encoder.encode.__code__ = original_code
+
+            event_types = tuple(
+                event["event_type"]
+                for event in store.load_events_after_journal_sequence(0)
+            )
+            self.assertNotIn(
+                "RuntimeQualificationResearchInterferenceMeasured",
+                event_types,
+            )
+
+    def test_research_callback_cannot_rebind_json_encoder_iterencode_dependency(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, _financial, research, _first, _second = self._plans(root)
+            canonical_json = research_measurement_module.payload_digest.__globals__[
+                "canonical_json"
+            ]
+            json_module = canonical_json.__globals__["json"]
+            iterencode_globals = json_module.JSONEncoder.iterencode.__globals__
+            original_factory = iterencode_globals["_make_iterencode"]
+
+            def mutate_iterencode_dependency() -> None:
+                iterencode_globals["_make_iterencode"] = lambda *_args, **_kwargs: None
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(100, 200),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeLoadResearchMeasurementError,
+                        "transitive global authority changed during callback: _make_iterencode",
+                    ),
+                ):
+                    measure_declared_research_interference(
+                        store,
+                        _spec(),
+                        plan_id=research.plan_id,
+                        sample_id="research-1",
+                        operation=mutate_iterencode_dependency,
+                    )
+            finally:
+                iterencode_globals["_make_iterencode"] = original_factory
 
     def test_research_callback_cannot_retarget_store_instance(self):
         with tempfile.TemporaryDirectory() as root:

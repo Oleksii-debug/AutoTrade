@@ -15,17 +15,24 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import re
-from typing import Mapping
 
 from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .persistence import canonical_json
 from .provider_core import ProviderResponseObservation, Surface
 from .provider_origin import (
+    AuthenticatedReadResponseBinding,
     ProviderOriginError,
     ProviderOriginObservation,
     require_provider_origin_response_binding_authority,
 )
-from .provider_route_reads import ProviderRouteReadError
+from .provider_route_reads import (
+    ProviderRouteReadError,
+    QualifiedProviderResponseObservation,
+)
+from .provider_transport import (
+    direct_authenticated_read_network_policy_identity,
+    direct_authenticated_read_transport_identity,
+)
 
 
 class ProviderFundingIncomeError(ValueError):
@@ -138,18 +145,27 @@ class ProviderFundingIncomeObservation:
 
 def _validated_origin(
     source: ProviderOriginObservation,
-) -> tuple[object, ProviderResponseObservation, str]:
+) -> tuple[
+    AuthenticatedReadResponseBinding,
+    ProviderResponseObservation,
+    QualifiedProviderResponseObservation,
+    str,
+]:
     if type(source) is not ProviderOriginObservation:
         raise ProviderFundingIncomeError(
             "funding income requires exact ProviderOriginObservation"
         )
     binding = source.response_binding
+    qualified = source.qualified_observation
+    if type(binding) is not AuthenticatedReadResponseBinding:
+        raise ProviderFundingIncomeError("funding income origin binding is not canonical")
+    if type(qualified) is not QualifiedProviderResponseObservation:
+        raise ProviderFundingIncomeError("funding income qualified observation is not canonical")
     try:
         require_provider_origin_response_binding_authority(binding)
-        qualified = source.qualified_observation
         qualified_ref = qualified.evidence_ref
         qualified_query_digest = qualified.query_binding.query_digest
-    except (ProviderOriginError, ProviderRouteReadError) as error:
+    except (ProviderOriginError, ProviderRouteReadError, AttributeError) as error:
         raise ProviderFundingIncomeError(
             "funding income provider-origin authority is unavailable"
         ) from error
@@ -179,11 +195,20 @@ def _validated_origin(
             "funding income provider-origin wrapper differs from sealed Q/response"
         )
     if (
+        binding.execution_class != "DIRECT_PROVIDER_WIRE"
+        or binding.transport_identity != direct_authenticated_read_transport_identity()
+        or binding.network_policy_identity
+        != direct_authenticated_read_network_policy_identity()
+    ):
+        raise ProviderFundingIncomeError(
+            "funding income requires canonical direct provider wire origin"
+        )
+    if (
         binding.provider_id != "BYBIT"
         or binding.endpoint != _BYBIT_TRANSACTION_LOG_ENDPOINT
         or binding.data_entitlement != "ACTIVITIES"
         or binding.parser_identity != _BYBIT_FUNDING_PARSER_IDENTITY
-        or base.surface is not Surface.AUTHENTICATED_READ
+        or base.surface != Surface.AUTHENTICATED_READ
         or base.permission_scope != "ACCOUNT.READ"
     ):
         raise ProviderFundingIncomeError(
@@ -210,7 +235,7 @@ def _validated_origin(
         raise ProviderFundingIncomeError(
             "funding transaction-log neutral response scope is invalid"
         ) from error
-    return binding, neutral, qualified_ref
+    return binding, neutral, qualified, qualified_ref
 
 
 def bybit_funding_income_observations(
@@ -218,7 +243,7 @@ def bybit_funding_income_observations(
 ) -> tuple[ProviderFundingIncomeObservation, ...]:
     """Project funding cash movements; grant no rate/price/position authority."""
 
-    binding, neutral, qualified_ref = _validated_origin(source)
+    binding, neutral, qualified, qualified_ref = _validated_origin(source)
     payload = neutral.payload
     if type(payload) is not dict:
         raise ProviderFundingIncomeError("Bybit transaction-log payload must be an object")
@@ -228,13 +253,7 @@ def bybit_funding_income_observations(
     if type(result) is not dict or type(result.get("list")) is not list:
         raise ProviderFundingIncomeError("Bybit transaction-log result shape is invalid")
 
-    expected_category = binding.qualified_observation.query_binding.query_binding.query.get(
-        "category"
-    ) if False else None
-    # Read through the already-authorized qualified observation rather than the
-    # response-binding payload; the response binding intentionally stores only
-    # immutable route/origin identity.
-    query = source.qualified_observation.query_binding.query_binding.query
+    query = qualified.query_binding.query_binding.query
     expected_category = query["category"]
     observations: list[ProviderFundingIncomeObservation] = []
     seen_ids: set[str] = set()

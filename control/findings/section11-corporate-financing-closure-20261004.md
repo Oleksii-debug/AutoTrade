@@ -35,3 +35,17 @@ Section 11 is DONE only after exact-head qualification proves:
 7. merge and post-merge readback confirm accepted source identity.
 
 Real provider-origin issuance remains a deferred provider qualification concern and is not claimed here.
+
+## Follow-up source review: authoritative action issuance
+
+Exact source review after convergence found that frozen=True plus an exact AuthoritativeCorporateAction type was insufficient authority: callers could manually reconstruct the dataclass (or mutate a legitimately resolved instance with object.__setattr__) and DurableCorporateActionEvidenceStore would persist its fields without proving resolver issuance.
+
+The canonical Section 11 candidate now also:
+- seals resolver-issued AuthoritativeCorporateAction instances in process state outside caller-writable dataclass fields;
+- retains an immutable canonical snapshot and returns a detached snapshot to durable/accounting consumers;
+- rejects manually reconstructed exact actions and post-resolution mutation;
+- enforces the issuance seal before financial code reads observed_at or other accepted fields;
+- rejects hostile str, InstrumentRegistry subclasses and ProviderResponseObservation subclasses at the corporate-action evidence boundary;
+- includes durable-no-mutation regressions for the above paths.
+
+This does not claim external provider-origin issuance is globally solved. The provider-core/real-provider qualification remains a separate gate; this repair only prevents the corporate-action durable/financial path from treating arbitrary self-minted AuthoritativeCorporateAction DTOs as resolver-issued evidence.

@@ -354,6 +354,39 @@ class ScientificRegistryTests(unittest.TestCase):
                 0,
             )
 
+    def test_nonterminal_legacy_trial_cannot_count_toward_completeness(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            store = ScientificRegistry(path)
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial_index": 0, "result": "registered"},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+
+            import sqlite3
+            with sqlite3.connect(path) as connection:
+                connection.execute("DROP TRIGGER trials_no_update")
+                cursor = connection.execute(
+                    "UPDATE trials SET status=? WHERE trial_id=?",
+                    (
+                        "RUNNING",
+                        "11111111-1111-4111-8111-111111111111",
+                    ),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial population integrity mismatch",
+            ):
+                store.completeness(registered.protocol_id)
+
     def test_full_trial_closure_allows_locked_evaluation_without_early_stop_authority(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

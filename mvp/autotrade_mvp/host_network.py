@@ -61,8 +61,8 @@ _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
 
 
-class _SnapshotUnavailable(RuntimeError):
-    """A valid state read could not obtain one coherent journal cut in time."""
+class SnapshotTemporarilyUnavailable(RuntimeError):
+    """A valid state read cannot currently obtain one coherent authority snapshot."""
 
 
 _SINGLETON_REQUEST_HEADERS = (
@@ -378,7 +378,7 @@ class AuthenticatedHostApplication:
             if self._journal.current_journal_sequence() == journal_cut:
                 break
         else:
-            raise _SnapshotUnavailable("Journal changed during UiSnapshot projection")
+            raise SnapshotTemporarilyUnavailable("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
         payload = dict(projected)
@@ -648,7 +648,7 @@ class AuthenticatedHostApplication:
                 },
                 headers=(("Cache-Control", "no-store"),),
             )
-        except _SnapshotUnavailable:
+        except SnapshotTemporarilyUnavailable:
             return _json_response(
                 503,
                 {"error": "SNAPSHOT_BUSY", "retryable": True},

@@ -107,6 +107,7 @@ class FakeSecretResolver:
         provider,
         environment,
         purpose,
+        provider_environment=None,
     ):
         if self.lease_active:
             raise AssertionError("credential lease must not be re-entered")
@@ -119,6 +120,7 @@ class FakeSecretResolver:
             provider=provider,
             environment=environment,
             purpose=purpose,
+            provider_environment=provider_environment,
         )
         self.lease_active = True
         self.lease_enters += 1
@@ -139,20 +141,22 @@ class FakeSecretResolver:
         provider,
         environment,
         purpose,
+        provider_environment=None,
     ):
         self.events.append("resolve")
-        self.calls.append(
-            {
-                "token": token,
-                "origin": origin,
-                "handle": handle,
-                "execution_identity": execution_identity,
-                "account_id": account_id,
-                "provider": provider,
-                "environment": environment,
-                "purpose": purpose,
-            }
-        )
+        call = {
+            "token": token,
+            "origin": origin,
+            "handle": handle,
+            "execution_identity": execution_identity,
+            "account_id": account_id,
+            "provider": provider,
+            "environment": environment,
+            "purpose": purpose,
+        }
+        if provider_environment is not None:
+            call["provider_environment"] = provider_environment
+        self.calls.append(call)
         if self.on_resolve is not None:
             self.on_resolve()
         if self.credential_plaintext is not None:

@@ -122,6 +122,37 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
             _canonical_evidence_refs((raw,))
         self.assertEqual(touched, [])
 
+    def test_evidence_identity_text_must_be_canonical_not_trimmed(self):
+        fields = (
+            ("artifact_id", f" {ARTIFACT_A} "),
+            ("sha256", f" {DIGEST} "),
+            ("source_uri", " https://provider.example/evidence/a "),
+            ("observed_at", f" {OBSERVED_AT} "),
+        )
+        for field, value in fields:
+            with self.subTest(field=field):
+                raw = evidence_ref(
+                    ARTIFACT_A,
+                    "https://provider.example/evidence/a",
+                )
+                raw[field] = value
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical non-empty text",
+                ):
+                    _canonical_evidence_refs((raw,))
+
+    def test_artifact_uuid_must_already_be_canonical_lowercase(self):
+        raw = evidence_ref(
+            ARTIFACT_A.upper(),
+            "https://provider.example/evidence/a",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical lowercase UUID",
+        ):
+            _canonical_evidence_refs((raw,))
+
     def test_exact_list_and_dict_snapshot_remain_supported(self):
         refs = _canonical_evidence_refs(
             [evidence_ref(ARTIFACT_A, "https://provider.example/evidence/a")]

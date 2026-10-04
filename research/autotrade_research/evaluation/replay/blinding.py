@@ -347,8 +347,6 @@ class BlindedEvent:
     ingested_at_us: int
     session_index: int
     moment_index: int
-    source_priority: int
-    source_sequence: int
     payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
@@ -360,8 +358,6 @@ class BlindedEvent:
             "ingested_at_us",
             "session_index",
             "moment_index",
-            "source_priority",
-            "source_sequence",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
@@ -383,8 +379,6 @@ class BlindedEvent:
                     "ingested_at_us": self.ingested_at_us,
                     "session_index": self.session_index,
                     "moment_index": self.moment_index,
-                    "source_priority": self.source_priority,
-                    "source_sequence": self.source_sequence,
                     "payload": self.payload,
                 }
             )
@@ -629,8 +623,6 @@ def blind_dataset(
                 ingested_at_us=_microseconds(event.ingested_at - anchor),
                 session_index=sessions[event.available_at.date()],
                 moment_index=moments[event.available_at],
-                source_priority=event.source_priority,
-                source_sequence=event.source_sequence,
                 payload=payload,
             )
         )

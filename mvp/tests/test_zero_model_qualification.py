@@ -25,6 +25,9 @@ class ZeroModelQualificationTests(unittest.TestCase):
             "zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}",
             workflow,
         )
+        self.assertIn('"mvp/autotrade_mvp/**"', workflow)
+        self.assertIn('"research/autotrade_research/**"', workflow)
+        self.assertIn("mvp.tests.test_zero_model_economics", workflow)
 
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()
@@ -58,6 +61,33 @@ class ZeroModelQualificationTests(unittest.TestCase):
             self.assertEqual(outage["reserved_cost"], "0")
             self.assertEqual(outage["reason"], "no_admissible_model")
         self.assertEqual(evidence["model_cost_total"], "0")
+
+        autonomous = evidence["canonical_autonomous_zero_loop"]
+        self.assertEqual(autonomous["continuous_status"], "COMPLETED")
+        self.assertEqual(autonomous["paused_status"], "PAUSED")
+        self.assertEqual(autonomous["resumed_status"], "COMPLETED")
+        self.assertEqual(autonomous["replay_status"], "COMPLETED")
+        self.assertEqual(autonomous["mode"], "ZERO")
+        self.assertEqual(autonomous["episodes"], 120)
+        self.assertEqual(autonomous["pause_cut"], 41)
+        self.assertGreater(autonomous["continuous_outbound_requests"], 20)
+        self.assertEqual(
+            autonomous["pause_resume_outbound_requests"],
+            autonomous["continuous_outbound_requests"],
+        )
+        self.assertEqual(autonomous["replay_outbound_requests"], 0)
+        self.assertTrue(autonomous["same_decisions_after_resume"])
+        self.assertTrue(autonomous["same_economics_after_resume"])
+        self.assertEqual(autonomous["economic_edge_status"], "INCONCLUSIVE")
+
+        partial = evidence["canonical_partial_fill_zero_loop"]
+        self.assertEqual(partial["status"], "COMPLETED")
+        self.assertEqual(partial["mode"], "ZERO")
+        self.assertEqual(partial["execution_profile"], "TWO_EQUAL_PARTIALS")
+        self.assertGreater(partial["new_outbound_requests"], 0)
+        self.assertEqual(partial["replay_outbound_requests"], 0)
+        self.assertTrue(partial["same_decisions_after_replay"])
+        self.assertEqual(partial["economic_edge_status"], "INCONCLUSIVE")
 
         financial = evidence["deterministic_financial_slice"]
         self.assertTrue(financial["resumed"])

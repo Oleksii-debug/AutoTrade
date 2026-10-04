@@ -1062,12 +1062,22 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertEqual(tag, "p", status_id)
             self.assertNotIn("role", attrs, status_id)
             self.assertNotIn("aria-live", attrs, status_id)
-            tag, attrs = by_id[f"{prefix}-filter"]
+            for control_suffix in ("filter", "copy", "sort", "previous", "next"):
+                tag, attrs = by_id[f"{prefix}-{control_suffix}"]
+                self.assertEqual(
+                    attrs.get("aria-controls"),
+                    f"{prefix}-body",
+                    f"{prefix}-{control_suffix}",
+                )
+                self.assertIn(
+                    status_id,
+                    attrs.get("aria-describedby", "").split(),
+                    f"{prefix}-{control_suffix}",
+                )
+            tag, _ = by_id[f"{prefix}-filter"]
             self.assertEqual(tag, "input", prefix)
-            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
-            tag, attrs = by_id[f"{prefix}-sort"]
+            tag, _ = by_id[f"{prefix}-sort"]
             self.assertEqual(tag, "select", prefix)
-            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
         # Native output is implicitly a polite status region even without ARIA.
         # Snapshot metadata must remain readable without announcing every poll.
         live_ids = [

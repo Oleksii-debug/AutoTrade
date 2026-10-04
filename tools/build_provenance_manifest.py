@@ -15,12 +15,16 @@ if __package__:
     from .dotnet_lock import (
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_tokens_are_locked,
     )
 else:
     from dotnet_lock import (
         dotnet_imported_package_reference_blockers,
         dotnet_locked_dependency_graph,
         dotnet_project_package_references,
+        dotnet_restore_command_tokens,
+        dotnet_restore_tokens_are_locked,
     )
 
 
@@ -518,20 +522,59 @@ def build_manifest() -> dict[str, object]:
                         ),
                     }
                 )
-            elif any(
-                "--locked-mode" not in command
-                and "RestoreLockedMode=true" not in command
-                for command in restore_commands
-            ):
-                blockers.append(
-                    {
-                        "code": "DOTNET_RESTORE_NOT_LOCKED",
-                        "detail": (
-                            "Every canonical dotnet restore must enforce the "
-                            "committed NuGet dependency graph."
-                        ),
-                    }
-                )
+            else:
+                restore_tokens: list[tuple[str, ...]] = []
+                invalid_restore = False
+                for command in restore_commands:
+                    try:
+                        tokens = dotnet_restore_command_tokens(command)
+                    except ValueError:
+                        invalid_restore = True
+                        continue
+                    restore_tokens.append(tokens)
+                if invalid_restore:
+                    blockers.append(
+                        {
+                            "code": "DOTNET_RESTORE_COMMAND_INVALID",
+                            "detail": (
+                                "Canonical dotnet restore commands must be "
+                                "unambiguously tokenizable."
+                            ),
+                        }
+                    )
+                if any(
+                    not dotnet_restore_tokens_are_locked(tokens)
+                    for tokens in restore_tokens
+                ):
+                    blockers.append(
+                        {
+                            "code": "DOTNET_RESTORE_NOT_LOCKED",
+                            "detail": (
+                                "Every canonical dotnet restore must enforce the "
+                                "committed NuGet dependency graph."
+                            ),
+                        }
+                    )
+                missing_restore_projects = [
+                    project.relative_to(ROOT).as_posix()
+                    for project in dotnet_projects
+                    if not any(
+                        project.relative_to(ROOT).as_posix() in tokens
+                        for tokens in restore_tokens
+                    )
+                ]
+                if missing_restore_projects:
+                    blockers.append(
+                        {
+                            "code": "DOTNET_LOCKED_RESTORE_PROJECT_MISSING",
+                            "projects": missing_restore_projects,
+                            "detail": (
+                                "Every release project with PackageReference "
+                                "dependencies must be an exact project token in "
+                                "a canonical dotnet restore command."
+                            ),
+                        }
+                    )
 
     return {
         "schema_version": "1.0.0",

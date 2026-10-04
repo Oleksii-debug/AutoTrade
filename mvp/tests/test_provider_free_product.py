@@ -144,6 +144,43 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             client = ProductClient(data)
             try:
                 self.assertEqual(client.state()['portfolio']['status']['session_status'], 'UNKNOWN')
+
+                # START is ordinary forward execution, not recovery authority.
+                # An unresolved durable episode must require the explicit
+                # RECOVER_SIMULATION action before any recovery worker can run.
+                before_rejected_start = client.state()
+                rejected_id = str(uuid4())
+                rejected_request = {
+                    'command_id': rejected_id,
+                    'idempotency_key': rejected_id,
+                    'expected_state_version': before_rejected_start['state_version'],
+                    'actor': 'local-owner',
+                    'session': before_rejected_start['permission_summary']['session'],
+                    'account_id': ACCOUNT,
+                    'environment': ENVIRONMENT,
+                    'action': 'START_SIMULATION',
+                    'payload': {},
+                }
+                rejected_status, rejected, _ = client.request(
+                    'POST', '/api/v1/commands', rejected_request
+                )
+                self.assertEqual(rejected_status, 400)
+                self.assertEqual(rejected, {'error': 'INVALID_REQUEST'})
+                after_rejected_start = client.state()
+                self.assertEqual(
+                    after_rejected_start['state_version'],
+                    before_rejected_start['state_version'],
+                )
+                self.assertEqual(
+                    after_rejected_start['portfolio']['status']['session_status'],
+                    'UNKNOWN',
+                )
+                self.assertFalse(any(
+                    event['event_type'] == 'COMMAND_ACCEPTED'
+                    and event['payload'].get('command_id') == rejected_id
+                    for event in store.load_events_by_aggregate_type('HOST_CONTROL')
+                ))
+
                 _, operation = client.command('RECOVER_SIMULATION')
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 state = client.state()
@@ -178,6 +215,39 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
+
+    def test_worker_rejects_unaccepted_lifecycle_invocation(self):
+        with TemporaryDirectory() as directory:
+            data = Path(directory) / 'product'
+            client = ProductClient(data)
+            try:
+                store = client.runtime.journal
+                before = store.current_journal_sequence()
+            finally:
+                client.close()
+
+            forged_command_id = str(uuid4())
+            worker = subprocess.run(
+                [
+                    sys.executable,
+                    '-m',
+                    'mvp.autotrade_mvp.product_worker',
+                    '--state-dir',
+                    str(data / 'state'),
+                    '--action',
+                    'START_SIMULATION',
+                    '--command-id',
+                    forged_command_id,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertNotEqual(worker.returncode, 0)
+            self.assertEqual(
+                JournalStore(data / 'state' / 'journal.sqlite3').current_journal_sequence(),
+                before,
+            )
 
     def test_simulation_receipt_replay_requires_exact_canonical_envelope(self):
         with TemporaryDirectory() as directory:

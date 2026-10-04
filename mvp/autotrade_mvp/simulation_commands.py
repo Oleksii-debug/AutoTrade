@@ -11,6 +11,32 @@ SIMULATION_ACTIONS = frozenset({'START_SIMULATION', 'RECOVER_SIMULATION', 'BACKU
 _RECEIPT_TYPE = 'simulation_operator_receipt'
 
 
+def _require_explicit_recovery_for_unknown_start(journal, action):
+    """Keep ordinary START from acquiring recovery authority implicitly."""
+    if action != 'START_SIMULATION':
+        return
+    from .simulation_status import inspect_canonical_simulation
+    inspected = inspect_canonical_simulation(Path(journal.path).parent)
+    if type(inspected) is not dict:
+        raise ValueError('canonical simulation state is unavailable')
+    status = inspected.get('status')
+    if type(status) is not dict:
+        raise ValueError('canonical simulation status is unavailable')
+    session_status = status.get('session_status')
+    if session_status not in {'PAUSED', 'COMPLETED', 'UNKNOWN'}:
+        raise ValueError('canonical simulation session status is invalid')
+    if session_status == 'UNKNOWN':
+        if status.get('recovery_disposition') not in {
+            'RETAINED_FILL_RECOVERY',
+            'ZERO_WIRE_COMPLETION',
+            'RECONCILIATION_REQUIRED',
+        }:
+            raise ValueError('canonical simulation recovery disposition is invalid')
+        raise ValueError('simulation recovery requires RECOVER_SIMULATION')
+    if status.get('replay_verified') is not True:
+        raise ValueError('simulation start requires verified durable state')
+
+
 def _protocol(journal):
     from .simulation_session import ACCOUNT, ENVIRONMENT
     events = journal.load_events_by_aggregate_type('canonical_autonomous_simulation')
@@ -30,6 +56,7 @@ def canonical_simulation_payload(journal, action, raw, command, account, environ
     if set(raw) - {'stop_after_episodes'} or (action == 'BACKUP_SIMULATION' and raw):
         raise ValueError('unsupported simulation payload')
     protocol = _protocol(journal)
+    _require_explicit_recovery_for_unknown_start(journal, action)
     stop = raw.get('stop_after_episodes')
     if stop is not None and (type(stop) is not int or not 1 <= stop <= len(protocol['prices'])):
         raise ValueError('stop must be a frozen observation index')
@@ -167,6 +194,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
     if existing is not None:
         return existing
     protocol = _protocol(journal)
+    _require_explicit_recovery_for_unknown_start(journal, action)
     if payload_digest(protocol) != payload['protocol_digest']:
         raise ValueError('frozen simulation identity changed')
     root = Path(journal.path).parent
@@ -184,7 +212,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import os
         import sys
         from .simulation_status import inspect_canonical_simulation
-        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
+        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         try:

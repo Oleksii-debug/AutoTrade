@@ -369,6 +369,34 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
             self.assertFalse(equality_called)
             self.assertIsNone(journal.get_event("fin-1"))
 
+    def test_research_callback_cannot_replace_callback_verifier(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(financial_samples=1)
+            self._declare(journal, spec, "fin-1")
+            clock = FakeClock()
+            original = runner_module._require_callable_authority
+
+            def poison_verifier() -> None:
+                runner_module._require_callable_authority = lambda *_args, **_kwargs: None
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "callback authority verifier changed",
+                ):
+                    self._run(
+                        journal,
+                        spec,
+                        {"fin-1": lambda: append_expected(journal, "fin-1")},
+                        clock=clock,
+                        research=(("poison-verifier", poison_verifier),),
+                    )
+            finally:
+                runner_module._require_callable_authority = original
+
+            self.assertIsNone(journal.get_event("fin-1"))
+
     def test_research_callback_cannot_replace_terminal_budget_authority(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

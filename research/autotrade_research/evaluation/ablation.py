@@ -1352,6 +1352,13 @@ class AblationQualificationAuthority:
         selected = tuple(pairs)
         if selected:
             _validate_pairs(selected[0].target_component, selected)
+            if any(
+                pair.full.outcome_available_utc > self.causal_cutoff
+                for pair in selected
+            ):
+                raise ValueError(
+                    "selected ablation outcome was not available by causal cutoff"
+                )
         registration = self.scientific_registry.protocol_registration(self.protocol_id)
         if registration.protocol_hash != self.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")

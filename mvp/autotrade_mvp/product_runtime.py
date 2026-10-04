@@ -71,10 +71,25 @@ def source_revision():
     bundle_revision = None
     bundle_manifest = ROOT / 'bundle-manifest.json'
     if bundle_manifest.is_file():
+        def reject_duplicate_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError('duplicate bundle manifest JSON key')
+                result[key] = value
+            return result
+
+        def reject_non_finite(constant):
+            raise ValueError('non-finite bundle manifest JSON value: ' + constant)
+
         try:
-            manifest = json.loads(bundle_manifest.read_text(encoding='utf-8'))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError('bundle source revision manifest is unreadable') from error
+            manifest = json.loads(
+                bundle_manifest.read_text(encoding='utf-8'),
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RuntimeError('bundle source revision manifest is not strict JSON') from error
         if type(manifest) is not dict:
             raise RuntimeError('bundle source revision manifest must be an object')
         bundle_revision = _canonical_source_revision(

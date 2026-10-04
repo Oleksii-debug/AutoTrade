@@ -151,14 +151,16 @@ class Section17BlindedReplayTests(unittest.TestCase):
         self.assertEqual(result.events[0].payload["status"], "active")
 
     def test_rejects_declared_identity_used_as_dynamic_payload_key(self):
-        source = dataset(
-            event(
-                "one",
-                payload_extra={"BTC-USD": "dynamic-key-leak"},
-            )
-        )
-        with self.assertRaisesRegex(BlindingError, "payload key"):
-            self.blind(source)
+        for leaking_key in ("BTC-USD", "BTC-USD_close"):
+            with self.subTest(leaking_key=leaking_key):
+                source = dataset(
+                    event(
+                        "one",
+                        payload_extra={leaking_key: "dynamic-key-leak"},
+                    )
+                )
+                with self.assertRaisesRegex(BlindingError, "payload key"):
+                    self.blind(source)
 
     def test_rejects_absolute_calendar_string_not_declared_for_masking(self):
         source = dataset(
@@ -362,6 +364,15 @@ class Section17BlindedReplayTests(unittest.TestCase):
         source = dataset(event("one", kind="TRADE_2024-03-12"))
         with self.assertRaisesRegex(BlindingError, "event kind"):
             self.blind(source)
+
+    def test_privileged_artifact_retains_only_shuffle_seed_commitment(self):
+        result = self.blind(dataset(event("one")))
+        self.assertFalse(hasattr(result, "shuffle_key_sha256"))
+        self.assertRegex(
+            result.shuffle_key_commitment_sha256,
+            r"^sha256:[0-9a-f]{64}$",
+        )
+        self.assertNotEqual(result.shuffle_key_commitment_sha256, SHUFFLE)
 
     def test_profile_and_dataset_digests_are_exact_and_stable(self):
         source = dataset(event("one"))

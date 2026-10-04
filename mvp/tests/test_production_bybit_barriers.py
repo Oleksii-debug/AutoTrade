@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from mvp.autotrade_mvp import production_host
+from mvp.autotrade_mvp import production_host, provider_transport
 from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
@@ -47,6 +47,20 @@ class _HostileTimestamp(int):
 
     def __str__(self):
         raise AssertionError("hostile timestamp string conversion executed")
+
+
+_FORGED_SIGNER_CALLS = []
+_FORGED_POLICY_URL_CALLS = []
+
+
+def _forged_bybit_sign(*args, **kwargs):
+    _FORGED_SIGNER_CALLS.append((args, kwargs))
+    raise AssertionError("forged Bybit signer executed")
+
+
+def _forged_policy_absolute_url(self, endpoint):
+    _FORGED_POLICY_URL_CALLS.append((self, endpoint))
+    raise AssertionError("forged policy URL authority executed")
 
 
 class ProductionBybitBarrierTests(unittest.TestCase):
@@ -387,6 +401,160 @@ class ProductionBybitBarrierTests(unittest.TestCase):
                 SecurityBoundary.lease_for_execution = original_lease
 
             self.assertEqual(_HostileTimestamp.comparison_calls, 0)
+            self.assertEqual(wire.requests, [])
+
+    def test_callback_time_signer_rebind_is_rejected_before_execution(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            original_signer = provider_transport.BybitV5Signer.sign
+            _FORGED_SIGNER_CALLS.clear()
+
+            def quota_gate(*_args):
+                provider_transport.BybitV5Signer.sign = staticmethod(_forged_bybit_sign)
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "signer authority changed before signing",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after signer rebind"),
+                    )
+            finally:
+                SecurityBoundary.lease_for_execution = original_lease
+                provider_transport.BybitV5Signer.sign = staticmethod(original_signer)
+
+            self.assertEqual(_FORGED_SIGNER_CALLS, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_callback_time_signer_code_mutation_is_rejected_before_execution(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            signer = provider_transport.BybitV5Signer.sign
+            original_code = signer.__code__
+            _FORGED_SIGNER_CALLS.clear()
+
+            def quota_gate(*_args):
+                signer.__code__ = _forged_bybit_sign.__code__
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "signer authority code changed before signing",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after signer code mutation"),
+                    )
+            finally:
+                signer.__code__ = original_code
+                SecurityBoundary.lease_for_execution = original_lease
+
+            self.assertEqual(_FORGED_SIGNER_CALLS, [])
+            self.assertEqual(wire.requests, [])
+
+    def test_callback_time_policy_url_rebind_is_rejected_before_execution(self) -> None:
+        plaintext = json.dumps(
+            {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with TemporaryDirectory() as root:
+            runtime, _boundary = self._runtime(root)
+            wire = _RecordingWire()
+            original_url_reader = ProviderEndpointPolicy.absolute_url
+            _FORGED_POLICY_URL_CALLS.clear()
+
+            def quota_gate(*_args):
+                ProviderEndpointPolicy.absolute_url = _forged_policy_absolute_url
+
+            @contextmanager
+            def fake_lease(_self, _token, **_kwargs):
+                yield plaintext
+
+            original_lease = SecurityBoundary.lease_for_execution
+            SecurityBoundary.lease_for_execution = fake_lease
+            try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
+                with self.assertRaisesRegex(
+                    PermissionError,
+                    "policy URL authority changed before signing",
+                ):
+                    sender._transport_send(
+                        client_order_id,
+                        request,
+                        lambda: self.fail("final guard ran after URL authority rebind"),
+                    )
+            finally:
+                ProviderEndpointPolicy.absolute_url = original_url_reader
+                SecurityBoundary.lease_for_execution = original_lease
+
+            self.assertEqual(_FORGED_POLICY_URL_CALLS, [])
             self.assertEqual(wire.requests, [])
 
     def test_post_sign_callback_authority_mutation_is_rechecked_before_wire(self) -> None:

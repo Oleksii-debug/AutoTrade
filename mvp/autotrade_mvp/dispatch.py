@@ -23,10 +23,11 @@ from .provider_response_limits import require_provider_json_depth
 from .sender_authority import sender_authority_window
 
 
-# Retain the installed JournalStore CAS primitives once. The final-send boundary
-# must not be redirected by later mutation of public class attributes.
+# Retain the installed final-send authority primitives once. The irreversible
+# boundary must not be redirected by later mutation of public module/class attrs.
 _CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
 _CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
+_CANONICAL_SENDER_AUTHORITY_WINDOW = sender_authority_window
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -783,11 +784,11 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        # Capture the installed journal-cut callables before any caller callback
-        # can execute. final_barrier_clock, sender_check and authority_check are
-        # caller-controlled seams and cannot redirect the irreversible CAS.
+        # Capture the installed final-send authority callables before any caller
+        # callback can execute. Those seams cannot redirect the irreversible cut.
         journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
         journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
+        sender_authority_window_factory = _CANONICAL_SENDER_AUTHORITY_WINDOW
 
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -967,7 +968,7 @@ class GuardedDispatcher:
                 raise DispatchBlocked(barrier_reason)
             if self.environment in {"PAPER", "LIVE"}:
                 try:
-                    sender_window = sender_authority_window(
+                    sender_window = sender_authority_window_factory(
                         self._journal_store_authority(),
                         owner_scope=f"{self.environment}:{self.account_id}",
                     )

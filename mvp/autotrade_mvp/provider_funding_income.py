@@ -62,29 +62,44 @@ def _decimal(value: object, *, name: str) -> Decimal:
         raise ProviderFundingIncomeError(f"{name} must be bounded exact decimal text") from error
 
 
-def _transaction_time(value: object) -> datetime:
-    text = _text(value, name="transactionTime")
+def _epoch_millis(value: object, *, name: str) -> int:
+    text = _text(value, name=name)
     if not text.isascii() or not text.isdigit():
-        raise ProviderFundingIncomeError("transactionTime must be exact epoch-millisecond text")
+        raise ProviderFundingIncomeError(
+            f"{name} must be exact epoch-millisecond text"
+        )
     try:
         millis = int(text)
     except ValueError as error:
         raise ProviderFundingIncomeError(
-            "transactionTime must be exact epoch-millisecond text"
+            f"{name} must be exact epoch-millisecond text"
         ) from error
     if millis <= 0:
-        raise ProviderFundingIncomeError("transactionTime must be positive")
+        raise ProviderFundingIncomeError(f"{name} must be positive")
     if str(millis) != text:
         raise ProviderFundingIncomeError(
-            "transactionTime must use canonical epoch-millisecond text"
+            f"{name} must use canonical epoch-millisecond text"
         )
+    return millis
+
+
+def _datetime_from_epoch_millis(millis: int, *, name: str) -> datetime:
     seconds, remainder_millis = divmod(millis, 1000)
     try:
         return datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(
             milliseconds=remainder_millis
         )
     except (OverflowError, OSError, ValueError) as error:
-        raise ProviderFundingIncomeError("transactionTime is outside supported UTC range") from error
+        raise ProviderFundingIncomeError(
+            f"{name} is outside supported UTC range"
+        ) from error
+
+
+def _transaction_time(value: object) -> datetime:
+    return _datetime_from_epoch_millis(
+        _epoch_millis(value, name="transactionTime"),
+        name="transactionTime",
+    )
 
 
 def _uppercase_ascii_text(value: object, *, name: str) -> str:
@@ -326,7 +341,8 @@ def _bybit_funding_income_observations_impl(
     payload = neutral.payload
     if type(payload) is not dict:
         raise ProviderFundingIncomeError("Bybit transaction-log payload must be an object")
-    if payload.get("retCode") != 0 or type(payload.get("retMsg")) is not str:
+    ret_code = payload.get("retCode")
+    if type(ret_code) is not int or ret_code != 0 or type(payload.get("retMsg")) is not str:
         raise ProviderFundingIncomeError("Bybit transaction-log response is not successful")
     result = payload.get("result")
     if type(result) is not dict or type(result.get("list")) is not list:
@@ -340,6 +356,30 @@ def _bybit_funding_income_observations_impl(
             expected_currency,
             name="qualified query currency",
         )
+    start_millis = (
+        None
+        if query.get("startTime") is None
+        else _epoch_millis(
+            query.get("startTime"),
+            name="qualified query startTime",
+        )
+    )
+    end_millis = (
+        None
+        if query.get("endTime") is None
+        else _epoch_millis(
+            query.get("endTime"),
+            name="qualified query endTime",
+        )
+    )
+    if (
+        start_millis is not None
+        and end_millis is not None
+        and end_millis < start_millis
+    ):
+        raise ProviderFundingIncomeError(
+            "qualified funding query endTime precedes startTime"
+        )
     observations: list[ProviderFundingIncomeObservation] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(result["list"]):
@@ -350,7 +390,7 @@ def _bybit_funding_income_observations_impl(
         row_type = item.get("type")
         category = item.get("category")
         funding = item.get("funding")
-        if row_type != "SETTLEMENT" or category not in {"linear", "inverse"}:
+        if row_type != "SETTLEMENT":
             continue
         if category != expected_category:
             raise ProviderFundingIncomeError(
@@ -371,7 +411,23 @@ def _bybit_funding_income_observations_impl(
                 "Bybit funding row escaped the qualified currency scope"
             )
         side = _text(item.get("side"), name="side")
-        provider_transaction_at = _transaction_time(item.get("transactionTime"))
+        transaction_time_text = item.get("transactionTime")
+        transaction_millis = _epoch_millis(
+            transaction_time_text,
+            name="transactionTime",
+        )
+        if start_millis is not None and transaction_millis < start_millis:
+            raise ProviderFundingIncomeError(
+                "Bybit funding row predates the qualified startTime"
+            )
+        if end_millis is not None and transaction_millis > end_millis:
+            raise ProviderFundingIncomeError(
+                "Bybit funding row exceeds the qualified endTime"
+            )
+        provider_transaction_at = _datetime_from_epoch_millis(
+            transaction_millis,
+            name="transactionTime",
+        )
         funding_amount = _decimal(funding, name="funding")
         fee = _decimal(item.get("fee"), name="fee")
         cash_flow = _decimal(item.get("cashFlow"), name="cashFlow")

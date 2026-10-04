@@ -7,6 +7,7 @@ import unittest
 
 from control.tools.reconvergence_integrity import (
     Change,
+    PROTECTED_MUTATION_ROOTS,
     PROTECTED_SENTINELS,
     assess_git_revisions,
     assess_reconvergence,
@@ -146,6 +147,32 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_name_status(["R100\tonly-old-path"])
 
+    def test_parser_rejects_unmerged_unknown_similarity_and_hostile_paths(self):
+        hostile_records = (
+            "U\tcontrol/tools/reconvergence_integrity.py",
+            "X\tcontrol/tools/reconvergence_integrity.py",
+            "R101\told.py\tnew.py",
+            "Rabc\told.py\tnew.py",
+            "M\t../control/tools/reconvergence_integrity.py",
+            "M\t/absolute.py",
+            "M\tbad" + "\x00" + "path.py",
+        )
+        for record in hostile_records:
+            with self.subTest(record=repr(record)), self.assertRaises(ValueError):
+                parse_name_status([record])
+
+    def test_synthetic_change_values_cannot_bypass_name_status_validation(self):
+        for change in (
+            Change(status="U", path="mvp/runtime.py"),
+            Change(status="M", path="../mvp/runtime.py"),
+            Change(status="R200", previous_path="old.py", path="new.py"),
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                assess_reconvergence(
+                    base_paths=["mvp/runtime.py", "README.md"],
+                    changes=[change],
+                    protected_sentinels=frozenset(),
+                )
 
     def test_guard_itself_and_canonical_control_authorities_are_protected(self):
         for path in (
@@ -222,6 +249,61 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             result.protected_violations,
             ("control/qualification.json (type change)",),
         )
+
+    def test_executable_trust_root_modification_requires_exact_external_scope(self):
+        for trust_root in sorted(PROTECTED_MUTATION_ROOTS):
+            with self.subTest(trust_root=trust_root):
+                unscoped = assess_reconvergence(
+                    base_paths=[trust_root, "README.md"],
+                    changes=[Change(status="M", path=trust_root)],
+                )
+                self.assertFalse(unscoped.allowed)
+                self.assertIn(
+                    f"{trust_root} (unauthorized modification)",
+                    unscoped.protected_violations,
+                )
+
+                exact = assess_reconvergence(
+                    base_paths=[trust_root, "README.md"],
+                    changes=[Change(status="M", path=trust_root)],
+                    allowed_scopes=(trust_root,),
+                )
+                self.assertTrue(exact.allowed)
+                self.assertEqual(exact.protected_violations, ())
+
+    def test_directory_scope_cannot_authorize_executable_trust_root_modification(self):
+        trust_root = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[trust_root, "README.md"],
+            changes=[Change(status="M", path=trust_root)],
+            allowed_scopes=("control/tools",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.scope_violations, ())
+        self.assertEqual(
+            result.protected_violations,
+            (f"{trust_root} (unauthorized modification)",),
+        )
+
+    def test_rename_or_copy_into_executable_trust_root_fails_closed(self):
+        trust_root = "control/tools/reconvergence_integrity.py"
+        for status in ("R100", "C100"):
+            with self.subTest(status=status):
+                result = assess_reconvergence(
+                    base_paths=["scratch.py", "README.md"],
+                    changes=[
+                        Change(
+                            status=status,
+                            previous_path="scratch.py",
+                            path=trust_root,
+                        )
+                    ],
+                    protected_sentinels=frozenset(),
+                    allowed_scopes=(trust_root, "scratch.py"),
+                )
+                self.assertFalse(result.allowed)
+                self.assertTrue(result.protected_violations)
 
     def test_declared_scope_rejects_small_unrelated_blob_change(self):
         result = assess_reconvergence(
@@ -311,6 +393,13 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
+        self.assertIn(
+            "Verify event base is still exact live target tip",
+            workflow,
+        )
+        self.assertIn("git ls-remote --refs origin", workflow)
+        self.assertIn("AUTOTRADE_EVENT_BASE_REF:", workflow)
+        self.assertIn("AUTOTRADE_EVENT_BASE_SHA:", workflow)
 
 
 

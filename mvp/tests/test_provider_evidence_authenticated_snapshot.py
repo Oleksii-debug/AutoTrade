@@ -4,6 +4,7 @@ from unittest.mock import patch
 from uuid import uuid4
 import unittest
 
+import research.autotrade_research.artifacts.store as artifact_store_module
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
@@ -157,6 +158,75 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                     committed_at=T1,
                     evidence_refs=[ref],
                 )
+
+    def test_manifest_decoder_rebinding_fails_closed_before_redirect(self):
+        with TemporaryDirectory() as directory:
+            book, _artifacts, _request, ref = prepared_book(directory)
+            with patch.object(
+                ArtifactStore,
+                "_decode_manifest_bytes",
+                side_effect=AssertionError("forged manifest decoder executed"),
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "reader graph changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-decoder-rebind",
+                        client_order_id="c1",
+                        provider_order_id="provider-order-1",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+
+    def test_manifest_integrity_rebinding_fails_closed_before_redirect(self):
+        with TemporaryDirectory() as directory:
+            book, _artifacts, _request, ref = prepared_book(directory)
+            with patch.object(
+                artifact_store_module,
+                "_verify_manifest_integrity",
+                side_effect=AssertionError("forged integrity verifier executed"),
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "reader graph changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-integrity-rebind",
+                        client_order_id="c1",
+                        provider_order_id="provider-order-1",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+
+    def test_manifest_decoder_code_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            book, _artifacts, _request, ref = prepared_book(directory)
+            decoder = ArtifactStore._decode_manifest_bytes
+            original_code = decoder.__code__
+
+            def forged_decoder(self, manifest_path, raw_bytes):
+                del self, manifest_path, raw_bytes
+                raise AssertionError("forged decoder executed")
+
+            try:
+                decoder.__code__ = forged_decoder.__code__
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "reader graph changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-decoder-code",
+                        client_order_id="c1",
+                        provider_order_id="provider-order-1",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+            finally:
+                decoder.__code__ = original_code
 
     def test_retained_authenticated_reader_code_retarget_fails_closed(self):
         with TemporaryDirectory() as directory:

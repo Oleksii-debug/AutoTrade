@@ -844,6 +844,24 @@ class FuturesLifecycleTests(unittest.TestCase):
         ):
             lifecycle_gate(forged, utc(29, 12))
 
+    def test_manual_post_init_cannot_mint_forged_lifecycle_authority(self):
+        forged = object.__new__(FuturesContract)
+        with self.assertRaisesRegex(
+            FuturesError, "normal constructor execution"
+        ):
+            forged.__post_init__()
+
+        object.__setattr__(forged, "instrument", "forged")
+        object.__setattr__(forged, "settlement_method", "CASH")
+        object.__setattr__(forged, "expiry", utc(30, 21))
+        object.__setattr__(forged, "last_trade_at", utc(30, 20))
+        object.__setattr__(forged, "delivery_cutoff", utc(29, 12))
+        object.__setattr__(forged, "canonical_instrument", None)
+        with self.assertRaisesRegex(
+            FuturesError, "lifecycle authority is not established"
+        ):
+            lifecycle_gate(forged, utc(29, 12))
+
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(
             FuturesError, "delivery_cutoff cannot be after last_trade_at"

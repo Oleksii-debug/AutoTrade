@@ -623,7 +623,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             start_update_checkpoint(forged, trust=self.trust)
 
     def test_signed_backup_receipt_must_cover_exact_artifact_identity(self):
-        wrong = BackupEvidence(
+        wrong_raw = BackupEvidence(
             manifest_sha256=self.backup.manifest_sha256,
             source_sha=self.backup.source_sha,
             journal_schema_version=self.backup.journal_schema_version,
@@ -634,7 +634,32 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             evidence_artifact_id=str(
                 uuid5(NAMESPACE_URL, "different-backup-artifact")
             ),
-            qualification_receipt=self.backup.qualification_receipt,
+        )
+        receipt = self._update_receipt(
+            wrong_raw,
+            requirement=windows_update_module.backup_evidence_subject_requirement(
+                wrong_raw
+            ),
+            refs=(
+                EvidenceArtifactRef(
+                    artifact_id=self.backup.evidence_artifact_id,
+                    sha256=self.backup.manifest_sha256,
+                    media_type=windows_update_module.WINDOWS_UPDATE_BACKUP_MEDIA_TYPE,
+                    evidence_kind=windows_update_module.WINDOWS_UPDATE_BACKUP_EVIDENCE_KIND,
+                    source_sha=self.backup.source_sha,
+                ),
+            ),
+        )
+        wrong = BackupEvidence(
+            manifest_sha256=wrong_raw.manifest_sha256,
+            source_sha=wrong_raw.source_sha,
+            journal_schema_version=wrong_raw.journal_schema_version,
+            verification_status=wrong_raw.verification_status,
+            reconciliation_required_after_restore=(
+                wrong_raw.reconciliation_required_after_restore
+            ),
+            evidence_artifact_id=wrong_raw.evidence_artifact_id,
+            qualification_receipt=receipt,
         )
         decision = build_windows_update_plan(
             current_release=self.current,
@@ -647,6 +672,59 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn(
             "pre_update_backup_authority_unverified",
+            decision.reasons,
+        )
+
+    def test_signed_migration_receipt_must_cover_exact_artifact_identity(self):
+        qualified = self._qualified_migration()
+        wrong_raw = MigrationEvidence(
+            from_schema_version=qualified.from_schema_version,
+            to_schema_version=qualified.to_schema_version,
+            source_sha=qualified.source_sha,
+            evidence_sha256=qualified.evidence_sha256,
+            verification_status=qualified.verification_status,
+            rollback_mode=qualified.rollback_mode,
+            evidence_artifact_id=str(
+                uuid5(NAMESPACE_URL, "different-migration-artifact")
+            ),
+        )
+        receipt = self._update_receipt(
+            wrong_raw,
+            requirement=windows_update_module.migration_evidence_subject_requirement(
+                wrong_raw
+            ),
+            refs=(
+                EvidenceArtifactRef(
+                    artifact_id=qualified.evidence_artifact_id,
+                    sha256=qualified.evidence_sha256,
+                    media_type=windows_update_module.WINDOWS_UPDATE_MIGRATION_MEDIA_TYPE,
+                    evidence_kind=windows_update_module.WINDOWS_UPDATE_MIGRATION_EVIDENCE_KIND,
+                    source_sha=qualified.source_sha,
+                ),
+            ),
+        )
+        wrong = MigrationEvidence(
+            from_schema_version=wrong_raw.from_schema_version,
+            to_schema_version=wrong_raw.to_schema_version,
+            source_sha=wrong_raw.source_sha,
+            evidence_sha256=wrong_raw.evidence_sha256,
+            verification_status=wrong_raw.verification_status,
+            rollback_mode=wrong_raw.rollback_mode,
+            evidence_artifact_id=wrong_raw.evidence_artifact_id,
+            qualification_receipt=receipt,
+        )
+        decision = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=2,
+            backup_evidence=self.backup,
+            migration_evidence=wrong,
+            trust=self.trust,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn(
+            "migration_evidence_authority_unverified",
             decision.reasons,
         )
 

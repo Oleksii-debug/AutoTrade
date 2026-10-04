@@ -3,7 +3,7 @@
 The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
 binds every changed path to those scopes. Destructive base-tree accounting covers
-not only direct deletions but also rename-away and Git object-type replacement. A candidate must descend from the exact
+not only direct deletions but also rename-away and Git object-type replacement. The resulting candidate tree must also remain case-insensitively unique for Windows-safe checkout. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
 cannot be deleted, renamed away or changed to another Git object type. A PR that
 deletes both a material absolute number and a material fraction of the base tree
@@ -228,6 +228,37 @@ def assess_reconvergence(
             raise ValueError(
                 f"added path already exists in the base tree: {change.path}"
             )
+
+    candidate_paths = set(base_set)
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "D":
+            candidate_paths.discard(change.path)
+        elif kind == "R":
+            if change.previous_path is None:
+                raise ValueError("rename source path identity is missing")
+            candidate_paths.discard(change.previous_path)
+    for change in validated_changes:
+        if change.status[:1] in {"A", "R", "C"}:
+            candidate_paths.add(change.path)
+
+    casefold_groups: dict[str, list[str]] = {}
+    for path in sorted(candidate_paths):
+        casefold_groups.setdefault(path.casefold(), []).append(path)
+    casefold_collisions = tuple(
+        tuple(paths)
+        for paths in casefold_groups.values()
+        if len(paths) > 1
+    )
+    if casefold_collisions:
+        rendered = "; ".join(
+            " <> ".join(paths)
+            for paths in casefold_collisions
+        )
+        raise ValueError(
+            "candidate tree contains case-insensitive path collision(s): "
+            + rendered
+        )
 
     normalized_scopes: tuple[str, ...] | None = None
     if allowed_scopes is not None:

@@ -1024,6 +1024,22 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
 
 
+    def test_live_event_history_selection_has_stable_identity_and_page_reveal(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]
+        self.assertIn("const bookmark = captureTableSelection(body);", render)
+        self.assertIn('row.dataset.selectionKey = "event:" + cursor.toString();', render)
+        self.assertIn('row.dataset.selectionExact = "true";', render)
+        self.assertIn('reapplyTableFilter("event-history-body");', render)
+        self.assertLess(
+            render.index('reapplyTableFilter("event-history-body");'),
+            render.index("revealBookmarkedTablePage(body, bookmark);"),
+        )
+        self.assertLess(
+            render.index("revealBookmarkedTablePage(body, bookmark);"),
+            render.index("restoreTableSelection(body, bookmark);"),
+        )
+
     def test_event_history_retention_is_cursor_based_not_dom_sort_based(self):
         js = APP.read_text(encoding="utf-8")
         render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]

@@ -433,6 +433,15 @@ class StrategyToolPolicy:
                     f"{cell.key} requires at least two distinct "
                     "registered strategy families"
                 )
+            protocols = {
+                item.evaluation_protocol_sha256
+                for item in eligible
+            }
+            if len(protocols) != 1:
+                raise StrategyToolWeightingError(
+                    f"{cell.key} strategies must share one registered "
+                    "evaluation protocol before their metrics are comparable"
+                )
 
         object.__setattr__(self, "registered_strategies", strategies)
         object.__setattr__(self, "required_cells", tuple(cells))

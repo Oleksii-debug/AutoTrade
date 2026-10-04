@@ -290,6 +290,8 @@ def record_reconciliation_checkpoint(
     host_id: str,
     owner_epoch: str,
     evidence_artifact_store: ArtifactStore | None = None,
+    expected_journal_sequence: int | None = None,
+    expected_whole_store_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
@@ -346,6 +348,8 @@ def record_reconciliation_checkpoint(
     store.append_event(
         envelope,
         outbox_topic="autotrade.reconciliation.events",
+        expected_journal_sequence=expected_journal_sequence,
+        expected_whole_store_counts=expected_whole_store_counts,
     )
     event = store.get_event(event_id)
     if event is None:
@@ -663,6 +667,7 @@ def load_account_resource_availability_evidence(
     max_age_seconds: Decimal | str | int,
     evidence_artifact_store: ArtifactStore | None = None,
     require_latest_scope: bool = False,
+    journal_sequence_cut: int | None = None,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -676,6 +681,12 @@ def load_account_resource_availability_evidence(
         raise TypeError("store must be JournalStore")
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
+    if journal_sequence_cut is not None:
+        if (type(journal_sequence_cut) is not int or journal_sequence_cut < 0
+                or journal_sequence_cut > store.current_journal_sequence()):
+            raise ValueError("historical availability journal cut is invalid")
+        if require_latest_scope:
+            raise ValueError("current availability cannot use a historical journal cut")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     current_scope_head = None
     if require_latest_scope:
@@ -689,6 +700,10 @@ def load_account_resource_availability_evidence(
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
+    if (journal_sequence_cut is not None
+            and checkpoint.get("journal_sequence", journal_sequence_cut + 1)
+            > journal_sequence_cut):
+        raise ValueError("availability checkpoint is after the historical journal cut")
     if (
         checkpoint.get("event_type") != "AccountReconciled"
         or checkpoint.get("aggregate_type") != "account_reconciliation"
@@ -733,10 +748,12 @@ def load_account_resource_availability_evidence(
 
     if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
+    if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
+        raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
         max_age = (
             max_age_seconds
-            if isinstance(max_age_seconds, Decimal)
+            if type(max_age_seconds) is Decimal
             else Decimal(max_age_seconds)
         )
     except Exception as error:
@@ -855,6 +872,9 @@ def load_account_resource_availability_evidence(
             "settlement_book"
         ):
             settlement_sequence = settlement_event.get("journal_sequence")
+            if (journal_sequence_cut is not None and type(settlement_sequence) is int
+                    and settlement_sequence > journal_sequence_cut):
+                continue
             settlement_payload = settlement_event.get("payload")
             if (
                 type(settlement_sequence) is not int
@@ -894,6 +914,9 @@ def load_account_resource_availability_evidence(
             "option_lifecycle"
         ):
             lifecycle_sequence = lifecycle_event.get("journal_sequence")
+            if (journal_sequence_cut is not None and type(lifecycle_sequence) is int
+                    and lifecycle_sequence > journal_sequence_cut):
+                continue
             lifecycle_payload = lifecycle_event.get("payload")
             if (
                 type(lifecycle_sequence) is not int

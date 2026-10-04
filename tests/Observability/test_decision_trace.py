@@ -32,8 +32,8 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
 class DecisionTraceEvidenceTests(unittest.TestCase):
     def test_relative_backing_path_is_frozen_across_cwd_change(self):
         original_cwd = os.getcwd()
-        try:
-            with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:
+            try:
                 source_root = Path(source_directory)
                 other_root = Path(other_directory)
                 os.chdir(source_root)
@@ -53,8 +53,10 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                     [item["trace_id"] for item in store.records()],
                     ["decision-cwd-frozen"],
                 )
-        finally:
-            os.chdir(original_cwd)
+            finally:
+                # Windows cannot remove a TemporaryDirectory that is the process CWD.
+                # Restore it before either context manager starts cleanup.
+                os.chdir(original_cwd)
 
     def test_append_waits_for_shared_cross_process_writer_lock(self):
         with TemporaryDirectory() as directory:

@@ -93,10 +93,12 @@ def _assert_root_continuity(self) -> None:
 
 
 def _canonical_authoritative_root(root: str | Path) -> Path:
-    if not isinstance(root, (str, Path)):
-        raise TypeError("trusted artifact root must be a string or Path")
-    if isinstance(root, str) and not root.strip():
-        raise ValueError("trusted artifact root must be non-empty")
+    canonical_path_type = type(Path())
+    if type(root) is str:
+        if not root.strip():
+            raise ValueError("trusted artifact root must be non-empty")
+    elif type(root) is not canonical_path_type:
+        raise TypeError("trusted artifact root must be an exact string or Path")
     return Path(os.path.abspath(os.fspath(root)))
 
 

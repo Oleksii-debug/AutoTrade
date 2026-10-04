@@ -23,10 +23,15 @@ from .provider_response_limits import require_provider_json_depth
 from .sender_authority import sender_authority_window
 
 
-# Retain the installed JournalStore CAS primitives once. The final-send boundary
-# must not be redirected by later mutation of public class attributes.
+# Retain the installed final-send authority primitives once. The irreversible
+# boundary must not be redirected by later mutation of public module/class attrs.
+_CANONICAL_JOURNAL_STORE_IDENTITY = JournalStore.store_identity
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
 _CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
 _CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
+_CANONICAL_PAYLOAD_DIGEST = payload_digest
+_CANONICAL_SENDER_AUTHORITY_WINDOW = sender_authority_window
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -323,6 +328,8 @@ def submission_attempt_aggregate_id(
 
 def _canonical_journal_authority_snapshot(
     store: JournalStore,
+    *,
+    _store_identity_descriptor=_CANONICAL_JOURNAL_STORE_IDENTITY,
 ) -> tuple[object, object]:
     """Validate the narrow canonical JournalStore instance/generation seam.
 
@@ -347,7 +354,7 @@ def _canonical_journal_authority_snapshot(
     if "path" not in state or "_store_identity" not in state:
         raise TypeError("canonical JournalStore backing state is unavailable")
     path = state["path"]
-    identity = JournalStore.store_identity.__get__(store, JournalStore)
+    identity = _store_identity_descriptor.__get__(store, JournalStore)
     if getattr(identity, "canonical_path", None) != str(path):
         raise PermissionError("canonical JournalStore backing identity changed")
     return path, identity
@@ -372,9 +379,11 @@ def load_submission_response_binding(
         account_id=account_id,
         attempt_id=attempt_id,
     )
-    # Resolve the method from the canonical class after rejecting all instance
-    # shadow state; never dispatch through a caller-attached load_events.
-    events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
+    # Use the retained installed reader after rejecting all instance shadow
+    # state; later public class-method rebinding cannot retarget provenance.
+    events = _CANONICAL_JOURNAL_LOAD_EVENTS(
+        store, "submission_attempt", aggregate_id
+    )
     if not events:
         raise ValueError("durable submission attempt was not found")
     event_types = [event.get("event_type") for event in events]
@@ -528,6 +537,7 @@ def _envelope(
     payload: dict[str, Any],
     now: str,
     owner_epoch: int,
+    _payload_digest_function=_CANONICAL_PAYLOAD_DIGEST,
 ) -> dict[str, Any]:
     timestamp = _instant(now).isoformat().replace("+00:00", "Z")
     return {
@@ -551,7 +561,7 @@ def _envelope(
         ),
         "causation_id": None,
         "payload": payload,
-        "payload_hash": payload_digest(payload),
+        "payload_hash": _payload_digest_function(payload),
         "evidence_refs": [],
     }
 
@@ -619,9 +629,13 @@ class GuardedDispatcher:
             attempt_id=attempt_id,
         )
 
-    def _events(self, attempt_id: str) -> list[dict[str, Any]]:
+    def _events(
+        self,
+        attempt_id: str,
+        _journal_load_events=_CANONICAL_JOURNAL_LOAD_EVENTS,
+    ) -> list[dict[str, Any]]:
         store = self._journal_store_authority()
-        return JournalStore.load_events(
+        return _journal_load_events(
             store,
             "submission_attempt",
             self._aggregate_id(attempt_id),
@@ -637,6 +651,7 @@ class GuardedDispatcher:
         now: str,
         expected_journal_sequence: int | None = None,
         _journal_commit_command: Callable[..., object] | None = None,
+        _journal_append_event=_CANONICAL_JOURNAL_APPEND_EVENT,
     ):
         store = self._journal_store_authority()
         envelope = _envelope(
@@ -651,7 +666,7 @@ class GuardedDispatcher:
             owner_epoch=self.owner_epoch,
         )
         if expected_journal_sequence is None:
-            return JournalStore.append_event(
+            return _journal_append_event(
                 store,
                 envelope,
                 outbox_topic="autotrade.submission.events",
@@ -783,11 +798,11 @@ class GuardedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        # Capture the installed journal-cut callables before any caller callback
-        # can execute. final_barrier_clock, sender_check and authority_check are
-        # caller-controlled seams and cannot redirect the irreversible CAS.
+        # Capture the installed final-send authority callables before any caller
+        # callback can execute. Those seams cannot redirect the irreversible cut.
         journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
         journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
+        sender_authority_window_factory = _CANONICAL_SENDER_AUTHORITY_WINDOW
 
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -967,7 +982,7 @@ class GuardedDispatcher:
                 raise DispatchBlocked(barrier_reason)
             if self.environment in {"PAPER", "LIVE"}:
                 try:
-                    sender_window = sender_authority_window(
+                    sender_window = sender_authority_window_factory(
                         self._journal_store_authority(),
                         owner_scope=f"{self.environment}:{self.account_id}",
                     )

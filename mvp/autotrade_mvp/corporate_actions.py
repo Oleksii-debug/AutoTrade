@@ -12,7 +12,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
-from .exact_decimal import ExactDecimalError, exact_add, exact_multiply
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    exact_abs,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    terminating_decimal,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 
 
@@ -33,6 +42,67 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if result < 0 or (result == 0 and not allow_zero):
         raise ValueError(f"{name} must be {'non-negative' if allow_zero else 'positive'}")
     return result
+
+
+def _exact_addition(left: Decimal, right: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_difference(left: Decimal, right: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_product(*values: Decimal, name: str) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_absolute(value: Decimal, *, name: str) -> Decimal:
+    try:
+        return exact_abs(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} exceeds exact decimal resource envelope"
+        ) from error
+
+
+def _exact_ratio_product(
+    value: Decimal,
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    name: str,
+) -> Decimal:
+    try:
+        denominator_fraction = as_fraction(denominator)
+        if denominator_fraction == 0:
+            raise ValueError(f"{name} denominator must be non-zero")
+        result = bounded_fraction(
+            as_fraction(value)
+            * as_fraction(numerator)
+            / denominator_fraction
+        )
+        return terminating_decimal(result)
+    except ValueError:
+        raise
+    except (ExactDecimalError, ZeroDivisionError) as error:
+        raise ValueError(
+            f"{name} is not representable within the exact decimal resource envelope"
+        ) from error
 
 
 def _text(value: str, *, name: str) -> str:
@@ -147,7 +217,14 @@ class EquityState:
 
     @property
     def unit_basis(self) -> Decimal:
-        return Decimal("0") if self.quantity == 0 else self.total_basis / abs(self.quantity)
+        if self.quantity == 0:
+            return Decimal("0")
+        return _exact_ratio_product(
+            self.total_basis,
+            Decimal("1"),
+            _exact_absolute(self.quantity, name="unit basis quantity"),
+            name="unit basis",
+        )
 
 
 @dataclass(frozen=True)
@@ -588,13 +665,27 @@ class CorporateActionBook:
             raise ValueError("split requires exactly numerator and denominator")
         numerator = _positive(event.payload.get("numerator"), name="numerator")
         denominator = _positive(event.payload.get("denominator"), name="denominator")
-        ratio = numerator / denominator
         before = self.state
         after = replace(
             before,
-            quantity=before.quantity * ratio,
-            borrowed_quantity=before.borrowed_quantity * ratio,
-            recalled_quantity=before.recalled_quantity * ratio,
+            quantity=_exact_ratio_product(
+                before.quantity,
+                numerator,
+                denominator,
+                name="split quantity",
+            ),
+            borrowed_quantity=_exact_ratio_product(
+                before.borrowed_quantity,
+                numerator,
+                denominator,
+                name="split borrowed quantity",
+            ),
+            recalled_quantity=_exact_ratio_product(
+                before.recalled_quantity,
+                numerator,
+                denominator,
+                name="split recalled quantity",
+            ),
         )
         return Transition(
             event_id=event.event_id,
@@ -631,13 +722,25 @@ class CorporateActionBook:
         before = self.state
         if before.borrowed_quantity != 0:
             raise ValueError("cash merger with unresolved borrowed quantity requires explicit provider handling")
-        proceeds = before.quantity * cash_per_share
-        pnl = proceeds - before.total_basis
+        proceeds = _exact_product(
+            before.quantity,
+            cash_per_share,
+            name="cash merger proceeds",
+        )
+        pnl = _exact_difference(
+            proceeds,
+            before.total_basis,
+            name="cash merger P&L",
+        )
         after = replace(
             before,
             quantity=Decimal("0"),
             total_basis=Decimal("0"),
-            unsettled_cash=before.unsettled_cash + proceeds,
+            unsettled_cash=_exact_addition(
+                before.unsettled_cash,
+                proceeds,
+                name="cash merger unsettled cash",
+            ),
         )
         return Transition(
             event_id=event.event_id,
@@ -775,12 +878,23 @@ def settle_cash(state: EquityState, amount) -> EquityState:
         raise ValueError("cannot settle cash when no unsettled balance exists")
     if (value > 0) != (outstanding > 0):
         raise ValueError("settlement amount must have the same sign as unsettled cash")
-    if abs(value) > abs(outstanding):
+    if _exact_absolute(value, name="settlement amount") > _exact_absolute(
+        outstanding,
+        name="unsettled cash",
+    ):
         raise ValueError("cannot settle more cash than is currently unsettled")
     return replace(
         state,
-        unsettled_cash=outstanding - value,
-        settled_cash=state.settled_cash + value,
+        unsettled_cash=_exact_difference(
+            outstanding,
+            value,
+            name="remaining unsettled cash",
+        ),
+        settled_cash=_exact_addition(
+            state.settled_cash,
+            value,
+            name="settled cash",
+        ),
     )
 
 
@@ -796,14 +910,26 @@ def record_unsettled_purchase(
         raise ValueError(
             "long purchase helper cannot implicitly cover an existing cash-equity short"
         )
-    cost = qty * unit_price
+    cost = _exact_product(qty, unit_price, name="purchase cost")
     if cost > state.settled_cash:
         raise ValueError("purchase cannot spend unfunded settled cash")
     return replace(
         state,
-        quantity=state.quantity + qty,
-        total_basis=state.total_basis + cost,
-        settled_cash=state.settled_cash - cost,
+        quantity=_exact_addition(
+            state.quantity,
+            qty,
+            name="purchase quantity",
+        ),
+        total_basis=_exact_addition(
+            state.total_basis,
+            cost,
+            name="purchase total basis",
+        ),
+        settled_cash=_exact_difference(
+            state.settled_cash,
+            cost,
+            name="purchase settled cash",
+        ),
     )
 
 
@@ -817,12 +943,24 @@ def establish_short(
     price = _positive(sale_price, name="sale_price")
     if state.quantity > 0:
         raise ValueError("foundation does not net a long position into a new short implicitly")
-    proceeds = qty * price
+    proceeds = _exact_product(qty, price, name="short-sale proceeds")
     return replace(
         state,
-        quantity=state.quantity - qty,
-        borrowed_quantity=state.borrowed_quantity + qty,
-        unsettled_cash=state.unsettled_cash + proceeds,
+        quantity=_exact_difference(
+            state.quantity,
+            qty,
+            name="short position quantity",
+        ),
+        borrowed_quantity=_exact_addition(
+            state.borrowed_quantity,
+            qty,
+            name="borrowed quantity",
+        ),
+        unsettled_cash=_exact_addition(
+            state.unsettled_cash,
+            proceeds,
+            name="short-sale unsettled cash",
+        ),
     )
 
 
@@ -837,20 +975,44 @@ def accrue_borrow_financing(
     value = _positive(marked_value, name="marked_value", allow_zero=True)
     if not isinstance(days, int) or isinstance(days, bool) or days < 0:
         raise ValueError("days must be a non-negative integer")
-    charge = value * rate * Decimal(days)
+    charge = _exact_product(
+        value,
+        rate,
+        Decimal(days),
+        name="borrow financing charge",
+    )
     return replace(
         state,
-        accrued_financing=state.accrued_financing + charge,
-        unsettled_cash=state.unsettled_cash - charge,
+        accrued_financing=_exact_addition(
+            state.accrued_financing,
+            charge,
+            name="accrued borrow financing",
+        ),
+        unsettled_cash=_exact_difference(
+            state.unsettled_cash,
+            charge,
+            name="borrow financing unsettled cash",
+        ),
     )
 
 
 def record_recall(state: EquityState, quantity) -> EquityState:
     qty = _positive(quantity, name="quantity")
-    available = state.borrowed_quantity - state.recalled_quantity
+    available = _exact_difference(
+        state.borrowed_quantity,
+        state.recalled_quantity,
+        name="available borrow quantity",
+    )
     if qty > available:
         raise ValueError("recall exceeds currently borrowed unrecalled quantity")
-    return replace(state, recalled_quantity=state.recalled_quantity + qty)
+    return replace(
+        state,
+        recalled_quantity=_exact_addition(
+            state.recalled_quantity,
+            qty,
+            name="recalled quantity",
+        ),
+    )
 
 
 def cover_recalled_short(state: EquityState, *, quantity, buy_price) -> EquityState:
@@ -858,13 +1020,29 @@ def cover_recalled_short(state: EquityState, *, quantity, buy_price) -> EquitySt
     price = _positive(buy_price, name="buy_price")
     if qty > state.recalled_quantity or qty > state.borrowed_quantity:
         raise ValueError("cover quantity exceeds recalled/borrowed quantity")
-    cost = qty * price
+    cost = _exact_product(qty, price, name="short-cover cost")
     if cost > state.settled_cash:
         raise ValueError("cover requires sufficient settled cash in this foundation")
     return replace(
         state,
-        quantity=state.quantity + qty,
-        borrowed_quantity=state.borrowed_quantity - qty,
-        recalled_quantity=state.recalled_quantity - qty,
-        settled_cash=state.settled_cash - cost,
+        quantity=_exact_addition(
+            state.quantity,
+            qty,
+            name="covered position quantity",
+        ),
+        borrowed_quantity=_exact_difference(
+            state.borrowed_quantity,
+            qty,
+            name="remaining borrowed quantity",
+        ),
+        recalled_quantity=_exact_difference(
+            state.recalled_quantity,
+            qty,
+            name="remaining recalled quantity",
+        ),
+        settled_cash=_exact_difference(
+            state.settled_cash,
+            cost,
+            name="short-cover settled cash",
+        ),
     )

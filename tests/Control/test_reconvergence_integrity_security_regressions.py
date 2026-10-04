@@ -124,6 +124,39 @@ class ReconvergenceSecurityRegressionTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_hostile_expected_head_is_rejected_before_regex_or_text_dispatch(self):
+        calls: list[str] = []
+        hostile_head = HostileText("a" * 40, calls)
+
+        with self.assertRaisesRegex(ValueError, "expected approval head"):
+            parse_trusted_scope_approval(
+                "AUTOTRADE_RECONVERGENCE_SCOPE_V1\n"
+                + "head: "
+                + ("a" * 40)
+                + "\npath: .github/workflows/verify.yml",
+                expected_head_sha=hostile_head,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_scope_approval_rejects_noncanonical_whitespace(self):
+        head = "a" * 40
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                " AUTOTRADE_RECONVERGENCE_SCOPE_V1\n"
+                + f"head: {head}\n"
+                + "path: .github/workflows/verify.yml",
+                expected_head_sha=head,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "canonical repository-relative path"):
+            parse_trusted_scope_approval(
+                "AUTOTRADE_RECONVERGENCE_SCOPE_V1\n"
+                + f"head: {head}\n"
+                + "path: .github/workflows/verify.yml ",
+                expected_head_sha=head,
+            )
+
     def test_mass_rename_away_counts_as_base_tree_disappearance(self):
         base = [f"path-{index:03d}.txt" for index in range(100)]
         changes = [

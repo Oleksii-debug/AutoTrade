@@ -584,6 +584,67 @@ class InformationClaimTests(unittest.TestCase):
                 },
             )
 
+    def test_claim_store_detaches_admitted_claim_from_later_mutation(self):
+        store = ClaimStore()
+        original = store.build_claim(
+            doc("corp", "r1", "guidance is 10"),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        accepted, inserted = store.add(original)
+        self.assertTrue(inserted)
+        self.assertEqual(accepted, original)
+
+        object.__setattr__(original, "value", "attacker-rewrite")
+        object.__setattr__(original, "available_at", BASE + timedelta(days=30))
+
+        effective = store.effective_at(BASE)
+        self.assertEqual(len(effective), 1)
+        self.assertEqual(effective[0].value, "10")
+        self.assertEqual(effective[0].available_at, BASE)
+
+    def test_claim_store_exposes_detached_claims_not_internal_authority(self):
+        store = ClaimStore()
+        original = store.build_claim(
+            doc("corp", "r1", "guidance is 10"),
+            subject="X",
+            predicate="guidance",
+            value="10",
+        )
+        store.add(original)
+
+        exposed = store.claims[0]
+        object.__setattr__(exposed, "value", "attacker-rewrite")
+        object.__setattr__(exposed, "published_at", BASE + timedelta(days=30))
+
+        self.assertEqual(store.claims[0].value, "10")
+        self.assertEqual(store.decision_snapshot_at(BASE).claims[0].value, "10")
+        self.assertEqual(store.revisions("corp")[0].published_at, BASE)
+
+    def test_add_rejects_claim_subclass_before_attribute_dispatch(self):
+        class HostileInformationClaim(InformationClaim):
+            def __getattribute__(self, name):
+                raise AssertionError("claim subclass callback must not run")
+
+        forged = object.__new__(HostileInformationClaim)
+        with self.assertRaisesRegex(ValueError, "exact InformationClaim"):
+            ClaimStore().add(forged)
+
+    def test_build_claim_rejects_source_subclass_before_attribute_dispatch(self):
+        class HostileSourceDocument(SourceDocument):
+            def __getattribute__(self, name):
+                raise AssertionError("source subclass callback must not run")
+
+        forged = object.__new__(HostileSourceDocument)
+        with self.assertRaisesRegex(ValueError, "exact SourceDocument"):
+            ClaimStore.build_claim(
+                forged,
+                subject="X",
+                predicate="guidance",
+                value="10",
+            )
+
     def test_direct_source_document_cannot_bypass_provenance_invariants(self):
         with self.assertRaisesRegex(ValueError, "unsupported source_kind"):
             SourceDocument(

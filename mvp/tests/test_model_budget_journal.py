@@ -396,6 +396,49 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(HostileDatetime.compare_calls, 0)
             self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_route_detaches_financial_identity_before_journal_callbacks(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="1")
+            policy = route_policy()
+            request = route_request("route-detached-identity", budget="1")
+            descriptor = route_model_descriptor(cost="0.1")
+            canonical_snapshot = budget.snapshot
+            mutated = False
+
+            def mutating_snapshot():
+                nonlocal mutated
+                if not mutated:
+                    mutated = True
+                    object.__setattr__(policy, "allowed_model_ids", ())
+                    object.__setattr__(request, "budget_remaining", Decimal("0"))
+                    object.__setattr__(descriptor, "estimated_cost", Decimal("99"))
+                return canonical_snapshot()
+
+            with patch.object(budget, "snapshot", side_effect=mutating_snapshot):
+                decision = budget.admit_route(
+                    policy,
+                    request,
+                    [descriptor],
+                    now_utc=ROUTE_NOW,
+                    reservation_context={"attempt_id": "attempt-detached"},
+                )
+
+            self.assertTrue(mutated)
+            self.assertEqual(decision.status, RouteStatus.ADMITTED)
+            self.assertEqual(decision.reserved_cost, Decimal("0.1"))
+            event = journal.load_events(
+                "model_budget",
+                "policy-1",
+            )[-1]
+            self.assertEqual(event["event_type"], "ModelRouteReserved")
+            routing_input = event["payload"]["routing_input"]
+            self.assertEqual(routing_input["policy"]["allowed_model_ids"], ["local"])
+            self.assertEqual(routing_input["request"]["budget_cap"], "1")
+            self.assertEqual(
+                routing_input["descriptors"][0]["estimated_cost"],
+                "0.1",
+            )
+
     def test_durable_route_ignores_inflated_caller_budget(self):
         with TemporaryDirectory() as directory:
             _, budget = open_budget(directory, ceiling="0")

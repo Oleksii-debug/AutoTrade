@@ -791,6 +791,8 @@ def measure_declared_research_interference(
                     "research measurement plan instance state changed during callback: "
                     f"{name}"
                 )
+        if plan.digest != plan_digest_value:
+            raise error_type("research measurement plan digest changed during callback")
 
         for value, snapshot, label in (
             (store_identity, selected_identity_snapshot, "selected JournalStore identity"),

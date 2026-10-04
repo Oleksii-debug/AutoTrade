@@ -727,6 +727,41 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
 
+    def test_fresh_auth_rejection_discards_only_definitively_unaccepted_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        classifier = js[
+            js.index("function isCommandAuthRejection"):
+            js.index("function reportSnapshotBusy")
+        ]
+        self.assertIn("error.status === 401 || error.status === 403", classifier)
+
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        catch = submit.index("} catch (error) {")
+        definitive = submit.index(
+            "if (!recovering && isCommandAuthRejection(error))",
+            catch,
+        )
+        clear = submit.index("clearConfirmedCommand(payload)", definitive)
+        ambiguous = submit.index(
+            "could not be confirmed. Its original command_id and idempotency_key "
+            "are retained for exact retry",
+            definitive,
+        )
+        self.assertLess(definitive, clear)
+        self.assertLess(clear, ambiguous)
+        self.assertIn(
+            "was not accepted because the authenticated host session was rejected "
+            "before command acceptance",
+            submit[definitive:ambiguous],
+        )
+        self.assertIn(
+            "A retry is different: its prior attempt may already be durable",
+            submit[definitive:ambiguous],
+        )
+
     def test_ambiguous_command_keeps_exact_identity_for_retry(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("pendingCommand: null", js)

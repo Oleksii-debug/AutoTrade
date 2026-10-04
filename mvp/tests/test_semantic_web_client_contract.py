@@ -1008,5 +1008,16 @@ class SemanticWebClientContractTests(unittest.TestCase):
 
 
 
+    def test_event_history_retention_is_cursor_based_not_dom_sort_based(self):
+        js = APP.read_text(encoding="utf-8")
+        render = js[js.index("function renderHostEvent"):js.index("function resetEventHistoryForScope")]
+        self.assertIn("const retained = filterableRows(body)", render)
+        self.assertIn("BigInt(left.dataset.hostEventCursor)", render)
+        self.assertIn("BigInt(right.dataset.hostEventCursor)", render)
+        self.assertIn("for (const expired of retained.slice(100)) expired.remove();", render)
+        self.assertNotIn("body.lastElementChild.remove()", render)
+
+
+
 if __name__ == "__main__":
     unittest.main()

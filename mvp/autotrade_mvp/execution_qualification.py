@@ -31,6 +31,7 @@ from .execution_realism import (
     SimulatedExecution,
     SimulatedOrder,
     _detached_dataclass_input,
+    _instant,
     simulate_execution,
 )
 
@@ -286,6 +287,13 @@ def _validate_qualified_instrument_rules(
         detached.validate_quantity(order.quantity)
     except InstrumentRegistryError:
         failures.append("instrument_quantity_rules")
+
+    submitted_at = _instant(order.submitted_at, name="order.submitted_at")
+    market_time = _instant(observation.market_time, name="observation.market_time")
+    if not detached.contains(submitted_at):
+        failures.append("instrument_effective_at_order")
+    if not detached.contains(market_time):
+        failures.append("instrument_effective_at_market")
 
     for field_name in ("limit_price", "stop_price"):
         price = getattr(order, field_name)

@@ -125,6 +125,18 @@ def format_accessible_status(
         )
         if economic_report.get("valuation_status") == "MARK_UNAVAILABLE":
             lines.append("Portfolio valuation and profit or loss: unavailable; no retained current market mark")
+        if isinstance(economic_report.get("cash_buckets"), dict):
+            buckets = economic_report["cash_buckets"]
+            lines.extend([
+                f"Гроші на рахунку ({buckets['currency']}): {buckets['account_cash']}",
+                f"Розраховані кошти: {buckets['settled_cash']}",
+                f"Нерозраховані надходження: {buckets['unsettled_receivable']}",
+                f"Нерозраховані зобов'язання: {buckets['unsettled_payable']}",
+                f"Зарезервовані кошти: {buckets['reserved_cash']}",
+                f"Реально доступні кошти: {buckets['available_cash']}",
+                f"Реалізований прибуток/збиток: {economic_report['realized_pnl']}",
+                f"Нереалізований прибуток/збиток: {economic_report['unrealized_pnl']}",
+            ])
 
     lines.append("Economic edge: unproven")
     return "\n".join(lines)

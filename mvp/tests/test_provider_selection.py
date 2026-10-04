@@ -11,9 +11,13 @@ from mvp.autotrade_mvp.durable_provider_qualification import (
     DurableProviderQualificationRegistry,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_core import Surface
 from mvp.autotrade_mvp.provider_qualification_authority import (
     _derive_accepted_provider_qualification,
     parse_provider_qualification_campaign,
+)
+from mvp.autotrade_mvp.provider_route_reads import (
+    qualified_read_route_semantic_claim,
 )
 from mvp.autotrade_mvp.provider_selection import (
     ProviderCandidate,
@@ -78,12 +82,21 @@ def candidate(*, provider_environment="TESTNET", package_digest=PACKAGE_DIGEST):
     )
 
 
-def accepted_spot_q(*, ordinal=40, unsupported=()):
+def accepted_spot_q(*, ordinal=40, unsupported=(), include_read_rule=True):
     protocol = _protocol()
     raw_ref = _raw_ref(100 + ordinal)
     payload = _campaign_payload(raw_ref=raw_ref)
     payload["product_family"] = "SPOT"
     payload["unsupported_features"] = sorted(unsupported)
+    if include_read_rule:
+        claim_key, claim_digest = qualified_read_route_semantic_claim(
+            provider_id="BYBIT",
+            endpoint="/v5/account/wallet-balance",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ACCOUNT.READ",
+        )
+        payload["route_semantics"][claim_key] = claim_digest
+        payload["route_semantics"] = dict(sorted(payload["route_semantics"].items()))
     campaign_raw = canonical_json(payload).encode("utf-8")
     campaign_ref = EvidenceArtifactRef(
         artifact_id=_artifact_id(ordinal),

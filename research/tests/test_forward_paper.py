@@ -120,6 +120,58 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         values.update(overrides)
         return ForwardPaperEvidence.create(**values)
 
+    def test_hostile_sequence_is_rejected_before_iteration_callback(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile sequence callback executed")
+
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            self.protocol(
+                required_provider_capabilities=HostileList(
+                    ["KRAKEN:SPOT:LIMIT"]
+                )
+            )
+        self.assertEqual(calls, [])
+
+    def test_hostile_cost_mapping_is_rejected_before_items_callback(self):
+        calls = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("hostile mapping callback executed")
+
+        with self.assertRaisesRegex(TypeError, "exact mapping"):
+            self.evidence(costs_by_currency=HostileDict({"USD": "1.00"}))
+        self.assertEqual(calls, [])
+
+    def test_subclassed_prediction_cannot_cross_evidence_boundary(self):
+        base = self.predictions()[0]
+
+        class ForgedPrediction(SealedPrediction):
+            @property
+            def met_deadline(self):
+                return True
+
+        forged = ForgedPrediction(
+            prediction_id=base.prediction_id,
+            provider_capability=base.provider_capability,
+            input_hash=base.input_hash,
+            proposal_hash=base.proposal_hash,
+            information_cutoff_at=base.information_cutoff_at,
+            sealed_at=base.sealed_at,
+            decision_deadline_at=base.decision_deadline_at,
+            outcome_horizon_end_at=base.outcome_horizon_end_at,
+            decision_latency_ms=base.decision_latency_ms,
+        )
+        with self.assertRaisesRegex(TypeError, "exact SealedPrediction"):
+            self.evidence(
+                predictions=(forged, self.predictions()[1]),
+            )
+
     def test_complete_mechanics_can_be_valid_without_claiming_edge(self):
         result = assess_forward_paper(self.protocol(), self.evidence())
         self.assertEqual(result.evidence_status, "VALID")

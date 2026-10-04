@@ -23,10 +23,11 @@ class ForwardPaperError(ValueError):
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ForwardPaperError(f"{name} is required")
     return value.strip()
 
@@ -125,10 +126,12 @@ def forward_paper_protocol_hash(
 
 
 def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ForwardPaperError(f"{name} must use exact decimal input")
+    if type(value) not in {Decimal, str, int}:
+        raise ForwardPaperError(
+            f"{name} must use exact Decimal, string or integer input"
+        )
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ForwardPaperError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
@@ -139,8 +142,8 @@ def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
 
 
 def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ForwardPaperError(f"{name} must be an integer")
+    if type(value) is not int:
+        raise ForwardPaperError(f"{name} must be an exact integer")
     minimum = 0 if allow_zero else 1
     if value < minimum:
         raise ForwardPaperError(f"{name} must be >= {minimum}")
@@ -148,12 +151,24 @@ def _positive_int(value: int, *, name: str, allow_zero: bool = False) -> int:
 
 
 def _unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
-    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-        raise ForwardPaperError(f"{name} must be a sequence")
+    if type(values) not in {tuple, list}:
+        raise TypeError(f"{name} must be an exact tuple or list")
     normalized = tuple(_text(value, name=name) for value in values)
     if len(set(normalized)) != len(normalized):
         raise ForwardPaperError(f"{name} contains duplicates")
     return normalized
+
+
+def _exact_records(values, *, record_type: type, name: str) -> tuple[object, ...]:
+    if type(values) not in {tuple, list}:
+        raise TypeError(f"{name} must be an exact tuple or list")
+    result = tuple(values)
+    for item in result:
+        if type(item) is not record_type:
+            raise TypeError(
+                f"{name} must contain exact {record_type.__name__} records"
+            )
+    return result
 
 
 @dataclass(frozen=True)
@@ -528,8 +543,25 @@ class ForwardPaperEvidence:
             or type(self.account_reconciliation_complete) is not bool
         ):
             raise ForwardPaperError("completion flags must be boolean")
-        if not isinstance(self.costs_by_currency, Mapping):
-            raise TypeError("costs_by_currency must be a mapping")
+        if type(self.predictions) is not tuple:
+            raise TypeError("predictions must be an exact tuple")
+        if type(self.outcomes) is not tuple:
+            raise TypeError("outcomes must be an exact tuple")
+        if type(self.operational_observations) is not tuple:
+            raise TypeError("operational_observations must be an exact tuple")
+        for item in self.predictions:
+            if type(item) is not SealedPrediction:
+                raise TypeError("predictions must contain exact SealedPrediction records")
+        for item in self.outcomes:
+            if type(item) is not ForwardOutcome:
+                raise TypeError("outcomes must contain exact ForwardOutcome records")
+        for item in self.operational_observations:
+            if type(item) is not OperationalObservation:
+                raise TypeError(
+                    "operational_observations must contain exact OperationalObservation records"
+                )
+        if type(self.costs_by_currency) not in {dict, _MAPPING_PROXY_TYPE}:
+            raise TypeError("costs_by_currency must be an exact mapping")
         costs: dict[str, Decimal] = {}
         for currency, value in self.costs_by_currency.items():
             if not isinstance(currency, str):
@@ -575,8 +607,23 @@ class ForwardPaperEvidence:
         _instant(observed_until, name="observed_until")
         if type(costs_complete) is not bool or type(account_reconciliation_complete) is not bool:
             raise ForwardPaperError("completion flags must be boolean")
-        if not isinstance(costs_by_currency, Mapping):
-            raise TypeError("costs_by_currency must be a mapping")
+        if type(costs_by_currency) not in {dict, _MAPPING_PROXY_TYPE}:
+            raise TypeError("costs_by_currency must be an exact mapping")
+        prediction_records = _exact_records(
+            predictions,
+            record_type=SealedPrediction,
+            name="predictions",
+        )
+        outcome_records = _exact_records(
+            outcomes,
+            record_type=ForwardOutcome,
+            name="outcomes",
+        )
+        operational_records = _exact_records(
+            operational_observations,
+            record_type=OperationalObservation,
+            name="operational_observations",
+        )
         costs: dict[str, Decimal] = {}
         for currency, value in costs_by_currency.items():
             if not isinstance(currency, str):
@@ -589,9 +636,9 @@ class ForwardPaperEvidence:
             exact_build_sha=build,
             protocol_hash=_hash(protocol_hash, name="protocol_hash"),
             observed_until=observed_until,
-            predictions=tuple(predictions),
-            outcomes=tuple(outcomes),
-            operational_observations=tuple(operational_observations),
+            predictions=prediction_records,
+            outcomes=outcome_records,
+            operational_observations=operational_records,
             costs_by_currency=MappingProxyType(costs),
             costs_complete=costs_complete,
             account_reconciliation_complete=account_reconciliation_complete,
@@ -624,10 +671,10 @@ def assess_forward_paper(
 ) -> ForwardPaperAssessment:
     """Validate frozen forward evidence without declaring economic edge."""
 
-    if not isinstance(protocol, ForwardPaperProtocol):
-        raise TypeError("protocol must be ForwardPaperProtocol")
-    if not isinstance(evidence, ForwardPaperEvidence):
-        raise TypeError("evidence must be ForwardPaperEvidence")
+    if type(protocol) is not ForwardPaperProtocol:
+        raise TypeError("protocol must be exact ForwardPaperProtocol")
+    if type(evidence) is not ForwardPaperEvidence:
+        raise TypeError("evidence must be exact ForwardPaperEvidence")
 
     invalid: list[str] = []
     incomplete: list[str] = []
@@ -647,7 +694,7 @@ def assess_forward_paper(
         capability: 0 for capability in protocol.required_provider_capabilities
     }
     for prediction in evidence.predictions:
-        if not isinstance(prediction, SealedPrediction):
+        if type(prediction) is not SealedPrediction:
             invalid.append("invalid_prediction_record")
             continue
         if prediction.prediction_id in prediction_by_id:
@@ -676,7 +723,7 @@ def assess_forward_paper(
 
     outcomes_by_prediction: dict[str, ForwardOutcome] = {}
     for outcome in evidence.outcomes:
-        if not isinstance(outcome, ForwardOutcome):
+        if type(outcome) is not ForwardOutcome:
             invalid.append("invalid_outcome_record")
             continue
         if outcome.prediction_id in outcomes_by_prediction:
@@ -717,7 +764,7 @@ def assess_forward_paper(
             incomplete.append(f"missing_operational_case:{capability}:{case}")
 
     for item in evidence.operational_observations:
-        if not isinstance(item, OperationalObservation):
+        if type(item) is not OperationalObservation:
             invalid.append("invalid_operational_observation")
             continue
         if item.provider_capability not in capability_counts:

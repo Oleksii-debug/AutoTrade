@@ -926,7 +926,7 @@ def _plan_document(
             "rollback_mode",
             "reverse_evidence_sha256",
         }
-        if not isinstance(migration_raw, dict) or set(migration_raw) != migration_fields:
+        if type(migration_raw) is not dict or set(migration_raw) != migration_fields:
             raise WindowsUpdateError(
                 "schema change requires canonical migration evidence"
             )
@@ -956,7 +956,7 @@ def _plan_document(
         )
 
     rollback = document.get("rollback")
-    if not isinstance(rollback, dict) or set(rollback) != {"mode", "steps"}:
+    if type(rollback) is not dict or set(rollback) != {"mode", "steps"}:
         raise WindowsUpdateError("rollback plan structure is not canonical")
     expected_rollback_mode = (
         migration.rollback_mode
@@ -972,7 +972,7 @@ def _plan_document(
 def _step_sequence(document: dict[str, Any], *, rollback: bool) -> tuple[str, ...]:
     raw = (
         document.get("rollback", {}).get("steps")
-        if rollback and isinstance(document.get("rollback"), dict)
+        if rollback and type(document.get("rollback")) is dict
         else document.get("install_steps")
     )
     if type(raw) is not list or not raw:
@@ -1274,9 +1274,9 @@ def assess_windows_update_restart(
     candidate = document.get("candidate_release")
     transition = document.get("journal_schema_transition")
     if (
-        not isinstance(current, dict)
-        or not isinstance(candidate, dict)
-        or not isinstance(transition, dict)
+        type(current) is not dict
+        or type(candidate) is not dict
+        or type(transition) is not dict
     ):
         raise WindowsUpdateError("update plan release metadata is invalid")
     current_package = _sha256(

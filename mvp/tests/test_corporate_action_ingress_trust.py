@@ -4,10 +4,18 @@ import unittest
 
 from mvp.autotrade_mvp.corporate_action_accounting import _exact_utc_instant
 from mvp.autotrade_mvp.corporate_actions import (
+    CorporateActionBook,
+    CorporateActionCheckpoint,
     CorporateEvent,
     EquityState,
+    Transition,
     accrue_borrow_financing,
+    settle_cash,
 )
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
+
+
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
 
 
 class CorporateActionIngressTrustTests(unittest.TestCase):
@@ -24,6 +32,37 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
         }
         values.update(overrides)
         return CorporateEvent.create(**values)
+
+    def _state(self):
+        return EquityState.create(
+            symbol="AAA",
+            quantity="0",
+            total_basis="0",
+            settled_cash="0",
+            currency="USD",
+        )
+
+    def _instrument(self):
+        return InstrumentVersion(
+            instrument_id=INSTRUMENT_ID,
+            version=1,
+            provider_id="simulated",
+            venue_id="simulated-venue",
+            provider_symbol="AAA",
+            asset_class="CASH_EQUITY",
+            base_currency="AAA",
+            quote_currency="USD",
+            settlement_currency="USD",
+            quantity_unit="AAA",
+            contract_multiplier=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            quantity_step=Decimal("1"),
+            minimum_quantity=Decimal("1"),
+            calendar_id="CONTINUOUS_24_7",
+            timezone_id="UTC",
+            effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            status="ACTIVE",
+        )
 
     def test_payload_mapping_subclass_is_rejected_before_items_dispatch(self):
         class HostileDict(dict):
@@ -91,13 +130,7 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
             def __lt__(self, other):
                 raise AssertionError("hostile integer comparison")
 
-        state = EquityState.create(
-            symbol="AAA",
-            quantity="0",
-            total_basis="0",
-            settled_cash="0",
-            currency="USD",
-        )
+        state = self._state()
         with self.assertRaisesRegex(ValueError, "days"):
             accrue_borrow_financing(
                 state,
@@ -105,6 +138,133 @@ class CorporateActionIngressTrustTests(unittest.TestCase):
                 marked_value="0",
                 days=HostileInt(1),
             )
+
+    def test_checkpoint_rejects_polymorphic_or_mutable_nested_authority(self):
+        base_state = self._state()
+        current = self._instrument()
+
+        class StateSubclass(EquityState):
+            pass
+
+        derived_state = StateSubclass(**vars(base_state))
+        with self.assertRaisesRegex(TypeError, "checkpoint state"):
+            CorporateActionCheckpoint(
+                checkpoint_id="checkpoint-state-subclass",
+                state=derived_state,
+                instrument_version=current,
+                records=(),
+            )
+
+        class InstrumentVersionSubclass(InstrumentVersion):
+            pass
+
+        derived_version = InstrumentVersionSubclass(**vars(current))
+        with self.assertRaisesRegex(TypeError, "checkpoint instrument_version"):
+            CorporateActionCheckpoint(
+                checkpoint_id="checkpoint-version-subclass",
+                state=base_state,
+                instrument_version=derived_version,
+                records=(),
+            )
+
+        with self.assertRaisesRegex(TypeError, "checkpoint records"):
+            CorporateActionCheckpoint(
+                checkpoint_id="checkpoint-mutable-records",
+                state=base_state,
+                instrument_version=current,
+                records=[],
+            )
+
+    def test_checkpoint_rejects_transition_subclass(self):
+        base_state = self._state()
+        current = self._instrument()
+        event = self._event()
+        transition = Transition(
+            event_id=event.event_id,
+            before=base_state,
+            after=base_state,
+            economic_pnl=Decimal("0"),
+            reason="no-op test transition",
+        )
+
+        class TransitionSubclass(Transition):
+            pass
+
+        derived_transition = TransitionSubclass(**vars(transition))
+        with self.assertRaisesRegex(TypeError, "CorporateEvent/Transition"):
+            CorporateActionCheckpoint(
+                checkpoint_id="checkpoint-transition-subclass",
+                state=base_state,
+                instrument_version=current,
+                records=((event, derived_transition),),
+            )
+
+    def test_book_rejects_polymorphic_authority_before_semantic_reads(self):
+        base_state = self._state()
+        current = self._instrument()
+        registry = InstrumentRegistry(versions=(current,))
+
+        class HostileState(EquityState):
+            def __getattribute__(self, name):
+                if name == "symbol":
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError("hostile state semantic read")
+                return super().__getattribute__(name)
+
+        hostile_state = HostileState(**vars(base_state))
+        object.__setattr__(hostile_state, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "state"):
+            CorporateActionBook(
+                hostile_state,
+                instrument_version=current,
+                registry=registry,
+            )
+
+        class InstrumentVersionSubclass(InstrumentVersion):
+            pass
+
+        derived_version = InstrumentVersionSubclass(**vars(current))
+        with self.assertRaisesRegex(TypeError, "instrument_version"):
+            CorporateActionBook(
+                base_state,
+                instrument_version=derived_version,
+                registry=registry,
+            )
+
+        class HostileRegistry(InstrumentRegistry):
+            def versions(self, instrument_id):
+                raise AssertionError("hostile registry dispatch")
+
+        hostile_registry = object.__new__(HostileRegistry)
+        with self.assertRaisesRegex(TypeError, "registry"):
+            CorporateActionBook(
+                base_state,
+                instrument_version=current,
+                registry=hostile_registry,
+            )
+
+    def test_cash_helper_rejects_state_subclass_before_semantic_read(self):
+        base_state = self._state()
+
+        class HostileState(EquityState):
+            def __getattribute__(self, name):
+                if name == "unsettled_cash":
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError("hostile cash state read")
+                return super().__getattribute__(name)
+
+        hostile_state = HostileState(**vars(base_state))
+        object.__setattr__(hostile_state, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "state"):
+            settle_cash(hostile_state, "0")
 
     def test_activation_instants_reject_datetime_subclasses_before_dispatch(self):
         class HostileDatetime(datetime):

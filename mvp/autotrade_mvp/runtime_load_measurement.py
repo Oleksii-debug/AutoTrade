@@ -239,7 +239,7 @@ def _decode_measurement(
 
 
 def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
-    """Snapshot only post-callback executable dependencies needed for issuance."""
+    """Snapshot post-callback dependency identity and Python executable state."""
 
     function_states: list[tuple] = []
     global_bindings: list[tuple[dict[str, object], str, object]] = []
@@ -247,6 +247,7 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
     module_members: list[tuple[ModuleType, str, object]] = []
     closure_bindings: list[tuple[object, bool, object | None]] = []
     seen_functions: set[int] = set()
+    expanded_functions: set[int] = set()
     seen_globals: set[tuple[int, str]] = set()
     seen_builtins: set[tuple[int, str]] = set()
     seen_members: set[tuple[int, str]] = set()
@@ -257,21 +258,29 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
             "mvp.autotrade_mvp."
         )
 
-    def capture(value: object) -> None:
+    def snapshot_function(value: object) -> FunctionType | None:
         target = value.__func__ if type(value) is MethodType else value
-        if type(target) is not FunctionType or id(target) in seen_functions:
-            return
-        seen_functions.add(id(target))
-        kwdefaults = target.__kwdefaults__
-        function_states.append(
-            (
-                target,
-                target.__code__,
-                target.__defaults__,
-                kwdefaults,
-                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+        if type(target) is not FunctionType:
+            return None
+        if id(target) not in seen_functions:
+            seen_functions.add(id(target))
+            kwdefaults = target.__kwdefaults__
+            function_states.append(
+                (
+                    target,
+                    target.__code__,
+                    target.__defaults__,
+                    kwdefaults,
+                    None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+                )
             )
-        )
+        return target
+
+    def capture(value: object) -> None:
+        target = snapshot_function(value)
+        if target is None or id(target) in expanded_functions:
+            return
+        expanded_functions.add(id(target))
         namespace = target.__globals__
         builtins_namespace = target.__builtins__
         if type(builtins_namespace) is not dict:
@@ -294,30 +303,26 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                         if member_key in seen_members:
                             continue
                         seen_members.add(member_key)
-                        module_members.append(
-                            (dependency, member_name, getattr(dependency, member_name))
-                        )
-                dependency_target = (
-                    dependency.__func__
-                    if type(dependency) is MethodType
-                    else dependency
-                )
-                if type(dependency_target) is FunctionType and is_first_party(
-                    dependency_target
-                ):
+                        member = getattr(dependency, member_name)
+                        module_members.append((dependency, member_name, member))
+                        snapshot_function(member)
+                dependency_target = snapshot_function(dependency)
+                if dependency_target is not None and is_first_party(dependency_target):
                     capture(dependency_target)
                 continue
             if dependency_name in builtins_namespace:
                 binding_key = (id(builtins_namespace), dependency_name)
                 if binding_key not in seen_builtins:
                     seen_builtins.add(binding_key)
+                    dependency = builtins_namespace[dependency_name]
                     builtin_bindings.append(
                         (
                             builtins_namespace,
                             dependency_name,
-                            builtins_namespace[dependency_name],
+                            dependency,
                         )
                     )
+                    snapshot_function(dependency)
         for cell in target.__closure__ or ():
             try:
                 expected_value = cell.cell_contents
@@ -325,14 +330,8 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                 closure_bindings.append((cell, False, None))
                 continue
             closure_bindings.append((cell, True, expected_value))
-            dependency_target = (
-                expected_value.__func__
-                if type(expected_value) is MethodType
-                else expected_value
-            )
-            if type(dependency_target) is FunctionType and is_first_party(
-                dependency_target
-            ):
+            dependency_target = snapshot_function(expected_value)
+            if dependency_target is not None and is_first_party(dependency_target):
                 capture(dependency_target)
 
     for value in values:

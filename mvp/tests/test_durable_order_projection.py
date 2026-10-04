@@ -826,7 +826,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     evidence_artifact_store=artifacts,
                 )
 
-    def test_provider_evidence_rehashes_authenticated_snapshot_bytes(self):
+    def test_provider_evidence_module_reader_replacement_is_not_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(f"{directory}/artifacts")
@@ -856,14 +856,18 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 observed_at=T1,
             )
             manifest = artifacts.load_manifest(ref["artifact_id"])
+            authentic_bytes = artifacts.read_bytes(ref["artifact_id"])
+            forged_reader = unittest.mock.Mock(
+                return_value=(manifest, authentic_bytes),
+            )
             with patch.object(
                 durable_order_projection_module,
                 "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
-                return_value=(manifest, b"different provider evidence bytes"),
+                forged_reader,
             ):
                 with self.assertRaisesRegex(
                     OrderProjectionConflict,
-                    "digest differs from immutable artifact",
+                    "snapshot reader authority changed",
                 ):
                     book.acknowledge(
                         event_key="ack-evidence-rehash",
@@ -873,6 +877,60 @@ class DurableOrderProjectionTests(unittest.TestCase):
                         committed_at=T1,
                         evidence_refs=[ref],
                     )
+            forged_reader.assert_not_called()
+
+    def test_provider_evidence_retained_reader_code_retarget_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-reader-code-evidence",
+                client_order_id="reader-code-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "reader-code-evidence",
+                "provider_order_id": "provider-reader-code-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+            reader = durable_order_projection_module._CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+            original_code = reader.__code__
+
+            def forged_reader(self, artifact_id):
+                del self, artifact_id
+                raise AssertionError("forged retained reader executed")
+
+            try:
+                reader.__code__ = forged_reader.__code__
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "snapshot reader authority changed",
+                ):
+                    book.acknowledge(
+                        event_key="ack-reader-code-evidence",
+                        client_order_id="reader-code-evidence",
+                        provider_order_id="provider-reader-code-evidence",
+                        status="ACCEPTED",
+                        committed_at=T1,
+                        evidence_refs=[ref],
+                    )
+            finally:
+                reader.__code__ = original_code
 
     def test_provider_evidence_io_failure_is_domain_fail_closed(self):
         with TemporaryDirectory() as directory:

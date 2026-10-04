@@ -342,8 +342,22 @@ class _ParsedBybitFundingIncomeRow:
 def _parse_bybit_funding_income_rows(
     payload: object,
     query: object,
+    observed_at: str,
 ) -> tuple[_ParsedBybitFundingIncomeRow, ...]:
     """Parse exact Bybit funding rows without minting financial authority."""
+
+    if type(observed_at) is not str or not observed_at.endswith("Z"):
+        raise ProviderFundingIncomeError(
+            "provider response observed_at must be canonical UTC text"
+        )
+    try:
+        response_observed_at = datetime.fromisoformat(
+            observed_at.replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except ValueError as error:
+        raise ProviderFundingIncomeError(
+            "provider response observed_at must be canonical UTC text"
+        ) from error
 
     if type(payload) is not dict:
         raise ProviderFundingIncomeError("Bybit transaction-log payload must be an object")
@@ -463,6 +477,10 @@ def _parse_bybit_funding_income_rows(
             transaction_millis,
             name="transactionTime",
         )
+        if provider_transaction_at > response_observed_at:
+            raise ProviderFundingIncomeError(
+                "Bybit funding transaction occurs after provider response observation"
+            )
 
         funding_amount = _decimal(funding, name="funding")
         fee = _decimal(item.get("fee"), name="fee")
@@ -500,7 +518,11 @@ def _bybit_funding_income_observations_impl(
 ) -> tuple[ProviderFundingIncomeObservation, ...]:
     binding, neutral, qualified, qualified_ref = _validated_origin_fn(source)
     base = qualified.query_binding.query_binding
-    rows = _parse_rows_fn(neutral.payload, dict(base.query))
+    rows = _parse_rows_fn(
+        neutral.payload,
+        dict(base.query),
+        neutral.observed_at,
+    )
 
     observations: list[ProviderFundingIncomeObservation] = []
     for row in rows:

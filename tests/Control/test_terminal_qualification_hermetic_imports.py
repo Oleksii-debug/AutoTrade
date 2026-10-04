@@ -57,6 +57,8 @@ import tools.check_nvda_qualification
 import tools.check_product_completion
 import tools.build_windows_bundle as windows_bundle
 import tools.build_windows_install_manifest as windows_install_manifest
+import tools.stage_windows_foundation
+import tools.stage_windows_runtime
 
 if qualification_attestation.ArtifactStore is not runtime_artifacts.ArtifactStore:
     raise AssertionError("qualification verifier does not use neutral ArtifactStore")

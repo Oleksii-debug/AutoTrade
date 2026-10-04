@@ -318,6 +318,80 @@ class ProductionFinancialHostTests(unittest.TestCase):
                     probe="value",
                 )
 
+    def test_active_dispatch_blocks_financial_teardown_until_send_exits(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+
+            send_entered = Event()
+            allow_send_exit = Event()
+            close_finished = Event()
+            fence_release_reached = Event()
+
+            def blocking_dispatch(**kwargs):
+                self.assertIn("sender_check", kwargs)
+                send_entered.set()
+                allow_send_exit.wait()
+                return "sent"
+
+            runtime.dispatcher._dispatcher.dispatch = Mock(side_effect=blocking_dispatch)
+
+            def simulated_host_close() -> None:
+                host._admission_gate.stop_and_drain()
+                host._terminal_finalizer()
+                fence_release_reached.set()
+
+            host.close = Mock(side_effect=simulated_host_close)  # type: ignore[method-assign]
+
+            send_result = []
+            send_thread = Thread(
+                target=lambda: send_result.append(
+                    runtime.dispatcher.dispatch(probe="value")
+                ),
+                daemon=False,
+            )
+            send_thread.start()
+            self.assertTrue(send_entered.wait(timeout=2))
+            self.assertEqual(runtime.dispatcher.active_dispatches, 1)
+
+            close_thread = Thread(
+                target=lambda: (runtime.close(), close_finished.set()),
+                daemon=False,
+            )
+            close_thread.start()
+
+            for _ in range(200):
+                if not runtime.dispatcher.accepting:
+                    break
+                Event().wait(0.005)
+            self.assertFalse(runtime.dispatcher.accepting)
+            self.assertTrue(runtime.provider_secret_resolver.accepting)
+            self.assertFalse(close_finished.is_set())
+            self.assertFalse(fence_release_reached.is_set())
+            self.assertEqual(runtime.recovery_controller.state, HostState.RECOVERING)
+
+            allow_send_exit.set()
+            send_thread.join(timeout=2)
+            close_thread.join(timeout=2)
+
+            self.assertFalse(send_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertEqual(send_result, ["sent"])
+            self.assertTrue(close_finished.is_set())
+            self.assertTrue(fence_release_reached.is_set())
+            self.assertFalse(runtime.provider_secret_resolver.accepting)
+            self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
+
     def test_closed_dispatcher_rejects_new_provider_send(self) -> None:
         with TemporaryDirectory() as root:
             config = self._config(root)

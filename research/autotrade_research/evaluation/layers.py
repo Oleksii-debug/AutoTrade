@@ -25,9 +25,12 @@ from typing import Mapping, Sequence
 
 from .gates import GateDecision
 from ..forward_paper import (
+    ForwardOutcome,
     ForwardPaperAssessment,
     ForwardPaperEvidence,
     ForwardPaperProtocol,
+    OperationalObservation,
+    SealedPrediction,
     assess_forward_paper,
 )
 
@@ -135,14 +138,120 @@ def _digest(value: object) -> str:
 def _gate_payload(decision: GateDecision) -> dict[str, object]:
     if type(decision) is not GateDecision:
         raise TypeError("historical layer requires exact GateDecision")
-    checks = dict(decision.checks)
-    provenance = None if decision.provenance is None else dict(decision.provenance)
+    clean = GateDecision(
+        status=decision.status,
+        reasons=tuple(decision.reasons),
+        checks=dict(decision.checks),
+        provenance=(
+            None
+            if decision.provenance is None
+            else dict(decision.provenance)
+        ),
+    )
     return {
-        "status": decision.status,
-        "reasons": tuple(decision.reasons),
-        "checks": checks,
-        "provenance": provenance,
+        "status": clean.status,
+        "reasons": tuple(clean.reasons),
+        "checks": dict(clean.checks),
+        "provenance": dict(clean.provenance),
     }
+
+
+def _detached_forward_inputs(
+    protocol: ForwardPaperProtocol,
+    evidence: ForwardPaperEvidence,
+    assessment: ForwardPaperAssessment,
+) -> tuple[ForwardPaperProtocol, ForwardPaperEvidence, ForwardPaperAssessment]:
+    if type(protocol) is not ForwardPaperProtocol:
+        raise TypeError("forward layer requires exact ForwardPaperProtocol")
+    if type(evidence) is not ForwardPaperEvidence:
+        raise TypeError("forward layer requires exact ForwardPaperEvidence")
+    if type(assessment) is not ForwardPaperAssessment:
+        raise TypeError("forward layer requires exact ForwardPaperAssessment")
+
+    clean_protocol = ForwardPaperProtocol(
+        campaign_id=protocol.campaign_id,
+        exact_build_sha=protocol.exact_build_sha,
+        protocol_hash=protocol.protocol_hash,
+        registered_at=protocol.registered_at,
+        starts_at=protocol.starts_at,
+        ends_at=protocol.ends_at,
+        minimum_predictions=protocol.minimum_predictions,
+        maximum_decision_latency_ms=protocol.maximum_decision_latency_ms,
+        required_provider_capabilities=tuple(protocol.required_provider_capabilities),
+        required_operational_cases=tuple(protocol.required_operational_cases),
+    )
+
+    clean_predictions = []
+    for item in evidence.predictions:
+        if type(item) is not SealedPrediction:
+            raise TypeError(
+                "forward evidence predictions must contain exact SealedPrediction"
+            )
+        clean_predictions.append(
+            SealedPrediction(
+                prediction_id=item.prediction_id,
+                provider_capability=item.provider_capability,
+                input_hash=item.input_hash,
+                proposal_hash=item.proposal_hash,
+                information_cutoff_at=item.information_cutoff_at,
+                sealed_at=item.sealed_at,
+                decision_deadline_at=item.decision_deadline_at,
+                outcome_horizon_end_at=item.outcome_horizon_end_at,
+                decision_latency_ms=item.decision_latency_ms,
+            )
+        )
+
+    clean_outcomes = []
+    for item in evidence.outcomes:
+        if type(item) is not ForwardOutcome:
+            raise TypeError(
+                "forward evidence outcomes must contain exact ForwardOutcome"
+            )
+        clean_outcomes.append(
+            ForwardOutcome(
+                prediction_id=item.prediction_id,
+                outcome_hash=item.outcome_hash,
+                outcome_available_at=item.outcome_available_at,
+                evaluated_at=item.evaluated_at,
+            )
+        )
+
+    clean_observations = []
+    for item in evidence.operational_observations:
+        if type(item) is not OperationalObservation:
+            raise TypeError(
+                "forward evidence operational observations must contain "
+                "exact OperationalObservation"
+            )
+        clean_observations.append(
+            OperationalObservation(
+                provider_capability=item.provider_capability,
+                case=item.case,
+                observed_at=item.observed_at,
+                reconciled=item.reconciled,
+            )
+        )
+
+    clean_evidence = ForwardPaperEvidence(
+        exact_build_sha=evidence.exact_build_sha,
+        protocol_hash=evidence.protocol_hash,
+        observed_until=evidence.observed_until,
+        predictions=tuple(clean_predictions),
+        outcomes=tuple(clean_outcomes),
+        operational_observations=tuple(clean_observations),
+        costs_by_currency=dict(evidence.costs_by_currency),
+        costs_complete=evidence.costs_complete,
+        account_reconciliation_complete=evidence.account_reconciliation_complete,
+    )
+    clean_assessment = ForwardPaperAssessment(
+        evidence_status=assessment.evidence_status,
+        operational_status=assessment.operational_status,
+        economic_edge_status=assessment.economic_edge_status,
+        reasons=tuple(assessment.reasons),
+        prediction_count=assessment.prediction_count,
+        evaluated_outcome_count=assessment.evaluated_outcome_count,
+    )
+    return clean_protocol, clean_evidence, clean_assessment
 
 
 def _forward_assessment_payload(
@@ -357,6 +466,7 @@ class EvaluationLayerReceipt:
         decision: GateDecision,
         model_training_cutoff_uncertainty: str,
     ) -> "EvaluationLayerReceipt":
+        layer = _text(layer, name="layer")
         if layer not in _HISTORICAL_LAYERS:
             raise EvaluationLayersError(
                 "historical GateDecision can only populate layer A or B"
@@ -401,13 +511,11 @@ class EvaluationLayerReceipt:
         evidence: ForwardPaperEvidence,
         assessment: ForwardPaperAssessment,
     ) -> "EvaluationLayerReceipt":
-        if type(protocol) is not ForwardPaperProtocol:
-            raise TypeError("forward layer requires exact ForwardPaperProtocol")
-        if type(evidence) is not ForwardPaperEvidence:
-            raise TypeError("forward layer requires exact ForwardPaperEvidence")
-        if type(assessment) is not ForwardPaperAssessment:
-            raise TypeError("forward layer requires exact ForwardPaperAssessment")
-
+        protocol, evidence, assessment = _detached_forward_inputs(
+            protocol,
+            evidence,
+            assessment,
+        )
         recomputed = assess_forward_paper(protocol, evidence)
         if recomputed != assessment:
             raise EvaluationLayersError(

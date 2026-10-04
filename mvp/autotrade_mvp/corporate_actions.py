@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
+from .exact_decimal import ExactDecimalError, exact_add, exact_multiply
 from .instruments import InstrumentRegistry, InstrumentVersion
 
 
@@ -606,8 +607,14 @@ class CorporateActionBook:
     def _cash_dividend(self, event: CorporateEvent) -> Transition:
         per_share = self._cash_event_amount(event, amount_key="per_share")
         before = self.state
-        entitlement = before.quantity * per_share
-        after = replace(before, unsettled_cash=before.unsettled_cash + entitlement)
+        try:
+            entitlement = exact_multiply(before.quantity, per_share)
+            unsettled_cash = exact_add(before.unsettled_cash, entitlement)
+        except ExactDecimalError as error:
+            raise ValueError(
+                "cash dividend arithmetic exceeds exact decimal resource envelope"
+            ) from error
+        after = replace(before, unsettled_cash=unsettled_cash)
         return Transition(
             event_id=event.event_id,
             before=before,

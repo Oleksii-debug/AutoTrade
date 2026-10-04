@@ -119,13 +119,6 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 def _trusted_git_environment() -> dict[str, str]:
     """Run trust-policy Git reads without caller-selected process authority."""
 
-    # Do not inherit the ambient process environment wholesale. An absolute Git
-    # executable is still vulnerable to dynamic-loader injection (for example
-    # LD_PRELOAD / DYLD_*), user-selected HOME config, and other process-level
-    # overrides if those variables are forwarded to the trust-critical child.
-    # Git's exact-object reads need only a tiny environment; retain the Windows
-    # process bootstrap variables when present and explicitly disable external
-    # Git configuration plus replacement-object semantics.
     environment = {
         key: value
         for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
@@ -196,7 +189,7 @@ def _strict_list(value: object, *, name: str) -> list[object]:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or value != value.strip() or not value:
+    if type(value) is not str or value != value.strip() or not value:
         raise QualificationTrustError(f"{name} must be a canonical non-empty string")
     return value
 
@@ -221,7 +214,7 @@ def _uuid(value: str, *, name: str) -> str:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or _GIT_SHA.fullmatch(value) is None:
+    if type(value) is not str or _GIT_SHA.fullmatch(value) is None:
         raise QualificationTrustError(
             f"{name} must be a lowercase 40-character Git SHA"
         )
@@ -229,7 +222,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 
 def _digest(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+    if type(value) is not str or _SHA256.fullmatch(value) is None:
         raise QualificationTrustError(f"{name} must be sha256:<64 lowercase hex>")
     return value
 
@@ -336,7 +329,7 @@ class TrustRoot:
         object.__setattr__(self, "verification_method", method)
         modulus_hex = self.public_modulus_hex
         if (
-            not isinstance(modulus_hex, str)
+            type(modulus_hex) is not str
             or modulus_hex != modulus_hex.lower()
             or not modulus_hex
             or len(modulus_hex) % 2
@@ -351,16 +344,19 @@ class TrustRoot:
             raise QualificationTrustError("RSA trust root must be 2048-4096 bits")
         exponent = self.public_exponent
         if (
-            isinstance(exponent, bool)
-            or not isinstance(exponent, int)
+            type(exponent) is not int
             or exponent < 3
             or exponent >= 2**32
             or exponent % 2 == 0
         ):
             raise QualificationTrustError("public_exponent is invalid")
-        scopes = tuple(self.allowed_scopes)
+        if type(self.allowed_scopes) is not tuple:
+            raise QualificationTrustError(
+                "allowed_scopes must contain QualificationScope values"
+            )
+        scopes = self.allowed_scopes
         if not scopes or not all(
-            isinstance(item, QualificationScope) for item in scopes
+            type(item) is QualificationScope for item in scopes
         ):
             raise QualificationTrustError(
                 "allowed_scopes must contain QualificationScope values"
@@ -424,8 +420,10 @@ class QualificationTrustPolicy:
             "policy_version",
             _token(self.policy_version, name="policy_version"),
         )
-        roots = tuple(self.roots)
-        if not roots or not all(isinstance(item, TrustRoot) for item in roots):
+        if type(self.roots) is not tuple:
+            raise QualificationTrustError("roots must contain TrustRoot values")
+        roots = self.roots
+        if not roots or not all(type(item) is TrustRoot for item in roots):
             raise QualificationTrustError("roots must contain TrustRoot values")
         roots = tuple(sorted(roots, key=lambda item: item.root_id))
         if len({item.root_id for item in roots}) != len(roots):
@@ -479,10 +477,12 @@ class QualificationAttestation:
     verification_method: str = _RSA_METHOD
 
     def __post_init__(self) -> None:
-        if self.schema_version != "1.0.0":
+        schema_version = _token(self.schema_version, name="schema_version")
+        if schema_version != "1.0.0":
             raise QualificationTrustError(
                 "unsupported attestation schema_version"
             )
+        object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(
             self,
             "attestation_id",
@@ -503,6 +503,10 @@ class QualificationAttestation:
             "protocol_version",
             _token(self.protocol_version, name="protocol_version"),
         )
+        if type(self.requirement_ids) is not tuple:
+            raise QualificationTrustError(
+                "requirement_ids must be non-empty and unique"
+            )
         requirements = tuple(
             _token(item, name="requirement_id")
             for item in self.requirement_ids
@@ -514,9 +518,13 @@ class QualificationAttestation:
         object.__setattr__(
             self, "requirement_ids", tuple(sorted(requirements))
         )
-        refs = tuple(self.evidence_refs)
+        if type(self.evidence_refs) is not tuple:
+            raise QualificationTrustError(
+                "evidence_refs must contain evidence artifacts"
+            )
+        refs = self.evidence_refs
         if not refs or not all(
-            isinstance(item, EvidenceArtifactRef) for item in refs
+            type(item) is EvidenceArtifactRef for item in refs
         ):
             raise QualificationTrustError(
                 "evidence_refs must contain evidence artifacts"
@@ -575,6 +583,10 @@ class QualificationAttestation:
         if result not in _RESULTS:
             raise QualificationTrustError("unsupported qualification result")
         object.__setattr__(self, "result", result)
+        if type(self.unresolved_limits) is not tuple:
+            raise QualificationTrustError(
+                "unresolved_limits must be unique"
+            )
         limits = tuple(
             _text(item, name="unresolved_limit")
             for item in self.unresolved_limits
@@ -653,7 +665,7 @@ class SignedQualificationAttestation:
     signature_b64: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.attestation, QualificationAttestation):
+        if type(self.attestation) is not QualificationAttestation:
             raise TypeError(
                 "attestation must be QualificationAttestation"
             )
@@ -675,7 +687,7 @@ class SignedQualificationAttestation:
 def qualification_trust_policy_payload(
     policy: QualificationTrustPolicy,
 ) -> dict[str, object]:
-    if not isinstance(policy, QualificationTrustPolicy):
+    if type(policy) is not QualificationTrustPolicy:
         raise TypeError("policy must be QualificationTrustPolicy")
     return {
         "policy_version": policy.policy_version,
@@ -757,9 +769,6 @@ def _canonical_qualification_trust_policy_bytes(
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
-    # The Git object path is a source constant, not a filesystem-derived path.
-    # Resolving the working-tree policy path here would let a mutable symlink
-    # redirect exact-source lookup to a different blob in the same trusted commit.
     relative_policy = _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH
     git_executable = _trusted_git_executable(source_root=source_root)
     try:
@@ -840,7 +849,7 @@ def _canonical_qualification_trust_policy_bytes(
 def _independently_authenticated_packaged_source_sha() -> str:
     """Return installed source SHA from a separately authenticated release authority.
 
-    No such authority is wired yet.  Keeping this boundary fail-closed prevents a
+    No such authority is wired yet. Keeping this boundary fail-closed prevents a
     policy digest pin or caller-provided expected_source_sha from becoming a
     substitute for signed/delivered package identity.
     """
@@ -857,7 +866,7 @@ def _canonical_packaged_qualification_trust_policy_bytes(
 
     This is deliberately a non-Git release path, not a working-tree fallback.
     The source-controlled policy digest can bind policy bytes into composition,
-    but it cannot authenticate the installed source identity.  That identity must
+    but it cannot authenticate the installed source identity. That identity must
     come from a separate signed/delivered release authority and equal the caller's
     expected_source_sha before packaged policy bytes are trusted.
     A source checkout remains on the Git-object authority path even when Git is
@@ -919,10 +928,10 @@ def load_canonical_qualification_trust_policy(
     """Load canonical policy from exact Git source or authenticated release state.
 
     Checkout/dev verification uses the exact Git object and never mutable
-    working-tree policy bytes.  A delivered non-Git release may use the fixed
+    working-tree policy bytes. A delivered non-Git release may use the fixed
     packaged policy only after an independent signed/delivered source identity
     matches expected_source_sha and the policy bytes match the source-controlled
-    digest.  Until that release identity authority is wired, the packaged path is
+    digest. Until that release identity authority is wired, the packaged path is
     intentionally unavailable.
     """
 
@@ -944,6 +953,7 @@ def load_canonical_qualification_trust_policy(
             "canonical qualification trust policy is malformed"
         ) from error
     return parse_qualification_trust_policy(payload)
+
 
 def parse_signed_qualification_attestation(
     value: object,
@@ -1108,6 +1118,10 @@ def _resolve_evidence(
 ) -> None:
     try:
         manifest, data = read_snapshot(ref.artifact_id)
+        if type(manifest) is not dict or type(data) is not bytes:
+            raise QualificationTrustError(
+                "evidence artifact representation is invalid"
+            )
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -1164,11 +1178,11 @@ def verify_qualification_attestation(
     expected_release_artifact_id: str | None = None,
     expected_release_artifact_sha256: str | None = None,
 ) -> AcceptedQualificationAttestation:
-    if not isinstance(receipt, SignedQualificationAttestation):
+    if type(receipt) is not SignedQualificationAttestation:
         raise TypeError(
             "receipt must be SignedQualificationAttestation"
         )
-    if not isinstance(policy, QualificationTrustPolicy):
+    if type(policy) is not QualificationTrustPolicy:
         raise TypeError(
             "policy must be QualificationTrustPolicy"
         )
@@ -1344,6 +1358,7 @@ def verify_qualification_attestation(
         release_artifact_sha256=attestation.release_artifact_sha256,
     )
 
+
 def verify_canonical_qualification_attestation(
     receipt: SignedQualificationAttestation,
     *,
@@ -1386,4 +1401,3 @@ def verify_canonical_qualification_attestation(
         expected_release_artifact_id=expected_release_artifact_id,
         expected_release_artifact_sha256=expected_release_artifact_sha256,
     )
-

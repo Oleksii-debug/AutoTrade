@@ -31,8 +31,10 @@
   });
 
   const TABLE_TOOLS = Object.freeze([
+    Object.freeze({bodyId: "permissions-body", filterId: "permissions-filter", copyId: "permissions-copy", sortId: "permissions-sort", previousId: "permissions-previous", nextId: "permissions-next", statusId: "permissions-filter-status", label: "permission and capability"}),
     Object.freeze({bodyId: "strategy-body", filterId: "strategy-filter", copyId: "strategy-copy", sortId: "strategy-sort", previousId: "strategy-previous", nextId: "strategy-next", statusId: "strategy-filter-status", label: "strategy and decision"}),
     Object.freeze({bodyId: "portfolio-body", filterId: "portfolio-filter", copyId: "portfolio-copy", sortId: "portfolio-sort", previousId: "portfolio-previous", nextId: "portfolio-next", statusId: "portfolio-filter-status", label: "portfolio"}),
+    Object.freeze({bodyId: "operations-body", filterId: "operations-filter", copyId: "operations-copy", sortId: "operations-sort", previousId: "operations-previous", nextId: "operations-next", statusId: "operations-filter-status", label: "current host operation"}),
     Object.freeze({bodyId: "risk-body", filterId: "risk-filter", copyId: "risk-copy", sortId: "risk-sort", previousId: "risk-previous", nextId: "risk-next", statusId: "risk-filter-status", label: "risk and authority"}),
     Object.freeze({bodyId: "jobs-body", filterId: "jobs-filter", copyId: "jobs-copy", sortId: "jobs-sort", previousId: "jobs-previous", nextId: "jobs-next", statusId: "jobs-filter-status", label: "research and replay jobs"}),
     Object.freeze({bodyId: "event-history-body", filterId: "event-history-filter", copyId: "event-history-copy", sortId: "event-history-sort", previousId: "event-history-previous", nextId: "event-history-next", statusId: "event-history-filter-status", label: "received host events"})
@@ -46,6 +48,9 @@
     sessionIdentity: null,
     accountId: null,
     environment: null,
+    renderedHostId: null,
+    renderedAccountId: null,
+    renderedEnvironment: null,
     snapshotReady: false,
     polling: false,
     stopped: false,
@@ -61,9 +66,19 @@
   const RESTORABLE_FOCUS_IDS = new Set([
     "main",
     "permissions-region",
+    "permissions-filter",
+    "permissions-copy",
+    "permissions-sort",
+    "permissions-previous",
+    "permissions-next",
     "strategy-region",
     "portfolio-region",
     "operations-region",
+    "operations-filter",
+    "operations-copy",
+    "operations-sort",
+    "operations-previous",
+    "operations-next",
     "risk-region",
     "jobs-region",
     "event-history-region",
@@ -707,16 +722,16 @@
       if (permissionSummary.capabilities.length === 0) {
         appendProjectionRow(
           body, "Capabilities", "No capabilities reported by the host snapshot.");
-        return;
+      } else {
+        permissionSummary.capabilities.forEach((capability, index) => {
+          const row = appendProjectionRow(
+            body, "Capability " + String(index + 1), capability);
+          // Capability position is not durable identity; do not retarget a
+          // selection if different evidence later occupies the same position.
+          row.dataset.selectionExact = "true";
+        });
       }
-      permissionSummary.capabilities.forEach((capability, index) => {
-        const row = appendProjectionRow(
-          body, "Capability " + String(index + 1), capability);
-        // The contract exposes no independent capability-row identity. Never
-        // retarget an old selection merely because a different capability
-        // occupies the same list position on a later snapshot.
-        row.dataset.selectionExact = "true";
-      });
+      reapplyTableFilter("permissions-body");
     });
   }
 
@@ -983,6 +998,16 @@
     }, 750);
   }
 
+  function resetNotificationsForScope(message =
+      "No material notifications recorded in this account/environment session.") {
+    const history = byId("notification-history");
+    if (!history) return;
+    history.replaceChildren();
+    const item = document.createElement("li");
+    item.textContent = message;
+    history.appendChild(item);
+  }
+
   function announce(message, urgent = false) {
     if (!message) return;
     const history = byId("notification-history");
@@ -1075,6 +1100,7 @@
   function renderOperation(operation) {
     const body = byId("operations-body");
     if (!body) return;
+    const bookmark = captureTableSelection(body);
 
     let row = [...body.querySelectorAll("tr")].find(
       (item) => item.dataset.operationId === operation.operationId);
@@ -1085,7 +1111,14 @@
       }
       row = document.createElement("tr");
       row.dataset.operationId = operation.operationId;
-      for (let index = 0; index < 4; index += 1) {
+      row.dataset.filterableRow = "true";
+      row.dataset.tableHostOrder = String(filterableRows(body).length);
+      row.dataset.selectionKey = "operation:" + operation.operationId;
+      row.dataset.selectionExact = "true";
+      const rowHeader = document.createElement("th");
+      rowHeader.scope = "row";
+      row.appendChild(rowHeader);
+      for (let index = 1; index < 4; index += 1) {
         row.appendChild(document.createElement("td"));
       }
       body.appendChild(row);
@@ -1097,6 +1130,9 @@
     row.children[3].textContent = operation.remainingUncertainty.length > 0
       ? operation.remainingUncertainty.join(", ")
       : "None reported";
+    reapplyTableFilter("operations-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
   async function refreshOperation(operationId) {
@@ -1127,7 +1163,10 @@
     row.dataset.tableHostOrder = cursor.toString();
     row.dataset.selectionKey = "event:" + cursor.toString();
     row.dataset.selectionExact = "true";
-    for (let index = 0; index < 4; index += 1) {
+    const rowHeader = document.createElement("th");
+    rowHeader.scope = "row";
+    row.appendChild(rowHeader);
+    for (let index = 1; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
     row.children[0].textContent = cursor.toString();
@@ -1149,14 +1188,29 @@
     restoreTableSelection(body, bookmark);
   }
 
-  function resetEventHistoryForScope() {
+  function resetOperationsForScope(message =
+      "No host operations loaded for this account/environment session.") {
+    const body = byId("operations-body");
+    if (!body) return;
+    body.replaceChildren();
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = message;
+    row.appendChild(cell);
+    body.appendChild(row);
+    reapplyTableFilter("operations-body");
+  }
+
+  function resetEventHistoryForScope(message =
+      "No canonical host events received in this account/environment session.") {
     const body = byId("event-history-body");
     if (!body) return;
     body.replaceChildren();
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 4;
-    cell.textContent = "No canonical host events received in this account/environment session.";
+    cell.textContent = message;
     row.appendChild(cell);
     body.appendChild(row);
     reapplyTableFilter("event-history-body");
@@ -1164,17 +1218,45 @@
 
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
     const parsed = parseCanonicalSnapshot(snapshot);
-    const scopeChanged = state.accountId !== null && (
-      parsed.accountId !== state.accountId ||
-      parsed.environment !== state.environment);
-    if (scopeChanged) {
+    const hostChanged =
+      state.renderedHostId !== null && parsed.hostId !== state.renderedHostId;
+    const scopeChanged = state.renderedAccountId !== null && (
+      parsed.accountId !== state.renderedAccountId ||
+      parsed.environment !== state.renderedEnvironment);
+    const displayContextChanged = hostChanged || scopeChanged;
+    const priorCursor = state.cursor;
+    const skippedSameScopeEvents =
+      !displayContextChanged &&
+      state.renderedHostId !== null &&
+      parsed.cursor > priorCursor;
+
+    if (displayContextChanged) {
       state.cursor = 0n;
       state.version = 0n;
+      resetNotificationsForScope();
       resetTableFiltersForScopeChange();
+      resetOperationsForScope();
       resetEventHistoryForScope();
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
       throw new Error("host snapshot counters regressed");
+    }
+
+    if (skippedSameScopeEvents) {
+      const gap =
+        "Canonical snapshot advanced from event cursor " + priorCursor.toString() +
+        " to " + parsed.cursor.toString() +
+        " before those host events were received by this page.";
+      resetNotificationsForScope(
+        "Notification history was cleared because " + gap);
+      resetOperationsForScope(
+        "Current host operations were cleared because " + gap);
+      resetEventHistoryForScope(
+        "Received host-event history was cleared because " + gap);
+      announce(
+        gap +
+          " Event-derived operation, notification, and received-event views were cleared rather than shown as current.",
+        true);
     }
 
     state.version = parsed.version;
@@ -1198,23 +1280,36 @@
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
     text("server-time", parsed.serverTime);
-    renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged});
+    renderPermissionSummary(
+      parsed.permissionSummary, {preserveSelection: !displayContextChanged});
     renderProjection(
       "portfolio-body",
       parsed.portfolio,
       "No portfolio projection reported by the host snapshot.",
-      {preserveSelection: !scopeChanged});
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "risk-body",
       parsed.risk,
       "No risk projection reported by the host snapshot.",
-      {preserveSelection: !scopeChanged});
+      {preserveSelection: !displayContextChanged});
     renderProjection(
       "strategy-body",
       parsed.strategy,
       "No strategy or decision projection reported by the host snapshot.",
-      {preserveSelection: !scopeChanged});
-    renderJobs(parsed.jobs, {preserveSelection: !scopeChanged});
+      {preserveSelection: !displayContextChanged});
+    renderJobs(parsed.jobs, {preserveSelection: !displayContextChanged});
+
+    state.renderedHostId = parsed.hostId;
+    state.renderedAccountId = parsed.accountId;
+    state.renderedEnvironment = parsed.environment;
+
+    if (displayContextChanged) {
+      announce(
+        "Host display context changed to host " + parsed.hostId +
+          ", account " + parsed.accountId + " in " + parsed.environment +
+          ". Old-context operation, event, and notification evidence was cleared.",
+        parsed.environment === "LIVE" || hostChanged);
+    }
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);

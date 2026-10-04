@@ -4734,6 +4734,8 @@ def _install_authenticated_read_execution_receipt_authority():
         http_status: int,
         response_bytes: bytes,
         observed_at: datetime,
+        transport_identity: str,
+        network_policy_identity: str,
     ) -> None:
         if type(observation) is not ProviderResponseObservation:
             raise ProviderTransportError(
@@ -4765,6 +4767,21 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct authenticated-read observed_at is invalid"
             )
+        if (
+            type(transport_identity) is not str
+            or not transport_identity
+            or transport_identity != transport_identity.strip()
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read transport identity is invalid"
+            )
+        if (
+            type(network_policy_identity) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", network_policy_identity) is None
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read network policy identity is invalid"
+            )
         prune()
         object_id = id(observation)
         current = states.get(object_id)
@@ -4781,6 +4798,8 @@ def _install_authenticated_read_execution_receipt_authority():
                 response_bytes,
                 observed_at.astimezone(timezone.utc),
                 observation.response_sha256,
+                transport_identity,
+                network_policy_identity,
             ),
         )
 
@@ -4805,6 +4824,8 @@ def _install_authenticated_read_execution_receipt_authority():
             response_bytes,
             observed_at,
             response_sha256,
+            transport_identity,
+            network_policy_identity,
         ) = state[1]
         _require_authenticated_read_query_binding_authority(query_binding)
         if observation.query_binding is not query_binding:
@@ -4831,8 +4852,26 @@ def _install_authenticated_read_execution_receipt_authority():
                 "response_bytes": response_bytes,
                 "observed_at": observed_at,
                 "response_sha256": response_sha256,
+                "transport_identity": transport_identity,
+                "network_policy_identity": network_policy_identity,
             }
         )
+
+    def direct_network_policy_identity(
+        policy: ProviderEndpointPolicy,
+        *,
+        provider_environment: str | None = None,
+    ) -> str:
+        material = {
+            "provider_id": policy.provider_id,
+            "environment": policy.environment,
+            "base_url": policy.base_url,
+            "allowed_hosts": sorted(policy.allowed_hosts),
+            "timeout_seconds": policy.timeout_seconds,
+        }
+        if provider_environment is not None:
+            material["provider_environment"] = provider_environment
+        return payload_digest(material)
 
     def require_direct_request_scope(
         request: AuthenticatedReadHttpRequest,
@@ -4862,6 +4901,8 @@ def _install_authenticated_read_execution_receipt_authority():
         success_statuses: frozenset[int],
         final_guard: Callable[[], object],
         clock_utc: ClockUtc,
+        transport_identity: str,
+        network_policy_identity: str,
     ) -> ProviderResponseObservation:
         if type(request) is not direct_request_type:
             raise ProviderTransportError(
@@ -4921,6 +4962,8 @@ def _install_authenticated_read_execution_receipt_authority():
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
+            transport_identity=transport_identity,
+            network_policy_identity=network_policy_identity,
         )
         register(
             observation,
@@ -5006,6 +5049,15 @@ def _install_authenticated_read_execution_receipt_authority():
                 success_statuses=rule.success_statuses,
                 final_guard=final_guard,
                 clock_utc=self.clock_utc,
+                transport_identity=(
+                    type(self).__module__
+                    + "."
+                    + type(self).__qualname__
+                    + ":direct-receipt-v1"
+                ),
+                network_policy_identity=direct_network_policy_identity(
+                    canonical_policy,
+                ),
             )
 
     def bybit_execute_with_receipt(
@@ -5083,6 +5135,16 @@ def _install_authenticated_read_execution_receipt_authority():
                 success_statuses=rule.success_statuses,
                 final_guard=final_guard,
                 clock_utc=self.clock_utc,
+                transport_identity=(
+                    type(self).__module__
+                    + "."
+                    + type(self).__qualname__
+                    + ":direct-receipt-v1"
+                ),
+                network_policy_identity=direct_network_policy_identity(
+                    canonical_policy,
+                    provider_environment=self.provider_environment,
+                ),
             )
 
     def kraken_execute_with_receipt(
@@ -5164,6 +5226,15 @@ def _install_authenticated_read_execution_receipt_authority():
                         success_statuses=rule.success_statuses,
                         final_guard=final_guard,
                         clock_utc=self.clock_utc,
+                        transport_identity=(
+                            type(self).__module__
+                            + "."
+                            + type(self).__qualname__
+                            + ":direct-receipt-v1"
+                        ),
+                        network_policy_identity=direct_network_policy_identity(
+                            canonical_policy,
+                        ),
                     )
             finally:
                 provider_api_key = None

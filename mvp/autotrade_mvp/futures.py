@@ -885,6 +885,53 @@ def lifecycle_gate(
     exists, reaching the delivery cutoff is a hard fail-closed boundary.
     """
 
+    if type(contract) is not FuturesContract:
+        raise FuturesError("lifecycle gate requires exact FuturesContract")
+
+    for field_name in (
+        "instrument",
+        "settlement_method",
+    ):
+        if type(getattr(contract, field_name)) is not str:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact text"
+            )
+    for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
+        if type(getattr(contract, field_name)) is not datetime:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact datetime"
+            )
+
+    version = contract.canonical_instrument
+    if version is not None:
+        if type(version) is not InstrumentVersion:
+            raise FuturesError(
+                "canonical_instrument must be exact InstrumentVersion"
+            )
+        if (
+            type(version.instrument_id) is not str
+            or type(version.version) is not int
+            or type(version.asset_class) is not str
+            or type(version.settlement_method) is not str
+            or type(version.expiry) is not datetime
+            or type(version.last_trade_at) is not datetime
+            or type(version.delivery_cutoff) is not datetime
+        ):
+            raise FuturesError(
+                "canonical lifecycle instrument fields must retain exact types"
+            )
+        if (
+            version.asset_class != "FUTURE"
+            or contract.instrument != f"{version.instrument_id}@{version.version}"
+            or contract.expiry != version.expiry
+            or contract.last_trade_at != version.last_trade_at
+            or contract.delivery_cutoff != version.delivery_cutoff
+            or contract.settlement_method != version.settlement_method
+        ):
+            raise FuturesError(
+                "futures lifecycle contract no longer matches canonical InstrumentVersion"
+            )
+
     point = _utc(at, "at")
     if point >= contract.expiry:
         return "EXPIRED"

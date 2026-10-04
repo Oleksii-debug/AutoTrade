@@ -954,7 +954,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 origin.load_response_binding(attempt_id, binding)
             with self.assertRaisesRegex(
                 ProviderOriginError,
-                "Prepared \\+ Retained",
+                "direct wire execution claim is missing or ambiguous",
             ):
                 origin.recover_response_binding(attempt_id, binding)
 

@@ -27,6 +27,7 @@ from .dispatch import (
 )
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
+from .persistence import JournalStore
 from .provider_qualification_authority import ProviderQualificationError
 from .provider_qualification_current_scope import ProviderQualificationCurrentScope
 from .provider_selection import ProviderSelectionError, SelectedProviderRoute
@@ -86,15 +87,21 @@ def _current_scope(route: SelectedProviderRoute) -> ProviderQualificationCurrent
     )
 
 
-def _require_bound_route(
+def _require_bound_route_authority(
     *,
-    dispatcher: GuardedDispatcher,
+    store: JournalStore,
+    environment: str,
+    account_id: str,
     route: SelectedProviderRoute,
     capability_registry: DurableCapabilityRegistry,
     qualification_registry: DurableProviderQualificationRegistry,
 ) -> None:
-    if type(dispatcher) is not GuardedDispatcher:
-        raise TypeError("dispatcher must be exact GuardedDispatcher")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    if type(environment) is not str or not environment:
+        raise TypeError("environment must be exact non-empty text")
+    if type(account_id) is not str or not account_id:
+        raise TypeError("account_id must be exact non-empty text")
     if type(route) is not SelectedProviderRoute:
         raise TypeError("route must be exact SelectedProviderRoute")
     if type(capability_registry) is not DurableCapabilityRegistry:
@@ -103,10 +110,7 @@ def _require_bound_route(
         raise TypeError(
             "qualification_registry must be exact DurableProviderQualificationRegistry"
         )
-    if (
-        capability_registry.store is not dispatcher.store
-        or qualification_registry.store is not dispatcher.store
-    ):
+    if capability_registry.store is not store or qualification_registry.store is not store:
         raise ProviderRouteDispatchError(
             "route C/Q authority and dispatcher must share one JournalStore instance"
         )
@@ -116,15 +120,15 @@ def _require_bound_route(
     qualification = route.qualification
     provider_scope = qualification.scope.provider_scope
 
-    if dispatcher.environment != provider_scope.runtime_environment:
+    if environment != provider_scope.runtime_environment:
         raise ProviderRouteDispatchError("dispatcher runtime environment differs from Q")
-    if dispatcher.account_id != candidate.account_id:
+    if account_id != candidate.account_id:
         raise ProviderRouteDispatchError("dispatcher account differs from selected route")
     if capability.account_id != candidate.account_id:
         raise ProviderRouteDispatchError("capability account differs from selected route")
     if capability.entity_id != candidate.entity_id:
         raise ProviderRouteDispatchError("capability entity differs from selected route")
-    if capability.environment != dispatcher.environment:
+    if capability.environment != environment:
         raise ProviderRouteDispatchError("capability runtime environment differs from dispatcher")
     if capability.provider_id.upper() != candidate.provider_id:
         raise ProviderRouteDispatchError("capability provider differs from selected route")
@@ -150,6 +154,25 @@ def _require_bound_route(
         raise ProviderRouteDispatchError("Q protocol differs from selected route")
     if qualification.scope.protocol_version != candidate.protocol_version:
         raise ProviderRouteDispatchError("Q protocol version differs from selected route")
+
+
+def _require_bound_route(
+    *,
+    dispatcher: GuardedDispatcher,
+    route: SelectedProviderRoute,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
+) -> None:
+    if type(dispatcher) is not GuardedDispatcher:
+        raise TypeError("dispatcher must be exact GuardedDispatcher")
+    _require_bound_route_authority(
+        store=dispatcher.store,
+        environment=dispatcher.environment,
+        account_id=dispatcher.account_id,
+        route=route,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
+    )
 
 
 def _bound_submission_scope(
@@ -187,6 +210,88 @@ def _bound_submission_scope(
     return result
 
 
+def compose_selected_provider_route_authority(
+    *,
+    store: JournalStore,
+    environment: str,
+    account_id: str,
+    route: SelectedProviderRoute,
+    capability_registry: DurableCapabilityRegistry,
+    qualification_registry: DurableProviderQualificationRegistry,
+    authority_check: AuthorityCheck,
+) -> AuthorityCheck:
+    """Add exact current C1/Q1 to an existing final authority callback.
+
+    This is the reusable provider part of the existing final barrier.  It owns no
+    durable send state and performs no provider I/O; callers must pass the
+    returned callback to the already-selected dispatcher/transport boundary.
+    """
+
+    _require_bound_route_authority(
+        store=store,
+        environment=environment,
+        account_id=account_id,
+        route=route,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
+    )
+    if not callable(authority_check):
+        raise TypeError("authority_check must be callable")
+
+    candidate = route.candidate
+    expected_capability_id = route.capability_snapshot_id
+    expected_qualification_id = route.qualification_id
+    current_scope = _current_scope(route)
+
+    def combined_authority_check(intent_hash_value: str, at_text: str) -> tuple[bool, str]:
+        upstream = authority_check(intent_hash_value, at_text)
+        if type(upstream) is not tuple or len(upstream) != 2:
+            return False, "upstream_authority_invalid_result"
+        allowed, reason = upstream
+        if type(allowed) is not bool:
+            return False, "upstream_authority_invalid_allowed"
+        if type(reason) is not str or not reason.strip():
+            return False, "upstream_authority_invalid_reason"
+        if not allowed:
+            return False, reason.strip()
+        point = _point(at_text)
+        cut = _journal_cut(store)
+        try:
+            capability = capability_registry.require_verified(
+                provider_id=candidate.provider_id,
+                account_id=candidate.account_id,
+                entity_id=candidate.entity_id,
+                environment=environment,
+                provider_environment=candidate.provider_environment,
+                instrument_version=route.capability.instrument_version,
+                at=point,
+                journal_sequence_cut=cut,
+            )
+        except (CapabilityError, ValueError, TypeError):
+            return False, "provider_capability_not_exact_current"
+        if capability.snapshot_id != expected_capability_id:
+            return False, "provider_capability_not_exact_current"
+        try:
+            current = qualification_registry.require_exact_current(
+                scope=current_scope,
+                at=point,
+                expected_qualification_id=expected_qualification_id,
+                journal_sequence_cut=cut,
+            )
+        except (ProviderQualificationError, ProviderSelectionError, ValueError, TypeError):
+            return False, "provider_qualification_not_exact_current"
+        if (
+            current.qualification_id != expected_qualification_id
+            or current.journal_sequence_cut != cut
+        ):
+            return False, "provider_qualification_not_exact_current"
+        if _journal_cut(store) != cut:
+            return False, "provider_route_authority_changed_during_barrier"
+        return True, reason.strip()
+
+    return combined_authority_check
+
+
 def dispatch_selected_provider_route(
     dispatcher: GuardedDispatcher,
     route: SelectedProviderRoute,
@@ -220,59 +325,15 @@ def dispatch_selected_provider_route(
         capability_registry=capability_registry,
         qualification_registry=qualification_registry,
     )
-    if not callable(authority_check):
-        raise TypeError("authority_check must be callable")
-
-    candidate = route.candidate
-    expected_capability_id = route.capability_snapshot_id
-    expected_qualification_id = route.qualification_id
-    current_scope = _current_scope(route)
-
-    def combined_authority_check(intent_hash_value: str, at_text: str) -> tuple[bool, str]:
-        upstream = authority_check(intent_hash_value, at_text)
-        if type(upstream) is not tuple or len(upstream) != 2:
-            return False, "upstream_authority_invalid_result"
-        allowed, reason = upstream
-        if type(allowed) is not bool:
-            return False, "upstream_authority_invalid_allowed"
-        if type(reason) is not str or not reason.strip():
-            return False, "upstream_authority_invalid_reason"
-        if not allowed:
-            return False, reason.strip()
-        point = _point(at_text)
-        cut = _journal_cut(dispatcher.store)
-        try:
-            capability = capability_registry.require_verified(
-                provider_id=candidate.provider_id,
-                account_id=candidate.account_id,
-                entity_id=candidate.entity_id,
-                environment=dispatcher.environment,
-                provider_environment=candidate.provider_environment,
-                instrument_version=route.capability.instrument_version,
-                at=point,
-                journal_sequence_cut=cut,
-            )
-        except (CapabilityError, ValueError, TypeError):
-            return False, "provider_capability_not_exact_current"
-        if capability.snapshot_id != expected_capability_id:
-            return False, "provider_capability_not_exact_current"
-        try:
-            current = qualification_registry.require_exact_current(
-                scope=current_scope,
-                at=point,
-                expected_qualification_id=expected_qualification_id,
-                journal_sequence_cut=cut,
-            )
-        except (ProviderQualificationError, ProviderSelectionError, ValueError, TypeError):
-            return False, "provider_qualification_not_exact_current"
-        if (
-            current.qualification_id != expected_qualification_id
-            or current.journal_sequence_cut != cut
-        ):
-            return False, "provider_qualification_not_exact_current"
-        if _journal_cut(dispatcher.store) != cut:
-            return False, "provider_route_authority_changed_during_barrier"
-        return True, reason.strip()
+    combined_authority_check = compose_selected_provider_route_authority(
+        store=dispatcher.store,
+        environment=dispatcher.environment,
+        account_id=dispatcher.account_id,
+        route=route,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
+        authority_check=authority_check,
+    )
 
     return GuardedDispatcher.dispatch(
         dispatcher,

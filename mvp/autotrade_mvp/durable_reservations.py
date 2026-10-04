@@ -310,19 +310,6 @@ def _build_reservation_store_binding_accessors():
             "reservation-book",
         )
 
-        object.__setattr__(value, "store", store)
-        object.__setattr__(value, "environment", normalized_environment)
-        object.__setattr__(value, "account_id", normalized_account)
-        object.__setattr__(
-            value,
-            "resolution_artifact_store",
-            resolution_artifact_store,
-        )
-        object.__setattr__(value, "_resolution_artifact_reader", reader)
-        object.__setattr__(value, "scope_id", scope_id)
-        object.__setattr__(value, "_book", ReservationBook())
-        object.__setattr__(value, "_idempotency", {})
-
         object_id = id(value)
         binding = _DurableReservationStoreBinding(
             store_ref=weakref.ref(store),
@@ -339,12 +326,37 @@ def _build_reservation_store_binding_accessors():
                 None if reader is None else weakref.ref(reader)
             ),
         )
+        # The initial precheck is only a fast-fail optimization. A concurrent
+        # explicit __init__ can pass it on the same live object, so the
+        # authority selection and visible state must be published under one
+        # lock with a second exact-identity check. Never let a later initializer
+        # overwrite the first closure-owned financial authority.
         with lock:
             entry = bindings.get(object_id)
-            if entry is not None and entry[0]() is not value:
-                raise ReservationConflict(
-                    "durable reservation binding identity collision"
-                )
+            if entry is not None:
+                current = entry[0]()
+                if current is value:
+                    raise ReservationConflict(
+                        "reservation store authority is already established"
+                    )
+                if current is not None:
+                    raise ReservationConflict(
+                        "durable reservation binding identity collision"
+                    )
+                bindings.pop(object_id, None)
+
+            object.__setattr__(value, "store", store)
+            object.__setattr__(value, "environment", normalized_environment)
+            object.__setattr__(value, "account_id", normalized_account)
+            object.__setattr__(
+                value,
+                "resolution_artifact_store",
+                resolution_artifact_store,
+            )
+            object.__setattr__(value, "_resolution_artifact_reader", reader)
+            object.__setattr__(value, "scope_id", scope_id)
+            object.__setattr__(value, "_book", ReservationBook())
+            object.__setattr__(value, "_idempotency", {})
             bindings[object_id] = (weakref.ref(value), binding)
         try:
             DurableReservationBook._reload(value)

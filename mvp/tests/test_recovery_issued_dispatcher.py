@@ -220,22 +220,23 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
             self.assertIs(recovery.state, HostState.DEGRADED)
             self.assertFalse(recovery.provider_reconciled)
             self.assertIn("attempt-unknown-1", recovery.unresolved_attempts)
-            events = JournalStore.load_events_by_aggregate_type(
+            inner = dispatcher._RecoveryIssuedDispatcher__dispatcher
+            first_events = JournalStore.load_events(
                 journal,
                 "submission_attempt",
+                inner._aggregate_id("attempt-unknown-1"),
             )
-            by_attempt = {}
-            for event in events:
-                payload = event.get("payload", {})
-                by_attempt.setdefault(payload.get("attempt_id"), []).append(
-                    event["event_type"]
-                )
+            second_events = JournalStore.load_events(
+                journal,
+                "submission_attempt",
+                inner._aggregate_id("attempt-unknown-2"),
+            )
             self.assertEqual(
-                by_attempt["attempt-unknown-1"],
+                [event["event_type"] for event in first_events],
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
             )
             self.assertEqual(
-                by_attempt["attempt-unknown-2"],
+                [event["event_type"] for event in second_events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
             )
 

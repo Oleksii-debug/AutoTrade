@@ -60,6 +60,30 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_simulation_rejects_domain_subclasses_before_execution_logic(self):
+        class DerivedOrder(SimulatedOrder):
+            pass
+
+        class DerivedObservation(LiquidityObservation):
+            pass
+
+        class DerivedModel(ExecutionModel):
+            pass
+
+        exact_order = order()
+        exact_observation = top()
+        exact_model = model()
+        derived_order = DerivedOrder(**exact_order.__dict__)
+        derived_observation = DerivedObservation(**exact_observation.__dict__)
+        derived_model = DerivedModel(**exact_model.__dict__)
+
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            simulate_execution(derived_order, exact_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            simulate_execution(exact_order, derived_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            simulate_execution(exact_order, exact_observation, derived_model)
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

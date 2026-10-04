@@ -668,15 +668,23 @@ def build_production_bybit_order_sender(
     _credential_identity(credential_handle)
     if not callable(clock_millis):
         raise TypeError("clock_millis must be callable")
+    if (
+        type(recv_window_ms) is not int
+        or recv_window_ms < 1
+        or recv_window_ms > 60000
+    ):
+        raise ValueError("recv_window_ms must be an exact integer from 1 through 60000")
 
     raw_clock_millis = clock_millis
+    transport_slot: list[BybitV5HttpTransport | None] = [None]
 
     def guarded_clock_millis() -> int:
         value = raw_clock_millis()
         # clock_millis is the last caller-supplied callback evaluated before
-        # BybitV5Signer consumes the endpoint policy. A quota/capability/clock
-        # callback therefore cannot retarget the mutable frozen policy object
-        # for signing and restore it only after the signed request exists.
+        # BybitV5Signer consumes the endpoint policy. Re-establish every mutable
+        # transport input that the signer will read after this callback.
+        if type(value) is not int or value < 0:
+            raise ValueError("clock_millis must return an exact non-negative integer")
         if _bybit_policy_identity is not policy_identity_reader:
             raise PermissionError("Bybit provider policy identity authority changed")
         if policy_identity_reader.__code__ is not policy_identity_reader_code:
@@ -687,6 +695,18 @@ def build_production_bybit_order_sender(
             policy,
             provider_environment=provider_environment,
         )
+        current_transport = transport_slot[0]
+        if (
+            current_transport is None
+            or type(current_transport) is not BybitV5HttpTransport
+            or current_transport.policy is not policy
+        ):
+            raise PermissionError("Bybit transport policy authority changed before signing")
+        if (
+            type(current_transport.recv_window_ms) is not int
+            or current_transport.recv_window_ms != recv_window_ms
+        ):
+            raise PermissionError("Bybit receive-window authority changed before signing")
         return value
 
     dispatcher = runtime.financial_dispatcher
@@ -731,4 +751,5 @@ def build_production_bybit_order_sender(
         wire_client=wire_client,
         recv_window_ms=recv_window_ms,
     )
+    transport_slot[0] = transport
     return ProductionBybitOrderSender(runtime=runtime, transport=transport)

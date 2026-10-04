@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    _response_artifact_id,
     execute_direct_provider_origin_read,
     observe_provider_origin_json_response,
 )
@@ -214,6 +215,136 @@ class ProviderOriginJournalTests(unittest.TestCase):
             observed_at=point,
         )
 
+    def test_direct_origin_rejects_wrong_qualification_registry_type_before_prepare(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                _qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "qualification_registry must be exact DurableProviderQualificationRegistry",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=object(),
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+
+    def test_direct_origin_rejects_c_q_store_split_before_prepare_or_transport(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                _qualifications,
+                route,
+                _q1,
+                harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            foreign_store = JournalStore(Path(directory) / "foreign-q-journal.sqlite3")
+            foreign_evidence = Path(directory) / "foreign-q-evidence"
+            foreign_qualifications = harness.registry(
+                foreign_store,
+                evidence_store=ArtifactStore(foreign_evidence),
+                evidence_root=foreign_evidence,
+            )
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct, patch.object(
+                BybitV5AuthenticatedReadTransport,
+                "__call__",
+                autospec=True,
+            ) as transport_call:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "C/Q authorities must share one JournalStore",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=foreign_qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+                transport_call.assert_not_called()
+            self.assertEqual(
+                foreign_store.whole_store_state_cut()["journal_sequence"],
+                0,
+            )
+
+    def test_direct_origin_rejects_cross_store_authority_before_prepare_or_transport(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                _journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            foreign_store = JournalStore(Path(directory) / "foreign-journal.sqlite3")
+            origin = self._origin(foreign_store, directory)
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct, patch.object(
+                BybitV5AuthenticatedReadTransport,
+                "__call__",
+                autospec=True,
+            ) as transport_call:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "share exact C/Q JournalStore",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+                transport_call.assert_not_called()
+            self.assertEqual(
+                foreign_store.whole_store_state_cut()["journal_sequence"],
+                0,
+            )
+
     def test_instance_shadowed_opener_cannot_be_promoted_to_direct_provider_origin(self):
         class Resolver:
             @contextmanager
@@ -284,33 +415,319 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     )
                 prepare_direct.assert_not_called()
 
-    def test_direct_wire_claim_is_single_use_and_restart_verifiable(self):
+    def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
         with TemporaryDirectory() as directory:
-            journal = JournalStore(Path(directory) / "journal.sqlite3")
-            kwargs = {
-                "attempt_id": "provider-read:" + "a" * 32,
-                "qualified_query_digest": "sha256:" + "1" * 64,
-                "qualification_id": "provider-qualification:sha256:" + "2" * 64,
-                "response_sha256": "sha256:" + "3" * 64,
-                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                "wire_request_sha256": "sha256:" + "4" * 64,
-                "wire_request_semantics_sha256": "sha256:" + "5" * 64,
-                "terminal_authority_journal_sequence_cut": 1,
-                "terminal_authority_verified_at": NOW.isoformat().replace("+00:00", "Z"),
-            }
-            provider_origin_module._claim_direct_wire_execution(journal, **kwargs)
-            provider_origin_module._require_direct_wire_execution_claim(journal, **kwargs)
-            restarted = JournalStore(journal.path)
-            provider_origin_module._require_direct_wire_execution_claim(restarted, **kwargs)
-            conflicting = dict(kwargs)
-            conflicting["attempt_id"] = "provider-read:" + "b" * 32
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"10.25"}]}}'
+
+            class Stream(BytesIO):
+                status = 200
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener.open = lambda *_args, **_kwargs: Stream(body)
+            base = binding.query_binding
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-bybit-read",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-test-host",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: NOW,
+                wire_client=client,
+            )
+            recorded = execute_direct_provider_origin_read(
+                origin=origin,
+                route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+                query_binding=binding,
+                transport=transport,
+            )
+            self.assertEqual(recorded.execution_class, "DIRECT_PROVIDER_WIRE")
+            self.assertEqual(recorded.qualification_id, q1.qualification_id)
+
+            # A second real call with the same exact signed request bytes (the
+            # test clock is intentionally fixed) is not independent provider
+            # evidence. Its request digest is already durably claimed by the
+            # first Prepared attempt, so it must fail closed instead of minting
+            # a second origin from an execution-equivalent request.
             with self.assertRaisesRegex(
                 ProviderOriginError,
                 "already claimed by another attempt",
             ):
-                provider_origin_module._claim_direct_wire_execution(
-                    restarted,
-                    **conflicting,
+                execute_direct_provider_origin_read(
+                    origin=origin,
+                    route=route,
+                    capability_registry=capabilities,
+                    qualification_registry=qualifications,
+                    query_binding=binding,
+                    transport=transport,
+                )
+
+            claims = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+                recorded.attempt_id,
+            )
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]["payload"]["attempt_id"], recorded.attempt_id)
+            self.assertEqual(
+                claims[0]["payload"]["response_sha256"],
+                recorded.response_sha256,
+            )
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            recovered = restarted.load_response_binding(recorded.attempt_id, binding)
+            observation = observe_provider_origin_json_response(
+                response_binding=recovered,
+                query_binding=binding,
+            )
+            self.assertEqual(observation.origin_ref, recovered.origin_ref)
+            self.assertEqual(
+                observation.payload["result"]["list"][0]["equity"],
+                "10.25",
+            )
+            self.assertNotEqual(
+                observation.origin_ref,
+                observation.qualified_evidence_ref,
+            )
+
+    def test_direct_wire_claim_recovers_after_crash_before_retained_without_requery(self):
+        class Resolver:
+            @contextmanager
+            def lease_for_execution(self, *_args, **_kwargs):
+                yield (
+                    '{"api_key":"SYNTHETIC-KEY",'
+                    '"api_secret":"SYNTHETIC-SECRET"}'
+                )
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"11.50"}]}}'
+
+            class Stream(BytesIO):
+                status = 200
+
+            open_calls = 0
+
+            def open_once(*_args, **_kwargs):
+                nonlocal open_calls
+                open_calls += 1
+                return Stream(body)
+
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener.open = open_once
+            base = binding.query_binding
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id=base.account_id,
+                capability_snapshot_id=base.capability_snapshot_id,
+                capability_registry=capabilities,
+                secret_resolver=Resolver(),
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="provider-origin-recovery-read",
+                    account_id=base.account_id,
+                    provider="BYBIT",
+                    environment=base.environment,
+                    provider_environment="TESTNET",
+                    purpose="READ",
+                    generation=1,
+                ),
+                session_token="provider-origin-recovery-session",
+                origin="https://localhost",
+                execution_identity="provider-origin-recovery-host",
+                clock_millis=lambda: 1_700_000_000_123,
+                clock_utc=lambda: NOW,
+                wire_client=client,
+            )
+
+            original_append = JournalStore.append_event
+
+            def fail_retained(store, envelope, **kwargs):
+                if envelope.get("event_type") == "AuthenticatedReadRetained":
+                    raise RuntimeError("simulated crash before Retained commit")
+                return original_append(store, envelope, **kwargs)
+
+            with patch.object(
+                JournalStore,
+                "append_event",
+                side_effect=fail_retained,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated crash before Retained commit",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+            self.assertEqual(open_calls, 1)
+
+            all_events = JournalStore.load_events_after_journal_sequence(
+                journal,
+                0,
+            )
+            prepared_events = [
+                event
+                for event in all_events
+                if event.get("event_type") == "AuthenticatedReadPrepared"
+            ]
+            self.assertEqual(len(prepared_events), 1)
+            attempt_id = prepared_events[0]["aggregate_id"]
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            claims = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+                attempt_id,
+            )
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]["payload"]["http_status"], 200)
+
+            claim_payload = claims[0]["payload"]
+            artifact_id = _response_artifact_id(
+                attempt_id=attempt_id,
+                qualified_query_digest=claim_payload["qualified_query_digest"],
+                response_sha256=claim_payload["response_sha256"],
+            )
+            response_store = origin._response_store
+            manifest = response_store.load_manifest(artifact_id)
+            object_path = response_store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            exact_bytes = object_path.read_bytes()
+            object_path.unlink()
+
+            missing_artifact_restart = self._origin(
+                JournalStore(journal.path),
+                directory,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "recovery provider response artifact is unavailable",
+            ):
+                missing_artifact_restart.recover_response_binding(
+                    attempt_id,
+                    binding,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
+            )
+            object_path.write_bytes(exact_bytes)
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            recovered = restarted.recover_response_binding(
+                attempt_id,
+                binding,
+            )
+            self.assertEqual(open_calls, 1)
+            self.assertEqual(recovered.execution_class, "DIRECT_PROVIDER_WIRE")
+            self.assertEqual(recovered.response_bytes, body)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                [
+                    "AuthenticatedReadPrepared",
+                    "AuthenticatedReadRetained",
+                    "AuthenticatedReadObserved",
+                ],
+            )
+
+    def test_imported_observation_token_cannot_promote_test_injected_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
+                network_policy_identity="sha256:" + "8" * 64,
+                recorded_at=NOW,
+            )
+            recorded = self._record(origin, attempt_id, binding)
+            qualified = provider_origin_module.observe_qualified_provider_json_response(
+                query_binding=binding,
+                http_status=recorded.http_status,
+                response_bytes=recorded.response_bytes,
+                observed_at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "DIRECT_PROVIDER_WIRE",
+            ):
+                provider_origin_module.ProviderOriginObservation(
+                    response_binding=recorded,
+                    qualified_observation=qualified,
+                    _observation_token=provider_origin_module._OBSERVATION_TOKEN,
                 )
 
     def test_journal_never_embeds_provider_response_bytes(self):
@@ -533,33 +950,6 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 origin.load_response_binding(attempt_id, binding).response_sha256,
                 first.response_sha256,
             )
-
-    def test_imported_observation_token_cannot_promote_test_injected_origin(self):
-        with TemporaryDirectory() as directory:
-            _fixture, journal, *_rest, binding = self._route_fixture(directory)
-            origin = self._origin(journal, directory)
-            attempt_id = origin.prepare(
-                binding,
-                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
-                network_policy_identity="sha256:" + "8" * 64,
-                recorded_at=NOW,
-            )
-            recorded = self._record(origin, attempt_id, binding)
-            qualified = provider_origin_module.observe_qualified_provider_json_response(
-                query_binding=binding,
-                http_status=recorded.http_status,
-                response_bytes=recorded.response_bytes,
-                observed_at=NOW,
-            )
-            with self.assertRaisesRegex(
-                ProviderOriginError,
-                "DIRECT_PROVIDER_WIRE",
-            ):
-                provider_origin_module.ProviderOriginObservation(
-                    response_binding=recorded,
-                    qualified_observation=qualified,
-                    _observation_token=provider_origin_module._OBSERVATION_TOKEN,
-                )
 
     def test_imported_module_token_cannot_mint_direct_provider_origin(self):
         with TemporaryDirectory() as directory:

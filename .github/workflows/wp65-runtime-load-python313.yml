@@ -7,6 +7,7 @@ on:
       - "mvp/autotrade_mvp/runtime_load_evidence.py"
       - "mvp/autotrade_mvp/runtime_load_plan.py"
       - "mvp/autotrade_mvp/runtime_load_measurement.py"
+      - "mvp/autotrade_mvp/runtime_load_research_measurement.py"
       - "mvp/autotrade_mvp/runtime_load_campaign.py"
       - "mvp/tests/test_runtime_load_evidence.py"
       - "mvp/tests/test_runtime_load_evidence_full_cut.py"
@@ -18,6 +19,7 @@ on:
       - "mvp/tests/test_runtime_load_measurement_cut.py"
       - "mvp/tests/test_runtime_load_measurement_journal_transitive_authority.py"
       - "mvp/tests/test_runtime_load_measurement_schema_authority.py"
+      - "mvp/tests/test_runtime_load_research_measurement.py"
       - "mvp/tests/test_runtime_load_campaign_backlog.py"
       - ".github/workflows/wp65-runtime-load-python313.yml"
 
@@ -58,12 +60,13 @@ jobs:
           mvp.tests.test_runtime_load_measurement_cut
           mvp.tests.test_runtime_load_measurement_journal_transitive_authority
           mvp.tests.test_runtime_load_measurement_schema_authority
+          mvp.tests.test_runtime_load_research_measurement
           mvp.tests.test_runtime_load_campaign_backlog
       - name: Write exact-head current-main WP-65 evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite wp65-current-main-runtime-load-python313
-          --command "python -m unittest -v mvp.tests.test_runtime_load_evidence mvp.tests.test_runtime_load_evidence_full_cut mvp.tests.test_runtime_load_evidence_input_snapshot mvp.tests.test_runtime_load_plan mvp.tests.test_runtime_load_plan_limits mvp.tests.test_runtime_load_measurement mvp.tests.test_runtime_load_measurement_backlog mvp.tests.test_runtime_load_measurement_cut mvp.tests.test_runtime_load_measurement_journal_transitive_authority mvp.tests.test_runtime_load_measurement_schema_authority mvp.tests.test_runtime_load_campaign_backlog"
+          --command "python -m unittest -v mvp.tests.test_runtime_load_evidence mvp.tests.test_runtime_load_evidence_full_cut mvp.tests.test_runtime_load_evidence_input_snapshot mvp.tests.test_runtime_load_plan mvp.tests.test_runtime_load_plan_limits mvp.tests.test_runtime_load_measurement mvp.tests.test_runtime_load_measurement_backlog mvp.tests.test_runtime_load_measurement_cut mvp.tests.test_runtime_load_measurement_journal_transitive_authority mvp.tests.test_runtime_load_measurement_schema_authority mvp.tests.test_runtime_load_research_measurement mvp.tests.test_runtime_load_campaign_backlog"
           --output "artifacts/wp65-current-main-runtime-load-python313-${{ runner.os }}.json"
       - name: Upload exact-head current-main WP-65 evidence
         uses: actions/upload-artifact@v4

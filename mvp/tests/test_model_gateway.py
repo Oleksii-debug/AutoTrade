@@ -39,6 +39,80 @@ def request(*ids, budget="10", remote=True, deadline=None):
 
 
 class ModelGatewayTests(unittest.TestCase):
+    def test_descriptor_latency_rejects_int_subclass_without_comparison(self):
+        class HostileInt(int):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile latency comparison executed")
+
+        hostile = HostileInt(10)
+        with self.assertRaisesRegex(ValueError, "latency must be"):
+            ModelDescriptor(
+                model_id="hostile-latency",
+                provider_id="provider",
+                revision="r1",
+                remote=False,
+                estimated_cost="0",
+                latency_ms=hostile,
+                quality_score="0.5",
+            )
+        self.assertEqual(HostileInt.compare_calls, 0)
+
+    def test_policy_latency_rejects_int_subclass_without_comparison(self):
+        class HostileInt(int):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile maximum latency comparison executed")
+
+        hostile = HostileInt(100)
+        with self.assertRaisesRegex(ValueError, "maximum latency must be"):
+            RoutingPolicy(
+                RoutingMode.ALLOWLIST,
+                allowed_model_ids=("local",),
+                maximum_cost="1",
+                maximum_latency_ms=hostile,
+            )
+        self.assertEqual(HostileInt.compare_calls, 0)
+
+    def test_route_rejects_datetime_subclass_before_truth_or_deadline_comparison(self):
+        class HostileDatetime(datetime):
+            truth_calls = 0
+            compare_calls = 0
+
+            def __bool__(self):
+                type(self).truth_calls += 1
+                raise AssertionError("hostile route time truthiness executed")
+
+            def __ge__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile route time comparison executed")
+
+        hostile = HostileDatetime(
+            2026,
+            9,
+            24,
+            16,
+            30,
+            tzinfo=timezone.utc,
+        )
+        with self.assertRaisesRegex(ValueError, "exact timezone-aware datetime"):
+            route_model(
+                RoutingPolicy(
+                    RoutingMode.ALLOWLIST,
+                    allowed_model_ids=("local",),
+                    maximum_cost="1",
+                ),
+                request("local"),
+                [model("local", remote=False, cost="0")],
+                now_utc=hostile,
+            )
+        self.assertEqual(HostileDatetime.truth_calls, 0)
+        self.assertEqual(HostileDatetime.compare_calls, 0)
+
     def test_zero_mode_never_selects_model(self):
         decision = route_model(
             RoutingPolicy(RoutingMode.ZERO, maximum_cost=Decimal("100")),

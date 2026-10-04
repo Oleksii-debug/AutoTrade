@@ -1119,10 +1119,32 @@ class ScientificRegistry:
                 "candidate promotion requires an untouched locked holdout evaluation"
             )
 
-        # Contamination belongs to the immutable physical holdout identity, not
-        # a protocol-local display alias. Legacy alias-only accesses are counted
-        # conservatively so a migration cannot manufacture an untouched holdout.
+        # Promotion re-resolves the preregistered physical holdout so legacy
+        # evaluations created before this authority existed cannot regain
+        # terminal power after restart/migration.
         with self._connect() as con:
+            protocol_row = con.execute(
+                "SELECT * FROM protocols WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchone()
+            if protocol_row is None:
+                raise KeyError(expected_protocol)
+            protocol_payload = _registered_protocol_payload(protocol_row)
+            locked_holdout = self._registered_locked_holdout(
+                con,
+                protocol_id=expected_protocol,
+                protocol_payload=protocol_payload,
+            )
+            if (
+                evidence.holdout_identity_hash
+                != locked_holdout.holdout_identity_hash
+            ):
+                raise ProtocolViolation(
+                    "candidate promotion holdout differs from preregistered physical authority"
+                )
+            # Contamination belongs to the immutable physical holdout identity,
+            # not a protocol-local display alias. Legacy alias-only accesses are
+            # counted conservatively so migration cannot manufacture untouchedness.
             current_access_count = int(
                 con.execute(
                     "SELECT COUNT(*) FROM holdout_access "

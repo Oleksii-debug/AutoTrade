@@ -184,6 +184,24 @@ class DurableRecoveryTakeoverTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "Host is not ready"):
             self.controller.validate_sender("host-b", 2)
 
+    def test_direct_restart_start_cannot_mint_next_durable_owner_epoch(self):
+        restarted = RecoveryController(
+            owner_store=JournalStore(self.store.path),
+            owner_scope="PAPER:paper-1",
+        )
+
+        with self.assertRaisesRegex(
+            PermissionError,
+            "Existing durable owner requires explicit takeover evidence",
+        ):
+            restarted.start("host-a")
+
+        self.assertEqual(
+            [(owner.owner_id, owner.epoch) for owner in restarted.durable_owner_chain()],
+            [("host-a", 1)],
+        )
+        self.assertIsNone(restarted.owner)
+
     def test_same_host_restart_takeover_advances_epoch_without_owner_rename(self):
         result = self._takeover(new_owner_id="host-a")
 

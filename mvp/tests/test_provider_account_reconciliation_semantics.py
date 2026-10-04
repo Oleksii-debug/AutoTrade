@@ -28,7 +28,7 @@ class ProviderAccountReconciliationSemanticsTests(unittest.TestCase):
         return account_reconciliation_route_semantics(
             acquisition_mode="SERIALIZED_ACQUISITION_GENERATION",
             consistency_method_id="SERIALIZED_SNAPSHOT_READBACK",
-            consistency_method_version="1.0.0",
+            consistency_method_version=1,
         )
 
     def test_missing_source_owned_q_semantics_fail_closed(self):
@@ -65,7 +65,7 @@ class ProviderAccountReconciliationSemanticsTests(unittest.TestCase):
                 value.consistency_method_id,
                 "SERIALIZED_SNAPSHOT_READBACK",
             )
-            self.assertEqual(value.consistency_method_version, "1.0.0")
+            self.assertEqual(value.consistency_method_version, 1)
             self.assertEqual(
                 value.qualification_route_semantics_digest,
                 record.identity.route_semantics_digest,

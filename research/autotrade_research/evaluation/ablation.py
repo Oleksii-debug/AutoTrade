@@ -2103,6 +2103,15 @@ def _make_registered_policy_context(resolve_policy_binding):
             ArtifactStore,
             "artifact store",
         )
+        memory_state = object.__getattribute__(experience_memory, "__dict__")
+        if "_correction_evidence_resolver" not in memory_state:
+            raise ProtocolViolation(
+                "ablation qualification memory correction authority is unavailable"
+            )
+        if memory_state["_correction_evidence_resolver"] is not None:
+            raise ProtocolViolation(
+                "ablation qualification does not admit caller correction-evidence resolvers"
+            )
         if (
             type(protocol_id) is not str
             or not protocol_id

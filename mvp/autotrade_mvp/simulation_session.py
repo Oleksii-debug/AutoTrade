@@ -1561,6 +1561,28 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
     store = JournalStore(root / "journal.sqlite3")
     run_id = protocol["run_id"]
     events = store.load_events(_LOOP_AGGREGATE, run_id)
+    from .simulation_runtime_checkpoint import (
+        _issue_autonomous_runtime_authority_key,
+        _require_autonomous_runtime_authority_key,
+    )
+    protocol = dict(protocol)
+    if not events:
+        protocol["runtime_authority_key_sha256"] = (
+            _issue_autonomous_runtime_authority_key(root)
+        )
+    else:
+        first = events[0]
+        if (
+            first["event_type"] != "AutonomousSimulationStarted"
+            or type(first.get("payload")) is not dict
+            or type(first["payload"].get("protocol")) is not dict
+        ):
+            raise ValueError("autonomous simulation start authority is invalid")
+        key_identity = first["payload"]["protocol"].get(
+            "runtime_authority_key_sha256"
+        )
+        _require_autonomous_runtime_authority_key(root, key_identity)
+        protocol["runtime_authority_key_sha256"] = key_identity
     protocol_digest = payload_digest(protocol)
     started_at = datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
     instruments = _loop_instrument(started_at)
@@ -1575,7 +1597,11 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "provider_state": provider.export_state(),
         }, protocol["start_time"])
         events = store.load_events(_LOOP_AGGREGATE, run_id)
-    if events[0]["event_type"] != "AutonomousSimulationStarted" or events[0]["payload"]["protocol_digest"] != protocol_digest:
+    if (
+        events[0]["event_type"] != "AutonomousSimulationStarted"
+        or events[0]["payload"]["protocol_digest"] != protocol_digest
+        or events[0]["payload"]["protocol"] != protocol
+    ):
         raise ValueError("autonomous simulation protocol/input identity changed")
     completed = []
     active = None
@@ -1597,6 +1623,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
                 "reason": "unfinished_episode_requires_reconciliation", "resumed": True}
+    if completed:
+        # Missing, malformed or causally stale checkpoint bytes are rejected
+        # before rebuilding any provider projection.  Full cross-authority
+        # equality is checked below after owner-specific recovery diagnostics.
+        from .simulation_runtime_checkpoint import preflight_autonomous_runtime_checkpoint
+        preflight_autonomous_runtime_checkpoint(
+            root,
+            protocol=protocol,
+            completed_episodes=len(completed),
+        )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
     provider = SimulatedProvider.from_state(state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -1610,6 +1646,25 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         resolution_artifact_store=artifacts, resolution_artifact_root=root / "artifacts")
     orders = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
         environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    if completed:
+        # Preserve the owning authorities' more specific fail-closed diagnoses
+        # before applying the cross-authority common-cut gate.  These reads do
+        # not expose another market event or permit a send.
+        if any(
+            record.state == "UNKNOWN"
+            or any(value > 0 for value in record.remaining.values())
+            for record in reservations.active()
+        ):
+            raise ValueError("pending/UNKNOWN reservations block a new financial cut")
+        if any(order.state != "FILLED" for order in orders.snapshots):
+            raise ValueError("pending/UNKNOWN OMS obligations block a new financial cut")
+        from .simulation_runtime_checkpoint import verify_autonomous_runtime_checkpoint
+        verify_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            completed=completed,
+        )
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
     registry = DurableRiskPolicyRegistry(store)
     policy = selected_policy
@@ -1861,6 +1916,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         for item in store.pending_outbox(limit=1000):
             store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
         completed.append(result)
+        # Persist only after the durable episode and every publication in this
+        # terminal cut are complete.  A crash before this point leaves the
+        # prior checkpoint and therefore fails closed on restart.
+        from .simulation_runtime_checkpoint import persist_autonomous_runtime_checkpoint
+        persist_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            completed=completed,
+        )
         previous_equities.append(equity)
     return {"status": "COMPLETED" if len(completed) == len(values) else "PAUSED", "environment": ENVIRONMENT,
         "mode": "ZERO", "run_id": run_id, "protocol_digest": protocol_digest,

@@ -274,7 +274,7 @@ class ThesisImplementationTests(unittest.TestCase):
         derived = DerivedCandidate(**{
             "candidate_id": "derived",
             "thesis_id": "gold-down-1",
-            "instrument_version": "derived@1",
+            "instrument_version": "22222222-2222-4222-8222-222222222222@1",
             "provider_id": "SIMULATED",
             "asset_class": "FUTURE",
             "exposure_direction": "SHORT",

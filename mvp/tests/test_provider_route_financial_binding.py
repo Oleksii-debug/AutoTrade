@@ -5,6 +5,7 @@ import unittest
 from mvp.autotrade_mvp.persistence import payload_digest
 from mvp.autotrade_mvp.provider_route_financial_binding import (
     ProviderRouteFinancialBindingError,
+    build_selected_bybit_transport_authority_inputs,
     build_selected_provider_route_financial_submission_scope,
     build_selected_provider_route_transport_capability_registry,
     require_financial_binding_matches_selected_route,
@@ -132,6 +133,37 @@ class ProviderRouteFinancialBindingTests(unittest.TestCase):
                 "capability differs from transport scope",
             ):
                 build_selected_provider_route_transport_capability_registry(route)
+
+    def test_bybit_transport_authority_inputs_all_come_from_selected_route(self):
+        with TemporaryDirectory() as directory:
+            route = self._route(directory)
+            inputs = build_selected_bybit_transport_authority_inputs(route)
+            self.assertEqual(
+                set(inputs),
+                {
+                    "provider_environment",
+                    "capability_snapshot_id",
+                    "capability_registry",
+                },
+            )
+            self.assertEqual(
+                inputs["provider_environment"],
+                route.candidate.provider_environment,
+            )
+            self.assertEqual(
+                inputs["capability_snapshot_id"],
+                route.capability_snapshot_id,
+            )
+            current = inputs["capability_registry"].require_verified(
+                provider_id="BYBIT",
+                account_id=route.candidate.account_id,
+                entity_id=route.candidate.entity_id,
+                environment=route.qualification.scope.provider_scope.runtime_environment,
+                provider_environment=route.candidate.provider_environment,
+                instrument_version=route.capability.instrument_version,
+                at=NOW,
+            )
+            self.assertIs(current, route.capability)
 
     def test_other_qualification_id_cannot_relabel_financial_binding(self):
         with TemporaryDirectory() as directory:

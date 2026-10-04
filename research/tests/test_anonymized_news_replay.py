@@ -62,7 +62,7 @@ def news_event(
     if corrects_news_id is not None:
         payload["corrects_news_id"] = corrects_news_id
     return CausalEvent.create(
-        event_id=f"raw-event-{raw_news_id}",
+        event_id=f"raw-event-{raw_news_id}-{sequence}",
         kind=kind,
         event_time=event_time,
         available_at=published_at,

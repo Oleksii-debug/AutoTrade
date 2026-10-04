@@ -284,5 +284,190 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 dotnet_locked_dependency_graph(root, [project])
 
 
+    def test_transitive_hash_is_part_of_composition_gate(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                        },
+                        'Example.Transitive': {
+                            'type': 'Transitive',
+                            'resolved': '2.0.0',
+                            'contentHash': 'bad',
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith('DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:')
+                    and ':Example.Transitive:' in item
+                    for item in blockers
+                )
+            )
+
+    def test_auto_referenced_direct_still_requires_artifact_hash(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                        },
+                        'Microsoft.NET.ILLink.Tasks': {
+                            'type': 'Direct',
+                            'requested': '[10.0.0, )',
+                            'resolved': '10.0.0',
+                            'contentHash': 'bad',
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith('DOTNET_PROJECT_LOCK_CONTENT_HASH_INVALID:')
+                    and ':Microsoft.NET.ILLink.Tasks:' in item
+                    for item in blockers
+                )
+            )
+
+    def test_case_variant_package_ids_in_one_target_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                        },
+                        'Example.Transitive': {
+                            'type': 'Transitive',
+                            'resolved': '2.0.0',
+                            'contentHash': GOOD_HASH,
+                        },
+                        'example.transitive': {
+                            'type': 'Transitive',
+                            'resolved': '2.0.0',
+                            'contentHash': GOOD_HASH,
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith('DOTNET_PROJECT_LOCK_PACKAGE_CASE_AMBIGUOUS:')
+                    for item in blockers
+                )
+            )
+            with self.assertRaisesRegex(ValueError, 'does not match project'):
+                dotnet_locked_dependency_graph(root, [project])
+
+    def test_release_graph_binds_dependency_edges(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                            'dependencies': {
+                                'Example.Transitive': '[2.0.0, )',
+                            },
+                        },
+                        'Example.Transitive': {
+                            'type': 'Transitive',
+                            'resolved': '2.0.0',
+                            'contentHash': GOOD_HASH,
+                        },
+                    }
+                },
+            }
+            lock = project.parent / 'packages.lock.json'
+            lock.write_text(json.dumps(payload), encoding='utf-8')
+            first = dotnet_locked_dependency_graph(root, [project])
+            direct = next(
+                item for item in first
+                if item['name'] == 'Microsoft.Web.WebView2'
+            )
+            self.assertEqual(
+                direct['dependencies'],
+                [{'name': 'Example.Transitive', 'requested': '[2.0.0, )'}],
+            )
+
+            payload['dependencies']['net10.0-windows7.0'][
+                'Microsoft.Web.WebView2'
+            ]['dependencies']['Example.Transitive'] = '[1.0.0, )'
+            lock.write_text(json.dumps(payload), encoding='utf-8')
+            second = dotnet_locked_dependency_graph(root, [project])
+            self.assertNotEqual(first, second)
+
+    def test_invalid_dependency_edge_shape_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = write_project(root)
+            payload = {
+                'version': 1,
+                'dependencies': {
+                    'net10.0-windows7.0': {
+                        'Microsoft.Web.WebView2': {
+                            'type': 'Direct',
+                            'requested': '[1.0.4191.47, )',
+                            'resolved': '1.0.4191.47',
+                            'contentHash': GOOD_HASH,
+                            'dependencies': ['not-a-map'],
+                        },
+                    }
+                },
+            }
+            (project.parent / 'packages.lock.json').write_text(
+                json.dumps(payload), encoding='utf-8'
+            )
+            blockers = dotnet_lock_content_blockers(root, project)
+            self.assertTrue(
+                any(
+                    item.startswith(
+                        'DOTNET_PROJECT_LOCK_DEPENDENCY_EDGES_INVALID:'
+                    )
+                    for item in blockers
+                )
+            )
+
+
 if __name__ == '__main__':
     unittest.main()

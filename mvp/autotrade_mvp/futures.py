@@ -974,9 +974,10 @@ def lifecycle_gate(
                 f"lifecycle contract {field_name} must be exact text"
             )
     for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
-        if type(getattr(contract, field_name)) is not datetime:
+        value = getattr(contract, field_name)
+        if type(value) is not datetime or value.tzinfo is not timezone.utc:
             raise FuturesError(
-                f"lifecycle contract {field_name} must be exact datetime"
+                f"lifecycle contract {field_name} must be exact UTC datetime"
             )
 
     version = contract.canonical_instrument
@@ -992,9 +993,12 @@ def lifecycle_gate(
         or type(version.expiry) is not datetime
         or type(version.last_trade_at) is not datetime
         or type(version.delivery_cutoff) is not datetime
+        or version.expiry.tzinfo is not timezone.utc
+        or version.last_trade_at.tzinfo is not timezone.utc
+        or version.delivery_cutoff.tzinfo is not timezone.utc
     ):
         raise FuturesError(
-            "canonical lifecycle instrument fields must retain exact types"
+            "canonical lifecycle instrument fields must retain exact UTC types"
         )
     if (
         version.asset_class != "FUTURE"

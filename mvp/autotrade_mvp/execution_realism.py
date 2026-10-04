@@ -23,6 +23,8 @@ class ExecutionRealismError(ValueError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
+    if isinstance(value, (bool, float)):
+        raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
         return parse_bounded_exact_decimal(value)
     except (TypeError, ValueError) as error:

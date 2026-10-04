@@ -245,6 +245,47 @@ class ExecutionOracleTests(unittest.TestCase):
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
 
+    def test_oracle_market_projection_is_invariant_to_ambient_decimal_context(self):
+        o = order(quantity="10")
+        q = observation(available_volume="30")
+        m = model(max_participation="0.5")
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+    def test_oracle_rejects_market_price_that_differs_from_adverse_tick_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, fill_price=result.fill_price + Decimal("0.01"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently projected adverse tick bound",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
     def test_oracle_limit_arithmetic_is_invariant_to_ambient_decimal_context(self):
         o = order(
             order_type="LIMIT",

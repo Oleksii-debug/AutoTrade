@@ -1384,6 +1384,13 @@ class AblationQualificationAuthority:
             self._load_outcome(reference, population_root=snapshot.root_hash)
             for reference in outcome_refs
         )
+        if any(
+            evidence.outcome_available_utc > self.causal_cutoff
+            for evidence in outcomes
+        ):
+            raise ValueError(
+                "ablation outcome artifact became available after causal cutoff"
+            )
         if selected:
             earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
             if registered_at > earliest_cutoff:
@@ -1653,6 +1660,11 @@ def evaluate_qualified_incremental_value(
         earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
         if population.registered_at_utc > earliest_cutoff:
             return inconclusive("post_hoc_population_or_protocol_registration")
+        if any(
+            pair.full.outcome_available_utc > population.evaluation_cutoff_utc
+            for pair in selected
+        ):
+            return inconclusive("outcome_unavailable_at_evaluation_cutoff")
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:

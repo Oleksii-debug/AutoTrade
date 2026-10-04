@@ -998,14 +998,25 @@ def _snapshot_mutable_source_digests(
 
     snapshots: list[tuple[Path, str]] = []
     for source, _, _ in sources:
-        if source.is_symlink() or not source.is_file():
-            raise BackupError(f"Backup source is not a regular file: {source.name}")
-        before = _sha256_file(source)
-        if source.is_symlink() or not source.is_file():
-            raise BackupError(f"Backup source changed before journal snapshot: {source.name}")
-        after = _sha256_file(source)
+        try:
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source is not a regular file: {source.name}"
+                )
+            before = _sha256_file(source)
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source changed before journal snapshot: {source.name}"
+                )
+            after = _sha256_file(source)
+        except OSError as error:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            ) from error
         if before != after:
-            raise BackupError(f"Backup source changed before journal snapshot: {source.name}")
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            )
         snapshots.append((source, after))
     return tuple(snapshots)
 
@@ -1019,11 +1030,15 @@ def _assert_mutable_sources_unchanged(
     """Fail closed if the frozen mutable source cut no longer matches."""
 
     for source, expected_digest in source_rechecks:
-        if (
-            source.is_symlink()
-            or not source.is_file()
-            or _sha256_file(source) != expected_digest
-        ):
+        try:
+            unchanged = (
+                not source.is_symlink()
+                and source.is_file()
+                and _sha256_file(source) == expected_digest
+            )
+        except OSError as error:
+            raise BackupError("Source changed before backup commit") from error
+        if not unchanged:
             raise BackupError("Source changed before backup commit")
 
     current_sources = _mutable_backup_sources(state, artifacts)

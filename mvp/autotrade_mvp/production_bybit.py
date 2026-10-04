@@ -589,7 +589,11 @@ class ProductionBybitOrderSender:
 
         def terminal_guard() -> None:
             final_guard()
-            self._require_wire_authority()
+            # The transport executes current-capability/clock callbacks after
+            # the outer send-authority check. Revalidate the complete production
+            # authority graph after those callbacks and immediately before the
+            # transport crosses the wire boundary.
+            self._require_send_authority()
 
         transport_call = self.__transport_call
         return transport_call(self.__transport, client_order_id, request, terminal_guard)
@@ -658,8 +662,32 @@ def build_production_bybit_order_sender(
     policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
     if policy is None:
         raise ValueError("Bybit provider_environment must be MAINNET, TESTNET or DEMO")
-    _bybit_policy_identity(policy, provider_environment=provider_environment)
+    policy_identity_reader = _bybit_policy_identity
+    policy_identity_reader_code = policy_identity_reader.__code__
+    policy_identity_reader(policy, provider_environment=provider_environment)
     _credential_identity(credential_handle)
+    if not callable(clock_millis):
+        raise TypeError("clock_millis must be callable")
+
+    raw_clock_millis = clock_millis
+
+    def guarded_clock_millis() -> int:
+        value = raw_clock_millis()
+        # clock_millis is the last caller-supplied callback evaluated before
+        # BybitV5Signer consumes the endpoint policy. A quota/capability/clock
+        # callback therefore cannot retarget the mutable frozen policy object
+        # for signing and restore it only after the signed request exists.
+        if _bybit_policy_identity is not policy_identity_reader:
+            raise PermissionError("Bybit provider policy identity authority changed")
+        if policy_identity_reader.__code__ is not policy_identity_reader_code:
+            raise PermissionError(
+                "Bybit provider policy identity authority code changed"
+            )
+        policy_identity_reader(
+            policy,
+            provider_environment=provider_environment,
+        )
+        return value
 
     dispatcher = runtime.financial_dispatcher
     recovery = runtime.recovery_controller
@@ -697,7 +725,7 @@ def build_production_bybit_order_sender(
         session_token=session_token,
         origin=config.public_origin,
         execution_identity=dispatcher.owner.owner_id,
-        clock_millis=clock_millis,
+        clock_millis=guarded_clock_millis,
         clock_utc=clock_utc,
         quota_gate=quota_gate,
         wire_client=wire_client,

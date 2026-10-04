@@ -18,6 +18,7 @@ from typing import Literal
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
+    bounded_fraction,
     exact_multiply,
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
@@ -95,6 +96,64 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
+_PRICE_PROJECTION_POLICY_ID = "ADVERSE_INSTRUMENT_TICK"
+_PRICE_PROJECTION_POLICY_VERSION = "1"
+
+
+@dataclass(frozen=True)
+class ExecutionPriceProjectionPolicy:
+    """Versioned adverse price-grid projection bound to instrument metadata facts."""
+
+    policy_id: str
+    policy_version: str
+    instrument_version: str
+    price_quantum: Decimal
+    instrument_metadata_binding: str
+
+    def __post_init__(self) -> None:
+        policy_id = _text(self.policy_id, name="projection policy_id")
+        policy_version = _text(self.policy_version, name="projection policy_version")
+        if policy_id != _PRICE_PROJECTION_POLICY_ID or policy_version != _PRICE_PROJECTION_POLICY_VERSION:
+            raise ExecutionRealismError("unsupported execution price projection policy")
+        object.__setattr__(self, "policy_id", policy_id)
+        object.__setattr__(self, "policy_version", policy_version)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, name="projection instrument_version"),
+        )
+        object.__setattr__(
+            self,
+            "price_quantum",
+            _positive(self.price_quantum, name="projection price_quantum"),
+        )
+        object.__setattr__(
+            self,
+            "instrument_metadata_binding",
+            _digest(
+                self.instrument_metadata_binding,
+                name="projection instrument_metadata_binding",
+            ),
+        )
+
+    @classmethod
+    def from_instrument(cls, instrument) -> "ExecutionPriceProjectionPolicy":
+        """Issue projection semantics from one detached canonical InstrumentVersion."""
+
+        from .instruments import InstrumentVersion, _detached_instrument_version
+
+        if type(instrument) is not InstrumentVersion:
+            raise TypeError("instrument must be exact InstrumentVersion")
+        detached = _detached_instrument_version(instrument)
+        return cls(
+            policy_id=_PRICE_PROJECTION_POLICY_ID,
+            policy_version=_PRICE_PROJECTION_POLICY_VERSION,
+            instrument_version=f"{detached.instrument_id}@{detached.version}",
+            price_quantum=detached.price_tick,
+            instrument_metadata_binding=detached.metadata_evidence_binding(),
+        )
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     model_version: str
@@ -109,6 +168,7 @@ class ExecutionModel:
     impact_bps_at_max_participation: Decimal
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
+    price_projection: ExecutionPriceProjectionPolicy | None = None
 
     def __post_init__(self) -> None:
         if type(self.latency_ms) is not int or self.latency_ms < 0:
@@ -161,6 +221,13 @@ class ExecutionModel:
             _non_negative(self.bar_half_spread_bps, name="bar_half_spread_bps"),
         )
         object.__setattr__(self, "scenario_cost_multiplier", multiplier)
+        if self.price_projection is not None:
+            projection = _detached_dataclass_input(
+                self.price_projection,
+                ExecutionPriceProjectionPolicy,
+                name="price_projection",
+            )
+            object.__setattr__(self, "price_projection", projection)
 
     @classmethod
     def create(
@@ -178,6 +245,7 @@ class ExecutionModel:
         impact_bps_at_max_participation,
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
+        price_projection: ExecutionPriceProjectionPolicy | None = None,
     ) -> "ExecutionModel":
         if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -220,6 +288,7 @@ class ExecutionModel:
                 name="bar_half_spread_bps",
             ),
             scenario_cost_multiplier=multiplier,
+            price_projection=price_projection,
         )
 
     @property
@@ -240,6 +309,17 @@ class ExecutionModel:
             "bar_half_spread_bps": _decimal_text(self.bar_half_spread_bps),
             "scenario_cost_multiplier": _decimal_text(
                 self.scenario_cost_multiplier
+            ),
+            "price_projection": (
+                None
+                if self.price_projection is None
+                else {
+                    "policy_id": self.price_projection.policy_id,
+                    "policy_version": self.price_projection.policy_version,
+                    "instrument_version": self.price_projection.instrument_version,
+                    "price_quantum": _decimal_text(self.price_projection.price_quantum),
+                    "instrument_metadata_binding": self.price_projection.instrument_metadata_binding,
+                }
             ),
         }
         encoded = json.dumps(

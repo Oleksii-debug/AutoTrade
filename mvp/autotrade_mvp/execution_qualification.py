@@ -10,6 +10,7 @@ replay evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
@@ -24,6 +25,11 @@ from .execution_realism import (
     SimulatedOrder,
     simulate_execution,
 )
+
+
+# Retain the installed canonical authenticated reader once. Later mutation of the
+# public ArtifactStore class attribute must not redirect this qualification boundary.
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
 
 
 class ExecutionQualificationError(ValueError):
@@ -42,7 +48,7 @@ _PURPOSES = {"RESEARCH", "REPLAY", "PROMOTION"}
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ExecutionQualificationError(f"{name} is required")
     return value.strip()
 
@@ -141,12 +147,14 @@ def validate_execution_qualification(
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
 
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
-    if not isinstance(qualification, ExecutionModelQualification):
-        raise TypeError("qualification must be ExecutionModelQualification")
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be the canonical ArtifactStore")
+    if type(model) is not ExecutionModel:
+        raise TypeError("model must be the exact ExecutionModel")
+    if type(qualification) is not ExecutionModelQualification:
+        raise TypeError(
+            "qualification must be the exact ExecutionModelQualification"
+        )
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be the exact canonical ArtifactStore")
 
     normalized_asset = _text(asset_class, name="asset_class").upper()
     if normalized_asset not in _ASSET_CLASSES:
@@ -165,14 +173,14 @@ def validate_execution_qualification(
     )
 
     try:
-        evidence_manifest = artifact_store.load_manifest(
-            normalized_evidence_artifact_id
+        evidence_manifest, evidence_bytes = _CANONICAL_AUTHENTICATED_SNAPSHOT_READ(
+            artifact_store,
+            normalized_evidence_artifact_id,
         )
         if evidence_manifest.get("manifest_hash") is None:
             raise ExecutionQualificationError(
                 "execution evidence manifest lacks integrity binding"
             )
-        artifact_store.read_bytes(normalized_evidence_artifact_id)
     except ExecutionQualificationError:
         raise
     except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
@@ -184,6 +192,10 @@ def validate_execution_qualification(
         evidence_manifest.get("sha256"),
         name="resolved evidence sha256",
     )
+    if sha256(evidence_bytes).hexdigest() != resolved_evidence:
+        raise ExecutionQualificationError(
+            "execution evidence bytes do not match immutable artifact digest"
+        )
 
     failures: list[str] = []
     if qualification.asset_class != normalized_asset:
@@ -238,10 +250,10 @@ def simulate_qualified_execution(
     no provider credentials, admission, confirmation or live trading authority.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
+    if type(order) is not SimulatedOrder:
+        raise TypeError("order must be the exact SimulatedOrder")
+    if type(observation) is not LiquidityObservation:
+        raise TypeError("observation must be the exact LiquidityObservation")
 
     validate_execution_qualification(
         model=model,

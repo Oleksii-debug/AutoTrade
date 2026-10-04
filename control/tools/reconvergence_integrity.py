@@ -382,7 +382,7 @@ def assess_git_revisions(
     )
     return assess_reconvergence(
         base_paths=base_paths,
-        changes=normalized_changes,
+        changes=changes,
         max_deletions=max_deletions,
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,

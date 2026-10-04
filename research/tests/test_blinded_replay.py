@@ -536,7 +536,7 @@ class Section17BlindedReplayTests(unittest.TestCase):
     def test_source_dataset_tampering_after_construction_fails_closed(self):
         source = dataset(event("one"))
         object.__setattr__(source.events[0], "payload", {"instrument_id": "EVIL", "provider_id": "P", "price": "999"})
-        with self.assertRaisesRegex(BlindingError, "committed digest"):
+        with self.assertRaisesRegex(TypeError, "must remain an exact frozen mapping"):
             self.blind(source)
 
     def test_mutating_original_input_after_blinding_does_not_change_artifact(self):
@@ -1019,7 +1019,7 @@ class Section17BlindedReplayTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(TypeError, "exact JSON-like blinded scalar"):
+        with self.assertRaisesRegex(TypeError, "exact JSON-like blinded value types"):
             self.blind(source)
         self.assertEqual(callbacks, [])
 

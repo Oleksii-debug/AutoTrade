@@ -308,6 +308,22 @@ def _require_direct_terminal_after_prepared_sequence(
         )
 
 
+def _require_direct_prepared_network_authority(
+    prepared_payload: object,
+) -> None:
+    if type(prepared_payload) is not dict:
+        raise ProviderOriginError("durable Prepared payload is unavailable")
+    if (
+        prepared_payload.get("transport_identity")
+        != direct_authenticated_read_transport_identity()
+        or prepared_payload.get("network_policy_identity")
+        != direct_authenticated_read_network_policy_identity()
+    ):
+        raise ProviderOriginError(
+            "direct provider recovery requires canonical Prepared network authority"
+        )
+
+
 def _response_artifact_id(
     *,
     attempt_id: str,
@@ -399,8 +415,15 @@ def _direct_wire_execution_claim_payload(
         terminal_authority_verified_at,
         name="wire execution terminal authority verified_at",
     )
-    _parse_utc_text(observed, name="wire execution observed_at")
-    _parse_utc_text(verified, name="wire execution terminal authority verified_at")
+    observed_time = _parse_utc_text(observed, name="wire execution observed_at")
+    verified_time = _parse_utc_text(
+        verified,
+        name="wire execution terminal authority verified_at",
+    )
+    if verified_time > observed_time:
+        raise ProviderOriginError(
+            "wire execution terminal authority verification follows response observation"
+        )
     cut = terminal_authority_journal_sequence_cut
     if type(cut) is not int or cut < 0:
         raise ProviderOriginError(
@@ -500,6 +523,10 @@ def _load_direct_wire_execution_claim(
     sequence = event.get("journal_sequence")
     if type(sequence) is not int or sequence < 1:
         raise ProviderOriginError("direct wire execution claim sequence is invalid")
+    if sequence <= expected["terminal_authority_journal_sequence_cut"]:
+        raise ProviderOriginError(
+            "direct wire execution claim does not follow terminal authority cut"
+        )
     return expected
 
 
@@ -565,6 +592,11 @@ def _claim_direct_wire_execution(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
+    current_cut = JournalStore.current_journal_sequence(store)
+    if terminal_authority_journal_sequence_cut > current_cut:
+        raise ProviderOriginError(
+            "direct wire execution terminal authority cut is ahead of durable journal"
+        )
     event = _wire_execution_event(
         wire_request_sha256=wire_request_sha256,
         payload=expected,
@@ -1265,6 +1297,7 @@ class ProviderOriginJournal:
             # attempt-local Retained event.  The claim is indexed by attempt_id
             # while its deterministic request-hash event id still prevents the
             # same wire execution from being claimed by another attempt.
+            _require_direct_prepared_network_authority(prepared_payload)
             claim = _load_direct_wire_execution_claim(
                 store,
                 attempt_id=attempt,
@@ -1458,6 +1491,7 @@ class ProviderOriginJournal:
             observed_at=retained_payload.get("observed_at"),
         )
         if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
+            _require_direct_prepared_network_authority(prepared_payload)
             _require_direct_terminal_after_prepared_sequence(
                 prepared_event=prepared,
                 terminal_cut=retained_payload.get(
@@ -1643,6 +1677,7 @@ class ProviderOriginJournal:
             observed_at=observed_text,
         )
         if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_prepared_network_authority(prepared_payload)
             _require_direct_terminal_after_prepared_sequence(
                 prepared_event=prepared,
                 terminal_cut=terminal_cut,

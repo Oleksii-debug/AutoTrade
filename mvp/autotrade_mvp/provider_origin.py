@@ -1012,6 +1012,14 @@ class ProviderOriginJournal:
         )
         if _SHA256_RE.fullmatch(wire_request_sha256) is None:
             raise ProviderOriginError("durable wire request digest is invalid")
+        wire_request_semantics_sha256 = _exact_text(
+            retained_payload.get("wire_request_semantics_sha256"),
+            name="wire_request_semantics_sha256",
+        )
+        if _SHA256_RE.fullmatch(wire_request_semantics_sha256) is None:
+            raise ProviderOriginError(
+                "durable wire request semantics digest is invalid"
+            )
         terminal_cut = retained_payload.get(
             "terminal_authority_journal_sequence_cut"
         )
@@ -1063,6 +1071,7 @@ class ProviderOriginJournal:
             journal_sequence=journal_sequence,
             execution_class=execution_class,
             wire_request_sha256=wire_request_sha256,
+            wire_request_semantics_sha256=wire_request_semantics_sha256,
             terminal_authority_journal_sequence_cut=terminal_cut,
             terminal_authority_verified_at=terminal_verified_at,
         )
@@ -1091,6 +1100,7 @@ class ProviderOriginJournal:
             journal_sequence=journal_sequence,
             execution_class=execution_class,
             wire_request_sha256=wire_request_sha256,
+            wire_request_semantics_sha256=wire_request_semantics_sha256,
             terminal_authority_journal_sequence_cut=terminal_cut,
             terminal_authority_verified_at=terminal_verified_at,
             _binding_token=_BINDING_TOKEN,
@@ -1118,6 +1128,19 @@ def observe_provider_origin_json_response(
             "provider-origin financial observation requires canonical direct network policy"
         )
     snapshot = _qualified_query_snapshot(query_binding)
+    expected_wire_semantics_sha256 = (
+        qualified_authenticated_read_expected_wire_semantics_digest(
+            query_binding.query_binding,
+            provider_environment=query_binding.provider_environment,
+        )
+    )
+    if (
+        response_binding.wire_request_semantics_sha256
+        != expected_wire_semantics_sha256
+    ):
+        raise ProviderOriginError(
+            "durable direct wire semantics differ from exact qualified read"
+        )
     base = snapshot["base_query"]
     if (
         response_binding.provider_id != base["provider_id"]

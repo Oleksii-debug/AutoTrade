@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import weakref
 
 from mvp.autotrade_mvp import durable_reservations as reservation_authority
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
@@ -79,6 +80,34 @@ class DurableReservationStoreAuthorityTests(unittest.TestCase):
                 "_register_reservation_store_binding",
             )
         )
+
+    def test_reservation_authority_weakrefs_expose_no_removal_callback(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = JournalStore(root / "selected.sqlite3")
+            replacement = JournalStore(root / "replacement.sqlite3")
+            book = self._book(selected)
+
+            callbacks = [
+                reference.__callback__
+                for reference in weakref.getweakrefs(book)
+                if reference.__callback__ is not None
+            ]
+            self.assertEqual(callbacks, [])
+
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "already established",
+            ):
+                reservation_authority._initialize_reservation_store_binding(
+                    book,
+                    replacement,
+                    environment="PAPER",
+                    account_id="acct-reservation-authority",
+                )
+
+            self.assertIs(vars(book)["store"], selected)
+            book._reload()
 
     def test_reinitialization_cannot_retarget_reservation_authority(self):
         with TemporaryDirectory() as directory:

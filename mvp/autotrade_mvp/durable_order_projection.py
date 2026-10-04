@@ -31,6 +31,19 @@ _CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE = (
     ArtifactStore.read_authenticated_snapshot.__code__
 )
 
+
+from .order_projection import (
+    OrderBookProjection,
+    OrderProjectionConflict,
+    OrderSnapshot,
+)
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+
 # Durable order state is financial authority. Retain the exact installed
 # JournalStore ingress and I/O primitives so a caller cannot redirect journal
 # truth through subclassing, instance shadowing, or later public class rebinding.
@@ -46,19 +59,6 @@ _CANONICAL_JOURNAL_NEXT_AGGREGATE_VERSION_CODE = (
 )
 _CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
 _CANONICAL_JOURNAL_APPEND_EVENT_CODE = JournalStore.append_event.__code__
-
-
-from .order_projection import (
-    OrderBookProjection,
-    OrderProjectionConflict,
-    OrderSnapshot,
-)
-from .persistence import (
-    JournalStore,
-    canonical_json,
-    payload_digest,
-    require_exact_journal_store_authority,
-)
 
 
 _AGGREGATE_TYPE = "order_projection_book"

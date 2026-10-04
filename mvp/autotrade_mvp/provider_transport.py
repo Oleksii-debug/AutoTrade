@@ -60,7 +60,8 @@ from .provider_core import (
     _require_authenticated_read_query_binding_authority,
     _require_provider_response_observation_authority,
 )
-from .windows_secrets import PersistentCredentialHandle
+from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
+from .security import SecurityBoundary
 from .provider_response_limits import (
     DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -4710,12 +4711,45 @@ def _install_authenticated_read_execution_receipt_authority():
     bybit_read_sign_code = bybit_read_sign.__code__
     kraken_read_sign_code = kraken_read_sign.__code__
     kraken_credential_parse_code = kraken_credential_parse.__code__
+    bybit_credential_parse = BybitV5Credential.__dict__["parse"].__func__
+    binance_credential_parse = BinanceSpotCredential.__dict__["parse"].__func__
+    bybit_credential_parse_code = bybit_credential_parse.__code__
+    binance_credential_parse_code = binance_credential_parse.__code__
+    security_lease_for_execution = SecurityBoundary.lease_for_execution
+    security_validate_session = SecurityBoundary.validate_session
+    vault_lease = ProtectedCredentialVault.lease
+    security_lease_code = security_lease_for_execution.__code__
+    security_validate_session_code = security_validate_session.__code__
+    vault_lease_code = vault_lease.__code__
     direct_client_init_code = direct_client_init.__code__
     direct_client_send_code = direct_client_send.__code__
     canonical_observe_code = canonical_observe.__code__
     direct_build_opener_code = direct_build_opener.__code__
     direct_response_limiter_code = direct_response_limiter.__code__
     direct_redirect_code = direct_redirect_handler.redirect_request.__code__
+
+    def require_canonical_secret_authority(transport: object) -> None:
+        resolver = getattr(transport, "secret_resolver", None)
+        if type(resolver) is not SecurityBoundary:
+            raise ProviderTransportError(
+                "provider-origin receipt requires exact SecurityBoundary credential authority"
+            )
+        vault = getattr(resolver, "_credential_vault", None)
+        if type(vault) is not ProtectedCredentialVault:
+            raise ProviderTransportError(
+                "provider-origin receipt requires exact ProtectedCredentialVault authority"
+            )
+        if (
+            SecurityBoundary.lease_for_execution is not security_lease_for_execution
+            or SecurityBoundary.validate_session is not security_validate_session
+            or ProtectedCredentialVault.lease is not vault_lease
+            or security_lease_for_execution.__code__ is not security_lease_code
+            or security_validate_session.__code__ is not security_validate_session_code
+            or vault_lease.__code__ is not vault_lease_code
+        ):
+            raise ProviderTransportError(
+                "provider-origin credential authority implementation changed"
+            )
 
     def prune() -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
@@ -5057,14 +5091,23 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Binance authenticated-read network policy is not canonical"
             )
+        current_binance_parse = BinanceSpotCredential.__dict__.get("parse")
+        current_binance_parse_func = (
+            current_binance_parse.__func__
+            if isinstance(current_binance_parse, classmethod)
+            else None
+        )
         if (
             BinanceSpotAuthenticatedReadSigner.sign is not binance_read_sign
             or binance_read_sign.__code__ is not binance_read_sign_code
+            or current_binance_parse_func is not binance_credential_parse
+            or binance_credential_parse.__code__ is not binance_credential_parse_code
         ):
             raise ProviderTransportError(
                 "direct Binance authenticated-read signer authority changed"
             )
         require_direct_dependencies()
+        require_canonical_secret_authority(self)
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (
@@ -5149,14 +5192,23 @@ def _install_authenticated_read_execution_receipt_authority():
             raise ProviderTransportError(
                 "direct Bybit authenticated-read network policy is not canonical"
             )
+        current_bybit_parse = BybitV5Credential.__dict__.get("parse")
+        current_bybit_parse_func = (
+            current_bybit_parse.__func__
+            if isinstance(current_bybit_parse, classmethod)
+            else None
+        )
         if (
             BybitV5AuthenticatedReadSigner.sign is not bybit_read_sign
             or bybit_read_sign.__code__ is not bybit_read_sign_code
+            or current_bybit_parse_func is not bybit_credential_parse
+            or bybit_credential_parse.__code__ is not bybit_credential_parse_code
         ):
             raise ProviderTransportError(
                 "direct Bybit authenticated-read signer authority changed"
             )
         require_direct_dependencies()
+        require_canonical_secret_authority(self)
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (
@@ -5259,6 +5311,7 @@ def _install_authenticated_read_execution_receipt_authority():
                 "direct Kraken authenticated-read signer authority changed"
             )
         require_direct_dependencies()
+        require_canonical_secret_authority(self)
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
         if (

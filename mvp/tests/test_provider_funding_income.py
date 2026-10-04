@@ -498,6 +498,46 @@ class ProviderFundingIncomeTests(unittest.TestCase):
             ):
                 bybit_funding_income_observations(origin)
 
+    def test_lowercase_qualified_currency_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(),
+                query_currency="usdt",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified query currency",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_noncanonical_qualified_start_time_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(),
+                query_start_time="01672128000000",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "qualified query startTime.*canonical",
+            ):
+                bybit_funding_income_observations(origin)
+
+    def test_inverted_qualified_time_window_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            origin = self._origin_observation(
+                directory,
+                self._body(),
+                query_start_time="1672128000001",
+                query_end_time="1672128000000",
+            )
+            with self.assertRaisesRegex(
+                ProviderFundingIncomeError,
+                "endTime precedes startTime",
+            ):
+                bybit_funding_income_observations(origin)
+
     def test_wrong_qualified_parser_identity_cannot_mint_funding_income(self):
         with TemporaryDirectory() as directory:
             origin = self._origin_observation(

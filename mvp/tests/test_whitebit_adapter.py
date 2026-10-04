@@ -370,6 +370,88 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 at=NOW,
             )
 
+    def test_market_rule_grid_checks_ignore_ambient_decimal_context(self):
+        rules = market_rules(
+            step_size="0.000000000000000001",
+            tick_size="0.000000000000000001",
+            min_amount="0.000000000000000001",
+            min_total="0.000000000000000001",
+            max_total="100",
+        )
+        aligned = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="1.234567890123456789",
+            price="2.000000000000000001",
+        )
+        off_grid = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="1.2345678901234567895",
+            price="2.000000000000000001",
+        )
+        for precision, rounding in (
+            (6, ROUND_DOWN),
+            (10, ROUND_UP),
+            (28, ROUND_DOWN),
+            (80, ROUND_UP),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    validate_intent_market_rules(aligned, rules, at=NOW)
+                    with self.assertRaisesRegex(
+                        WhiteBitAdapterError,
+                        "amount step",
+                    ):
+                        validate_intent_market_rules(off_grid, rules, at=NOW)
+
+    def test_market_rule_total_boundary_uses_exact_product_under_hostile_context(self):
+        exact_total = "12345678901234567890.223456789012345678901"
+        intent = WhiteBitOrderIntent.create(
+            instrument_version="BTC_USDT:v1",
+            product_family="SPOT",
+            market="BTC_USDT",
+            side="BUY",
+            order_type="LIMIT",
+            amount="12345678901234567890.1",
+            price="1.00000000000000000001",
+        )
+        at_boundary = market_rules(
+            step_size="0.1",
+            tick_size="0.00000000000000000001",
+            min_amount="0.1",
+            min_total=exact_total,
+            max_total=exact_total,
+        )
+        below_max = market_rules(
+            step_size="0.1",
+            tick_size="0.00000000000000000001",
+            min_amount="0.1",
+            min_total="1",
+            max_total="12345678901234567890.223456789012345678900",
+        )
+        for precision, rounding in (
+            (6, ROUND_DOWN),
+            (10, ROUND_UP),
+            (28, ROUND_DOWN),
+            (80, ROUND_UP),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    validate_intent_market_rules(intent, at_boundary, at=NOW)
+                    with self.assertRaisesRegex(WhiteBitAdapterError, "maxTotal"):
+                        validate_intent_market_rules(intent, below_max, at=NOW)
+
     def test_market_rules_validate_total_and_delisting(self):
         too_small_total = WhiteBitOrderIntent.create(
             instrument_version="BTC_USDT:v1",

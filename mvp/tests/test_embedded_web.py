@@ -336,6 +336,31 @@ class EmbeddedWebTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "(strict JSON|duplicate)"):
             load_immutable_web_bundle(duplicate, dict(bodies))
 
+    def test_asset_body_map_rejects_hostile_key_before_callback(self):
+        bodies = {
+            item.path: item.body
+            for item in self.web_bundle.assets
+            if item.path != "app.js"
+        }
+        touched = []
+
+        class HostileKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("app.js")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "app.js"
+
+        hostile = HostileKey()
+        bodies[hostile] = self.web_bundle.asset_for_path("/app.js").body
+        touched.clear()
+
+        with self.assertRaisesRegex(TypeError, "body paths must be exact strings"):
+            load_immutable_web_bundle(self.web_bundle.manifest_bytes, bodies)
+        self.assertEqual(touched, [])
+
     def test_manifest_size_field_is_authoritative(self):
         manifest = json.loads(self.web_bundle.manifest_bytes.decode("utf-8"))
         manifest["assets"][0]["size"] += 1
@@ -504,6 +529,30 @@ class EmbeddedWebTests(unittest.TestCase):
             response.body,
             self.web_bundle.asset_for_path("/index.html").body,
         )
+
+    def test_non_exact_static_target_fails_before_url_parsing(self):
+        touched = []
+
+        class HostileTarget:
+            def decode(self, *_args, **_kwargs):
+                touched.append("decode")
+                raise AssertionError("unexpected target decode")
+
+            def __str__(self):
+                touched.append("str")
+                raise AssertionError("unexpected target string coercion")
+
+        response = self.app.dispatch(
+            method="GET",
+            target=HostileTarget(),
+            headers={},
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            json.loads(response.body.decode("utf-8"))["error"],
+            "INVALID_STATIC_REQUEST",
+        )
+        self.assertEqual(touched, [])
 
     def test_encoded_traversal_and_absolute_targets_never_serve_assets(self):
         encoded = self.app.dispatch(

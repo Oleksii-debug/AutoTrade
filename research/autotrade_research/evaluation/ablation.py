@@ -567,10 +567,10 @@ class AblationEvaluation:
             raise ValueError("ablation evaluation status is not canonical")
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
-    if not isinstance(target_component, str) or not target_component.strip():
-        raise ValueError("target_component is required")
-    target_component = target_component.strip()
+    target_component = _identity_text(target_component, "target_component")
     selected = list(pairs)
+    if any(type(pair) is not AblationPair for pair in selected):
+        raise TypeError("pairs must contain exact AblationPair values")
     if any(pair.target_component != target_component for pair in selected):
         raise ValueError("all pairs must target the requested component")
 
@@ -706,7 +706,7 @@ def _build_exact_decision(
 
 
 def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> AblationSummary:
-    target_component = target_component.strip() if isinstance(target_component, str) else target_component
+    target_component = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target_component, pairs)
     comparable = [pair for pair in selected if pair.utility_comparable]
 
@@ -773,7 +773,7 @@ def evaluate_incremental_value(
     if multiplier < 0:
         raise ValueError("uncertainty_multiplier must be non-negative")
 
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target, pairs)
     if any(not pair.full.input_evidence for pair in selected):
         return AblationEvaluation(
@@ -891,9 +891,11 @@ class AblationEvidenceBundle:
     content_digest: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_component, str) or not self.target_component.strip():
-            raise ValueError("target_component is required")
-        object.__setattr__(self, "target_component", self.target_component.strip())
+        object.__setattr__(
+            self,
+            "target_component",
+            _identity_text(self.target_component, "target_component"),
+        )
         if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         object.__setattr__(
@@ -1249,7 +1251,7 @@ def _ablation_population_candidate_hash(
 ) -> str:
     """Bind one selected ablation population without trusting outcome economics."""
 
-    target = target_component.strip()
+    target = _identity_text(target_component, "target_component")
     material = {
         "schema_version": "ablation-population-candidate.v1",
         "source_revision": source_revision,
@@ -1808,11 +1810,7 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        target = (
-            target_component.strip()
-            if isinstance(target_component, str)
-            else target_component
-        )
+        target = _identity_text(target_component, "target_component")
         _validate_pairs(target, selected_input)
 
         # Caller thresholds are API-compatibility inputs only on the trusted
@@ -1925,7 +1923,7 @@ def evaluate_qualified_incremental_value(
     multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
     if multiplier < 0:
         raise ValueError("uncertainty_multiplier must be non-negative")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = _validate_pairs(target, selected_input)
 
     def inconclusive(reason: str) -> AblationEvaluation:
@@ -2008,7 +2006,7 @@ def build_ablation_evidence_bundle(
         raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
     protocol = _digest(protocol_digest, "protocol_digest")
     dataset = _digest(dataset_digest, "dataset_digest")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
+    target = _identity_text(target_component, "target_component")
     selected = sorted(
         _validate_pairs(target, pairs),
         key=lambda pair: (pair.full.case_id, pair.full.input_fingerprint),

@@ -3,12 +3,151 @@ from __future__ import annotations
 from hashlib import sha256
 import os
 from pathlib import Path
+import sys
 import tempfile
+import weakref
 
 from . import _generation_bound_read as _generation
 from . import _root_authority as _root
 
 _store = _root._store
+_ORIGINAL_TRUSTED_AUTHENTICATED_READER = _root.trusted_authenticated_reader
+
+
+def _duplicate_exact_store_generation_pins(store: object) -> tuple[int, ...]:
+    """Duplicate retained namespace capabilities without caller coercion."""
+
+    if type(store) is not _store.ArtifactStore:
+        raise TypeError("trusted generation requires canonical ArtifactStore")
+    attributes = (
+        ("root", "_namespace_root_handle" if sys.platform == "win32" else "_namespace_root_fd"),
+        (
+            "manifests",
+            "_retained_manifests_handle"
+            if sys.platform == "win32"
+            else "_retained_manifests_fd",
+        ),
+        (
+            "objects",
+            "_retained_objects_handle"
+            if sys.platform == "win32"
+            else "_retained_objects_fd",
+        ),
+        (
+            "staging",
+            "_retained_staging_handle"
+            if sys.platform == "win32"
+            else "_retained_staging_fd",
+        ),
+    )
+    source: list[int] = []
+    for name, attribute in attributes:
+        try:
+            capability = object.__getattribute__(store, attribute)
+        except AttributeError:
+            capability = None
+        if (
+            type(capability) is not int
+            or capability < 0
+            or (sys.platform == "win32" and capability == 0)
+        ):
+            raise _store.ArtifactIntegrityError(
+                f"retained artifact {name} capability is unavailable"
+            )
+        source.append(capability)
+    return _root._duplicate_generation_pins(tuple(source))
+
+
+def _assert_same_namespace_generation(
+    publication_store: object,
+    private_store: object,
+) -> None:
+    """Require root and retained child capabilities to name one generation."""
+
+    if type(publication_store) is not _store.ArtifactStore:
+        raise TypeError("publication_store must be the canonical ArtifactStore")
+    if type(private_store) is not _store.ArtifactStore:
+        raise TypeError("private trusted reader must use canonical ArtifactStore")
+
+    publication_pins: tuple[int, ...] = ()
+    private_pins: tuple[int, ...] = ()
+    try:
+        publication_pins = _duplicate_exact_store_generation_pins(publication_store)
+        private_pins = _duplicate_exact_store_generation_pins(private_store)
+        publication_generation = _root._pinned_generation(publication_pins)
+        private_generation = _root._pinned_generation(private_pins)
+        if publication_generation != private_generation:
+            raise _store.ArtifactIntegrityError(
+                "publication store does not match trusted artifact namespace generation"
+            )
+    finally:
+        _root._close_generation_pins(private_pins)
+        _root._close_generation_pins(publication_pins)
+
+
+def _publication_bound_trusted_authenticated_reader(
+    authoritative_root: str | Path,
+    *,
+    publication_store: object | None = None,
+):
+    """Pin an existing publication generation without reconstructing its store."""
+
+    if publication_store is None:
+        return _ORIGINAL_TRUSTED_AUTHENTICATED_READER(authoritative_root)
+
+    root = _root._canonical_authoritative_root(authoritative_root)
+    root_key = _root._configured_root_key(root)
+    pins: tuple[int, ...] = ()
+    registered_reader_id: int | None = None
+    try:
+        pins = _duplicate_exact_store_generation_pins(publication_store)
+        expected_generation = _root._pinned_generation(pins)
+        configured_generation = _root._immutable_configured_generation(root_key)
+        _root._assert_expected_generation(
+            configured_generation,
+            expected_generation,
+        )
+
+        reader = _root._TrustedAuthenticatedReader()
+        reader_id = id(reader)
+        with _root._READER_CAPABILITY_LOCK:
+            if reader_id in _root._READER_CAPABILITIES:
+                raise _store.ArtifactIntegrityError(
+                    "trusted reader capability identity collision"
+                )
+            _root._READER_CAPABILITIES[reader_id] = (root_key, pins)
+        registered_reader_id = reader_id
+        weakref.finalize(
+            reader,
+            _root._release_reader_capability,
+            reader_id,
+        )
+        return reader
+    except BaseException:
+        if registered_reader_id is None:
+            _root._close_generation_pins(pins)
+        else:
+            with _root._READER_CAPABILITY_LOCK:
+                state = _root._READER_CAPABILITIES.pop(
+                    registered_reader_id,
+                    None,
+                )
+            if state is not None:
+                _root_key, registered_pins = state
+                _root._close_generation_pins(registered_pins)
+        raise
+
+
+def _install_publication_bound_trusted_reader() -> None:
+    _root._assert_same_root_generation = _assert_same_namespace_generation
+    _root.trusted_authenticated_reader = (
+        _publication_bound_trusted_authenticated_reader
+    )
+    package = sys.modules.get(__package__)
+    if package is not None:
+        package.trusted_authenticated_reader = (
+            _publication_bound_trusted_authenticated_reader
+        )
 
 
 def _raise_root_loss_if_any(self, primary: BaseException) -> None:
@@ -175,6 +314,7 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
 
 def install_root_authority_failure_fix() -> None:
     artifact_store = _store.ArtifactStore
+    _install_publication_bound_trusted_reader()
     if getattr(artifact_store, "_root_authority_failure_fix", False):
         return
 

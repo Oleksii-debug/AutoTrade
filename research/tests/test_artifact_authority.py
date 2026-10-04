@@ -2,6 +2,9 @@ import ast
 from pathlib import Path
 import unittest
 
+from autotrade_runtime.artifacts import _root_authority
+from autotrade_runtime.resource_lock import ResourceLockError
+
 from autotrade_research.artifacts import (
     ArtifactStore as PackageArtifactStore,
     CANONICAL_ARTIFACT_STORE_MODULE,
@@ -74,6 +77,23 @@ class ArtifactAuthorityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TypeError, "exact string or Path"):
             trusted_authenticated_reader(HostilePath("/not-authoritative"))
+        self.assertEqual(touched, [])
+
+    def test_configured_root_key_rejects_text_subclass_before_virtual_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def encode(self, *args, **kwargs):
+                touched.append("encode")
+                raise AssertionError("hostile configured-root hashing")
+
+        class StoreLike:
+            pass
+
+        store = StoreLike()
+        store._configured_artifact_root_key = HostileText("/not-authoritative")
+        with self.assertRaisesRegex(ResourceLockError, "path key is unavailable"):
+            _root_authority._windows_path_mutex_name(store)
         self.assertEqual(touched, [])
 
     def test_production_code_cannot_reintroduce_legacy_content_store_authority(self):

@@ -171,6 +171,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "protocol_digest": "1" * 64,
             "input_snapshot_digest": "2" * 64,
             "information_cutoff": "2026-09-24T18:00:40Z",
+            "forecast_horizon_end": "2026-09-25T18:00:45Z",
             "desired_notional": "100",
             "desired_notional_currency": "USD",
             "expected_return_rate": "0.10",
@@ -230,6 +231,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
             "fee_floor_base": "0",
             "max_executable_notional_base": "100",
             "payoff_identity": "linear:cash-equity:v1",
+            "holding_cost_horizon_end": "2026-09-25T18:00:45Z",
             "cost_rate_components": {
                 "execution": "0", "financing": "0", "funding": "0", "borrow": "0", "fx": "0"
             },

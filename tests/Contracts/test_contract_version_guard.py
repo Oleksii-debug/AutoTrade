@@ -11,7 +11,7 @@ def write_tree(root: Path, version="1.0.0", schemas=None, defs=None):
     schemas = ["a.schema.json"] if schemas is None else schemas
     defs = {"A": {"type": "string"}} if defs is None else defs
     base_uri = f"https://schemas.autotrade.local/{version}/"
-    (root / "contracts" / "jsonschema").mkdir(parents=True)
+    (root / "contracts" / "jsonschema").mkdir(parents=True, exist_ok=True)
     (root / "contracts" / "manifest.json").write_text(
         json.dumps({
             "contract_version": version,

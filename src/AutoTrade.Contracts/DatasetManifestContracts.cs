@@ -2,10 +2,15 @@ using System.Text.Json;
 
 namespace AutoTrade.Contracts;
 
+/// <summary>Validates source-evidence coverage of immutable dataset content.</summary>
 public static class DatasetManifestContracts
 {
+    /// <summary>The stable identity of the cross-runtime semantic validator.</summary>
     public const string SemanticValidatorId = "dataset-manifest-content-authority-v1";
 
+    /// <summary>Returns whether each declared content digest is covered by source evidence.</summary>
+    /// <param name="value">The dataset manifest JSON object.</param>
+    /// <returns>True when content and evidence form a complete, nonempty binding.</returns>
     public static bool IsSemanticallyValid(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Object)

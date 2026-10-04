@@ -66,6 +66,7 @@ def event(
         "event_id": identity,
         "instrument_version": "instrument:AAA:v1",
         "kind": "BAR",
+        "adapter_version": "research-fixture-v1",
         "source_event_at": _iso(source_at),
         "available_at": _iso(available),
         "ingested_at": _iso(ingested),

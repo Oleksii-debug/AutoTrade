@@ -34,6 +34,7 @@ def _event(
         "event_id": EVENT_ID,
         "instrument_version": "instrument:AAA:v1",
         "kind": kind,
+        "adapter_version": "research-fixture-v1",
         "source_event_at": _iso(source_at),
         "available_at": _iso(available_at),
         "ingested_at": _iso(ingested_at),
@@ -54,6 +55,28 @@ def _event(
 
 
 class RevisionKnowledgeChronologyTests(unittest.TestCase):
+    def test_revision_cannot_replace_original_adapter_build(self):
+        lower = _event(1, available_minutes=1, ingested_minutes=2)
+        higher = _event(2, available_minutes=3, ingested_minutes=4)
+        higher["adapter_version"] = "research-fixture-v2"
+        with self.assertRaisesRegex(HistoricalConflict, "source identity metadata"):
+            causal_market_event_history([lower, higher], BASE + timedelta(minutes=5))
+
+    def test_adapter_build_is_required_and_exact_at_population_ingress(self):
+        class HostileText(str):
+            def __len__(self):
+                raise AssertionError("hostile build callback")
+        for value in (None, "", " build ", "x" * 129, HostileText("build-v1")):
+            with self.subTest(value_type=type(value).__name__):
+                row = _event(1, available_minutes=1, ingested_minutes=2)
+                row["adapter_version"] = value
+                with self.assertRaisesRegex(HistoricalDataError, "adapter_version"):
+                    causal_market_event_history([row], BASE + timedelta(minutes=3))
+        row = _event(1, available_minutes=1, ingested_minutes=2)
+        del row["adapter_version"]
+        with self.assertRaisesRegex(HistoricalDataError, "adapter_version"):
+            causal_market_event_history([row], BASE + timedelta(minutes=3))
+
     def test_higher_revision_cannot_become_known_before_lower_revision(self):
         lower = _event(1, available_minutes=1, ingested_minutes=30)
         higher = _event(2, available_minutes=2, ingested_minutes=3)

@@ -30,7 +30,7 @@ Only VERIFIED and unexpired evidence can authorize the relevant action. Refresh 
 
 ## 4. Data contracts
 
-`MarketEvent`: envelope + `instrument_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
+`MarketEvent`: envelope + `instrument_version`, canonical bounded `adapter_version`, `kind = TRADE | QUOTE | BOOK_SNAPSHOT | BOOK_DELTA | BAR | FUNDING | MARK | INDEX | STATUS`, `source_event_at`, `available_at`, `availability_basis`, `ingested_at`, `source_sequence?`, `revision`, typed payload, `quality_flags[]`, `raw_evidence_ref`. A bar contains start/end, OHLCV, finalized flag and first availability; finalized close cannot be known at bar start. Book deltas contain predecessor/range IDs and checksum when supplied; a gap invalidates executable book state.
 
 `InformationEvent`: `information_id`, `source_id`, `source_event_at?`, `published_at`, `available_at`, `ingested_at`, `revision`, `supersedes?`, `entities[]`, `claims[]`, `content_hash`, `rights_id`, `trust_features`, `language`, `evidence[]`. Store disagreements as claims from separate sources. A revised macro series does not replace its historical vintages.
 

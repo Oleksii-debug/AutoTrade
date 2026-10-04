@@ -6,7 +6,7 @@ from typing import Mapping
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.accounting import book_equity_fill
+from mvp.autotrade_mvp.accounting import AccountingConflict, book_equity_fill
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
     EvidenceVerification,
@@ -332,32 +332,20 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             def read_cut(self):
                 raise AssertionError("hostile economic read-cut dispatch")
 
-        hostile = HostileEconomicBook(
-            self.store,
-            provider_id="BYBIT",
-            account_id="paper-1",
-            environment="PAPER",
-        )
         with self.assertRaisesRegex(
-            TypeError,
-            "economic_book must be exact DurableProviderEconomicBook",
+            TypeError, "economic_book must be exact DurableProviderEconomicBook",
         ):
-            self._authority(
-                registry=self.registry,
-                economic_book=hostile,
+            HostileEconomicBook(
+                self.store, provider_id="BYBIT", account_id="paper-1", environment="PAPER",
             )
 
     def test_lifecycle_rejects_post_construction_economic_method_shadow(self):
         self.seed_option_position("1")
         evidence_ref = self.evidence(external_event_id="shadowed-owner")
-        self.book.read_cut = lambda: (_ for _ in ()).throw(
-            AssertionError("shadowed economic cut dispatch")
-        )
-        with self.assertRaisesRegex(
-            TypeError,
-            "DurableProviderEconomicBook authority is shadowed",
-        ):
-            self.authority.apply(evidence_ref)
+        with self.assertRaisesRegex(AccountingConflict, "authority state is immutable"):
+            self.book.read_cut = lambda: (_ for _ in ()).throw(
+                AssertionError("shadowed economic cut dispatch")
+            )
         self.assertEqual(
             self.store.load_events("option_lifecycle", self.authority.aggregate_id),
             [],
@@ -379,14 +367,15 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         self.authority.evidence_resolver = hostile_resolver
         with self.assertRaisesRegex(
-            OptionLifecycleConflict,
-            "economic-book scope changed after lifecycle construction",
+            OptionLifecycleError,
+            "provider lifecycle evidence could not be resolved",
         ):
             self.authority.apply(evidence_ref)
         self.assertEqual(
             self.store.load_events("option_lifecycle", self.authority.aggregate_id),
             [],
         )
+        self.assertEqual(self.book.account_id, "paper-1")
 
     def test_correction_position_projection_is_context_independent(self):
         instrument = f"{OPTION_ID}@1"

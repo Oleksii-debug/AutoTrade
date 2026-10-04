@@ -542,7 +542,9 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     )
                 return original_commit(**kwargs)
 
-            store.commit_command = commit_with_newer_truth
+            injection = patch.object(JournalStore, "commit_command", lambda _store, **kwargs: commit_with_newer_truth(**kwargs))
+            injection.start()
+            self.addCleanup(injection.stop)
             with self.assertRaisesRegex(ValueError, "journal sequence changed"):
                 _admit(
                     authority,
@@ -722,7 +724,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "evidence_refs"
                 ] = bad_refs
 
-                with patch.object(store, "get_event", return_value=tampered):
+                with patch.object(JournalStore, "get_event", return_value=tampered):
                     with self.assertRaisesRegex(
                         ValueError,
                         "resource availability evidence_refs",

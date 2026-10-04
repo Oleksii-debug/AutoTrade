@@ -95,6 +95,8 @@ def format_accessible_status(
         lines.extend([
             f"Episode: {_value(status, 'episode_id')}",
             f"Session outcome: {_value(status, 'session_status')}",
+            *([f"Autonomous episodes: {status['completed_episodes']} of {status['total_episodes']}",
+               f"Model mode: {status.get('mode', 'Unavailable')}"] if 'completed_episodes' in status else []),
             f"Cash (USD): {_value(status, 'cash')}",
             f"Position (shares): {_value(status, 'position')}",
             f"Journal sequence: {_value(status, 'journal_sequence')}",

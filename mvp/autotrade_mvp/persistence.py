@@ -355,6 +355,7 @@ class JournalStore(_JournalStoreImpl):
         environment: str,
         idempotency_key: str,
         request: Any,
+        referenced_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         """Read one authenticated EVENT_BATCH command and its events at one cut.
 
@@ -370,6 +371,13 @@ class JournalStore(_JournalStoreImpl):
             environment=environment,
             idempotency_key=idempotency_key,
         )
+        if type(referenced_event_ids) is not tuple or any(
+            type(event_id) is not str or not event_id or event_id != event_id.strip()
+            for event_id in referenced_event_ids
+        ):
+            raise TypeError("referenced_event_ids must be exact canonical text tuple")
+        if len(set(referenced_event_ids)) != len(referenced_event_ids):
+            raise ValueError("referenced_event_ids must be unique")
         request_hash = _impl.payload_digest(request)
 
         with self._connect() as connection:
@@ -453,6 +461,32 @@ class JournalStore(_JournalStoreImpl):
                 if self.SCHEMA_VERSION >= 6:
                     self._journal_sequence_value(connection)
 
+                # Resolve immutable prior events in this same held snapshot.
+                # Owned events are not returned as references, so removing an
+                # owned event from the returned batch cannot invent recovery.
+                owned_ids = {event["event_id"] for event in decoded_events}
+                referenced_events = []
+                for event_id in referenced_event_ids:
+                    if event_id in owned_ids:
+                        continue
+                    event_row = connection.execute(
+                        "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+                        "aggregate_version, payload_json, payload_hash, committed_at, "
+                        "envelope_json, envelope_hash, journal_sequence "
+                        "FROM events WHERE event_id = ?", (event_id,),
+                    ).fetchone()
+                    if event_row is None:
+                        raise ValueError("referenced command event is missing")
+                    event = self._decode_event_row(event_row)
+                    self._aggregate_version_value(
+                        connection, event["aggregate_type"], event["aggregate_id"],
+                    )
+                    if not decoded_events or event["journal_sequence"] >= min(
+                        item["journal_sequence"] for item in decoded_events
+                    ):
+                        raise ValueError("referenced event must precede command effects")
+                    referenced_events.append(event)
+
                 connection.commit()
                 return {
                     "command_id": command_id,
@@ -462,6 +496,7 @@ class JournalStore(_JournalStoreImpl):
                     "state_version": state_version,
                     "result": saved_result,
                     "events": tuple(decoded_events),
+                    **({"referenced_events": tuple(referenced_events)} if referenced_event_ids else {}),
                 }
             except Exception:
                 connection.rollback()

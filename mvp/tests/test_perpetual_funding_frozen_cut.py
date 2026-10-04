@@ -156,6 +156,122 @@ class FundingFrozenCutTests(unittest.TestCase):
             authority.instrument_registry.at = lambda *_: self.fail("caller registry dispatch")
             self.assertEqual(authority.apply(source.evidence_ref).cashflow, Decimal("-0.2"))
 
+    def test_financial_store_binding_cannot_be_rebound_after_construction(self):
+        source = fixtures.sealed_funding()
+        for mutation in ("authority_store", "economic_book", "economic_book_store"):
+            with self.subTest(mutation=mutation), TemporaryDirectory() as directory:
+                primary_store = JournalStore(f"{directory}/primary.sqlite3")
+                authority, book = self.authority(primary_store, [source])
+                foreign_store = JournalStore(f"{directory}/foreign.sqlite3")
+                foreign_book = DurableProviderEconomicBook(
+                    foreign_store,
+                    provider_id=book.provider_id,
+                    account_id=book.account_id,
+                    environment=book.environment,
+                )
+                fixtures.seed_position(foreign_book, transaction_id="foreign-position")
+
+                primary_before = primary_store.current_journal_sequence()
+                foreign_before = foreign_store.current_journal_sequence()
+
+                if mutation == "authority_store":
+                    authority.store = foreign_store
+                elif mutation == "economic_book":
+                    authority.economic_book = foreign_book
+                else:
+                    with self.assertRaisesRegex(ValueError, "authority state is immutable"):
+                        book.store = foreign_store
+                    self.assertEqual(primary_store.current_journal_sequence(), primary_before)
+                    self.assertEqual(foreign_store.current_journal_sequence(), foreign_before)
+                    continue
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingConflict,
+                    "durable store binding changed after construction",
+                ):
+                    authority.apply(source.evidence_ref)
+
+                self.assertEqual(
+                    primary_store.current_journal_sequence(),
+                    primary_before,
+                )
+                self.assertEqual(
+                    foreign_store.current_journal_sequence(),
+                    foreign_before,
+                )
+                self.assertEqual(
+                    primary_store.load_events(
+                        "perpetual_funding",
+                        authority.aggregate_id,
+                    ),
+                    [],
+                )
+
+    def test_shadowed_journal_method_invalidates_funding_store_authority(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [source])
+            before = store.current_journal_sequence(), book.audit_digest()
+            store.load_events = lambda *args, **kwargs: self.fail(
+                "shadowed JournalStore read must not execute"
+            )
+            with self.assertRaisesRegex(
+                (PerpetualFundingConflict, TypeError),
+                "store identity is no longer valid|instance state is shadowed",
+            ):
+                authority.apply(source.evidence_ref)
+            del store.load_events
+            self.assertEqual(
+                (store.current_journal_sequence(), book.audit_digest()),
+                before,
+            )
+
+    def test_shadowed_economic_prepare_method_cannot_replace_canonical_plan(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [source])
+            with self.assertRaisesRegex(ValueError, "authority state is immutable"):
+                book.prepare_batch_mutation = lambda *args, **kwargs: self.fail(
+                    "instance economic mutation callback must not execute"
+                )
+            result = authority.apply(source.evidence_ref)
+            self.assertTrue(result.inserted)
+            self.assertEqual(result.cashflow, Decimal("-0.2"))
+
+    def test_evidence_callback_cannot_rebind_financial_store_mid_apply(self):
+        source = fixtures.sealed_funding()
+        with TemporaryDirectory() as directory:
+            primary_store = JournalStore(f"{directory}/primary.sqlite3")
+            authority, book = self.authority(primary_store, [source])
+            foreign_store = JournalStore(f"{directory}/foreign.sqlite3")
+            before = primary_store.current_journal_sequence(), book.audit_digest()
+
+            def hostile_resolver(reference):
+                self.assertEqual(reference, source.evidence_ref)
+                authority.store = foreign_store
+                return source
+
+            authority.evidence_resolver = hostile_resolver
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "durable store binding changed after construction",
+            ):
+                authority.apply(source.evidence_ref)
+
+            self.assertEqual(
+                (primary_store.current_journal_sequence(), book.audit_digest()),
+                before,
+            )
+            self.assertEqual(
+                foreign_store.load_events(
+                    "perpetual_funding",
+                    authority.aggregate_id,
+                ),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

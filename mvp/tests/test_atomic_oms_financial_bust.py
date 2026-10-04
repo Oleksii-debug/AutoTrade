@@ -123,6 +123,7 @@ def seed(
 def atomic_bust(
     orders: DurableOrderBookProjection,
     economics: DurableProviderEconomicBook,
+    reservations: DurableReservationBook,
     projected: ProjectedFillEvidence,
     provider: ProviderFillEvidence,
 ):
@@ -138,6 +139,8 @@ def atomic_bust(
         bust_provider_revision=BUST_REVISION,
         bust_observed_at=WHEN,
         order_event_key="bust-1",
+        reservation_book=reservations,
+        reservation_id="reservation-1",
         committed_at=WHEN,
     )
 
@@ -155,11 +158,15 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
         self.assertEqual(reversal.reverses_transaction_id, original.transaction_id)
         self.assertEqual(
             reservations.get("reservation-1").consumed["CASH:USD"],
-            Decimal("100"),
+            Decimal("0"),
         )
         self.assertEqual(
             reservations.get("reservation-1").remaining["CASH:USD"],
-            Decimal("20"),
+            Decimal("120"),
+        )
+        self.assertEqual(
+            reservations.total_reserved("CASH:USD"),
+            Decimal("120"),
         )
 
     def test_fresh_bust_is_atomic_restart_safe_and_idempotent(self):
@@ -170,14 +177,181 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             projected, provider = seed(orders, economics, reservations)
 
             self.assertTrue(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
             self.assert_busted(orders, economics, reservations)
 
             reopened = JournalStore(path)
             ro, re, rr = books(reopened)
-            self.assertFalse(atomic_bust(ro, re, projected, provider))
+            self.assertFalse(atomic_bust(ro, re, rr, projected, provider))
             self.assert_busted(ro, re, rr)
+
+    def test_exact_retry_survives_unrelated_later_reservation_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            self.assertTrue(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    projected,
+                    provider,
+                )
+            )
+            reservations.reserve(
+                command_id="later-reservation-command",
+                idempotency_key="later-reservation-idempotency",
+                reservation_id="later-reservation",
+                intent_id="later-intent",
+                requirements={"CASH:EUR": "3"},
+                available={"CASH:EUR": "3"},
+            )
+
+            ro, re, rr = books(JournalStore(path))
+            self.assertFalse(
+                atomic_bust(ro, re, rr, projected, provider)
+            )
+            self.assert_busted(ro, re, rr)
+            self.assertEqual(
+                rr.get("later-reservation").remaining["CASH:EUR"],
+                Decimal("3"),
+            )
+
+    def test_bust_restores_only_one_partial_fill_usage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            orders, economics, reservations = books(store)
+            reservations.reserve(
+                command_id="reserve-partials",
+                idempotency_key="reserve-partials",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "200"},
+                available={"CASH:USD": "1000"},
+            )
+            orders.create_order(
+                event_key="create-partials",
+                client_order_id="order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=WHEN,
+            )
+
+            def fill(fill_id, execution_id, quantity, command_id):
+                projected = ProjectedFillEvidence.create(
+                    fill_id=fill_id,
+                    provider_execution_id=execution_id,
+                    intent_id="intent-1",
+                    client_order_id="order-1",
+                    side="BUY",
+                    quantity=quantity,
+                    price="100",
+                )
+                provider = ProviderFillEvidence.create(
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_execution_id=execution_id,
+                    client_order_id="order-1",
+                    instrument="ABC",
+                    quantity=quantity,
+                    price="100",
+                    fee_amount="0",
+                    fee_currency="USD",
+                    trade_time=WHEN,
+                    side="BUY",
+                )
+                self.assertTrue(
+                    commit_provider_fill_with_reservation_consumption(
+                        economics,
+                        reservations,
+                        command_id=command_id,
+                        idempotency_key=command_id,
+                        reservation_id="reservation-1",
+                        projected_fill=projected,
+                        provider_fill=provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        observed_at=WHEN,
+                        committed_at=WHEN,
+                        order_book=orders,
+                        order_event_key=fill_id,
+                    )
+                )
+                return projected, provider
+
+            first_projected, first_provider = fill(
+                "fill-partial-a",
+                "provider-execution-partial-a",
+                "0.4",
+                "provider-fill-partial-a",
+            )
+            fill(
+                "fill-partial-b",
+                "provider-execution-partial-b",
+                "0.6",
+                "provider-fill-partial-b",
+            )
+            before = reservations.get("reservation-1")
+            self.assertEqual(before.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(before.remaining["CASH:USD"], Decimal("100"))
+
+            self.assertTrue(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    first_projected,
+                    first_provider,
+                )
+            )
+
+            after = reservations.get("reservation-1")
+            self.assertEqual(after.consumed["CASH:USD"], Decimal("60"))
+            self.assertEqual(after.remaining["CASH:USD"], Decimal("140"))
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("140"),
+            )
+            order = orders.order("order-1").snapshot()
+            self.assertEqual(order.filled_quantity, Decimal("0.6"))
+            self.assertEqual(order.fill_count, 1)
+            self.assertEqual(economics.position("ABC"), Decimal("0.6"))
+
+            # A later fill on the same reservation is valid forward progress.
+            # Exact retry of the older bust must resolve its historical command
+            # authority without requiring the current reservation snapshot to
+            # equal the old post-bust snapshot and without restoring twice.
+            fill(
+                "fill-partial-c",
+                "provider-execution-partial-c",
+                "0.2",
+                "provider-fill-partial-c",
+            )
+            before_retry = reservations.get("reservation-1")
+            self.assertEqual(before_retry.consumed["CASH:USD"], Decimal("80"))
+            self.assertEqual(before_retry.remaining["CASH:USD"], Decimal("120"))
+            self.assertFalse(
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    first_projected,
+                    first_provider,
+                )
+            )
+            after_retry = reservations.get("reservation-1")
+            self.assertEqual(after_retry, before_retry)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0.8"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("0.8"))
 
     def test_precommit_failure_leaves_oms_and_economics_unbusted(self):
         with TemporaryDirectory() as directory:
@@ -202,7 +376,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     RuntimeError,
                     "atomic bust failure",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 JournalStore.commit_command = original
 
@@ -247,12 +421,12 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     RuntimeError,
                     "bust acknowledgement loss",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 JournalStore.commit_command = original
 
             ro, re, rr = books(JournalStore(path))
-            self.assertFalse(atomic_bust(ro, re, projected, provider))
+            self.assertFalse(atomic_bust(ro, re, rr, projected, provider))
             self.assert_busted(ro, re, rr)
 
     def test_replay_rejects_command_effect_from_wrong_aggregate_identity(self):
@@ -260,7 +434,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             store = JournalStore(Path(directory) / "journal.sqlite3")
             orders, economics, reservations = books(store)
             projected, provider = seed(orders, economics, reservations)
-            self.assertTrue(atomic_bust(orders, economics, projected, provider))
+            self.assertTrue(atomic_bust(orders, economics, reservations, projected, provider))
 
             original_load = accounting_impl._economic_store_load_command_event_batch
 
@@ -288,7 +462,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     AccountingConflict,
                     "unexpected durable effects",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 accounting_impl._economic_store_load_command_event_batch = original_load
 
@@ -316,11 +490,11 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(economics.position("ABC"), Decimal("1"))
 
             self.assertTrue(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
             self.assert_busted(orders, economics, reservations)
             self.assertFalse(
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
             )
 
     def test_fully_split_bust_state_is_not_relabelled_atomic(self):
@@ -352,11 +526,23 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "exist without one atomic/recovery command authority",
+                "missing reservation restoration",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
-            self.assert_busted(orders, economics, reservations)
+            self.assertEqual(
+                orders.order("order-1").snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            self.assertEqual(economics.position("ABC"), Decimal("0"))
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                reservations.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
 
     def test_oms_only_recovery_fences_post_cut_journal_mutation(self):
         with TemporaryDirectory() as directory:
@@ -393,7 +579,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     ValueError,
                     "journal sequence changed after financial evidence validation",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 DurableOrderBookProjection.prepare_bust_fill_mutation = original_prepare
 
@@ -408,6 +594,72 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             self.assertEqual(
                 rr.get("reservation-1").consumed["CASH:USD"],
                 Decimal("100"),
+            )
+
+    def test_reservation_writer_after_cut_fences_atomic_bust(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+            original_prepare = (
+                DurableReservationBook.prepare_restore_consumption_mutation
+            )
+            injected = False
+
+            def race_after_reservation_cut(selected_book, **kwargs):
+                nonlocal injected
+                plan = original_prepare(selected_book, **kwargs)
+                if selected_book is reservations and not injected:
+                    injected = True
+                    reservations.reserve(
+                        command_id="reservation-race-command",
+                        idempotency_key="reservation-race-idempotency",
+                        reservation_id="reservation-race",
+                        intent_id="intent-race",
+                        requirements={"CASH:EUR": "1"},
+                        available={"CASH:EUR": "1"},
+                    )
+                return plan
+
+            DurableReservationBook.prepare_restore_consumption_mutation = (
+                race_after_reservation_cut
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed after financial evidence validation",
+                ):
+                    atomic_bust(
+                        orders,
+                        economics,
+                        reservations,
+                        projected,
+                        provider,
+                    )
+            finally:
+                DurableReservationBook.prepare_restore_consumption_mutation = (
+                    original_prepare
+                )
+
+            ro, re, rr = books(JournalStore(path))
+            self.assertEqual(
+                ro.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(re.position("ABC"), Decimal("1"))
+            self.assertEqual(len(re.transactions), 1)
+            self.assertEqual(
+                rr.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                rr.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
+            self.assertEqual(
+                rr.get("reservation-race").remaining["CASH:EUR"],
+                Decimal("1"),
             )
 
     def test_settled_source_blocks_bust_without_settlement_compensation_authority(self):
@@ -456,7 +708,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                     AccountingConflict,
                     "settled fill bust requires provider settlement compensation authority",
                 ):
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
             finally:
                 accounting_impl._economic_store_load_events = original_load
 
@@ -504,7 +756,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
             accounting_impl._economic_store_load_events = with_unsettled_registration
             try:
                 self.assertTrue(
-                    atomic_bust(orders, economics, projected, provider)
+                    atomic_bust(orders, economics, reservations, projected, provider)
                 )
             finally:
                 accounting_impl._economic_store_load_events = original_load
@@ -532,7 +784,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 AccountingConflict,
                 "economic fill reversal is committed without the matching OMS bust",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
             self.assertEqual(
                 orders.order("order-1").snapshot().filled_quantity,
@@ -629,7 +881,7 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 AccountingConflict,
                 "OMS state differs from active provider evidence",
             ):
-                atomic_bust(orders, economics, projected, provider)
+                atomic_bust(orders, economics, reservations, projected, provider)
 
             self.assertEqual(economics.position("ABC"), Decimal("1"))
             self.assertEqual(

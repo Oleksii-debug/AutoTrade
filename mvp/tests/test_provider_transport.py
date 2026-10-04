@@ -4555,6 +4555,51 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         ):
             direct_authenticated_read_execution_receipt_snapshot(receipt)
 
+    def test_direct_receipt_rejects_terminal_proof_relabelled_to_other_wire_endpoint(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(
+            request,
+            "url",
+            request.url.replace("/api/v3/account?", "/api/v3/myTrades?"),
+        )
+        object.__setattr__(
+            request,
+            "_terminal_qualified_read_authority",
+            object(),
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_query_binding",
+            binding,
+        )
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
+        )
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        canonical_opener = client._opener
+        canonical_opener.open = lambda *_args, **_kwargs: Stream(b'{"ok":true}')
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "transmitted endpoint differs",
+        ):
+            client.send(request)
+
     def test_replaced_urllib_opener_cannot_mint_direct_authenticated_read_receipt(self):
         class Stream(BytesIO):
             status = 200

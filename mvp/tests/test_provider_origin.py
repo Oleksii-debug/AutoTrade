@@ -256,6 +256,18 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     transport=transport,
                 )
 
+            claims = JournalStore.load_events(
+                journal,
+                "qualified_authenticated_provider_wire_execution",
+                recorded.wire_request_sha256,
+            )
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(claims[0]["payload"]["attempt_id"], recorded.attempt_id)
+            self.assertEqual(
+                claims[0]["payload"]["response_sha256"],
+                recorded.response_sha256,
+            )
+
             restarted = self._origin(JournalStore(journal.path), directory)
             recovered = restarted.load_response_binding(recorded.attempt_id, binding)
             observation = observe_provider_origin_json_response(

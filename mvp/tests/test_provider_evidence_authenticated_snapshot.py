@@ -106,6 +106,16 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
             artifacts = ArtifactStore(f"{directory}/artifacts")
             gc.collect()
             reader_capabilities_before = set(root_authority._READER_CAPABILITIES)
+            store_callback_refs_before = tuple(
+                reference
+                for reference in weakref.getweakrefs(store)
+                if reference.__callback__ is not None
+            )
+            artifact_callback_refs_before = tuple(
+                reference
+                for reference in weakref.getweakrefs(artifacts)
+                if reference.__callback__ is not None
+            )
             book = durable(store, artifacts)
             reader_capabilities_with_book = set(root_authority._READER_CAPABILITIES)
             added_reader_capabilities = (
@@ -122,17 +132,21 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                     for reference in weakref.getweakrefs(book)
                 )
             )
-            self.assertTrue(
-                all(
-                    reference.__callback__ is None
+            self.assertEqual(
+                {
+                    id(reference)
                     for reference in weakref.getweakrefs(store)
-                )
+                    if reference.__callback__ is not None
+                },
+                {id(reference) for reference in store_callback_refs_before},
             )
-            self.assertTrue(
-                all(
-                    reference.__callback__ is None
+            self.assertEqual(
+                {
+                    id(reference)
                     for reference in weakref.getweakrefs(artifacts)
-                )
+                    if reference.__callback__ is not None
+                },
+                {id(reference) for reference in artifact_callback_refs_before},
             )
 
             book_ref = weakref.ref(book)

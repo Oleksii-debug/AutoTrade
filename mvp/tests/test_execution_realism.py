@@ -153,6 +153,28 @@ class ExecutionRealismTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "unexpected state fields"):
             simulate_execution(injected_order, exact_observation, exact_model)
 
+        class HostileStateField(str):
+            armed = False
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                if type(self).armed:
+                    raise AssertionError("hostile state-field equality executed")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_key_order = order()
+        hostile_state = dict(hostile_key_order.__dict__)
+        quantity = hostile_state.pop("quantity")
+        hostile_state[HostileStateField("quantity")] = quantity
+        object.__setattr__(hostile_key_order, "__dict__", hostile_state)
+        HostileStateField.armed = True
+        with self.assertRaisesRegex(TypeError, "non-canonical state field names"):
+            simulate_execution(hostile_key_order, exact_observation, exact_model)
+        self.assertEqual(HostileStateField.equality_calls, 0)
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

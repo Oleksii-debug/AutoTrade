@@ -1,6 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
+from types import MappingProxyType
 import unittest
 
 from research.autotrade_research.evaluation.gates import GateDecision
@@ -18,6 +19,7 @@ from research.autotrade_research.strategies.tool_weighting import (
     StrategyToolPolicy,
     StrategyToolWeightingError,
     assess_strategy_tools,
+    strategy_cell_metrics_digest,
 )
 
 
@@ -123,7 +125,14 @@ def coverage_assessment(protocol, *, status="PASS"):
     )
 
 
-def gate(status="PASS", *, provenance=True, source=BUILD, checks=None):
+def gate(
+    status="PASS",
+    *,
+    provenance=True,
+    source=BUILD,
+    checks=None,
+    metrics_sha256=None,
+):
     if checks is None:
         if status == "PASS":
             checks = {"semantic_owner_evidence": "PASS"}
@@ -138,6 +147,8 @@ def gate(status="PASS", *, provenance=True, source=BUILD, checks=None):
             "evidence_graph_digest": "sha256:" + "6" * 64,
             "review_source_sha": source,
         }
+        if metrics_sha256 is not None:
+            values["strategy_comparison_metrics_sha256"] = metrics_sha256
     return GateDecision(
         status=status,
         reasons=("scientific result",),
@@ -165,22 +176,47 @@ def evidence(
         protocol,
         status=coverage_status,
     )
-    if gate_value is None:
-        gate_value = gate(gate_status)
     if cell is None:
         cell = StrategyToolCell("crypto", regime, 3600)
+    net_value = lower if net is None else net
+    metrics_sha256 = strategy_cell_metrics_digest(
+        cell=cell,
+        strategy_fingerprint=strategy.fingerprint,
+        after_cost_net_advantage=net_value,
+        dependence_aware_lower_bound=lower,
+        costs_complete=costs_complete,
+    )
+    if gate_value is None:
+        gate_value = gate(
+            gate_status,
+            metrics_sha256=metrics_sha256,
+        )
+    elif (
+        type(gate_value.checks) is MappingProxyType
+        and type(gate_value.provenance) is MappingProxyType
+        and gate_value.provenance
+    ):
+        provenance = dict(gate_value.provenance)
+        provenance.setdefault(
+            "strategy_comparison_metrics_sha256",
+            metrics_sha256,
+        )
+        gate_value = GateDecision(
+            status=gate_value.status,
+            reasons=gate_value.reasons,
+            checks=dict(gate_value.checks),
+            provenance=provenance,
+        )
     return StrategyCellEvidence(
         cell=cell,
         strategy_fingerprint=strategy.fingerprint,
         coverage_protocol=protocol,
         coverage_assessment=assessment,
         scientific_gate=gate_value,
-        after_cost_net_advantage=(
-            lower if net is None else net
-        ),
+        after_cost_net_advantage=net_value,
         dependence_aware_lower_bound=lower,
         costs_complete=costs_complete,
-        metrics_sha256=METRICS,
+        metrics_sha256=metrics_sha256,
     )
 
 
@@ -904,6 +940,49 @@ class StrategyToolWeightingTests(unittest.TestCase):
             "share one registered evaluation protocol",
         ):
             policy(strategies=(first, second))
+
+
+    def test_scientific_review_cannot_bind_different_score_metrics(self):
+        p = policy()
+        rows = list(full_evidence(p))
+        strategy = next(
+            item for item in p.registered_strategies
+            if item.family == "MOMENTUM"
+        )
+        rows[-1] = evidence(
+            strategy,
+            "bull",
+            "0.02",
+            gate_value=gate(
+                "PASS",
+                metrics_sha256="sha256:" + "f" * 64,
+            ),
+        )
+        result = assess_strategy_tools(p, rows)
+        self.assertEqual(
+            result.cell_statuses["crypto::bull::3600"],
+            "FAIL",
+        )
+
+    def test_metrics_digest_must_match_exact_score_values(self):
+        p = policy()
+        strategy = p.registered_strategies[0]
+        protocol = coverage_protocol(strategy)
+        with self.assertRaisesRegex(
+            StrategyToolWeightingError,
+            "does not bind the exact score-bearing values",
+        ):
+            StrategyCellEvidence(
+                cell=StrategyToolCell("crypto", "bull", 3600),
+                strategy_fingerprint=strategy.fingerprint,
+                coverage_protocol=protocol,
+                coverage_assessment=coverage_assessment(protocol),
+                scientific_gate=gate(),
+                after_cost_net_advantage="0.03",
+                dependence_aware_lower_bound="0.02",
+                costs_complete=True,
+                metrics_sha256=METRICS,
+            )
 
 
 if __name__ == "__main__":

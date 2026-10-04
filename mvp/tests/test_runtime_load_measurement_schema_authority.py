@@ -154,13 +154,70 @@ class RuntimeLoadMeasurementSchemaAuthorityTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     RuntimeLoadMeasurementError,
-                    r"transitive global dependency changed.*JSONEncoder",
+                    r"transitive authority changed.*JSONEncoder|transitive global dependency changed.*JSONEncoder",
                 ):
                     self._measure(store, expected, plan_id, attack)
             finally:
                 json_module.JSONEncoder = original_encoder
 
             self.assertFalse(touched)
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_mutate_json_encoder_encode_code_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            encode = json_module.JSONEncoder.encode
+            original_code = encode.__code__
+
+            def forged_encode(self, _value):
+                raise AssertionError("forged JSONEncoder.encode executed after callback")
+
+            def attack() -> None:
+                _append(store, expected)
+                encode.__code__ = forged_encode.__code__
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"executable authority changed.*json\.JSONEncoder\.encode",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                encode.__code__ = original_code
+
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
+
+    def test_operation_cannot_retarget_json_iterencode_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store, expected, plan_id = self._fixture(root)
+            canonical_json = measurement_module.payload_digest.__globals__["canonical_json"]
+            json_module = canonical_json.__globals__["json"]
+            iterencode = json_module.JSONEncoder.iterencode
+            namespace = iterencode.__globals__
+            original_make_iterencode = namespace["_make_iterencode"]
+
+            def forged_make_iterencode(*_args, **_kwargs):
+                raise AssertionError("forged _make_iterencode executed after callback")
+
+            def attack() -> None:
+                _append(store, expected)
+                namespace["_make_iterencode"] = forged_make_iterencode
+
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeLoadMeasurementError,
+                    r"transitive global dependency changed.*_make_iterencode",
+                ):
+                    self._measure(store, expected, plan_id, attack)
+            finally:
+                namespace["_make_iterencode"] = original_make_iterencode
+
             self.assertIsNone(
                 store.get_event(self._measurement_id(plan_id, expected.event_id))
             )

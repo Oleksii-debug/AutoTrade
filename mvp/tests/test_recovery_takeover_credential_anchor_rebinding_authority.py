@@ -134,7 +134,7 @@ class RecoveryTakeoverCredentialAnchorRebindingAuthorityTests(unittest.TestCase)
                 provider_id="SIMULATED",
             )
 
-        self.assertEqual(result.owner_id, "host-b")
+        self.assertEqual(result.target_owner.owner_id, "host-b")
         self.assertEqual(calls, [])
 
 

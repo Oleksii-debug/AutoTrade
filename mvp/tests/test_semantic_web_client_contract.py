@@ -820,7 +820,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'aria-label="Authenticated permission and capability evidence"',
             html,
         )
-        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("function renderPermissionSummary(permissionSummary, {preserveSelection = true} = {})", js)
         self.assertIn(
             'appendProjectionRow(body, "Actor", permissionSummary.actor)',
             js,
@@ -837,7 +837,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             'body, "Capability " + String(index + 1), capability',
             js,
         )
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged})", js)
 
 
     def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):

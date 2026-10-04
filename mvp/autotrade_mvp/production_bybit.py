@@ -17,6 +17,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Callable, Mapping
 
+from . import provider_transport as _provider_transport
 from .capabilities import CapabilityRegistry
 from .dispatch import AuthorityCheck, DispatchOutcome
 from .host_network import AuthenticatedHostApplication
@@ -664,6 +665,11 @@ def build_production_bybit_order_sender(
         raise ValueError("Bybit provider_environment must be MAINNET, TESTNET or DEMO")
     policy_identity_reader = _bybit_policy_identity
     policy_identity_reader_code = policy_identity_reader.__code__
+    signer_class = _provider_transport.BybitV5Signer
+    signer = signer_class.sign
+    signer_code = signer.__code__
+    policy_url_reader = ProviderEndpointPolicy.absolute_url
+    policy_url_reader_code = policy_url_reader.__code__
     policy_identity_reader(policy, provider_environment=provider_environment)
     _credential_identity(credential_handle)
     if not callable(clock_millis):
@@ -691,6 +697,16 @@ def build_production_bybit_order_sender(
             raise PermissionError(
                 "Bybit provider policy identity authority code changed"
             )
+        if _provider_transport.BybitV5Signer is not signer_class:
+            raise PermissionError("Bybit signer class authority changed before signing")
+        if signer_class.sign is not signer:
+            raise PermissionError("Bybit signer authority changed before signing")
+        if signer.__code__ is not signer_code:
+            raise PermissionError("Bybit signer authority code changed before signing")
+        if ProviderEndpointPolicy.absolute_url is not policy_url_reader:
+            raise PermissionError("Bybit policy URL authority changed before signing")
+        if policy_url_reader.__code__ is not policy_url_reader_code:
+            raise PermissionError("Bybit policy URL authority code changed before signing")
         policy_identity_reader(
             policy,
             provider_environment=provider_environment,

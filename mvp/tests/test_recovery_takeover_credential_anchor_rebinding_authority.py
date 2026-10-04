@@ -111,6 +111,17 @@ class RecoveryTakeoverCredentialAnchorRebindingAuthorityTests(unittest.TestCase)
             environment="PAPER",
         )
 
+    def _execute(self):
+        return execute_durable_takeover(
+            self.controller,
+            new_owner_id="host-b",
+            vault=self.vault,
+            handle=self.handle,
+            execution_identity="windows-user-1",
+            reconciliation_id="takeover-ready",
+            provider_id="SIMULATED",
+        )
+
     def test_public_credential_anchor_verifier_rebind_is_never_executed(self) -> None:
         installed = takeover_module.require_current_trade_credential_transition_anchor
         calls = []
@@ -124,18 +135,32 @@ class RecoveryTakeoverCredentialAnchorRebindingAuthorityTests(unittest.TestCase)
             "require_current_trade_credential_transition_anchor",
             new=rebound_verifier,
         ):
-            result = execute_durable_takeover(
-                self.controller,
-                new_owner_id="host-b",
-                vault=self.vault,
-                handle=self.handle,
-                execution_identity="windows-user-1",
-                reconciliation_id="takeover-ready",
-                provider_id="SIMULATED",
-            )
+            result = self._execute()
 
         self.assertEqual(result.target_owner.owner_id, "host-b")
         self.assertEqual(calls, [])
+
+    def test_public_takeover_authority_window_rebind_is_never_executed(self) -> None:
+        installed = takeover_module.takeover_authority_window
+        calls = []
+
+        def rebound_window(*args, **kwargs):
+            calls.append((args, kwargs))
+            return installed(*args, **kwargs)
+
+        with patch.object(
+            takeover_module,
+            "takeover_authority_window",
+            new=rebound_window,
+        ):
+            result = self._execute()
+
+        self.assertEqual(result.target_owner.owner_id, "host-b")
+        self.assertEqual(
+            calls,
+            [],
+            "takeover exclusion must not dispatch through a rebound public window",
+        )
 
 
 if __name__ == "__main__":

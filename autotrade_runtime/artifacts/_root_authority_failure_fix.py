@@ -11,6 +11,33 @@ from . import _root_authority as _root
 _store = _root._store
 
 
+def _assert_same_namespace_generation(
+    publication_store: object,
+    private_store: object,
+) -> None:
+    """Require root and retained child capabilities to name one generation."""
+
+    if type(publication_store) is not _store.ArtifactStore:
+        raise TypeError("publication_store must be the canonical ArtifactStore")
+    if type(private_store) is not _store.ArtifactStore:
+        raise TypeError("private trusted reader must use canonical ArtifactStore")
+
+    publication_pins: tuple[int, ...] = ()
+    private_pins: tuple[int, ...] = ()
+    try:
+        publication_pins = _root._duplicate_store_generation_pins(publication_store)
+        private_pins = _root._duplicate_store_generation_pins(private_store)
+        publication_generation = _root._pinned_generation(publication_pins)
+        private_generation = _root._pinned_generation(private_pins)
+        if publication_generation != private_generation:
+            raise _store.ArtifactIntegrityError(
+                "publication store does not match trusted artifact namespace generation"
+            )
+    finally:
+        _root._close_generation_pins(private_pins)
+        _root._close_generation_pins(publication_pins)
+
+
 def _raise_root_loss_if_any(self, primary: BaseException) -> None:
     try:
         _root._assert_root_continuity(self)
@@ -175,6 +202,7 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
 
 def install_root_authority_failure_fix() -> None:
     artifact_store = _store.ArtifactStore
+    _root._assert_same_root_generation = _assert_same_namespace_generation
     if getattr(artifact_store, "_root_authority_failure_fix", False):
         return
 

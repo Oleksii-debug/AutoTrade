@@ -247,6 +247,11 @@ def _immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
+_TERMINAL_TRIAL_STATUSES = frozenset(
+    {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
+)
+
+
 def _registered_protocol_payload(row: sqlite3.Row) -> dict[str, Any]:
     """Decode and revalidate one stored protocol row before using its authority."""
 
@@ -260,6 +265,24 @@ def _registered_protocol_payload(row: sqlite3.Row) -> dict[str, Any]:
         or _hash(payload) != row["protocol_hash"]
     ):
         raise ProtocolViolation("registered protocol integrity mismatch")
+    return payload
+
+
+def _registered_trial_payload(row: sqlite3.Row) -> dict[str, Any]:
+    """Revalidate one stored trial before it contributes scientific authority."""
+
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ProtocolViolation("registered trial payload is corrupt") from error
+    if (
+        row["status"] not in _TERMINAL_TRIAL_STATUSES
+        or not isinstance(payload, dict)
+        or not payload
+        or _canonical(payload) != row["payload_json"]
+        or _hash(payload) != row["payload_hash"]
+    ):
+        raise ProtocolViolation("registered trial population integrity mismatch")
     return payload
 
 
@@ -481,7 +504,7 @@ class ScientificRegistry:
     ) -> str:
         protocol = _id(protocol_id)
         normalized = _text(status, "status").upper()
-        if normalized not in {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}:
+        if normalized not in _TERMINAL_TRIAL_STATUSES:
             raise ProtocolViolation("trial status is invalid")
         if not isinstance(payload, dict) or not payload:
             raise ProtocolViolation("trial payload must be a non-empty object")
@@ -633,23 +656,7 @@ class ScientificRegistry:
             ).fetchall()
             recorded_trials = len(trial_rows)
             for trial in trial_rows:
-                try:
-                    trial_payload = json.loads(trial["payload_json"])
-                except json.JSONDecodeError as error:
-                    raise ProtocolViolation(
-                        "registered trial payload is corrupt"
-                    ) from error
-                if (
-                    trial["status"]
-                    not in {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
-                    or not isinstance(trial_payload, dict)
-                    or not trial_payload
-                    or _canonical(trial_payload) != trial["payload_json"]
-                    or _hash(trial_payload) != trial["payload_hash"]
-                ):
-                    raise ProtocolViolation(
-                        "registered trial population integrity mismatch"
-                    )
+                _registered_trial_payload(trial)
             if recorded_trials != trial_budget:
                 # The locked holdout is authorized only by the exact
                 # preregistered trial population.  A short population is
@@ -862,22 +869,9 @@ class ScientificRegistry:
             ).fetchall()
         candidate_trial_found = False
         for row in trial_rows:
+            payload = _registered_trial_payload(row)
             if row["status"] != "COMPLETED":
                 continue
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError as error:
-                raise ProtocolViolation(
-                    "registered trial payload is corrupt"
-                ) from error
-            if (
-                not isinstance(payload, dict)
-                or _canonical(payload) != row["payload_json"]
-                or _hash(payload) != row["payload_hash"]
-            ):
-                raise ProtocolViolation(
-                    "registered trial payload integrity mismatch"
-                )
             if (
                 payload.get("candidate_id") == candidate_id
                 and payload.get("artifact_hash") == artifact_hash
@@ -965,20 +959,7 @@ class ScientificRegistry:
         log: list[dict[str, str]] = []
         counts: dict[str, int] = {}
         for row in trial_rows:
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError as error:
-                raise ProtocolViolation(
-                    "registered trial payload is corrupt"
-                ) from error
-            if (
-                not isinstance(payload, dict)
-                or _canonical(payload) != row["payload_json"]
-                or _hash(payload) != row["payload_hash"]
-            ):
-                raise ProtocolViolation(
-                    "registered trial payload integrity mismatch"
-                )
+            _registered_trial_payload(row)
             log.append(
                 {
                     "trial_id": row["trial_id"],

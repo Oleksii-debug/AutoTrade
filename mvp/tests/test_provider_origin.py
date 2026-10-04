@@ -73,6 +73,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
         body: bytes,
         *,
         request_marker: str,
+        terminal_cut_delta: int = 0,
     ):
         """Seed only the durable recovery state; this is not provider-wire proof."""
 
@@ -94,7 +95,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 provider_environment=binding.provider_environment,
             )
         )
-        terminal_cut = prepared["journal_sequence"]
+        terminal_cut = prepared["journal_sequence"] + terminal_cut_delta
         artifact_id = _response_artifact_id(
             attempt_id=attempt_id,
             qualified_query_digest=snapshot["qualified_query_digest"],
@@ -536,6 +537,49 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     "AuthenticatedReadRetained",
                     "AuthenticatedReadObserved",
                 ],
+            )
+
+    def test_prepared_claim_recovery_rejects_terminal_cut_before_prepared(self):
+        """A durable claim cannot relabel a wire cut that predates Prepared."""
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                _capabilities,
+                _qualifications,
+                _route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[]}}'
+            attempt_id, _artifact_id = self._seed_direct_claim_artifact(
+                origin,
+                journal,
+                binding,
+                body,
+                request_marker="terminal-before-prepared",
+                terminal_cut_delta=-1,
+            )
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "predates durable Prepared",
+            ):
+                restarted.recover_response_binding(attempt_id, binding)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                ["AuthenticatedReadPrepared"],
             )
 
     def test_prepared_claim_missing_artifact_fails_closed_until_exact_bytes_restored(self):

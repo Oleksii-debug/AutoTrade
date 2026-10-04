@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.bounded_real import (
     ArtifactStoreEvidenceVerifier,
     BoundedRealEnvelope,
     BoundedRealObservations,
+    EvidenceVerification,
     ImmutableEvidenceRef,
     QualificationEvidence,
     assess_bounded_real_qualification,
@@ -381,6 +382,270 @@ class BoundedRealAuthorityUnforgeabilityTests(unittest.TestCase):
 
             self.assertIsNone(verifier_ref())
             self.assertIsNone(store_ref())
+
+    def test_text_subclass_is_rejected_before_strip_dispatch(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile text normalization must not run")
+
+        with self.assertRaisesRegex(ValueError, "envelope_id is required"):
+            BoundedRealEnvelope.create(
+                envelope_id=HostileText("bounded-real-test"),
+                source_sha="a" * 40,
+                account_id="acct-1",
+                provider_id="PROVIDER-A",
+                policy_id="policy-1",
+                allowed_actions=frozenset({"ORDER.SUBMIT"}),
+                max_capital="1000",
+                max_single_notional="100",
+                max_gross_leverage="2",
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_decimal_text_subclass_is_rejected_before_conversion_dispatch(self):
+        calls = []
+
+        class HostileText(str):
+            def __str__(self):
+                calls.append("str")
+                raise AssertionError("hostile decimal conversion must not run")
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "must use Decimal, string or integer input",
+        ):
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-real-test",
+                source_sha="a" * 40,
+                account_id="acct-1",
+                provider_id="PROVIDER-A",
+                policy_id="policy-1",
+                allowed_actions=frozenset({"ORDER.SUBMIT"}),
+                max_capital=HostileText("1000"),
+                max_single_notional="100",
+                max_gross_leverage="2",
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_action_collection_subclass_is_rejected_before_iteration(self):
+        calls = []
+
+        class HostileSet(set):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile action iteration must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact set or frozenset"):
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-real-test",
+                source_sha="a" * 40,
+                account_id="acct-1",
+                provider_id="PROVIDER-A",
+                policy_id="policy-1",
+                allowed_actions=HostileSet({"ORDER.SUBMIT"}),
+                max_capital="1000",
+                max_single_notional="100",
+                max_gross_leverage="2",
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_action_text_subclass_is_rejected_before_strip_dispatch(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile action normalization must not run")
+
+        with self.assertRaisesRegex(ValueError, "action is required"):
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-real-test",
+                source_sha="a" * 40,
+                account_id="acct-1",
+                provider_id="PROVIDER-A",
+                policy_id="policy-1",
+                allowed_actions=frozenset({HostileText("ORDER.SUBMIT")}),
+                max_capital="1000",
+                max_single_notional="100",
+                max_gross_leverage="2",
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_verifier_rejects_polymorphic_root_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile evidence-root normalization")
+
+            def __fspath__(self):
+                touched.append("text-fspath")
+                raise AssertionError("hostile evidence-root path conversion")
+
+        class HostilePath(type(Path())):
+            def __fspath__(self):
+                touched.append("path-fspath")
+                raise AssertionError("hostile evidence-root path conversion")
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            for root in (HostileText(directory), HostilePath(directory)):
+                with self.subTest(root_type=type(root).__name__):
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "evidence_root must be an exact string or Path",
+                    ):
+                        ArtifactStoreEvidenceVerifier(
+                            store,
+                            evidence_root=root,
+                        )
+
+        self.assertEqual(touched, [])
+
+    def test_verifier_identity_ignores_instance_constant_shadowing(self):
+        with TemporaryDirectory() as directory:
+            verifier = ArtifactStoreEvidenceVerifier(
+                ArtifactStore(directory),
+                evidence_root=directory,
+            )
+            expected = verifier.identity
+            verifier.VERIFIER_ID = "FORGED_BY_CALLER"
+
+            self.assertEqual(verifier.identity, expected)
+            self.assertNotIn("FORGED_BY_CALLER", verifier.identity)
+
+    def test_evidence_verification_reason_requires_exact_string(self):
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile reason text must not run")
+
+        with self.assertRaisesRegex(TypeError, "reason must be an exact string"):
+            EvidenceVerification(valid=False, reason=HostileText("untrusted"))
+
+        self.assertEqual(calls, [])
+
+    def test_unresolved_blocker_collection_subclass_is_rejected_before_iteration(self):
+        envelope = self._envelope()
+        calls = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile blocker iteration must not run")
+
+        ref = ImmutableEvidenceRef(
+            artifact_id="44444444-4444-4444-8444-444444444444",
+            sha256="sha256:" + "e" * 64,
+            evidence_kind="PREREQUISITE:RELEASE_CANDIDATE",
+            source_sha=envelope.source_sha,
+            envelope_id=envelope.envelope_id,
+            envelope_digest=envelope.envelope_digest,
+            provider_id=envelope.provider_id,
+            account_id=envelope.account_id,
+        )
+        with self.assertRaisesRegex(TypeError, "unresolved_blockers must be an exact tuple"):
+            QualificationEvidence(
+                evidence_id="evidence-1",
+                evidence_kind="RELEASE_CANDIDATE",
+                source_sha=envelope.source_sha,
+                envelope_id=envelope.envelope_id,
+                envelope_digest=envelope.envelope_digest,
+                passed=True,
+                evidence_ref=ref,
+                unresolved_blockers=HostileTuple(("blocked",)),
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_observation_count_subclass_is_rejected_before_comparison_dispatch(self):
+        envelope = self._envelope()
+        calls = []
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                calls.append("lt")
+                raise AssertionError("hostile count comparison must not run")
+
+        with self.assertRaisesRegex(ValueError, "observed_fill_count"):
+            BoundedRealObservations(
+                source_sha=envelope.source_sha,
+                envelope_id=envelope.envelope_id,
+                envelope_digest=envelope.envelope_digest,
+                provider_id=envelope.provider_id,
+                account_id=envelope.account_id,
+                observed_fill_count=HostileInt(0),
+                observed_partial_fill=False,
+                all_fills_reconciled=True,
+                fees_reconciled=True,
+                revocation_verified=True,
+                protection_verified=True,
+                unauthorized_action_count=0,
+                unresolved_unknown_count=0,
+                evidence_refs=(),
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_prerequisite_collection_subclass_is_rejected_before_iteration(self):
+        envelope = self._envelope()
+        observations = self._observations(envelope)
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile prerequisite iteration must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            assess_bounded_real_qualification(
+                envelope=envelope,
+                prerequisite_evidence=HostileList(),
+                observations=observations,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_noncanonical_trust_objects_fail_before_attribute_dispatch(self):
+        envelope = self._envelope()
+        observations = self._observations(envelope)
+        calls = []
+
+        class HostileTrust:
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    calls.append(name)
+                    raise AssertionError("hostile trust dispatch must not run")
+                return super().__getattribute__(name)
+
+        with TemporaryDirectory() as directory:
+            verifier = ArtifactStoreEvidenceVerifier(
+                ArtifactStore(directory),
+                evidence_root=directory,
+            )
+            result = assess_bounded_real_qualification(
+                envelope=envelope,
+                prerequisite_evidence=(),
+                observations=observations,
+                evidence_verifier=verifier,
+                qualification_receipt=HostileTrust(),
+                qualification_policy=HostileTrust(),
+                expected_policy_id="policy-id",
+                expected_policy_version="1",
+            )
+
+        self.assertIn("independent_evidence_trust_invalid", result.reason_codes)
+        self.assertEqual(calls, [])
 
     def test_verifier_subclass_is_rejected_before_verdict_dispatch(self):
         envelope = self._envelope()

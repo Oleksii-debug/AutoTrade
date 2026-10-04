@@ -429,6 +429,72 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 Decimal("100"),
             )
 
+    def test_reservation_writer_after_cut_fences_atomic_bust(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+            original_prepare = (
+                DurableReservationBook.prepare_restore_consumption_mutation
+            )
+            injected = False
+
+            def race_after_reservation_cut(selected_book, **kwargs):
+                nonlocal injected
+                plan = original_prepare(selected_book, **kwargs)
+                if selected_book is reservations and not injected:
+                    injected = True
+                    reservations.reserve(
+                        command_id="reservation-race-command",
+                        idempotency_key="reservation-race-idempotency",
+                        reservation_id="reservation-race",
+                        intent_id="intent-race",
+                        requirements={"CASH:EUR": "1"},
+                        available={"CASH:EUR": "1"},
+                    )
+                return plan
+
+            DurableReservationBook.prepare_restore_consumption_mutation = (
+                race_after_reservation_cut
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed after financial evidence validation",
+                ):
+                    atomic_bust(
+                        orders,
+                        economics,
+                        reservations,
+                        projected,
+                        provider,
+                    )
+            finally:
+                DurableReservationBook.prepare_restore_consumption_mutation = (
+                    original_prepare
+                )
+
+            ro, re, rr = books(JournalStore(path))
+            self.assertEqual(
+                ro.order("order-1").snapshot().filled_quantity,
+                Decimal("1"),
+            )
+            self.assertEqual(re.position("ABC"), Decimal("1"))
+            self.assertEqual(len(re.transactions), 1)
+            self.assertEqual(
+                rr.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                rr.get("reservation-1").remaining["CASH:USD"],
+                Decimal("20"),
+            )
+            self.assertEqual(
+                rr.get("reservation-race").remaining["CASH:EUR"],
+                Decimal("1"),
+            )
+
     def test_settled_source_blocks_bust_without_settlement_compensation_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

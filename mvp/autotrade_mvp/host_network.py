@@ -59,6 +59,10 @@ _SNAPSHOT_FIELDS = {
 }
 _PERMISSION_SUMMARY_FIELDS = {"actor", "session", "role", "capabilities"}
 _PERMISSION_SUMMARY_REQUIRED_FIELDS = {"actor", "session", "role"}
+class _SnapshotUnavailable(RuntimeError):
+    """A valid state read could not obtain one coherent journal cut in time."""
+
+
 _SINGLETON_REQUEST_HEADERS = (
     "Authorization",
     "X-AutoTrade-Actor",
@@ -372,7 +376,7 @@ class AuthenticatedHostApplication:
             if self._journal.current_journal_sequence() == journal_cut:
                 break
         else:
-            raise ValueError("Journal changed during UiSnapshot projection")
+            raise _SnapshotUnavailable("Journal changed during UiSnapshot projection")
         if not isinstance(projected, Mapping):
             raise TypeError("snapshot_provider must return a mapping")
         payload = dict(projected)
@@ -641,6 +645,12 @@ class AuthenticatedHostApplication:
                     "resnapshot": "/api/v1/state",
                 },
                 headers=(("Cache-Control", "no-store"),),
+            )
+        except _SnapshotUnavailable:
+            return _json_response(
+                503,
+                {"error": "SNAPSHOT_BUSY", "retryable": True},
+                headers=(("Cache-Control", "no-store"), ("Retry-After", "1")),
             )
         except PermissionError:
             return _error(403, "AUTHENTICATION_OR_AUTHORIZATION_FAILED")

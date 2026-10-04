@@ -1121,6 +1121,8 @@ class AblationOutcomeArtifactRef:
     def __post_init__(self) -> None:
         from uuid import UUID
 
+        if type(self.artifact_id) is not str:
+            raise TypeError("artifact_id must use exact canonical UUID text")
         try:
             canonical_id = str(UUID(self.artifact_id))
         except (ValueError, AttributeError, TypeError) as error:
@@ -1214,12 +1216,14 @@ def _load_registered_projection_descriptor(
         reference,
         f"{projection_kind.lower()}_projection_ref",
     )
-    manifest = ArtifactStore.load_manifest(artifact_store, artifact_id)
+    manifest, data = ArtifactStore.read_authenticated_snapshot(
+        artifact_store,
+        artifact_id,
+    )
     if manifest.get("sha256") != digest:
         raise ValueError("registered ablation projection digest mismatch")
     if manifest.get("media_type") != _ABLATION_VALUE_PROJECTION_MEDIA_TYPE:
         raise ValueError("registered ablation projection media type is not qualified")
-    data = ArtifactStore.read_bytes(artifact_store, artifact_id)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -1698,12 +1702,14 @@ class AblationQualificationAuthority:
         ) = _registered_policy_context(self)
         if type(reference) is not AblationOutcomeArtifactRef:
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = artifact_store.load_manifest(reference.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            reference.artifact_id,
+        )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = artifact_store.read_bytes(reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:

@@ -667,14 +667,29 @@ class ScientificRegistry:
             raise TypeError(
                 "vintage_registry must be exact HistoricalVintageRegistry"
             )
+        vintage_state = object.__getattribute__(vintage_registry, "__dict__")
+        if (
+            type(vintage_state) is not dict
+            or set(vintage_state) != {"root"}
+            or not isinstance(vintage_state["root"], Path)
+        ):
+            raise TypeError(
+                "vintage_registry has unexpected mutable instance state"
+            )
         canonical_dataset_id = _id(dataset_id)
         if type(dataset_version) is not int or dataset_version < 1:
             raise ProtocolViolation(
                 "locked holdout dataset_version must be a positive integer"
             )
         try:
+            # Reconstruct a clean owner instance from the selected registry root
+            # before dispatching owner methods.  An instance-level method shadow
+            # must not be able to mint a different physical holdout digest.
+            authoritative_vintages = HistoricalVintageRegistry(
+                vintage_state["root"]
+            )
             dataset_digest = HistoricalVintageRegistry.digest(
-                vintage_registry,
+                authoritative_vintages,
                 canonical_dataset_id,
                 dataset_version,
             )

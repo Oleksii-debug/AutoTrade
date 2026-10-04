@@ -223,21 +223,46 @@ class BoundedRealEnvelope:
 
     @property
     def envelope_digest(self) -> str:
+        snapshot = _snapshot_bounded_real_envelope(self)
         return _bounded_real_envelope_digest(
-            envelope_id=self.envelope_id,
-            source_sha=self.source_sha,
-            provider_id=self.provider_id,
-            account_id=self.account_id,
-            policy_id=self.policy_id,
-            allowed_actions=self.allowed_actions,
-            max_capital=self.max_capital,
-            max_single_notional=self.max_single_notional,
-            max_gross_leverage=self.max_gross_leverage,
+            envelope_id=snapshot.envelope_id,
+            source_sha=snapshot.source_sha,
+            provider_id=snapshot.provider_id,
+            account_id=snapshot.account_id,
+            policy_id=snapshot.policy_id,
+            allowed_actions=snapshot.allowed_actions,
+            max_capital=snapshot.max_capital,
+            max_single_notional=snapshot.max_single_notional,
+            max_gross_leverage=snapshot.max_gross_leverage,
         )
 
     @classmethod
     def create(cls, **values) -> "BoundedRealEnvelope":
         return cls(**values)
+
+
+def _snapshot_bounded_real_envelope(
+    envelope: BoundedRealEnvelope,
+) -> BoundedRealEnvelope:
+    if type(envelope) is not BoundedRealEnvelope:
+        raise TypeError("envelope must be exact BoundedRealEnvelope")
+    return BoundedRealEnvelope(
+        envelope_id=object.__getattribute__(envelope, "envelope_id"),
+        source_sha=object.__getattribute__(envelope, "source_sha"),
+        account_id=object.__getattribute__(envelope, "account_id"),
+        provider_id=object.__getattribute__(envelope, "provider_id"),
+        policy_id=object.__getattribute__(envelope, "policy_id"),
+        allowed_actions=object.__getattribute__(envelope, "allowed_actions"),
+        max_capital=object.__getattribute__(envelope, "max_capital"),
+        max_single_notional=object.__getattribute__(
+            envelope,
+            "max_single_notional",
+        ),
+        max_gross_leverage=object.__getattribute__(
+            envelope,
+            "max_gross_leverage",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -272,6 +297,23 @@ class ImmutableEvidenceRef:
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
         )
+
+
+def _snapshot_immutable_evidence_ref(
+    ref: ImmutableEvidenceRef,
+) -> ImmutableEvidenceRef:
+    if type(ref) is not ImmutableEvidenceRef:
+        raise TypeError("evidence reference must be exact ImmutableEvidenceRef")
+    return ImmutableEvidenceRef(
+        artifact_id=object.__getattribute__(ref, "artifact_id"),
+        sha256=object.__getattribute__(ref, "sha256"),
+        evidence_kind=object.__getattribute__(ref, "evidence_kind"),
+        source_sha=object.__getattribute__(ref, "source_sha"),
+        envelope_id=object.__getattribute__(ref, "envelope_id"),
+        envelope_digest=object.__getattribute__(ref, "envelope_digest"),
+        provider_id=object.__getattribute__(ref, "provider_id"),
+        account_id=object.__getattribute__(ref, "account_id"),
+    )
 
 
 @dataclass(frozen=True)
@@ -479,6 +521,7 @@ class ArtifactStoreEvidenceVerifier:
     def verify(self, ref: ImmutableEvidenceRef) -> EvidenceVerification:
         if type(ref) is not ImmutableEvidenceRef:
             raise TypeError("evidence reference must be exact ImmutableEvidenceRef")
+        ref = _snapshot_immutable_evidence_ref(ref)
         _, _, read_snapshot, _ = _artifact_store_evidence_verifier_binding(self)
         if not callable(read_snapshot):
             raise ValueError("trusted immutable evidence reader is unavailable")
@@ -600,12 +643,13 @@ class QualificationEvidence:
         envelope_digest = _digest(self.envelope_digest)
         if type(self.evidence_ref) is not ImmutableEvidenceRef:
             raise TypeError("evidence_ref must be exact ImmutableEvidenceRef")
-        if self.evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
+        evidence_ref = _snapshot_immutable_evidence_ref(self.evidence_ref)
+        if evidence_ref.evidence_kind != f"PREREQUISITE:{evidence_kind}":
             raise ValueError("prerequisite evidence_ref kind does not match evidence_kind")
         if (
-            self.evidence_ref.source_sha != source_sha
-            or self.evidence_ref.envelope_id != envelope_id
-            or self.evidence_ref.envelope_digest != envelope_digest
+            evidence_ref.source_sha != source_sha
+            or evidence_ref.envelope_id != envelope_id
+            or evidence_ref.envelope_digest != envelope_digest
         ):
             raise ValueError("prerequisite evidence_ref scope does not match evidence")
         object.__setattr__(self, "evidence_id", evidence_id)
@@ -614,11 +658,34 @@ class QualificationEvidence:
         object.__setattr__(self, "envelope_id", envelope_id)
         object.__setattr__(self, "envelope_digest", envelope_digest)
         object.__setattr__(self, "passed", _bool(self.passed, name="passed"))
+        object.__setattr__(self, "evidence_ref", evidence_ref)
         object.__setattr__(self, "unresolved_blockers", blockers)
 
     @classmethod
     def create(cls, **values) -> "QualificationEvidence":
         return cls(**values)
+
+
+def _snapshot_qualification_evidence(
+    evidence: QualificationEvidence,
+) -> QualificationEvidence:
+    if type(evidence) is not QualificationEvidence:
+        raise TypeError(
+            "prerequisite_evidence must contain exact QualificationEvidence"
+        )
+    return QualificationEvidence(
+        evidence_id=object.__getattribute__(evidence, "evidence_id"),
+        evidence_kind=object.__getattribute__(evidence, "evidence_kind"),
+        source_sha=object.__getattribute__(evidence, "source_sha"),
+        envelope_id=object.__getattribute__(evidence, "envelope_id"),
+        envelope_digest=object.__getattribute__(evidence, "envelope_digest"),
+        passed=object.__getattribute__(evidence, "passed"),
+        evidence_ref=object.__getattribute__(evidence, "evidence_ref"),
+        unresolved_blockers=object.__getattribute__(
+            evidence,
+            "unresolved_blockers",
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -661,15 +728,14 @@ class BoundedRealObservations:
             _bool(getattr(self, field_name), name=field_name)
         if type(self.evidence_refs) is not tuple:
             raise TypeError("evidence_refs must be an exact tuple")
-        refs = self.evidence_refs
+        refs = tuple(
+            _snapshot_immutable_evidence_ref(ref)
+            for ref in self.evidence_refs
+        )
         artifact_ids: set[str] = set()
         digests: set[str] = set()
         kinds: set[str] = set()
         for ref in refs:
-            if type(ref) is not ImmutableEvidenceRef:
-                raise TypeError(
-                    "evidence_refs must contain exact ImmutableEvidenceRef"
-                )
             if (
                 ref.source_sha != source_sha
                 or ref.envelope_id != envelope_id
@@ -695,6 +761,56 @@ class BoundedRealObservations:
     @classmethod
     def create(cls, **values) -> "BoundedRealObservations":
         return cls(**values)
+
+
+def _snapshot_bounded_real_observations(
+    observations: BoundedRealObservations,
+) -> BoundedRealObservations:
+    if type(observations) is not BoundedRealObservations:
+        raise TypeError("observations must be exact BoundedRealObservations")
+    return BoundedRealObservations(
+        source_sha=object.__getattribute__(observations, "source_sha"),
+        envelope_id=object.__getattribute__(observations, "envelope_id"),
+        envelope_digest=object.__getattribute__(
+            observations,
+            "envelope_digest",
+        ),
+        provider_id=object.__getattribute__(observations, "provider_id"),
+        account_id=object.__getattribute__(observations, "account_id"),
+        observed_fill_count=object.__getattribute__(
+            observations,
+            "observed_fill_count",
+        ),
+        observed_partial_fill=object.__getattribute__(
+            observations,
+            "observed_partial_fill",
+        ),
+        all_fills_reconciled=object.__getattribute__(
+            observations,
+            "all_fills_reconciled",
+        ),
+        fees_reconciled=object.__getattribute__(
+            observations,
+            "fees_reconciled",
+        ),
+        revocation_verified=object.__getattribute__(
+            observations,
+            "revocation_verified",
+        ),
+        protection_verified=object.__getattribute__(
+            observations,
+            "protection_verified",
+        ),
+        unauthorized_action_count=object.__getattribute__(
+            observations,
+            "unauthorized_action_count",
+        ),
+        unresolved_unknown_count=object.__getattribute__(
+            observations,
+            "unresolved_unknown_count",
+        ),
+        evidence_refs=object.__getattribute__(observations, "evidence_refs"),
+    )
 
 
 @dataclass(frozen=True)
@@ -759,6 +875,13 @@ def assess_bounded_real_qualification(
         raise TypeError("observations must be exact BoundedRealObservations")
     if type(prerequisite_evidence) not in {list, tuple}:
         raise TypeError("prerequisite_evidence must be an exact list or tuple")
+
+    envelope = _snapshot_bounded_real_envelope(envelope)
+    observations = _snapshot_bounded_real_observations(observations)
+    prerequisite_evidence = tuple(
+        _snapshot_qualification_evidence(evidence)
+        for evidence in prerequisite_evidence
+    )
 
     reasons: list[str] = []
     scope_matches = (

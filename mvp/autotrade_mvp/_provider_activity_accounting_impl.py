@@ -2735,9 +2735,9 @@ def commit_economic_batch_with_reservation_consumption(
                 )
 
     if provider_fill_binding is not None:
-        if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
+        if type(provider_fill_binding) is not PreparedProviderFillBinding:
             raise TypeError(
-                "provider_fill_binding must be PreparedProviderFillBinding or None"
+                "provider_fill_binding must be exact PreparedProviderFillBinding or None"
             )
         binding_request = provider_fill_binding.request
         if (
@@ -3306,12 +3306,10 @@ def commit_economic_correction_with_settlement_replacement(
             raise ValueError(
                 "reservation-aware correction requires correction binding evidence"
             )
-        if not isinstance(
-            provider_fill_correction_binding,
-            PreparedProviderFillCorrectionBinding,
-        ):
+        if type(provider_fill_correction_binding) is not PreparedProviderFillCorrectionBinding:
             raise TypeError(
-                "provider_fill_correction_binding has invalid type"
+                "provider_fill_correction_binding must be exact "
+                "PreparedProviderFillCorrectionBinding"
             )
         rid = _text(reservation_id, name="reservation_id")
         binding_request = provider_fill_correction_binding.request

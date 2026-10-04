@@ -115,7 +115,7 @@ _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
 
-    if not isinstance(value, str) or _SEQUENCE_RE.fullmatch(value) is None:
+    if type(value) is not str or _SEQUENCE_RE.fullmatch(value) is None:
         qualifier = "positive " if positive else ""
         raise ValueError(
             f"{name} must be a {qualifier}canonical integer sequence string"
@@ -869,7 +869,10 @@ class JournalStore:
 
     @staticmethod
     def _require_text(value: Any, name: str) -> str:
-        if not isinstance(value, str) or not value.strip():
+        # Authority-bearing text must be inert built-in text.  Reject subclasses
+        # before invoking .strip() so caller code cannot run inside persistence
+        # validation through an overridden string method.
+        if type(value) is not str or not value.strip():
             raise ValueError(f"{name} must be non-empty text")
         return value.strip()
 

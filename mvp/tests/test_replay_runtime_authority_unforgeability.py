@@ -207,6 +207,18 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             CompositeReplayCheckpoint.from_canonical_json(hostile)
         self.assertFalse(hostile.touched)
 
+    def test_composite_parser_rejects_subclass_factory_before_construction(self):
+        touched = []
+
+        class HostileCompositeCheckpoint(CompositeReplayCheckpoint):
+            def __post_init__(self):
+                touched.append("constructed")
+                super().__post_init__()
+
+        with self.assertRaisesRegex(TypeError, "parser requires canonical class"):
+            HostileCompositeCheckpoint.from_canonical_json("{}")
+        self.assertEqual(touched, [])
+
     def test_public_self_authored_authority_cannot_mint_resume_truth(self):
         events = [
             _event(1, "2026-09-24T10:00:00Z", 1),

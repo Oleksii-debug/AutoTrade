@@ -18,6 +18,8 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    _execution_receipt_ref,
+    _require_durable_execution_receipt,
     _require_same_terminal_qualified_authority,
     execute_qualified_provider_origin_read,
     observe_provider_origin_json_response,
@@ -86,6 +88,8 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 binding.qualified_route_rule_digest,
             )
             self.assertEqual(recorded.origin_kind, "TEST_INJECTED")
+            self.assertIsNone(recorded.transport_execution_receipt_ref)
+            self.assertIsNone(recorded.terminal_authority_journal_sequence_cut)
             self.assertTrue(
                 recorded.origin_ref.startswith("test-injected-provider-response:sha256:")
             )
@@ -162,6 +166,81 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 origin.observe_json_response(attempt_id, binding)
 
 
+
+
+    def test_execution_receipt_ref_binds_terminal_cut_and_policy(self):
+        common = {
+            "attempt_id": "provider-read:" + "a" * 32,
+            "qualified_query_digest": "sha256:" + "1" * 64,
+            "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+            "qualified_route_rule_digest": "sha256:" + "3" * 64,
+            "transport_identity": "transport:direct-receipt-v1",
+            "network_policy_identity": "sha256:" + "4" * 64,
+            "http_status": 200,
+            "response_sha256": "sha256:" + "5" * 64,
+            "observed_at": "2026-10-04T09:00:00Z",
+        }
+        first = _execution_receipt_ref(
+            **common,
+            terminal_authority_journal_sequence_cut=10,
+        )
+        later_cut = _execution_receipt_ref(
+            **common,
+            terminal_authority_journal_sequence_cut=11,
+        )
+        changed_policy = _execution_receipt_ref(
+            **{
+                **common,
+                "network_policy_identity": "sha256:" + "6" * 64,
+            },
+            terminal_authority_journal_sequence_cut=10,
+        )
+        self.assertTrue(first.startswith("provider-read-execution:sha256:"))
+        self.assertNotEqual(first, later_cut)
+        self.assertNotEqual(first, changed_policy)
+
+    def test_durable_execution_receipt_rejects_terminal_cut_before_prepared(self):
+        attempt = "provider-read:" + "b" * 32
+        snapshot = {
+            "qualified_query_digest": "sha256:" + "1" * 64,
+            "qualification_id": "provider-qualification:sha256:" + "2" * 64,
+            "qualified_route_rule_digest": "sha256:" + "3" * 64,
+        }
+        prepared_payload = {
+            "transport_identity": "transport:direct-receipt-v1",
+            "network_policy_identity": "sha256:" + "4" * 64,
+        }
+        prepared = {"journal_sequence": 20}
+        retained = {
+            "origin_kind": "PROVIDER_ORIGIN",
+            "http_status": 200,
+            "response_sha256": "sha256:" + "5" * 64,
+            "observed_at": "2026-10-04T09:00:00Z",
+            "terminal_authority_journal_sequence_cut": 19,
+        }
+        retained["transport_execution_receipt_ref"] = _execution_receipt_ref(
+            attempt_id=attempt,
+            qualified_query_digest=snapshot["qualified_query_digest"],
+            qualification_id=snapshot["qualification_id"],
+            qualified_route_rule_digest=snapshot["qualified_route_rule_digest"],
+            transport_identity=prepared_payload["transport_identity"],
+            network_policy_identity=prepared_payload["network_policy_identity"],
+            http_status=retained["http_status"],
+            response_sha256=retained["response_sha256"],
+            observed_at=retained["observed_at"],
+            terminal_authority_journal_sequence_cut=19,
+        )
+        with self.assertRaisesRegex(
+            ProviderOriginError,
+            "lacks valid terminal execution receipt",
+        ):
+            _require_durable_execution_receipt(
+                attempt_id=attempt,
+                prepared=prepared,
+                prepared_payload=prepared_payload,
+                retained_payload=retained,
+                snapshot=snapshot,
+            )
 
     def test_private_retention_core_cannot_self_mint_provider_origin(self):
         with TemporaryDirectory() as directory:

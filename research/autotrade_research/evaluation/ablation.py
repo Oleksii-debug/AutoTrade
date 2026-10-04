@@ -1750,6 +1750,10 @@ class AblationQualificationAuthority:
             task,
             instrument_family,
         ) = _registered_policy_context(self)
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
         selected = tuple(pairs)
         if not selected:
             raise ValueError("qualified ablation requires a non-empty matched population")
@@ -1844,7 +1848,16 @@ class AblationQualificationAuthority:
             task,
             instrument_family,
         ) = _registered_policy_context(self)
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
         selected = tuple(pairs)
+        refs = tuple(outcome_refs)
         population = self.resolve_population(selected)
         snapshot = experience_memory.coverage_population_snapshot(
             causal_cutoff=causal_cutoff,
@@ -1857,7 +1870,7 @@ class AblationQualificationAuthority:
             raise ValueError("ablation population changed during authority resolution")
         outcomes = tuple(
             self._load_outcome(reference, population_root=snapshot.root_hash)
-            for reference in outcome_refs
+            for reference in refs
         )
         if any(
             evidence.outcome_available_utc > causal_cutoff
@@ -2133,15 +2146,26 @@ def evaluate_qualified_incremental_value(
     owner evidence and one immutable historical economic cut are available.
     """
 
-    selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
         if type(authority) is not AblationQualificationAuthority:
             raise TypeError(
                 "authority must be the canonical AblationQualificationAuthority or None"
             )
-        caller_outcomes = tuple(canonical_outcomes)
-        if population is not None or caller_outcomes:
+        if type(pairs) not in {list, tuple}:
+            raise TypeError(
+                "pairs must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(canonical_outcomes) not in {list, tuple}:
+            raise TypeError(
+                "canonical_outcomes must be an exact list or tuple for authority-backed qualification"
+            )
+        if type(outcome_refs) not in {list, tuple}:
+            raise TypeError(
+                "outcome_refs must be an exact list or tuple for authority-backed qualification"
+            )
+        selected_input = tuple(pairs)
+        if population is not None or len(canonical_outcomes) != 0:
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
@@ -2266,6 +2290,7 @@ def evaluate_qualified_incremental_value(
             reason="canonical_utility_cost_owner_evidence_unavailable",
         )
     else:
+        selected_input = tuple(pairs)
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
         if not isinstance(population, RegisteredAblationPopulation):

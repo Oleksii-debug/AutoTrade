@@ -198,23 +198,29 @@ class DurableProviderQualificationRegistry:
         self.evidence_root = evidence_root
 
     def _resolved_cut(self, requested: int | None) -> int:
-        if requested is not None:
-            if type(requested) is not int or requested < 0:
-                raise ValueError(
-                    "journal_sequence_cut must be a non-negative exact integer or None"
-                )
-            return requested
+        if requested is not None and (
+            type(requested) is not int or requested < 0
+        ):
+            raise ValueError(
+                "journal_sequence_cut must be a non-negative exact integer or None"
+            )
         cut = self.store.whole_store_state_cut()
         if type(cut) is not dict:
             raise ProviderQualificationError(
                 "whole-store journal cut is non-canonical"
             )
-        value = cut.get("journal_sequence")
-        if type(value) is not int or value < 0:
+        observed = cut.get("journal_sequence")
+        if type(observed) is not int or observed < 0:
             raise ProviderQualificationError(
                 "whole-store journal cut lacks canonical sequence"
             )
-        return value
+        if requested is None:
+            return observed
+        if requested > observed:
+            raise ProviderQualificationError(
+                "requested provider qualification journal cut is in the future"
+            )
+        return requested
 
     def _authenticate_record(
         self,
@@ -589,15 +595,15 @@ class DurableProviderQualificationRegistry:
                 continue
             if qualification_id in history.superseded:
                 continue
-            completed = datetime.strptime(
-                record.completed_at,
+            signed_at = datetime.strptime(
+                record.signed_at,
                 "%Y-%m-%dT%H:%M:%SZ",
             ).replace(tzinfo=timezone.utc)
             valid_until = datetime.strptime(
                 record.valid_until,
                 "%Y-%m-%dT%H:%M:%SZ",
             ).replace(tzinfo=timezone.utc)
-            if completed <= point < valid_until:
+            if signed_at <= point < valid_until:
                 candidates.append(record)
         if not candidates:
             raise ProviderQualificationCurrentUnavailable(

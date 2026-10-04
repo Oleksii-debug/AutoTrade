@@ -197,14 +197,16 @@ def _require_durable_prepared_financial_request(
 def _risk_payload(
     journal: JournalStore,
     binding: FinancialRequestBindingMaterial,
+    *,
+    load_events: Callable[..., Any],
 ) -> Mapping[str, Any]:
-    events = journal.load_events("risk_decision", binding.risk_decision_id)
-    if len(events) != 1:
+    events = load_events(journal, "risk_decision", binding.risk_decision_id)
+    if type(events) is not list or len(events) != 1:
         raise FinancialSendAuthorityError(
             "financial binding risk decision is not one durable canonical event"
         )
     payload = events[0].get("payload")
-    if not isinstance(payload, Mapping):
+    if type(payload) is not dict:
         raise FinancialSendAuthorityError("durable risk decision payload is malformed")
     return payload
 
@@ -213,17 +215,19 @@ def _require_binding_matches_durable_admission(
     *,
     service: AuthorityService,
     journal: JournalStore,
+    historical_admission: Callable[..., Any],
+    load_events: Callable[..., Any],
     admission_id: str,
     intent_hash: str,
     action: str,
     binding: FinancialRequestBindingMaterial,
 ) -> Mapping[str, Any]:
-    admission = service.historical_admission(admission_id)
-    if not isinstance(admission, Mapping) or admission.get("outcome") != "ADMITTED":
+    admission = historical_admission(service, admission_id)
+    if type(admission) is not dict or admission.get("outcome") != "ADMITTED":
         raise FinancialSendAuthorityError("financial send requires an admitted durable record")
 
     instrument = admission.get("instrument")
-    if not isinstance(instrument, Mapping):
+    if type(instrument) is not dict:
         raise FinancialSendAuthorityError("durable admission instrument is malformed")
 
     expected = (
@@ -253,13 +257,13 @@ def _require_binding_matches_durable_admission(
             "financial request binding differs from durable admission scope"
         )
 
-    risk_payload = _risk_payload(journal, binding)
+    risk_payload = _risk_payload(journal, binding, load_events=load_events)
     if risk_payload.get("journal_sequence_cut") != binding.admitted_journal_sequence_cut:
         raise FinancialSendAuthorityError(
             "financial request binding journal cut differs from durable risk decision"
         )
     snapshot = risk_payload.get("authoritative_risk_snapshot")
-    if not isinstance(snapshot, Mapping):
+    if type(snapshot) is not dict:
         raise FinancialSendAuthorityError(
             "durable risk decision lacks authoritative risk snapshot"
         )
@@ -269,7 +273,7 @@ def _require_binding_matches_durable_admission(
         )
 
     durable_intent = risk_payload.get("risk_intent")
-    if not isinstance(durable_intent, Mapping):
+    if type(durable_intent) is not dict:
         raise FinancialSendAuthorityError("durable risk decision lacks canonical risk intent")
     durable_side = durable_intent.get("side")
     durable_quantity = durable_intent.get("quantity")
@@ -767,6 +771,8 @@ class FinancialSendAuthorityIssuer:
         admission = _require_binding_matches_durable_admission(
             service=self.__service,
             journal=self.__journal,
+            historical_admission=self.__historical_function,
+            load_events=self.__journal_load_events_function,
             admission_id=_exact_text(admission_id, name="admission_id"),
             intent_hash=_exact_text(intent_hash, name="intent_hash"),
             action=_exact_text(action, name="action"),
@@ -836,6 +842,8 @@ class FinancialSendAuthorityIssuer:
         admission = _require_binding_matches_durable_admission(
             service=self.__service,
             journal=self.__journal,
+            historical_admission=self.__historical_function,
+            load_events=self.__journal_load_events_function,
             admission_id=admission_id,
             intent_hash=intent_hash,
             action=action,

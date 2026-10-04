@@ -1311,12 +1311,177 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void HostRefreshHeartbeatAndTransitionTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null,
+                    new object[] { new DisconnectedEmergencyHostClient() }, null)!;
+                var timer = (System.Windows.Threading.DispatcherTimer)typeof(MainWindow)
+                    .GetField("_hostRefreshTimer", flags)!.GetValue(window)!;
+                typeof(MainWindow).GetMethod("MainWindow_Loaded", flags)!
+                    .Invoke(window, new object[] { window, new System.Windows.RoutedEventArgs() });
+                Check.True(timer.IsEnabled && timer.Interval == TimeSpan.FromSeconds(10),
+                    "native status refresh did not start its bounded ten-second cadence");
+
+                var apply = typeof(MainWindow).GetMethod("ApplyHostStatus", flags)!;
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                DateTimeOffset origin = new(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+                EmergencyHostStatus current = new(
+                    true, "host-local-1", "paper-account-1", "PAPER",
+                    "7", origin, "Current host evidence") { IsCurrent = true };
+                apply.Invoke(window, new object[] { current, false });
+                apply.Invoke(window, new object[] {
+                    current with {
+                        StateVersion = "8",
+                        ObservedAtUtc = origin.AddMinutes(-1),
+                        IsCurrent = false,
+                    },
+                    false,
+                });
+                Check.True(
+                    announcement.Text.StartsWith("Host status is stale.", StringComparison.Ordinal),
+                    "quiet heartbeat transition to stale evidence was not announced");
+                apply.Invoke(window, new object[] {
+                    current with {
+                        StateVersion = "8",
+                        ObservedAtUtc = origin.AddMinutes(1),
+                        IsCurrent = true,
+                    },
+                    false,
+                });
+                Check.True(
+                    announcement.Text.StartsWith("Host status refreshed.", StringComparison.Ordinal),
+                    "quiet heartbeat transition back to current evidence was not announced");
+
+                typeof(MainWindow).GetMethod("MainWindow_Closed", flags)!
+                    .Invoke(window, new object?[] { window, EventArgs.Empty });
+                Check.True(!timer.IsEnabled,
+                    "native status refresh continued after the window closed");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void AutomaticHostRefreshKeepsRefreshButtonEnabledTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null, new object[] { client }, null)!;
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+                client.OnGetStatus = () => Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh disabled the focusable refresh button");
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                Task task = (Task)refresh.Invoke(window, new object[] { false, false })!;
+                task.GetAwaiter().GetResult();
+                Check.True(button.IsEnabled,
+                    "automatic host refresh left the focusable refresh button disabled");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    static void ManualRefreshDuringAutomaticRefreshIsAnnouncedTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                int transportCalls = 0;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow), flags, null, new object[] { client }, null)!;
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                var announcement =
+                    (System.Windows.Controls.TextBlock)window.FindName("HostStatusAnnouncement");
+                var button =
+                    (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+
+                client.OnGetStatus = () =>
+                {
+                    transportCalls++;
+                    Task overlap =
+                        (Task)refresh.Invoke(window, new object[] { true, true })!;
+                    overlap.GetAwaiter().GetResult();
+                    Check.True(
+                        announcement.Text.StartsWith(
+                            "Host status refresh is already in progress.",
+                            StringComparison.Ordinal),
+                        "manual refresh overlap was silent to keyboard/NVDA users");
+                };
+
+                Task automatic =
+                    (Task)refresh.Invoke(window, new object[] { false, false })!;
+                automatic.GetAwaiter().GetResult();
+
+                Check.True(transportCalls == 1,
+                    "manual refresh overlap started a second host request");
+                Check.True(
+                    announcement.Text.Contains(
+                        "Inspecting status client is intentionally disconnected.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh did not announce the in-flight result");
+                Check.True(
+                    !announcement.Text.StartsWith(
+                        "Host status refresh is already in progress.",
+                        StringComparison.Ordinal),
+                    "coalesced manual refresh left only the interim announcement");
+                Check.True(button.IsEnabled,
+                    "manual refresh overlap disabled the focusable refresh button");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
         WebExperienceSecurityPolicyOriginAndNavigationTest();
         WebExperienceSecurityPolicyCredentialForwardingTest();
         WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
         WindowRetainsCurrentEvidenceFloorTest();
+        HostRefreshHeartbeatAndTransitionTest();
+        AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
+        ManualRefreshDuringAutomaticRefreshIsAnnouncedTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
@@ -1337,6 +1502,29 @@ internal static class Program
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
+}
+
+internal sealed class InspectingStatusHostClient : IEmergencyHostClient
+{
+    public Action? OnGetStatus { get; set; }
+
+    public Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OnGetStatus?.Invoke();
+        return Task.FromResult(
+            EmergencyHostStatus.Disconnected(
+                "Inspecting status client is intentionally disconnected."));
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
 }
 
 internal static class Check

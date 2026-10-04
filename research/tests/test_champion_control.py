@@ -447,10 +447,42 @@ class ChampionRegistryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial payload integrity mismatch",
+                "trial population integrity mismatch",
             ):
                 registry.promote(
                     approval_value,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_nonterminal_trial_status_cannot_authorize_promotion_after_lock(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+            with science._connect() as con:
+                # Model a legacy/manual writer below the append-only SQL guard.
+                # The locked evaluation existed while the trial was terminal;
+                # promotion must revalidate the current durable population.
+                con.execute("DROP TRIGGER trials_no_update")
+                cursor = con.execute(
+                    "UPDATE trials SET status=? WHERE protocol_id=?",
+                    ("RUNNING", candidate.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial population integrity mismatch",
+            ):
+                registry.promote(
+                    candidate,
                     expected_generation=0,
                     now=BASE,
                     open_position_count=0,

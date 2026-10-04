@@ -1739,5 +1739,83 @@ class DeterministicStrategyTests(unittest.TestCase):
             _ = comparison.fingerprint
 
 
+
+    def test_use_boundary_rejects_post_construction_threshold_mutation(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        object.__setattr__(strategy, "threshold", Decimal("-0.5"))
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            strategy.snapshot()
+
+    def test_use_boundary_rejects_post_construction_descriptor_relabeling(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        object.__setattr__(
+            strategy.descriptor,
+            "family",
+            "DETERMINISTIC_MEAN_REVERSION_THRESHOLD",
+        )
+        with self.assertRaisesRegex(ValueError, "descriptor family"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+
+    def test_propose_rejects_corrupted_internal_history_before_signal(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        first = obs(0, "100")
+        second = obs(1, "102")
+        strategy.ingest(first, simulation_time=first.available_at)
+        strategy.ingest(second, simulation_time=second.available_at)
+        object.__setattr__(strategy._history["AAA"][0], "price", Decimal("0"))
+        with self.assertRaisesRegex(ValueError, "price must be positive"):
+            strategy.propose(
+                symbol="AAA",
+                decision_time=BASE + timedelta(minutes=1),
+            )
+
+    def test_propose_requires_history_to_match_seen_event_state(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        first = obs(0, "100")
+        strategy.ingest(first, simulation_time=first.available_at)
+        strategy._observations_by_id[first.event_id] = CausalObservation.create(
+            event_id=first.event_id,
+            symbol="AAA",
+            available_at=first.available_at,
+            price="999",
+        )
+        with self.assertRaisesRegex(ValueError, "identical seen-event state"):
+            strategy.propose(symbol="AAA", decision_time=BASE)
+
+    def test_no_trade_control_revalidates_descriptor_at_use_boundary(self):
+        descriptor = self.descriptor(
+            strategy_id="no-trade-control",
+            family="NO_TRADE_CONTROL",
+            minimum_history=1,
+            parameter_bounds=(("dummy", "0", "0"),),
+        )
+        baseline = NoTradeBaseline(descriptor=descriptor)
+        object.__setattr__(baseline.descriptor, "family", "FORGED_FAMILY")
+        with self.assertRaisesRegex(ValueError, "NO_TRADE_CONTROL"):
+            baseline.propose(symbol="AAA", decision_time=BASE)
+
+
 if __name__ == "__main__":
     unittest.main()

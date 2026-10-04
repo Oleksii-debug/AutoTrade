@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import hmac
 import json
 import re
 from types import MappingProxyType
@@ -26,7 +27,25 @@ from .feeder import CausalDataset, CausalEvent
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _NAMESPACE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_ABSOLUTE_DATE = re.compile(r"(?<!\d)(?:19|20)\d{2}-\d{2}-\d{2}(?!\d)")
+_ABSOLUTE_DATE_PATTERNS = (
+    re.compile(r"(?<!\\d)(?:19|20)\\d{2}-\\d{2}-\\d{2}(?!\\d)"),
+    re.compile(
+        r"(?<!\\d)(?:(?:19|20)\\d{2}[/.]\\d{1,2}[/.]\\d{1,2}"
+        r"|\\d{1,2}[/.]\\d{1,2}[/.](?:19|20)\\d{2})(?!\\d)"
+    ),
+    re.compile(
+        r"(?i)\\b(?:"
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,)?\\s+(?:19|20)\\d{2}\\b"
+    ),
+    re.compile(
+        r"(?i)\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:"
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+        r")(?:,)?\\s+(?:19|20)\\d{2}\\b"
+    ),
+)
 _SCHEMA_VERSION = 1
 _PRICE_SCALE_MODE = "IDENTITY"
 
@@ -38,6 +57,7 @@ _NAMESPACE_LABELS = {
     "POLITICIAN": "Person",
     "VENUE": "Venue",
     "SOURCE": "Source",
+    "ENTITY": "Entity",
 }
 
 
@@ -185,6 +205,10 @@ def _contains_identity(text: str, raw: str) -> bool:
     ) is not None
 
 
+def _contains_absolute_date(text: str) -> bool:
+    return any(pattern.search(text) is not None for pattern in _ABSOLUTE_DATE_PATTERNS)
+
+
 def _scan_payload(
     value: object,
     *,
@@ -201,7 +225,7 @@ def _scan_payload(
                     raise BlindingError(
                         f"payload key at {'.'.join(child_path)} contains a declared raw identity"
                     )
-            if _ABSOLUTE_DATE.search(key):
+            if _contains_absolute_date(key):
                 raise BlindingError(
                     f"payload key at {'.'.join(child_path)} contains an absolute calendar date"
                 )
@@ -231,7 +255,7 @@ def _scan_payload(
                 raise BlindingError(
                     f"payload value at {'.'.join(path)} repeats a declared raw identity"
                 )
-    if path not in calendar_paths and _ABSOLUTE_DATE.search(value):
+    if path not in calendar_paths and _contains_absolute_date(value):
         raise BlindingError(
             f"payload value at {'.'.join(path)} exposes an undeclared absolute date"
         )
@@ -250,6 +274,10 @@ class IdentityField:
         namespace = _text(self.namespace, name="namespace").upper()
         if _NAMESPACE.fullmatch(namespace) is None:
             raise BlindingError("namespace must match [A-Z][A-Z0-9_]*")
+        if namespace not in _NAMESPACE_LABELS:
+            raise BlindingError(
+                "namespace must be a registered neutral blinding namespace"
+            )
         object.__setattr__(self, "namespace", namespace)
         if type(self.required) is not bool:
             raise TypeError("required must be an exact bool")
@@ -307,8 +335,16 @@ class BlindingProfile:
                 "instrument/execution invariant qualification"
             )
         paths = [item.path for item in identities] + [item.path for item in calendars]
-        if len(paths) != len(set(paths)):
-            raise BlindingError("identity/calendar paths must be unique and non-overlapping")
+        for index, left in enumerate(paths):
+            for right in paths[index + 1 :]:
+                if (
+                    left == right
+                    or left[: len(right)] == right
+                    or right[: len(left)] == left
+                ):
+                    raise BlindingError(
+                        "identity/calendar paths must be unique and non-overlapping"
+                    )
 
     @property
     def digest(self) -> str:
@@ -543,7 +579,7 @@ def blind_dataset(
         for raw in raw_identities:
             if raw and _contains_identity(event.kind, raw):
                 raise BlindingError("event kind exposes a declared raw identity")
-        if _ABSOLUTE_DATE.search(event.kind):
+        if _contains_absolute_date(event.kind):
             raise BlindingError("event kind exposes an absolute calendar date")
         _scan_payload(
             event.payload,
@@ -575,8 +611,10 @@ def blind_dataset(
         {"namespace": namespace, "raw": raw, "blind": blind}
         for (namespace, raw), blind in sorted(identity_map.items())
     ]
-    mapping_sha256 = "sha256:" + sha256(
-        (shuffle_key + "\n").encode("utf-8") + _canonical_bytes(mapping_commitment)
+    mapping_sha256 = "sha256:" + hmac.new(
+        bytes.fromhex(shuffle_key.removeprefix("sha256:")),
+        _canonical_bytes(mapping_commitment),
+        sha256,
     ).hexdigest()
 
     anchor = min(

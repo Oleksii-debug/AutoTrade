@@ -1666,22 +1666,17 @@ _MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 def _make_allocation_payload_sealer():
     """Create closure-private provenance for canonical frozen mapping nodes."""
 
-    registry: dict[int, weakref.ReferenceType] = {}
+    registry: dict[int, tuple[weakref.ReferenceType, str]] = {}
 
     class SealedAllocationPayload:
-        __slots__ = ("_proxy", "_canonical_json", "__weakref__")
+        __slots__ = ("_proxy", "__weakref__")
 
-        def __init__(self, proxy, canonical_json: str) -> None:
+        def __init__(self, proxy) -> None:
             object.__setattr__(self, "_proxy", proxy)
-            object.__setattr__(self, "_canonical_json", canonical_json)
 
         @property
         def proxy(self):
             return self._proxy
-
-        @property
-        def canonical_json(self) -> str:
-            return self._canonical_json
 
         def __setattr__(self, name, value) -> None:
             raise AttributeError(
@@ -1691,13 +1686,14 @@ def _make_allocation_payload_sealer():
     def lookup(value):
         if type(value) is not _MAPPING_PROXY_TYPE:
             return None
-        reference = registry.get(id(value))
-        if reference is None:
+        entry = registry.get(id(value))
+        if entry is None:
             return None
+        reference, canonical_json = entry
         owner = reference()
         if owner is None or owner.proxy is not value:
             return None
-        return owner
+        return owner, canonical_json
 
     def freeze(value):
         if type(value) is dict:
@@ -1708,23 +1704,22 @@ def _make_allocation_payload_sealer():
                 frozen_items[key] = frozen_item
                 owners.extend(nested_owners)
             proxy = MappingProxyType(frozen_items)
-            owner = SealedAllocationPayload(
-                proxy,
-                json.dumps(
-                    value,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ),
+            canonical_json = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
             )
+            owner = SealedAllocationPayload(proxy)
             key = id(proxy)
 
             def cleanup(reference, *, key=key) -> None:
-                if registry.get(key) is reference:
+                entry = registry.get(key)
+                if entry is not None and entry[0] is reference:
                     registry.pop(key, None)
 
-            registry[key] = weakref.ref(owner, cleanup)
+            registry[key] = (weakref.ref(owner, cleanup), canonical_json)
             owners.append(owner)
             return proxy, tuple(owners)
         if type(value) is list:
@@ -1776,12 +1771,13 @@ def _canonical_evidence_value(
             normalized[key] = _canonical_evidence_value(raw_value)
         return normalized
     if type(value) is _MAPPING_PROXY_TYPE:
-        owner = _sealed_lookup(value)
-        if owner is None:
+        sealed = _sealed_lookup(value)
+        if sealed is None:
             raise TypeError(
                 "allocation evidence mappingproxy lacks sealed canonical provenance"
             )
-        decoded = json.loads(owner.canonical_json)
+        _, canonical_json = sealed
+        decoded = json.loads(canonical_json)
         if type(decoded) is not dict:
             raise RuntimeError("sealed allocation payload provenance is invalid")
         return decoded
@@ -1967,11 +1963,14 @@ def _verified_allocation_payload_owner(
     if type(evidence) is not ImmutableAllocationEvidence:
         raise TypeError("allocation evidence must use the canonical evidence type")
     payload = object.__getattribute__(evidence, "payload")
-    owner = _sealed_lookup(payload)
+    sealed = _sealed_lookup(payload)
     owners = object.__getattribute__(evidence, "_payload_owners")
-    if owner is None or not any(candidate is owner for candidate in owners):
+    if sealed is None:
         raise ValueError("allocation evidence payload provenance is not sealed")
-    decoded = json.loads(owner.canonical_json)
+    owner, canonical_json = sealed
+    if not any(candidate is owner for candidate in owners):
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    decoded = json.loads(canonical_json)
     if type(decoded) is not dict:
         raise RuntimeError("sealed allocation payload provenance is invalid")
     expected_digest = _allocation_evidence_digest(

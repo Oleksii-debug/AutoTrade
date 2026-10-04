@@ -608,6 +608,14 @@ def value_cash_balances(
     for raw_currency in quotes_snapshot:
         if type(raw_currency) is not str:
             raise FxValuationError("quote currency keys must be exact strings")
+    normalized_quotes: dict[str, FxQuote] = {}
+    for raw_currency, quote in dict.items(quotes_snapshot):
+        currency = _currency(raw_currency, "quote currency")
+        if currency in normalized_quotes:
+            raise FxValuationError(
+                "quotes contain duplicate normalized currency codes"
+            )
+        normalized_quotes[currency] = quote
     reporting = _currency(reporting_currency, "reporting_currency")
     point = _instant(as_of, "as_of")
     age_limit = _age_limit(max_age)
@@ -629,7 +637,7 @@ def value_cash_balances(
             )
         seen_currencies.add(currency)
         amount = _decimal(balances_snapshot[raw_currency], f"balance[{currency}]")
-        quote = None if currency == reporting else quotes_snapshot.get(currency)
+        quote = None if currency == reporting else normalized_quotes.get(currency)
         component = value_amount(
             amount,
             source_currency=currency,

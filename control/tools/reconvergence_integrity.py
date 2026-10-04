@@ -86,11 +86,6 @@ PROTECTED_SENTINELS = frozenset(
         "tools/write_ci_evidence.py",
         "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
         "tests/Integration/LeanAdoption/Program.cs",
-        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
-        "tests/Contracts.DotNet/Program.cs",
-        "tests/Desktop.Client/Desktop.Client.csproj",
-        "tests/Desktop.Client/Program.cs",
-        "contracts/fixtures/common-scalars.corpus.json",
     }
 )
 

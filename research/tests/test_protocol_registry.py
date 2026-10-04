@@ -711,6 +711,64 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             ):
                 reopened.locked_holdout_registration(registered.protocol_id)
 
+    def test_locked_holdout_dataset_uuid_is_exact_durable_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "science.sqlite3"
+            science = ScientificRegistry(path)
+            registered = science.register_protocol(protocol())
+            vintages = HistoricalVintageRegistry(root / "historical-vintages")
+            manifest = _vintage_manifest("uuid-exact")
+            vintages.commit(manifest)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset_id must be a canonical UUID",
+            ):
+                science.preregister_locked_holdout(
+                    registered.protocol_id,
+                    vintage_registry=vintages,
+                    dataset_id="{" + manifest["dataset_id"] + "}",
+                    dataset_version=1,
+                )
+
+            locked = science.preregister_locked_holdout(
+                registered.protocol_id,
+                vintage_registry=vintages,
+                dataset_id=manifest["dataset_id"],
+                dataset_version=1,
+            )
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DROP TRIGGER protocol_locked_holdouts_no_update"
+                )
+                cursor = connection.execute(
+                    "UPDATE protocol_locked_holdouts SET dataset_id=? "
+                    "WHERE protocol_id=?",
+                    ("{" + locked.dataset_id + "}", registered.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset identity is noncanonical",
+            ):
+                science.locked_holdout_registration(registered.protocol_id)
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset identity is noncanonical",
+            ):
+                science.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-consume-aliased-dataset-id"},
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
     def test_corrupt_preregistration_binding_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "science.sqlite3"

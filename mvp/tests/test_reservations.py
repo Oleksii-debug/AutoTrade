@@ -6,7 +6,11 @@ from decimal import (
     localcontext,
 )
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationBook,
@@ -149,6 +153,37 @@ class ReservationFoundationTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
         self.assertEqual(book.get("r-terminal").state, "WORKING")
+
+    def test_durable_reservation_scope_rejects_text_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile durable reservation text callback")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile durable reservation text callback")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+
+            with self.assertRaisesRegex(ValueError, "environment"):
+                DurableReservationBook(
+                    store,
+                    environment=HostileText("SIMULATION"),
+                    account_id="account-1",
+                )
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(ValueError, "account_id"):
+                DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id=HostileText("account-1"),
+                )
+            self.assertEqual(touched, [])
 
     def test_two_concurrent_intents_cannot_double_spend_cash(self):
         book = ReservationBook()

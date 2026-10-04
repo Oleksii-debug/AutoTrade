@@ -4,14 +4,14 @@ This creates an unsigned diagnostics candidate, never a qualified release. Sourc
 bytes come from one exact Git object; developer caches and state cannot enter it.
 """
 import argparse
+import io
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
 import stat
-import subprocess
 import zipfile
 
-from tools.stage_windows_foundation import _SourceControlledComponent, _stage_source_controlled_components
+from tools.stage_windows_foundation import (_SourceControlledComponent, _git, _stage_source_controlled_components)
 from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
 from research.autotrade_research.artifacts.durable_publish import atomic_write_bytes, atomic_write_json
 
@@ -26,7 +26,16 @@ STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 
 def stage_source(source_root, source_sha, destination, composition_path):
     if len(source_sha) != 40 or any(c not in '0123456789abcdef' for c in source_sha):
         raise ValueError('exact lowercase Git source SHA required')
-    paths = subprocess.check_output(['git', '-C', str(source_root), 'ls-tree', '-r', '--name-only', source_sha], text=True).splitlines()
+    try:
+        paths = _git(
+            'ls-tree',
+            '-r',
+            '--name-only',
+            source_sha,
+            source_root=source_root,
+        ).decode('utf-8', errors='strict').splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError('exact Git tree contains a non-UTF-8 product path') from error
     selected = sorted(p for p in paths if (p.startswith(SOURCE_PREFIXES) and p.endswith('.py'))
         or (p.startswith('contracts/jsonschema/') and p.endswith('.json')) or p in STATIC)
     if not set(STATIC).issubset(selected) or 'mvp/autotrade_mvp/product_runtime.py' not in selected:
@@ -46,7 +55,10 @@ def extract_pinned(archive_path, destination, expected_digest):
     if sha256(archive_bytes).hexdigest() != expected_digest:
         raise ValueError('external runtime archive differs from frozen input')
     destination.mkdir(parents=True, exist_ok=False)
-    with zipfile.ZipFile(archive_path) as archive:
+    # Extract from the exact bytes that were authenticated above. Reopening the
+    # pathname after hashing would let a concurrent replacement substitute an
+    # unverified archive between digest admission and extraction.
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
         seen = set()
         for entry in archive.infolist():
             relative = PurePosixPath(entry.filename)

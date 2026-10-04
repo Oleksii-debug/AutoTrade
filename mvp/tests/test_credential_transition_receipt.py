@@ -318,7 +318,7 @@ class CredentialTransitionReceiptTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             CredentialTransitionReceiptError,
-            "prior credential transition receipt content identity",
+            "credential transition receipt content identity",
         ):
             rotate_trade_credential_with_receipt(
                 self.vault,

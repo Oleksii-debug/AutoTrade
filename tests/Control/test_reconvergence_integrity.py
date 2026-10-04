@@ -1,24 +1,154 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control.tools.reconvergence_integrity import (
     Change,
+    IntegrityAssessment,
     PROTECTED_SENTINELS,
     SELF_PROTECTING_TRUST_ROOTS,
     TRUSTED_SCOPE_APPROVAL_MARKER,
     assess_git_revisions,
     assess_reconvergence,
+    main,
     parse_name_status,
     parse_trusted_scope_approval,
+    reconvergence_evidence,
 )
 
 
 class ReconvergenceIntegrityTests(unittest.TestCase):
+    def test_exact_revision_evidence_is_canonical_secret_free_and_trust_root_aware(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        trust_root = "control/tools/reconvergence_integrity.py"
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=False,
+            trusted_root_approvals=(trust_root,),
+        )
+
+        self.assertEqual(evidence["schema_version"], "1.1.0")
+        self.assertEqual(evidence["source_sha"], "b" * 40)
+        self.assertEqual(evidence["trusted_guard_source_sha"], "a" * 40)
+        self.assertEqual(evidence["base_sha"], "a" * 40)
+        self.assertEqual(evidence["head_sha"], "b" * 40)
+        self.assertEqual(evidence["result"], "PASS")
+        self.assertEqual(evidence["policy"]["max_deletions"], 50)
+        self.assertEqual(evidence["policy"]["max_deleted_fraction"], 0.35)
+        self.assertFalse(evidence["policy"]["scope_enforced"])
+        self.assertEqual(evidence["policy"]["trusted_root_approval_count"], 1)
+        self.assertEqual(evidence["approved_trust_roots"], [trust_root])
+        self.assertIn("protected-trust-root-authorization", evidence["checks_run"])
+        self.assertEqual(
+            evidence["unresolved_limits"],
+            ["mutation_scope_not_enforced_without_trusted_external_scope"],
+        )
+        self.assertNotIn("trusted-mutation-scope", evidence["checks_run"])
+        self.assertFalse(evidence["contains_secrets"])
+
+        with self.assertRaisesRegex(ValueError, "exact lowercase Git object id"):
+            reconvergence_evidence(
+                base_sha="A" * 40,
+                head_sha="b" * 40,
+                assessment=assessment,
+                max_deletions=50,
+                max_deleted_fraction=0.35,
+                scope_enforced=False,
+            )
+
+    def test_evidence_records_full_mutation_scope_without_conflating_root_approval(self):
+        assessment = IntegrityAssessment(
+            allowed=True,
+            base_is_ancestor=True,
+            base_path_count=10,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=(),
+        )
+        evidence = reconvergence_evidence(
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            assessment=assessment,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            scope_enforced=True,
+        )
+
+        self.assertTrue(evidence["policy"]["scope_enforced"])
+        self.assertEqual(evidence["policy"]["trusted_root_approval_count"], 0)
+        self.assertEqual(evidence["approved_trust_roots"], [])
+        self.assertEqual(evidence["unresolved_limits"], [])
+        self.assertIn("trusted-mutation-scope", evidence["checks_run"])
+
+    def test_cli_writes_fail_evidence_before_returning_blocked(self):
+        blocked = IntegrityAssessment(
+            allowed=False,
+            base_is_ancestor=False,
+            base_path_count=700,
+            deletion_count=0,
+            deletion_fraction=0.0,
+            protected_deletions=(),
+            protected_violations=(),
+            scope_violations=(),
+            reasons=("head is not descended from exact base revision",),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "reconvergence.json"
+            with patch(
+                "control.tools.reconvergence_integrity._git_commit_id",
+                side_effect=["a" * 40, "b" * 40],
+            ), patch(
+                "control.tools.reconvergence_integrity.assess_git_revisions",
+                return_value=blocked,
+            ):
+                status = main(
+                    [
+                        "--base",
+                        "trusted-base",
+                        "--head",
+                        "candidate-head",
+                        "--evidence-output",
+                        str(output),
+                    ]
+                )
+
+            self.assertEqual(status, 2)
+            evidence = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["base_sha"], "a" * 40)
+            self.assertEqual(evidence["head_sha"], "b" * 40)
+            self.assertEqual(evidence["result"], "FAIL")
+            self.assertEqual(
+                evidence["reasons"],
+                ["head is not descended from exact base revision"],
+            )
+            self.assertEqual(
+                evidence["unresolved_limits"],
+                ["mutation_scope_not_enforced_without_trusted_external_scope"],
+            )
+
     def test_mass_base_tree_deletion_fails_closed(self):
         base = [f"path-{index}.txt" for index in range(100)]
         changes = [Change(status="D", path=path) for path in base[:60]]

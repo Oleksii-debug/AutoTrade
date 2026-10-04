@@ -51,6 +51,13 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
+PROTECTED_TRUST_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Change:
@@ -210,6 +217,16 @@ def assess_reconvergence(
             raise ValueError("protected sentinels collide case-insensitively")
         protected_by_casefold[folded] = canonical
 
+    trust_roots_by_casefold: dict[str, str] = {}
+    for trust_root in PROTECTED_TRUST_ROOTS:
+        canonical = _canonical_repo_path(
+            trust_root,
+            name="protected trust root",
+        )
+        if canonical.casefold() not in protected_by_casefold:
+            raise ValueError("protected trust root must also be a protected sentinel")
+        trust_roots_by_casefold[canonical.casefold()] = canonical
+
     deleted = tuple(
         sorted(
             {
@@ -233,6 +250,7 @@ def assess_reconvergence(
         kind = _status_kind(change.status)
         path_key = change.path.casefold()
         destination_sentinel = protected_by_casefold.get(path_key)
+        destination_trust_root = trust_roots_by_casefold.get(path_key)
         source_sentinel = (
             None
             if change.previous_path is None
@@ -248,23 +266,23 @@ def assess_reconvergence(
             )
         if (
             kind == "R"
-            and destination_sentinel is not None
-            and source_sentinel != destination_sentinel
-            and destination_sentinel.casefold() not in exact_scope_authority
+            and destination_trust_root is not None
+            and source_sentinel != destination_trust_root
+            and destination_trust_root.casefold() not in exact_scope_authority
         ):
             protected_damage.add(
-                f"{change.previous_path} -> {destination_sentinel} "
+                f"{change.previous_path} -> {destination_trust_root} "
                 "(rename into trust root without exact-path authorization)"
             )
         if kind == "T" and destination_sentinel is not None:
             protected_damage.add(f"{destination_sentinel} (type change)")
         if (
             kind in {"A", "M", "C"}
-            and destination_sentinel is not None
-            and destination_sentinel.casefold() not in exact_scope_authority
+            and destination_trust_root is not None
+            and destination_trust_root.casefold() not in exact_scope_authority
         ):
             protected_damage.add(
-                f"{destination_sentinel} "
+                f"{destination_trust_root} "
                 "(content change without exact-path authorization)"
             )
     protected_violations = tuple(sorted(protected_damage))

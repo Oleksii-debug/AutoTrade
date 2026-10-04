@@ -548,6 +548,79 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 ],
             )
 
+    def test_prepared_claim_recovery_accepts_concurrent_observed_completion(self):
+        """A competing recovery may finish Observed after our Retained append."""
+
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                _capabilities,
+                _qualifications,
+                _route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            body = b'{"retCode":0,"result":{"list":[{"coin":"USDT","equity":"12.00"}]}}'
+            attempt_id, _artifact_id = self._seed_direct_claim_artifact(
+                origin,
+                journal,
+                binding,
+                body,
+                request_marker="concurrent-recovery",
+            )
+
+            original_append = JournalStore.append_event
+
+            def append_with_competing_observed(store, envelope, **kwargs):
+                result = original_append(store, envelope, **kwargs)
+                if envelope.get("event_type") == "AuthenticatedReadRetained":
+                    observed_payload = {
+                        **envelope["payload"],
+                        "retained_event_id": envelope["event_id"],
+                    }
+                    original_append(
+                        store,
+                        provider_origin_module._event(
+                            event_id=attempt_id + ":observed",
+                            event_type=provider_origin_module._OBSERVED_EVENT,
+                            attempt_id=attempt_id,
+                            version=3,
+                            payload=observed_payload,
+                            committed_at=envelope["committed_at"],
+                        ),
+                    )
+                return result
+
+            restarted = self._origin(JournalStore(journal.path), directory)
+            with patch.object(
+                JournalStore,
+                "append_event",
+                side_effect=append_with_competing_observed,
+            ):
+                recovered = restarted.recover_response_binding(
+                    attempt_id,
+                    binding,
+                )
+            self.assertEqual(recovered.response_bytes, body)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in JournalStore.load_events(
+                        journal,
+                        "qualified_authenticated_provider_read",
+                        attempt_id,
+                    )
+                ],
+                [
+                    "AuthenticatedReadPrepared",
+                    "AuthenticatedReadRetained",
+                    "AuthenticatedReadObserved",
+                ],
+            )
+
     def test_prepared_claim_recovery_rejects_terminal_cut_before_prepared(self):
         """A durable claim cannot relabel a wire cut that predates Prepared."""
 

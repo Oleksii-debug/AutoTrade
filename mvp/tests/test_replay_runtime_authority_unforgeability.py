@@ -346,10 +346,49 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             RuntimeStateAuthority.seal_checkpoint(
                 authority,
                 snapshot,
+                verifier=_trusted_verifier(),
                 build_sha="b" * 40,
                 protocol_ref="protocol:mutated-seal",
             )
         self.assertFalse(hostile.touched)
+
+    def test_checkpoint_sealer_rejects_caller_constructed_snapshot_before_signing(self):
+        signer_calls = []
+
+        def counted_signer(material):
+            signer_calls.append(material)
+            return _signer(_TRUSTED_SECRET)(material)
+
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:production",
+            signer=counted_signer,
+            cut_resolver=lambda: (
+                "cut:unused",
+                self._checkpoint_value(),
+                _components(),
+            ),
+        )
+        forged = RuntimeStateSnapshot(
+            cut_id="cut:forged-signing-oracle",
+            replay=self._checkpoint_value(),
+            runtime_components=_components(forged_rng=True),
+            authority_id="runtime:production",
+            verifier_id="host-trust:runtime-production-v1",
+            authority_seal="a" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "snapshot authority signature mismatch",
+        ):
+            RuntimeStateAuthority.seal_checkpoint(
+                authority,
+                forged,
+                verifier=_trusted_verifier(),
+                build_sha="b" * 40,
+                protocol_ref="protocol:forged-signing-oracle",
+            )
+        self.assertEqual(signer_calls, [])
 
     def test_composite_schema_version_rejects_text_subclass(self):
         hostile = _HostileText("4.0.0")
@@ -584,6 +623,71 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
                 protocol_ref="protocol:walk-forward-v1",
             )
         self.assertEqual(replay.cursor, 1)
+
+    def test_dead_unselected_authority_state_releases_callbacks_on_next_registration(self):
+        replay = self._checkpoint_value()
+
+        def ephemeral_signer(material):
+            return _signer(_TRUSTED_SECRET)(material)
+
+        def ephemeral_cut():
+            return "cut:ephemeral", replay, _components()
+
+        signer_ref = weakref.ref(ephemeral_signer)
+        cut_ref = weakref.ref(ephemeral_cut)
+        authority = RuntimeStateAuthority(
+            authority_id="runtime:ephemeral-authority",
+            signer=ephemeral_signer,
+            cut_resolver=ephemeral_cut,
+        )
+        del ephemeral_signer
+        del ephemeral_cut
+        del authority
+        gc.collect()
+
+        self.assertIsNotNone(signer_ref())
+        self.assertIsNotNone(cut_ref())
+
+        survivor = RuntimeStateAuthority(
+            authority_id="runtime:authority-registry-survivor",
+            signer=_signer(_TRUSTED_SECRET),
+            cut_resolver=lambda: ("cut:survivor", replay, _components()),
+        )
+        gc.collect()
+
+        self.assertIsNone(signer_ref())
+        self.assertIsNone(cut_ref())
+        self.assertEqual(
+            survivor.authority_id,
+            "runtime:authority-registry-survivor",
+        )
+
+    def test_dead_unselected_verifier_state_releases_callback_on_next_registration(self):
+        verify = _signature_verifier(_ATTACKER_SECRET)
+        verify_ref = weakref.ref(verify)
+        verifier = RuntimeStateVerifier(
+            authority_id="runtime:ephemeral-verifier",
+            verifier_id="verifier:ephemeral",
+            verify_signature=verify,
+        )
+        del verify
+        del verifier
+        gc.collect()
+
+        self.assertIsNotNone(verify_ref())
+
+        survivor = RuntimeStateVerifier(
+            authority_id="runtime:verifier-registry-survivor",
+            verifier_id="verifier:survivor",
+            verify_signature=_signature_verifier(_TRUSTED_SECRET),
+        )
+        gc.collect()
+
+        self.assertIsNone(verify_ref())
+        self.assertEqual(
+            survivor.verifier_id,
+            "verifier:survivor",
+        )
 
     def test_runtime_trust_registries_expose_no_removal_callbacks(self):
         replay = CausalReplay(

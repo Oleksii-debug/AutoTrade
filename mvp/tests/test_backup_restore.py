@@ -34,6 +34,7 @@ from mvp.autotrade_mvp.reconciliation import (
 from mvp.autotrade_mvp.recovery import RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
+from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
 
 
 def _reseal_backup_manifest(backup: Path) -> None:
@@ -277,6 +278,24 @@ class BackupRestoreTests(unittest.TestCase):
         _artifact_store(artifacts)
         return state, artifacts
 
+    def _build_autonomous_sources(
+        self,
+        root: Path,
+        *,
+        stop_after_episodes: int = 2,
+    ) -> tuple[Path, Path]:
+        state = root / "state"
+        artifacts = root / "artifacts"
+        run_autonomous_simulation(
+            ["100", "101", "103", "102", "100"],
+            state,
+            run_id="backup-runtime-checkpoint",
+            now="2026-10-03T00:00:00Z",
+            stop_after_episodes=stop_after_episodes,
+        )
+        _artifact_store(artifacts)
+        return state, artifacts
+
     def test_manifest_paths_reject_windows_and_noncanonical_forms(self):
         self.assertEqual(
             _safe_relative_path("state/journal.sqlite3").as_posix(),
@@ -320,12 +339,11 @@ class BackupRestoreTests(unittest.TestCase):
     def test_autonomous_runtime_checkpoint_is_quarantined_not_reauthorized(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            state, artifacts = self._build_sources(root)
+            state, artifacts = self._build_autonomous_sources(root)
             checkpoint = state / "autonomous-runtime-checkpoint.json"
             authority_key = state / ".autonomous-runtime-authority.key"
-            checkpoint_bytes = b'{"sealed":"source-generation-checkpoint"}\n'
-            checkpoint.write_bytes(checkpoint_bytes)
-            authority_key.write_bytes(b"source-local-secret-must-not-travel")
+            checkpoint_bytes = checkpoint.read_bytes()
+            self.assertEqual(len(authority_key.read_bytes()), 32)
 
             backup = create_backup(state, artifacts, root / "backup")
             manifest = verify_backup(backup)
@@ -463,6 +481,50 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_runtime_checkpoint_aba_cannot_mix_with_newer_journal_snapshot(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_autonomous_sources(
+                root,
+                stop_after_episodes=2,
+            )
+            target = root / "backup"
+            checkpoint = state / "autonomous-runtime-checkpoint.json"
+            checkpoint_a = checkpoint.read_bytes()
+            original_backup_sqlite = backup_module._backup_sqlite
+            injected = False
+
+            def advance_journal_then_restore_checkpoint_a(source, destination):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    run_autonomous_simulation(
+                        ["100", "101", "103", "102", "100"],
+                        state,
+                        run_id="backup-runtime-checkpoint",
+                        now="2026-10-03T00:00:00Z",
+                        stop_after_episodes=3,
+                    )
+                    self.assertNotEqual(checkpoint.read_bytes(), checkpoint_a)
+                    checkpoint.write_bytes(checkpoint_a)
+                return original_backup_sqlite(source, destination)
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=advance_journal_then_restore_checkpoint_a,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "does not match staged journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertEqual(checkpoint.read_bytes(), checkpoint_a)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_runtime_checkpoint_created_after_staging_fsync_aborts_backup(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -531,9 +593,9 @@ class BackupRestoreTests(unittest.TestCase):
     def test_restored_runtime_checkpoint_evidence_tamper_fails_marker_validation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            state, artifacts = self._build_sources(root)
+            state, artifacts = self._build_autonomous_sources(root)
             checkpoint = state / "autonomous-runtime-checkpoint.json"
-            checkpoint.write_bytes(b'{"sealed":"source-generation-checkpoint"}\n')
+            self.assertTrue(checkpoint.is_file())
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")
             evidence = (
@@ -651,9 +713,9 @@ class BackupRestoreTests(unittest.TestCase):
     def test_legacy_marker_downgrade_cannot_hide_quarantined_checkpoint_evidence(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            state, artifacts = self._build_sources(root)
-            (state / "autonomous-runtime-checkpoint.json").write_bytes(
-                b'{"sealed":"source-generation-checkpoint"}\n'
+            state, artifacts = self._build_autonomous_sources(root)
+            self.assertTrue(
+                (state / "autonomous-runtime-checkpoint.json").is_file()
             )
             backup = create_backup(state, artifacts, root / "backup")
             restored = restore_backup(backup, root / "restored")

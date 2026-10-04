@@ -1031,6 +1031,33 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "incomplete_registered_population")
 
+    def test_qualified_outcome_after_evaluation_cutoff_is_inconclusive(self):
+        cases = [
+            pair("qualified-a", "2", population_unit="unit-a"),
+            pair("qualified-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            population=registered_population(
+                cases,
+                evaluation_cutoff=CUT + timedelta(minutes=30),
+            ),
+            canonical_outcomes=evidence,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "outcome_unavailable_at_evaluation_cutoff",
+        )
+
     def test_qualified_stale_pre_cutoff_revision_is_inconclusive(self):
         cases = [
             pair("qualified-a", "2", population_unit="unit-a"),
@@ -1505,6 +1532,21 @@ class AblationTests(unittest.TestCase):
             )
             self.assertEqual(result.required_lower_bound, Decimal("0"))
             self.assertEqual(result.uncertainty_multiplier, Decimal("2"))
+
+            pre_outcome_authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id=registration.protocol_id,
+                protocol_hash=registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=cutoff + timedelta(minutes=30),
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            with self.assertRaisesRegex(ValueError, "after causal cutoff"):
+                pre_outcome_authority.resolve(cases, outcome_refs=refs)
 
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
             diagnostic = evaluate_qualified_incremental_value(

@@ -163,6 +163,8 @@ class _ProductionBybitSecretResolver:
         "__credential_identity_reader",
         "__credential_identity_reader_code",
         "__session_token",
+        "__clock_utc",
+        "__clock_utc_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -487,6 +489,8 @@ class ProductionBybitOrderSender:
         self.__credential_identity_reader = credential_identity_reader
         self.__credential_identity_reader_code = credential_identity_reader_code
         self.__session_token = transport.session_token
+        self.__clock_utc = transport.clock_utc
+        self.__clock_utc_code = getattr(transport.clock_utc, "__code__", None)
 
     @property
     def provider_environment(self) -> str:
@@ -592,6 +596,13 @@ class ProductionBybitOrderSender:
             raise PermissionError("Bybit credential handle changed after composition")
         if transport.session_token != self.__session_token:
             raise PermissionError("Bybit session authority changed after composition")
+        if transport.clock_utc is not self.__clock_utc:
+            raise PermissionError("Bybit capability clock authority changed after composition")
+        if (
+            self.__clock_utc_code is not None
+            and getattr(self.__clock_utc, "__code__", None) is not self.__clock_utc_code
+        ):
+            raise PermissionError("Bybit capability clock authority code changed")
         self.__resolver._require_runtime_authority()
 
     def _transport_send(
@@ -628,6 +639,30 @@ class ProductionBybitOrderSender:
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
         self._require_send_authority()
+
+        if final_barrier_clock is None:
+            clock_utc = self.__clock_utc
+
+            def trusted_final_barrier_clock() -> str:
+                if self.__transport.clock_utc is not clock_utc:
+                    raise PermissionError(
+                        "Bybit capability clock authority changed after composition"
+                    )
+                point = clock_utc()
+                if (
+                    type(point) is not datetime
+                    or point.tzinfo is None
+                    or point.utcoffset() is None
+                ):
+                    raise ValueError(
+                        "Bybit capability clock must return exact timezone-aware datetime"
+                    )
+                return point.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+            selected_barrier_clock = trusted_final_barrier_clock
+        else:
+            selected_barrier_clock = final_barrier_clock
+
         return self.__dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
@@ -639,7 +674,7 @@ class ProductionBybitOrderSender:
             transport_send=self._transport_send,
             client_id_max_length=client_id_max_length,
             client_id_format=client_id_format,
-            final_barrier_clock=final_barrier_clock,
+            final_barrier_clock=selected_barrier_clock,
             submission_scope=submission_scope,
         )
 

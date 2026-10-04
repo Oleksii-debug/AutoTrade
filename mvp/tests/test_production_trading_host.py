@@ -183,7 +183,6 @@ class ProductionTradingHostTests(unittest.TestCase):
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(wire_calls, [])
 
-
     def test_close_revokes_dispatcher_before_later_host_cleanup_failure(self):
         with TemporaryDirectory() as directory:
             runtime, host, _store = self._build_with_fake_host(Path(directory))
@@ -216,7 +215,6 @@ class ProductionTradingHostTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(outcome.status, "BLOCKED")
-
 
     def test_existing_durable_owner_without_takeover_fails_and_releases_host_fence(self):
         with TemporaryDirectory() as directory:
@@ -289,10 +287,14 @@ class ProductionTradingHostTests(unittest.TestCase):
                 observed["state"] = controller.state
                 observed["new_owner_id"] = new_owner_id
                 observed["kwargs"] = kwargs
-                controller.owner = OwnerFence(new_owner_id, 2)
+                target = OwnerFence(new_owner_id, 2)
+                controller.owner = target
                 controller.provider_reconciled = False
                 controller.reason_codes = {"startup_reconciliation_required"}
                 controller.state = HostState.RECOVERING
+                controller.durable_owner_chain = Mock(
+                    return_value=[OwnerFence("owner-old", 1), target]
+                )
                 return Mock()
 
             with (

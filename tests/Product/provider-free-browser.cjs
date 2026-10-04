@@ -153,10 +153,20 @@ async function exerciseSnapshotSelectionPreservation(page) {
     range.setEnd(cell.firstChild, start + "895.696".length);
     const selection = window.getSelection();
     selection.removeAllRanges();
-    selection.addRange(range);
-    return selection.toString();
+    if (typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(
+        cell.firstChild, start + "895.696".length, cell.firstChild, start);
+    } else {
+      selection.addRange(range);
+    }
+    return {
+      text: selection.toString(),
+      backward: selection.anchorNode === cell.firstChild &&
+        selection.focusNode === cell.firstChild &&
+        selection.anchorOffset > selection.focusOffset
+    };
   });
-  assert.equal(selected, "895.696", "portfolio evidence is selectable before refresh");
+  assert.equal(selected.text, "895.696", "portfolio evidence is selectable before refresh");
 
   const routePattern = "**/api/v1/state";
   await page.route(routePattern, async route => {
@@ -177,13 +187,19 @@ async function exerciseSnapshotSelectionPreservation(page) {
       return {
         text: selection ? selection.toString() : "",
         inside: Boolean(range && body &&
-          body.contains(range.startContainer) && body.contains(range.endContainer))
+          body.contains(range.startContainer) && body.contains(range.endContainer)),
+        backward: Boolean(selection && selection.anchorNode && selection.focusNode &&
+          selection.anchorOffset > selection.focusOffset)
       };
     });
-    assert.deepEqual(
-      after,
-      {text: "895.696", inside: true},
+    assert.equal(after.text, "895.696",
       "same-scope canonical snapshot preserves selected portfolio evidence");
+    assert.equal(after.inside, true,
+      "restored selection remains inside the portfolio evidence table");
+    if (selected.backward) {
+      assert.equal(after.backward, true,
+        "backward selection direction survives snapshot replacement");
+    }
   } finally {
     await page.unroute(routePattern).catch(() => {});
   }

@@ -791,9 +791,6 @@ def measure_declared_research_interference(
                     "research measurement plan instance state changed during callback: "
                     f"{name}"
                 )
-        if plan.digest != plan_digest_value:
-            raise error_type("research measurement plan digest changed during callback")
-
         for value, snapshot, label in (
             (store_identity, selected_identity_snapshot, "selected JournalStore identity"),
             (stored_identity, stored_identity_snapshot, "stored JournalStore identity"),
@@ -921,6 +918,13 @@ def measure_declared_research_interference(
                 continue
             if not had_value or current_value is not expected_value:
                 raise error_type("research measurement closure authority changed during callback")
+
+        # Recompute the plan digest only after every transitive digest/JSON
+        # authority used to compute it has been revalidated.  Otherwise a hostile
+        # callback can replace canonical_json and turn a TCB mutation into the
+        # weaker symptom "plan digest changed".
+        if plan.digest != plan_digest_value:
+            raise error_type("research measurement plan digest changed during callback")
 
     with journal_store_authority_scope(store, store_identity):
         if get_event(store, measurement_id) is not None:

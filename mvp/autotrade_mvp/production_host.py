@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 import ssl
-from threading import Condition, Thread, current_thread
+from threading import Condition, RLock, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 from research.autotrade_research.artifacts.resource_lock import (
     ResourceLock,
@@ -52,6 +53,8 @@ _CONFIG_FIELDS = frozenset(
 )
 _TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
 _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
+_RUNTIME_CONFIG_BINDINGS = WeakKeyDictionary()
+_RUNTIME_CONFIG_BINDINGS_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -402,7 +405,11 @@ class ProductionHostRuntime:
         instance_fence: _InstanceFence,
         admission_gate: _CommandAdmissionGate,
     ) -> None:
-        self.config = config
+        canonical_config = _readmit_production_host_config(config)
+        with _RUNTIME_CONFIG_BINDINGS_LOCK:
+            if self in _RUNTIME_CONFIG_BINDINGS:
+                raise RuntimeError("production host config is already bound")
+            _RUNTIME_CONFIG_BINDINGS[self] = canonical_config
         self.journal = journal
         self.store_identity: JournalStoreIdentity = journal.store_identity
         self.application = application
@@ -417,6 +424,14 @@ class ProductionHostRuntime:
         self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
+
+    @property
+    def config(self) -> ProductionHostConfig:
+        with _RUNTIME_CONFIG_BINDINGS_LOCK:
+            bound = _RUNTIME_CONFIG_BINDINGS.get(self)
+        if type(bound) is not ProductionHostConfig:
+            raise RuntimeError("production host config authority is not bound")
+        return _readmit_production_host_config(bound)
 
     @property
     def closed(self) -> bool:

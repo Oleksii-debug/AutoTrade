@@ -15,11 +15,13 @@ from mvp.autotrade_mvp.provider_origin import (
     ProviderOriginError,
     ProviderOriginJournal,
     _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN,
+    execute_direct_provider_origin_read,
     observe_provider_origin_json_response,
 )
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
     BybitV5AuthenticatedReadSigner,
+    BybitV5AuthenticatedReadTransport,
     UrllibJsonWireClient,
     direct_authenticated_read_execution_receipt,
 )
@@ -103,6 +105,78 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     response_binding=recovered,
                     query_binding=binding,
                 )
+
+    def test_execute_direct_origin_rejects_injected_wire_before_prepared(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "canonical direct wire client",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+
+    def test_execute_direct_origin_rejects_replaced_opener_before_prepared(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                qualifications,
+                route,
+                _q1,
+                _harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            client = UrllibJsonWireClient(max_response_bytes=1024)
+            client._opener = object()
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = client
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "direct network authority is unavailable",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
 
     def test_direct_wire_origin_survives_restart_and_promotes_to_financial_observation(self):
         with TemporaryDirectory() as directory:

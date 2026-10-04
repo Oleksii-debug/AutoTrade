@@ -625,8 +625,25 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             and not observed_fill
             and payload["episode"] == active["episode"]
         ):
-            # Operator inspection is read-only. Recovery is performed only by
-            # the execution path under the canonical simulation lock.
+            # Operator inspection is read-only. It still validates that the
+            # retained provider image is internally self-consistent and really
+            # contains the exact retained fill before advertising recovery.
+            if (
+                set(payload)
+                != {"episode", "protocol_digest", "provider_state", "fill"}
+                or type(payload.get("provider_state")) is not dict
+                or type(payload.get("fill")) is not dict
+            ):
+                raise ValueError(
+                    "autonomous retained fill observation is malformed"
+                )
+            retained = SimulatedProvider.from_state(
+                payload["provider_state"]
+            )
+            if payload["fill"] not in retained.activity_fills():
+                raise ValueError(
+                    "autonomous retained fill observation conflicts with provider state"
+                )
             observed_fill = True
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)

@@ -13,6 +13,7 @@ from control.tools.reconvergence_integrity import (
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_name_status_z,
 )
 
 
@@ -136,7 +137,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         result = assess_reconvergence(
             base_paths=["old.py", "other.py"],
             changes=changes,
-            max_deletions=1,
+            max_deletions=2,
             max_deleted_fraction=0.1,
             protected_sentinels=frozenset(),
         )
@@ -514,6 +515,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                     protected_head,
                     "--allowed-scope",
                     "control/tools/reconvergence_integrity.py",
+                    "--allowed-scope-head",
+                    protected_head,
                 ],
                 cwd=root,
                 env=env,
@@ -638,6 +641,226 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
 
+
+    def test_nul_parser_and_change_graph_fail_closed(self):
+        self.assertEqual(
+            parse_name_status_z(b"M\x00README.md\x00A\x00new file.txt\x00"),
+            (
+                Change(status="M", path="README.md"),
+                Change(status="A", path="new file.txt"),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "Malformed NUL-delimited"):
+            parse_name_status_z(b"M\x00README.md")
+        with self.assertRaisesRegex(ValueError, "canonical UTF-8"):
+            parse_name_status_z(b"A\x00bad-\xff\x00")
+        with self.assertRaisesRegex(ValueError, "absent from the base tree"):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="M", path="missing.py")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaisesRegex(ValueError, "multiple mutating Git changes"):
+            assess_reconvergence(
+                base_paths=["README.md", "src/a.py"],
+                changes=[
+                    Change(status="M", path="src/a.py"),
+                    Change(status="D", path="src/a.py"),
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_mass_rename_is_destructive_but_copy_is_not(self):
+        base = [f"path-{index:03d}.txt" for index in range(100)]
+        renames = [
+            Change(
+                status="R100",
+                previous_path=path,
+                path=f"moved/{path}",
+            )
+            for path in base[:60]
+        ]
+        renamed = assess_reconvergence(
+            base_paths=base,
+            changes=renames,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+        self.assertFalse(renamed.allowed)
+        self.assertEqual(renamed.deletion_count, 0)
+        self.assertEqual(renamed.destructive_change_count, 60)
+        self.assertIn("mass destructive base-tree change", renamed.reasons[-1])
+
+        copies = [
+            Change(
+                status="C100",
+                previous_path=path,
+                path=f"copies/{path}",
+            )
+            for path in base[:60]
+        ]
+        copied = assess_reconvergence(
+            base_paths=base,
+            changes=copies,
+            max_deletions=50,
+            max_deleted_fraction=0.35,
+            protected_sentinels=frozenset(),
+        )
+        self.assertTrue(copied.allowed)
+        self.assertEqual(copied.destructive_change_count, 0)
+
+    def test_workflow_authority_is_dynamic_and_exact_scope_is_required(self):
+        new_workflow = ".github/workflows/new-authority.yml"
+        blocked = assess_reconvergence(
+            base_paths=["README.md"],
+            changes=[Change(status="A", path=new_workflow)],
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertIn(
+            "authority destination without exact authorization",
+            blocked.reasons[0],
+        )
+        authorized = assess_reconvergence(
+            base_paths=["README.md"],
+            changes=[Change(status="A", path=new_workflow)],
+            allowed_scopes=(new_workflow,),
+        )
+        self.assertTrue(authorized.allowed)
+
+        next_run_blocked = assess_reconvergence(
+            base_paths=["README.md", new_workflow],
+            changes=[Change(status="M", path=new_workflow)],
+        )
+        self.assertFalse(next_run_blocked.allowed)
+        self.assertIn("content change without exact authorization", next_run_blocked.reasons[0])
+
+    def test_protected_destination_replacement_requires_exact_scope(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        for status in ("R100", "C100"):
+            with self.subTest(status=status):
+                blocked = assess_reconvergence(
+                    base_paths=["candidate.py", "README.md"],
+                    changes=[
+                        Change(
+                            status=status,
+                            previous_path="candidate.py",
+                            path=sentinel,
+                        )
+                    ],
+                )
+                self.assertFalse(blocked.allowed)
+                self.assertIn(
+                    "authority destination without exact authorization",
+                    blocked.reasons[0],
+                )
+
+    def test_candidate_tree_rejects_windows_unsafe_and_case_colliding_paths(self):
+        for bad_path in (
+            "src/CON.txt",
+            "src/name?.py",
+            "src/trailing.",
+            "src/trailing ",
+        ):
+            with self.subTest(path=bad_path):
+                with self.assertRaisesRegex(ValueError, "Windows-checkout-safe"):
+                    assess_reconvergence(
+                        base_paths=["README.md"],
+                        changes=[Change(status="A", path=bad_path)],
+                        protected_sentinels=frozenset(),
+                    )
+
+        with self.assertRaisesRegex(ValueError, "case-insensitive path collision"):
+            assess_reconvergence(
+                base_paths=["README.md", "src/runtime.py"],
+                changes=[Change(status="A", path="readme.MD")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_cli_scope_authorization_is_exact_head_bound(self):
+        repository_root = Path.cwd().resolve()
+        sentinel = "control/tools/reconvergence_integrity.py"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "control" / "tools").mkdir(parents=True)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "scope-head@example.invalid")
+            git("config", "user.name", "Scope Head")
+            (root / sentinel).write_text("VALUE = 1\n", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+            (root / sentinel).write_text("VALUE = 2\n", encoding="utf-8")
+            git("commit", "-am", "candidate one")
+            head_one = git("rev-parse", "HEAD")
+
+            env = os.environ.copy()
+            python_path = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                str(repository_root)
+                if not python_path
+                else str(repository_root) + os.pathsep + python_path
+            )
+            common = [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--repo",
+                str(root),
+                "--base",
+                base_sha,
+                "--head",
+                head_one,
+                "--allowed-scope",
+                sentinel,
+            ]
+            exact = subprocess.run(
+                [*common, "--allowed-scope-head", head_one],
+                cwd=repository_root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(exact.returncode, 0, exact.stderr + exact.stdout)
+
+            (root / "README.md").write_text("moved head\n", encoding="utf-8")
+            git("commit", "-am", "candidate two")
+            head_two = git("rev-parse", "HEAD")
+            stale = subprocess.run(
+                [
+                    *common[:-3],
+                    head_two,
+                    "--allowed-scope",
+                    sentinel,
+                    "--allowed-scope-head",
+                    head_one,
+                ],
+                cwd=repository_root,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn(
+                "not bound to the exact candidate head",
+                stale.stderr + stale.stdout,
+            )
 
 
 if __name__ == "__main__":

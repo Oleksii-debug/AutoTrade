@@ -1,13 +1,13 @@
 """Canonical Bybit write composition for the current production financial host.
 
 This module owns no second dispatcher, provider transport, credential authority,
-recovery state machine, or journal.  It binds the existing Bybit V5 transport to
+recovery state machine, or journal. It binds the existing Bybit V5 transport to
 the exact current financial-host lifetime, recovery-issued dispatcher, host
 SecurityBoundary, provider domain, account, origin, owner generation and TRADE
 credential selected by product composition.
 
 Provider qualification, PAPER/LIVE campaign acceptance, release readiness and
-economic edge remain separate authorities.  This seam only prevents application
+economic edge remain separate authorities. This seam only prevents application
 callers from retargeting an otherwise-authorized host send to a different broker
 scope or credential authority.
 """
@@ -29,6 +29,7 @@ from .provider_transport import (
     BybitV5HttpTransport,
     ClockMillis,
     ClockUtc,
+    ProviderEndpointPolicy,
     ProviderWireClient,
     QuotaGate,
 )
@@ -37,10 +38,97 @@ from .security import SecurityBoundary
 from .windows_secrets import PersistentCredentialHandle
 
 
+_BYBIT_POLICY_IDENTITIES: Mapping[str, tuple[object, ...]] = {
+    "MAINNET": (
+        "BYBIT",
+        "LIVE",
+        "https://api.bybit.com",
+        frozenset({"api.bybit.com"}),
+        15,
+    ),
+    "TESTNET": (
+        "BYBIT",
+        "PAPER",
+        "https://api-testnet.bybit.com",
+        frozenset({"api-testnet.bybit.com"}),
+        15,
+    ),
+    "DEMO": (
+        "BYBIT",
+        "PAPER",
+        "https://api-demo.bybit.com",
+        frozenset({"api-demo.bybit.com"}),
+        15,
+    ),
+}
+
+
 def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f"{name} must be canonical exact text")
     return value
+
+
+def _bybit_policy_identity(
+    policy: ProviderEndpointPolicy,
+    *,
+    provider_environment: str,
+) -> tuple[object, ...]:
+    if type(policy) is not ProviderEndpointPolicy:
+        raise PermissionError("Bybit provider policy authority is not exact")
+    expected = _BYBIT_POLICY_IDENTITIES.get(provider_environment)
+    if expected is None:
+        raise PermissionError("Bybit provider environment authority is not canonical")
+    state = vars(policy)
+    if type(state) is not dict:
+        raise PermissionError("Bybit provider policy state changed")
+    provider_id = state.get("provider_id")
+    environment = state.get("environment")
+    base_url = state.get("base_url")
+    allowed_hosts = state.get("allowed_hosts")
+    timeout_seconds = state.get("timeout_seconds")
+    if (
+        type(provider_id) is not str
+        or type(environment) is not str
+        or type(base_url) is not str
+        or type(allowed_hosts) is not frozenset
+        or any(type(host) is not str for host in allowed_hosts)
+        or type(timeout_seconds) is not int
+    ):
+        raise PermissionError("Bybit provider policy scalar authority changed")
+    identity = (
+        provider_id,
+        environment,
+        base_url,
+        allowed_hosts,
+        timeout_seconds,
+    )
+    if identity != expected:
+        raise PermissionError("Bybit provider policy values changed")
+    return identity
+
+
+def _credential_identity(handle: PersistentCredentialHandle) -> tuple[object, ...]:
+    if type(handle) is not PersistentCredentialHandle:
+        raise PermissionError("Bybit credential handle authority is not exact")
+    state = vars(handle)
+    if type(state) is not dict:
+        raise PermissionError("Bybit credential handle state changed")
+    fields = (
+        state.get("handle_id"),
+        state.get("account_id"),
+        state.get("provider"),
+        state.get("environment"),
+        state.get("provider_environment"),
+        state.get("purpose"),
+        state.get("generation"),
+    )
+    for value in fields[:6]:
+        if type(value) is not str or not value or value != value.strip():
+            raise PermissionError("Bybit credential handle scalar authority changed")
+    if type(fields[6]) is not int or fields[6] < 1:
+        raise PermissionError("Bybit credential generation authority changed")
+    return fields
 
 
 class _ProductionBybitSecretResolver:
@@ -58,6 +146,7 @@ class _ProductionBybitSecretResolver:
         "__origin",
         "__provider_environment",
         "__credential_handle",
+        "__credential_identity",
         "__session_token",
     )
 
@@ -81,6 +170,7 @@ class _ProductionBybitSecretResolver:
             name="provider_environment",
         )
         session_token = _exact_text(session_token, name="session_token")
+        credential_identity = _credential_identity(credential_handle)
 
         application = runtime.application
         if type(application) is not AuthenticatedHostApplication:
@@ -119,6 +209,7 @@ class _ProductionBybitSecretResolver:
         self.__origin = config.public_origin
         self.__provider_environment = provider_environment
         self.__credential_handle = credential_handle
+        self.__credential_identity = credential_identity
         self.__session_token = session_token
 
     @property
@@ -156,6 +247,8 @@ class _ProductionBybitSecretResolver:
             raise PermissionError("production financial dispatcher account changed")
         if self.__dispatcher.environment != self.__environment:
             raise PermissionError("production financial dispatcher environment changed")
+        if _credential_identity(self.__credential_handle) != self.__credential_identity:
+            raise PermissionError("Bybit credential handle changed after composition")
 
     @contextmanager
     def lease_for_execution(
@@ -220,6 +313,7 @@ class ProductionBybitOrderSender:
         "__owner",
         "__resolver",
         "__policy",
+        "__policy_identity",
         "__account_id",
         "__environment",
         "__origin",
@@ -227,6 +321,7 @@ class ProductionBybitOrderSender:
         "__capability_snapshot_id",
         "__capability_registry",
         "__credential_handle",
+        "__credential_identity",
         "__session_token",
     )
 
@@ -253,9 +348,15 @@ class ProductionBybitOrderSender:
             raise RuntimeError("Bybit sender secret resolver is not production-bound")
 
         config = runtime.config
-        policy = BYBIT_V5_ENDPOINT_POLICIES.get(transport.provider_environment)
+        provider_environment = transport.provider_environment
+        policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
         if policy is None or transport.policy is not policy:
             raise RuntimeError("Bybit sender policy is not canonical provider policy")
+        policy_identity = _bybit_policy_identity(
+            policy,
+            provider_environment=provider_environment,
+        )
+        credential_identity = _credential_identity(transport.credential_handle)
         if transport.account_id != config.account_id:
             raise RuntimeError("Bybit sender account does not match production host")
         if transport.policy.environment != config.environment:
@@ -272,13 +373,15 @@ class ProductionBybitOrderSender:
         self.__owner = owner
         self.__resolver = resolver
         self.__policy = policy
+        self.__policy_identity = policy_identity
         self.__account_id = config.account_id
         self.__environment = config.environment
         self.__origin = config.public_origin
-        self.__provider_environment = transport.provider_environment
+        self.__provider_environment = provider_environment
         self.__capability_snapshot_id = transport.capability_snapshot_id
         self.__capability_registry = transport.capability_registry
         self.__credential_handle = transport.credential_handle
+        self.__credential_identity = credential_identity
         self.__session_token = transport.session_token
 
     @property
@@ -300,7 +403,16 @@ class ProductionBybitOrderSender:
             raise PermissionError("production financial sender owner changed")
         if type(transport) is not BybitV5HttpTransport:
             raise PermissionError("Bybit transport authority changed")
-        if transport.policy is not self.__policy:
+        canonical_policy = BYBIT_V5_ENDPOINT_POLICIES.get(self.__provider_environment)
+        if canonical_policy is not self.__policy or transport.policy is not self.__policy:
+            raise PermissionError("Bybit provider policy changed after composition")
+        if (
+            _bybit_policy_identity(
+                self.__policy,
+                provider_environment=self.__provider_environment,
+            )
+            != self.__policy_identity
+        ):
             raise PermissionError("Bybit provider policy changed after composition")
         if transport.provider_environment != self.__provider_environment:
             raise PermissionError("Bybit provider environment changed after composition")
@@ -319,6 +431,8 @@ class ProductionBybitOrderSender:
         if transport.capability_registry is not self.__capability_registry:
             raise PermissionError("Bybit capability registry changed after composition")
         if transport.credential_handle is not self.__credential_handle:
+            raise PermissionError("Bybit credential handle changed after composition")
+        if _credential_identity(self.__credential_handle) != self.__credential_identity:
             raise PermissionError("Bybit credential handle changed after composition")
         if transport.session_token != self.__session_token:
             raise PermissionError("Bybit session authority changed after composition")
@@ -388,6 +502,8 @@ def build_production_bybit_order_sender(
     policy = BYBIT_V5_ENDPOINT_POLICIES.get(provider_environment)
     if policy is None:
         raise ValueError("Bybit provider_environment must be MAINNET, TESTNET or DEMO")
+    _bybit_policy_identity(policy, provider_environment=provider_environment)
+    _credential_identity(credential_handle)
 
     dispatcher = runtime.financial_dispatcher
     recovery = runtime.recovery_controller

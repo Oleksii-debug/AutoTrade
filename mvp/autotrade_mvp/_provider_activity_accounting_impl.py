@@ -1600,6 +1600,89 @@ class ProviderEconomicCut:
                 )
 
 
+_PROVIDER_HISTORICAL_REALIZED_EQUITY_EVIDENCE_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoricalRealizedEquityEvidence:
+    """Recomputable owner evidence for realized FIFO economics at one frozen cut."""
+
+    provider_id: str
+    account_id: str
+    environment: str
+    economic_cut_digest: str
+    resulting_book_digest: str
+    aggregate_version: int
+    visibility_journal_sequence: int
+    instrument: str
+    settlement_currency: str
+    quantity: Decimal
+    open_cost_basis: Decimal
+    realized_pnl: Decimal
+    projection_policy_version: str
+    evidence_digest: str
+    _token: InitVar[object | None] = None
+
+    def __post_init__(self, _token: object | None) -> None:
+        if _token is not _PROVIDER_HISTORICAL_REALIZED_EQUITY_EVIDENCE_TOKEN:
+            raise AccountingConflict(
+                "historical realized equity evidence must come from canonical owner replay"
+            )
+        for name in (
+            "provider_id", "account_id", "environment", "economic_cut_digest",
+            "resulting_book_digest", "instrument", "settlement_currency",
+            "projection_policy_version", "evidence_digest",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise AccountingConflict(
+                    f"historical realized equity evidence {name} is not canonical text"
+                )
+        for name in ("aggregate_version", "visibility_journal_sequence"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise AccountingConflict(
+                    f"historical realized equity evidence {name} must be positive"
+                )
+        for name in ("quantity", "open_cost_basis", "realized_pnl"):
+            value = getattr(self, name)
+            if type(value) is not Decimal or not value.is_finite():
+                raise AccountingConflict(
+                    f"historical realized equity evidence {name} must be exact Decimal"
+                )
+        if self.evidence_digest != payload_digest(
+            _provider_historical_realized_equity_evidence_payload(self)
+        ):
+            raise AccountingConflict(
+                "historical realized equity evidence digest is inconsistent"
+            )
+
+
+def _provider_historical_realized_equity_evidence_payload(
+    value: ProviderHistoricalRealizedEquityEvidence,
+) -> dict[str, object]:
+    if type(value) is not ProviderHistoricalRealizedEquityEvidence:
+        raise TypeError(
+            "evidence must be exact ProviderHistoricalRealizedEquityEvidence"
+        )
+    return {
+        "schema_version": "provider-historical-realized-equity-evidence.v1",
+        "provider_id": value.provider_id,
+        "account_id": value.account_id,
+        "environment": value.environment,
+        "economic_cut_digest": value.economic_cut_digest,
+        "resulting_book_digest": value.resulting_book_digest,
+        "aggregate_version": value.aggregate_version,
+        "visibility_journal_sequence": value.visibility_journal_sequence,
+        "instrument": value.instrument,
+        "settlement_currency": value.settlement_currency,
+        "quantity": _decimal_text(value.quantity),
+        "open_cost_basis": _decimal_text(value.open_cost_basis),
+        "realized_pnl": _decimal_text(value.realized_pnl),
+        "projection_policy_version": value.projection_policy_version,
+    }
+
+
 def _provider_economic_cut_seal_digest(value: ProviderEconomicCut) -> str:
     if type(value) is not ProviderEconomicCut:
         raise TypeError("cut must be exact ProviderEconomicCut")
@@ -1727,6 +1810,32 @@ def reverify_provider_economic_cut(
             "provider economic cut does not match canonical durable replay"
         )
     return replayed
+
+
+def reverify_provider_historical_realized_equity_evidence(
+    book: "DurableProviderEconomicBook",
+    cut: ProviderEconomicCut,
+    evidence: object,
+    *,
+    expected_visibility_journal_sequence: int,
+) -> ProviderHistoricalRealizedEquityEvidence:
+    """Recompute owner-issued realized economics rather than trusting copied numbers."""
+
+    if type(evidence) is not ProviderHistoricalRealizedEquityEvidence:
+        raise TypeError(
+            "evidence must be exact ProviderHistoricalRealizedEquityEvidence"
+        )
+    recomputed = book.resolve_historical_realized_equity_evidence(
+        cut,
+        expected_visibility_journal_sequence=expected_visibility_journal_sequence,
+        instrument=evidence.instrument,
+        settlement_currency=evidence.settlement_currency,
+    )
+    if recomputed != evidence:
+        raise AccountingConflict(
+            "historical realized equity evidence does not match canonical replay"
+        )
+    return recomputed
 
 
 @dataclass
@@ -2293,6 +2402,56 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
                 "historical realized projection unexpectedly contains mark authority"
             )
         return projected
+
+    def resolve_historical_realized_equity_evidence(
+        self,
+        cut: ProviderEconomicCut,
+        *,
+        expected_visibility_journal_sequence: int,
+        instrument: str,
+        settlement_currency: str,
+    ) -> ProviderHistoricalRealizedEquityEvidence:
+        """Issue recomputable realized-economics evidence from the selected owner."""
+
+        projected = self.project_historical_equity_position(
+            cut,
+            expected_visibility_journal_sequence=expected_visibility_journal_sequence,
+            instrument=instrument,
+            settlement_currency=settlement_currency,
+        )
+        payload = {
+            "schema_version": "provider-historical-realized-equity-evidence.v1",
+            "provider_id": cut.provider_id,
+            "account_id": cut.account_id,
+            "environment": cut.environment,
+            "economic_cut_digest": cut.cut_digest,
+            "resulting_book_digest": cut.resulting_book_digest,
+            "aggregate_version": cut.aggregate_version,
+            "visibility_journal_sequence": cut.visibility_journal_sequence,
+            "instrument": projected.instrument,
+            "settlement_currency": projected.settlement_currency,
+            "quantity": _decimal_text(projected.quantity),
+            "open_cost_basis": _decimal_text(projected.open_cost_basis),
+            "realized_pnl": _decimal_text(projected.realized_pnl),
+            "projection_policy_version": projected.policy_version,
+        }
+        return ProviderHistoricalRealizedEquityEvidence(
+            provider_id=cut.provider_id,
+            account_id=cut.account_id,
+            environment=cut.environment,
+            economic_cut_digest=cut.cut_digest,
+            resulting_book_digest=cut.resulting_book_digest,
+            aggregate_version=cut.aggregate_version,
+            visibility_journal_sequence=cut.visibility_journal_sequence,
+            instrument=projected.instrument,
+            settlement_currency=projected.settlement_currency,
+            quantity=projected.quantity,
+            open_cost_basis=projected.open_cost_basis,
+            realized_pnl=projected.realized_pnl,
+            projection_policy_version=projected.policy_version,
+            evidence_digest=payload_digest(payload),
+            _token=_PROVIDER_HISTORICAL_REALIZED_EQUITY_EVIDENCE_TOKEN,
+        )
 
     def resolve_historical_cut(
         self,

@@ -61,8 +61,6 @@ PROTECTED_SENTINELS = frozenset(
         "control/work-packages/bank.json",
         "control/__init__.py",
         "control/tools/__init__.py",
-        "control/__init__.py",
-        "control/tools/__init__.py",
         "control/tools/reconvergence_integrity.py",
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",

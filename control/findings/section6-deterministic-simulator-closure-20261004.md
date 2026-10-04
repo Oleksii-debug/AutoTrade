@@ -51,3 +51,13 @@ Exact source review after the initial convergence found additional qualification
 - regressions cover false asset-class agreement, sub-step lots, off-grid order/liquidity prices and pre/post-effective instrument use.
 
 These are qualification-integrity repairs only. They do not turn simulation evidence into provider/PAPER/LIVE authority or profitability/edge evidence. Fresh exact-head baseline and Verify are required after these changes.
+
+
+## Follow-up source review: authoritative instrument metadata cut
+
+The qualified execution path now rejects caller-constructed InstrumentVersion facts unless
+their canonical metadata_evidence resolves through the existing authenticated ArtifactStore
+reader and is bound to the exact instrument-version facts. Qualified simulation additionally
+requires that metadata evidence to have been immutably committed by the order submission cut,
+preventing a later-discovered price tick or quantity rule from leaking backward into replay.
+Focused regressions cover missing metadata authority and post-order metadata publication.

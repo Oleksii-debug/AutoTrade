@@ -32,9 +32,32 @@ PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
+INSTRUMENT_METADATA_ARTIFACT_ID = str(
+    uuid5(NAMESPACE_URL, "autotrade:wp13:instrument-metadata")
+)
+INSTRUMENT_METADATA_BYTES = (
+    b'{"instrument_version":"' + INSTRUMENT_REF.encode("ascii")
+    + b'","price_tick":"0.01"}'
+)
+INSTRUMENT_METADATA_SHA256 = sha256(INSTRUMENT_METADATA_BYTES).hexdigest()
+INSTRUMENT_METADATA_OBSERVED_AT = "2025-12-30T10:00:00Z"
 
 
-def instrument(*, price_tick="0.01"):
+class _FixedArtifactClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2025, 12, 30, 12, 0, 0, tzinfo=timezone.utc)
+        return value if tz is None else value.astimezone(tz)
+
+
+class _LateArtifactClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 9, 25, 12, 0, 0, tzinfo=timezone.utc)
+        return value if tz is None else value.astimezone(tz)
+
+
+def instrument(*, price_tick="0.01", metadata_evidence=None):
     return InstrumentVersion(
         instrument_id=INSTRUMENT_ID,
         version=1,
@@ -53,6 +76,16 @@ def instrument(*, price_tick="0.01"):
         calendar_id="CONTINUOUS_24_7",
         timezone_id="UTC",
         effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        effective_to=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        metadata_evidence=(
+            ({
+                "artifact_id": INSTRUMENT_METADATA_ARTIFACT_ID,
+                "sha256": f"sha256:{INSTRUMENT_METADATA_SHA256}",
+                "observed_at": INSTRUMENT_METADATA_OBSERVED_AT,
+            },)
+            if metadata_evidence is None
+            else metadata_evidence
+        ),
     )
 
 
@@ -125,14 +158,29 @@ class ExecutionQualificationTests(unittest.TestCase):
     def setUp(self):
         self._temp = TemporaryDirectory()
         self.store = ArtifactStore(Path(self._temp.name) / "artifacts")
-        self.store.publish_bytes(
-            artifact_id=ARTIFACT_ID,
-            data=EVIDENCE_BYTES,
-            media_type="application/json",
-            rights={"storage": True, "export": False},
-            source_refs=["protocol:wp13"],
-            metadata={"kind": "execution-qualification-evidence"},
-        )
+        with patch(
+            "autotrade_research.artifacts.store.datetime",
+            _FixedArtifactClock,
+        ):
+            self.store.publish_bytes(
+                artifact_id=INSTRUMENT_METADATA_ARTIFACT_ID,
+                data=INSTRUMENT_METADATA_BYTES,
+                media_type="application/vnd.autotrade.instrument-metadata+json",
+                rights={"storage": True, "export": False},
+                source_refs=["provider:simulated:instrument:ABC"],
+                metadata={
+                    "kind": "instrument-metadata",
+                    "instrument_version_binding": instrument().metadata_evidence_binding(),
+                },
+            )
+            self.store.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+                source_refs=["protocol:wp13"],
+                metadata={"kind": "execution-qualification-evidence"},
+            )
 
     def tearDown(self):
         self._temp.cleanup()
@@ -297,25 +345,20 @@ class ExecutionQualificationTests(unittest.TestCase):
             )
 
     def test_qualified_order_cannot_precede_instrument_effective_interval(self):
-        future_instrument = replace(
-            instrument(),
-            effective_from=datetime(2026, 9, 25, tzinfo=timezone.utc),
-        )
-        exec_model = model(
-            price_projection=ExecutionPriceProjectionPolicy.from_instrument(
-                future_instrument
-            )
-        )
+        exec_model = model()
         with self.assertRaisesRegex(
             ExecutionQualificationError,
             "instrument_effective_at_order",
         ):
             simulate_qualified_execution(
-                order=order(),
-                observation=observation(),
+                order=order(submitted_at="2025-12-31T23:59:59Z"),
+                observation=observation(
+                    market_time="2026-01-01T00:00:00.200000Z",
+                    available_at="2026-01-01T00:00:00.250000Z",
+                ),
                 model=exec_model,
                 qualification=qualification(exec_model),
-                instrument=future_instrument,
+                instrument=instrument(),
                 asset_class="CASH_EQUITY",
                 protocol_sha256=PROTOCOL,
                 artifact_store=self.store,
@@ -324,40 +367,84 @@ class ExecutionQualificationTests(unittest.TestCase):
             )
 
     def test_qualified_market_observation_cannot_outlive_instrument_version(self):
-        ended_instrument = replace(
-            instrument(),
-            effective_to=datetime(
-                2026,
-                9,
-                24,
-                10,
-                0,
-                0,
-                100000,
-                tzinfo=timezone.utc,
-            ),
-        )
-        exec_model = model(
-            price_projection=ExecutionPriceProjectionPolicy.from_instrument(
-                ended_instrument
-            )
-        )
+        exec_model = model()
         with self.assertRaisesRegex(
             ExecutionQualificationError,
             "instrument_effective_at_market",
         ):
             simulate_qualified_execution(
                 order=order(),
-                observation=observation(),
+                observation=observation(
+                    market_time="2027-01-01T00:00:00.200000Z",
+                    available_at="2027-01-01T00:00:00.250000Z",
+                ),
                 model=exec_model,
                 qualification=qualification(exec_model),
-                instrument=ended_instrument,
+                instrument=instrument(),
                 asset_class="CASH_EQUITY",
                 protocol_sha256=PROTOCOL,
                 artifact_store=self.store,
                 evidence_artifact_id=ARTIFACT_ID,
                 purpose="REPLAY",
             )
+
+    def test_qualification_rejects_instrument_without_authenticated_metadata(self):
+        exec_model = model()
+        unbound = replace(instrument(), metadata_evidence=())
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "requires authenticated instrument metadata evidence",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    instrument=unbound,
+                )
+            )
+
+    def test_qualified_replay_rejects_metadata_committed_after_order_cut(self):
+        exec_model = model()
+        with TemporaryDirectory() as directory:
+            late_store = ArtifactStore(Path(directory) / "artifacts")
+            with patch(
+                "autotrade_research.artifacts.store.datetime",
+                _LateArtifactClock,
+            ):
+                late_store.publish_bytes(
+                    artifact_id=INSTRUMENT_METADATA_ARTIFACT_ID,
+                    data=INSTRUMENT_METADATA_BYTES,
+                    media_type="application/vnd.autotrade.instrument-metadata+json",
+                    rights={"storage": True, "export": False},
+                    source_refs=["provider:simulated:instrument:ABC"],
+                    metadata={
+                        "kind": "instrument-metadata",
+                        "instrument_version_binding": instrument().metadata_evidence_binding(),
+                    },
+                )
+                late_store.publish_bytes(
+                    artifact_id=ARTIFACT_ID,
+                    data=EVIDENCE_BYTES,
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=["protocol:wp13"],
+                    metadata={"kind": "execution-qualification-evidence"},
+                )
+            with self.assertRaisesRegex(
+                ExecutionQualificationError,
+                "requires authenticated instrument metadata evidence",
+            ):
+                simulate_qualified_execution(
+                    order=order(),
+                    observation=observation(),
+                    model=exec_model,
+                    qualification=qualification(exec_model),
+                    instrument=instrument(),
+                    asset_class="CASH_EQUITY",
+                    protocol_sha256=PROTOCOL,
+                    artifact_store=late_store,
+                    evidence_artifact_id=ARTIFACT_ID,
+                    purpose="REPLAY",
+                )
 
     def test_cost_assumption_change_invalidates_qualification(self):
         qualified = model(slippage_bps="5")

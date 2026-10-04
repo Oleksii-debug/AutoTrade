@@ -10,15 +10,21 @@ replay evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
-from autotrade_research.artifacts import ArtifactIntegrityError, ArtifactStore
+from autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 
 from .execution_oracle import assert_conservative_execution
 from .exact_decimal import ExactDecimalError, is_exact_decimal_multiple
 from .instruments import (
+    InstrumentRegistry,
     InstrumentRegistryError,
     InstrumentVersion,
     _detached_instrument_version,
@@ -50,6 +56,53 @@ _ASSET_CLASSES = {
     "OPTION",
 }
 _PURPOSES = {"RESEARCH", "REPLAY", "PROMOTION"}
+
+
+def _validate_instrument_metadata_authority(
+    *,
+    instrument: InstrumentVersion,
+    artifact_store: ArtifactStore,
+    knowledge_cutoff: str | None,
+) -> None:
+    """Authenticate the exact InstrumentVersion facts behind execution rules.
+
+    Storage integrity alone is not enough: the canonical instrument authority
+    binds price/quantity grids and lifecycle facts to immutable metadata
+    evidence. Qualified replay additionally requires that evidence to have been
+    knowable no later than the order submission cut.
+    """
+
+    cutoff = (
+        datetime.max.replace(tzinfo=timezone.utc)
+        if knowledge_cutoff is None
+        else _instant(knowledge_cutoff, name="instrument_knowledge_cutoff")
+    )
+    try:
+        trusted_read = trusted_authenticated_reader(
+            artifact_store.root,
+            publication_store=artifact_store,
+        )
+        known = InstrumentRegistry._metadata_known_by(
+            instrument,
+            cutoff,
+            artifact_store=artifact_store,
+            trusted_read=trusted_read,
+        )
+    except (
+        ArtifactIntegrityError,
+        InstrumentRegistryError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ExecutionQualificationError(
+            "instrument metadata evidence cannot be authenticated"
+        ) from error
+    if not known:
+        raise ExecutionQualificationError(
+            "qualified execution requires authenticated instrument metadata evidence"
+        )
 
 
 def _text(value: object, *, name: str) -> str:
@@ -153,6 +206,7 @@ def validate_execution_qualification(
     artifact_store: ArtifactStore,
     evidence_artifact_id: str,
     purpose: str,
+    instrument_knowledge_cutoff: str | None = None,
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
 
@@ -257,6 +311,12 @@ def validate_execution_qualification(
             + ", ".join(sorted(set(failures)))
         )
 
+    _validate_instrument_metadata_authority(
+        instrument=detached_instrument,
+        artifact_store=artifact_store,
+        knowledge_cutoff=instrument_knowledge_cutoff,
+    )
+
 
 def _validate_qualified_instrument_rules(
     *,
@@ -357,6 +417,7 @@ def simulate_qualified_execution(
         artifact_store=artifact_store,
         evidence_artifact_id=evidence_artifact_id,
         purpose=purpose,
+        instrument_knowledge_cutoff=order.submitted_at,
     )
     _validate_qualified_instrument_rules(
         order=order,

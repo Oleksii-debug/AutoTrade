@@ -44,7 +44,7 @@ class ArtifactAuthorityTests(unittest.TestCase):
         self.assertIs(PackageArtifactStore, CanonicalArtifactStore)
         self.assertEqual(
             CANONICAL_ARTIFACT_STORE_MODULE,
-            "autotrade_research.artifacts.store",
+            "autotrade_runtime.artifacts.store",
         )
 
     def test_production_code_cannot_reintroduce_legacy_content_store_authority(self):

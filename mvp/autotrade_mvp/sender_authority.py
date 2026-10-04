@@ -31,6 +31,8 @@ class SenderAuthorityError(PermissionError):
 
 
 _LEASE_FACTORY = object()
+_TAKEOVER_AGGREGATE_TYPE = "recovery_takeover"
+_TAKEOVER_COMPLETE_EVENT_TYPE = "RecoveryTakeoverOwnerCommitted"
 
 
 @dataclass(frozen=True)
@@ -101,26 +103,68 @@ def _lease(
     )
 
 
+def _assert_no_pending_takeover(store: JournalStore, *, owner_scope: str) -> None:
+    """Fail closed while a crash-resumable takeover is not durably complete."""
+
+    scope = _canonical_scope(owner_scope)
+    events = JournalStore.load_events_by_aggregate_type(
+        store,
+        _TAKEOVER_AGGREGATE_TYPE,
+    )
+    latest_by_aggregate: dict[str, dict[str, object]] = {}
+    for event in events:
+        if type(event) is not dict:
+            raise SenderAuthorityError("sender takeover journal event is invalid")
+        aggregate_id = event.get("aggregate_id")
+        payload = event.get("payload")
+        event_type = event.get("event_type")
+        if (
+            type(aggregate_id) is not str
+            or not aggregate_id
+            or type(payload) is not dict
+            or type(event_type) is not str
+            or not event_type
+        ):
+            raise SenderAuthorityError("sender takeover journal event is malformed")
+        durable_scope = payload.get("owner_scope")
+        if type(durable_scope) is not str or not durable_scope:
+            raise SenderAuthorityError("sender takeover journal scope is invalid")
+        if durable_scope == scope:
+            latest_by_aggregate[aggregate_id] = event
+
+    for event in latest_by_aggregate.values():
+        if event.get("event_type") != _TAKEOVER_COMPLETE_EVENT_TYPE:
+            raise SenderAuthorityError(
+                "sender authority is suspended by pending durable takeover"
+            )
+
+
 @contextmanager
-def sender_authority_window(
+def _sender_authority_window(
     store: JournalStore,
     *,
     owner_scope: str,
+    allow_pending_takeover: bool,
 ) -> Iterator[SenderAuthorityLease]:
-    """Hold the process-shared terminal-send/takeover exclusion window.
-
-    Lock ordering for WP-49 is sender authority gate first, then any provider
-    credential-vault lease. Takeover must use the same order. This avoids a
-    sender-vault deadlock while ensuring credential rotation/revocation cannot
-    race an already-authorized provider call.
-    """
-
     journal_path = _canonical_store_path(store)
     scope = _canonical_scope(owner_scope)
     lock_path = sender_authority_gate_path(store, owner_scope=scope)
     if lock_path.parent != journal_path.parent:
         raise SenderAuthorityError(
             "sender authority gate must share the journal parent"
+        )
+
+    def prepare_lease() -> SenderAuthorityLease:
+        if _canonical_store_path(store) != journal_path:
+            raise SenderAuthorityError(
+                "sender authority journal changed while acquiring gate"
+            )
+        if not allow_pending_takeover:
+            _assert_no_pending_takeover(store, owner_scope=scope)
+        return _lease(
+            owner_scope=scope,
+            journal_path=journal_path,
+            gate_path=lock_path,
         )
 
     if sys.platform == "win32":
@@ -134,15 +178,7 @@ def sender_authority_window(
                 authority,
                 lock_name=lock_path.name,
             ):
-                if _canonical_store_path(store) != journal_path:
-                    raise SenderAuthorityError(
-                        "sender authority journal changed while acquiring gate"
-                    )
-                yield _lease(
-                    owner_scope=scope,
-                    journal_path=journal_path,
-                    gate_path=lock_path,
-                )
+                yield prepare_lease()
         return
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,16 +209,50 @@ def sender_authority_window(
 
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
             try:
-                if _canonical_store_path(store) != journal_path:
-                    raise SenderAuthorityError(
-                        "sender authority journal changed while acquiring gate"
-                    )
-                yield _lease(
-                    owner_scope=scope,
-                    journal_path=journal_path,
-                    gate_path=lock_path,
-                )
+                yield prepare_lease()
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
+
+
+@contextmanager
+def sender_authority_window(
+    store: JournalStore,
+    *,
+    owner_scope: str,
+) -> Iterator[SenderAuthorityLease]:
+    """Hold the terminal send window and reject crash-pending takeovers.
+
+    Lock ordering for WP-49 is sender authority gate first, then any provider
+    credential-vault lease. A durable takeover-in-progress blocks this ordinary
+    sender path until its owner transition is durably completed.
+    """
+
+    with _sender_authority_window(
+        store,
+        owner_scope=owner_scope,
+        allow_pending_takeover=False,
+    ) as lease:
+        yield lease
+
+
+@contextmanager
+def takeover_authority_window(
+    store: JournalStore,
+    *,
+    owner_scope: str,
+) -> Iterator[SenderAuthorityLease]:
+    """Hold the same gate for canonical takeover issue/resume processing.
+
+    This path is intentionally separate from ``sender_authority_window`` so a
+    previously durable takeover can resume after process death while ordinary
+    provider sends remain fenced by that pending transition.
+    """
+
+    with _sender_authority_window(
+        store,
+        owner_scope=owner_scope,
+        allow_pending_takeover=True,
+    ) as lease:
+        yield lease

@@ -17,8 +17,8 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
 
-from autotrade_runtime.artifacts import trusted_authenticated_reader
-from autotrade_runtime.artifacts.store import (
+from research.autotrade_research.artifacts import trusted_authenticated_reader
+from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )

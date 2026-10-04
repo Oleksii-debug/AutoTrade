@@ -13,7 +13,7 @@ import subprocess
 from typing import Callable, Iterable, Mapping
 from uuid import UUID
 
-from autotrade_runtime.artifacts import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,

@@ -24,7 +24,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
-from autotrade_runtime.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"

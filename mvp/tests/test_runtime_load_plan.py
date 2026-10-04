@@ -71,6 +71,7 @@ class RuntimeLoadPlanTests(unittest.TestCase):
             store = self._store(root)
             current = _spec()
             expected = (_event("financial-1", 1), _event("financial-2", 2))
+            event_ids = tuple(event.event_id for event in expected)
             plan = declare_runtime_event_plan(
                 store,
                 plan_id="campaign-1",
@@ -97,6 +98,8 @@ class RuntimeLoadPlanTests(unittest.TestCase):
                 financial_staleness_us=(100, 200),
                 research_interference_us=(50,),
                 reconnect_backlog_remaining=0,
+                financial_latency_event_ids=event_ids,
+                financial_staleness_event_ids=event_ids,
                 declared_duration_us=1_000_000,
                 observed_duration_us=1_000_000,
             )

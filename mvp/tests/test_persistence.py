@@ -104,6 +104,42 @@ class JournalStoreTests(unittest.TestCase):
                 0,
             )
 
+    def test_command_environment_rejects_text_subclasses_without_callbacks(self):
+        class HostileEnvironment(str):
+            strip_calls = 0
+            upper_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("caller-controlled strip must not execute")
+
+            def upper(self):
+                type(self).upper_calls += 1
+                raise AssertionError("caller-controlled upper must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE",
+            ):
+                store.record_command(
+                    actor="alice",
+                    environment=HostileEnvironment("PAPER"),
+                    command_id="cmd-hostile-environment",
+                    idempotency_key="key-hostile-environment",
+                    request={"action": "A"},
+                    result={"status": "REJECTED"},
+                    state_version=0,
+                )
+
+            self.assertEqual(HostileEnvironment.strip_calls, 0)
+            self.assertEqual(HostileEnvironment.upper_calls, 0)
+            self.assertEqual(
+                store.whole_store_state_cut()["counts"]["command_dedupe"],
+                0,
+            )
+
     def test_event_and_outbox_commit_atomically_and_replay_idempotently(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

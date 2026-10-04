@@ -435,6 +435,75 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module.sha256 = original_sha256
 
 
+    def test_json_encoder_binding_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        dumps_globals = allocation_module.json.dumps.__globals__
+        original_encoder = dumps_globals["JSONEncoder"]
+        touched = []
+
+        class ForgedEncoder:
+            def __init__(self, *args, **kwargs):
+                touched.append("init")
+                raise AssertionError("forged JSON encoder executed")
+
+        dumps_globals["JSONEncoder"] = ForgedEncoder
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            dumps_globals["JSONEncoder"] = original_encoder
+
+        self.assertEqual(touched, [])
+
+    def test_json_encoder_helper_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_helper = encoder_globals["_make_iterencode"]
+        touched = []
+
+        def forged_helper(*args, **kwargs):
+            touched.append("helper")
+            raise AssertionError("forged JSON helper executed")
+
+        encoder_globals["_make_iterencode"] = forged_helper
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["_make_iterencode"] = original_helper
+
+        self.assertEqual(touched, [])
+
+    def test_json_default_decoder_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        loads_globals = allocation_module.json.loads.__globals__
+        original_decoder = loads_globals["_default_decoder"]
+        touched = []
+
+        class ForgedDecoder:
+            def decode(self, _value):
+                touched.append("decode")
+                raise AssertionError("forged JSON decoder executed")
+
+        loads_globals["_default_decoder"] = ForgedDecoder()
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decoder authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            loads_globals["_default_decoder"] = original_decoder
+
+        self.assertEqual(touched, [])
+
+
     def test_same_function_digest_code_mutation_fails_before_execution(self):
         evidence = self.evidence({"symbol": "AAA"})
         helper = allocation_module._allocation_evidence_digest

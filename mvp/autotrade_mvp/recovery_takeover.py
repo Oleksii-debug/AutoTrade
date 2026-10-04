@@ -77,6 +77,16 @@ _EFFECTFUL_SUBMISSION_EVENTS = frozenset(
     {"SubmissionSending", "SubmissionSent", "SubmissionUnknown"}
 )
 
+# Retain the installed JournalStore takeover primitives once. A later public
+# class-method rebind must not retarget the financial owner-transition proof.
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
+    JournalStore.load_events_by_aggregate_type
+)
+_CANONICAL_JOURNAL_GET_EVENT = JournalStore.get_event
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+
 
 @dataclass(frozen=True)
 class DurableTakeoverResult:
@@ -180,8 +190,8 @@ def _append_takeover_event(
         "payload_hash": payload_digest(payload),
         "committed_at": _now(),
     }
-    JournalStore.append_event(store, event)
-    loaded = JournalStore.load_events(
+    _CANONICAL_JOURNAL_APPEND_EVENT(store, event)
+    loaded = _CANONICAL_JOURNAL_LOAD_EVENTS(
         store, _TAKEOVER_AGGREGATE_TYPE, takeover_id
     )
     if (
@@ -287,7 +297,7 @@ def _takeover_groups(
     store: JournalStore,
 ) -> dict[str, tuple[dict[str, object], ...]]:
     grouped: dict[str, list[dict[str, object]]] = {}
-    for event in JournalStore.load_events_by_aggregate_type(
+    for event in _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
         store, _TAKEOVER_AGGREGATE_TYPE
     ):
         if type(event) is not dict:
@@ -466,7 +476,7 @@ def _owner_event(
     owner_scope: str,
     owner: OwnerFence,
 ) -> dict[str, object]:
-    events = JournalStore.load_events(
+    events = _CANONICAL_JOURNAL_LOAD_EVENTS(
         store, "recovery_owner", owner_scope
     )
     if len(events) < owner.epoch:
@@ -540,7 +550,7 @@ def _latest_effectful_submission_sequence(
     account_id: str,
 ) -> int:
     grouped: dict[str, list[dict[str, object]]] = {}
-    for event in JournalStore.load_events_by_aggregate_type(
+    for event in _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
         store, "submission_attempt"
     ):
         aggregate_id = event.get("aggregate_id")
@@ -614,7 +624,7 @@ def _require_checkpoint_event(
         raise DurableTakeoverError(
             "takeover reconciliation event identity is invalid"
         )
-    event = JournalStore.get_event(store, event_id)
+    event = _CANONICAL_JOURNAL_GET_EVENT(store, event_id)
     if event is None:
         raise DurableTakeoverError(
             "takeover reconciliation event disappeared"
@@ -1046,7 +1056,7 @@ def execute_durable_takeover(
     with takeover_authority_window(
         store, owner_scope=owner_scope
     ) as lease:
-        owner_validation_journal_sequence = JournalStore.current_journal_sequence(
+        owner_validation_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(
             store
         )
         pending = _pending_for_scope(

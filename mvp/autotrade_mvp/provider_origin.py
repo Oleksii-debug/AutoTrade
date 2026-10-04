@@ -1455,6 +1455,8 @@ class ProviderOriginJournal:
                 _AGGREGATE_TYPE,
                 attempt,
             )
+            if len(events) == 3:
+                return self.load_response_binding(attempt, query_binding)
             if len(events) != 2:
                 raise ProviderOriginError(
                     "provider-origin recovery could not establish Retained state"

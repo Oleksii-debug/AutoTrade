@@ -47,6 +47,21 @@ _DISPOSITIONS = frozenset(
         "INVALID",
     }
 )
+# Only these registered scientific failures are terminal evidence that a
+# candidate should receive zero research weight.  Protocol/integrity failures
+# are not evidence against the strategy and must never be laundered into a
+# completed comparison.
+_TERMINAL_ZERO_GATE_CHECKS = frozenset(
+    {
+        "walk_forward",
+        "locked_evaluation",
+        "statistical_rule",
+        "net_advantage",
+        "drawdown",
+        "cost_stress",
+        "retention",
+    }
+)
 
 
 class StrategyToolWeightingError(ValueError):
@@ -947,6 +962,12 @@ def assess_strategy_tools(
                     "cross-market/regime coverage is inconclusive"
                 )
 
+            terminal_gate_failure = False
+            failed_gate_checks = {
+                name
+                for name, value in gate.checks.items()
+                if value == "FAIL"
+            }
             if gate.status == "PASS" and any(
                 value != "PASS"
                 for value in gate.checks.values()
@@ -954,7 +975,24 @@ def assess_strategy_tools(
                 candidate_failures.append(
                     "scientific gate PASS contradicts non-PASS checks"
                 )
-            if gate.status == "PASS":
+            elif gate.status == "FAIL":
+                if not failed_gate_checks:
+                    candidate_failures.append(
+                        "scientific gate FAIL has no failing check"
+                    )
+                elif failed_gate_checks <= _TERMINAL_ZERO_GATE_CHECKS:
+                    terminal_gate_failure = True
+                else:
+                    candidate_failures.append(
+                        "scientific gate failed protocol/integrity checks: "
+                        + ", ".join(sorted(failed_gate_checks))
+                    )
+            elif gate.status == "INCONCLUSIVE":
+                candidate_incomplete.append(
+                    "scientific evaluation is inconclusive"
+                )
+
+            if gate.status == "PASS" or terminal_gate_failure:
                 graph_digest = gate.provenance.get("evidence_graph_digest")
                 review_source_sha = gate.provenance.get("review_source_sha")
                 evidence_bundle_id = gate.provenance.get("evidence_bundle_id")
@@ -964,7 +1002,8 @@ def assess_strategy_tools(
                     or review_source_sha is None
                 ):
                     candidate_incomplete.append(
-                        "scientific PASS lacks immutable reviewed provenance"
+                        "terminal scientific result lacks immutable "
+                        "reviewed provenance"
                     )
                 else:
                     try:
@@ -989,10 +1028,6 @@ def assess_strategy_tools(
                         candidate_failures.append(
                             "scientific evidence bundle identity is malformed"
                         )
-            elif gate.status == "INCONCLUSIVE":
-                candidate_incomplete.append(
-                    "scientific evaluation is inconclusive"
-                )
 
             if not item.costs_complete:
                 candidate_incomplete.append(
@@ -1028,7 +1063,7 @@ def assess_strategy_tools(
                 cell_dispositions[fingerprint] = "INCONCLUSIVE"
                 continue
 
-            if gate.status == "FAIL":
+            if terminal_gate_failure:
                 cell_dispositions[fingerprint] = "EVIDENCED_ZERO"
                 excess[fingerprint] = Fraction(0, 1)
                 continue

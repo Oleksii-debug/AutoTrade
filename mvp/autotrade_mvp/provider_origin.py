@@ -34,16 +34,22 @@ from .provider_route_reads import (
     QualifiedProviderReadQueryBinding,
     QualifiedProviderResponseObservation,
     _require_qualified_provider_read_binding_authority,
+    issue_terminal_qualified_provider_read_authority,
     observe_qualified_provider_json_response,
     terminal_qualified_provider_read_authority_snapshot,
 )
 from .provider_transport import (
+    BinanceSpotAuthenticatedReadTransport,
+    BybitV5AuthenticatedReadTransport,
+    KrakenSpotAuthenticatedReadTransport,
     ProviderTransportError,
+    UrllibJsonWireClient,
     direct_authenticated_read_execution_receipt_snapshot,
     direct_authenticated_read_network_policy_identity,
     direct_authenticated_read_transport_identity,
     provider_observation_direct_execution_material,
     qualified_authenticated_read_expected_wire_semantics_digest,
+    require_direct_authenticated_read_client,
 )
 from .provider_response_limits import (
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -1106,6 +1112,116 @@ class ProviderOriginJournal:
             _binding_token=_BINDING_TOKEN,
         )
 
+
+
+
+def execute_direct_provider_origin_read(
+    *,
+    origin: ProviderOriginJournal,
+    route: object,
+    capability_registry: object,
+    qualification_registry: object,
+    query_binding: QualifiedProviderReadQueryBinding,
+    transport: object,
+) -> AuthenticatedReadResponseBinding:
+    """Execute one qualified read through the canonical direct provider wire.
+
+    Prepared is durable before I/O.  Exact current C/Q is re-resolved inside
+    the transport's terminal callback immediately before SEND.  Only an exact
+    canonical UrllibJsonWireClient whose original direct-only opener is still
+    authoritative may enter this path.
+    """
+
+    if type(origin) is not ProviderOriginJournal:
+        raise TypeError("origin must be exact ProviderOriginJournal")
+    if type(query_binding) is not QualifiedProviderReadQueryBinding:
+        raise TypeError(
+            "query_binding must be exact QualifiedProviderReadQueryBinding"
+        )
+    _require_qualified_provider_read_binding_authority(query_binding)
+    if type(transport) not in {
+        BinanceSpotAuthenticatedReadTransport,
+        BybitV5AuthenticatedReadTransport,
+        KrakenSpotAuthenticatedReadTransport,
+    }:
+        raise ProviderOriginError(
+            "provider-origin execution requires canonical authenticated-read transport"
+        )
+    wire_client = getattr(transport, "wire_client", None)
+    if type(wire_client) is not UrllibJsonWireClient:
+        raise ProviderOriginError(
+            "provider-origin execution requires canonical direct wire client"
+        )
+    try:
+        require_direct_authenticated_read_client(wire_client)
+    except ProviderTransportError as error:
+        raise ProviderOriginError(
+            "provider-origin direct network authority is unavailable"
+        ) from error
+
+    base = query_binding.query_binding
+    policy = getattr(transport, "policy", None)
+    if (
+        getattr(transport, "account_id", None) != base.account_id
+        or getattr(transport, "capability_snapshot_id", None)
+        != base.capability_snapshot_id
+        or getattr(policy, "provider_id", None) != base.provider_id
+        or getattr(policy, "environment", None) != base.environment
+    ):
+        raise ProviderOriginError(
+            "provider-origin transport scope differs from exact qualified read"
+        )
+    if type(transport) is BybitV5AuthenticatedReadTransport:
+        if transport.provider_environment != query_binding.provider_environment:
+            raise ProviderOriginError(
+                "Bybit provider environment differs from exact qualified read"
+            )
+    elif type(transport) is BinanceSpotAuthenticatedReadTransport:
+        expected_provider_environment = (
+            "TESTNET" if base.environment == "PAPER" else "LIVE"
+        )
+        if query_binding.provider_environment != expected_provider_environment:
+            raise ProviderOriginError(
+                "Binance provider environment differs from canonical wire policy"
+            )
+    elif query_binding.provider_environment != "LIVE":
+        raise ProviderOriginError(
+            "Kraken provider environment differs from canonical wire policy"
+        )
+
+    clock_utc = getattr(transport, "clock_utc", None)
+    if not callable(clock_utc):
+        raise ProviderOriginError(
+            "provider-origin transport clock authority is unavailable"
+        )
+    prepared_at = clock_utc()
+    attempt_id = origin.prepare_direct(
+        query_binding,
+        recorded_at=prepared_at,
+    )
+
+    def terminal_authority_factory(received_query):
+        if received_query is not base:
+            raise ProviderOriginError(
+                "terminal transport query differs from exact qualified read"
+            )
+        return issue_terminal_qualified_provider_read_authority(
+            route,
+            capability_registry,
+            qualification_registry,
+            query_binding,
+            at=clock_utc(),
+        )
+
+    provider_observation = transport(
+        base,
+        terminal_authority_factory=terminal_authority_factory,
+    )
+    return origin.record_direct_provider_origin_observation(
+        attempt_id,
+        query_binding,
+        provider_observation=provider_observation,
+    )
 
 def observe_provider_origin_json_response(
     *,

@@ -4962,8 +4962,6 @@ def _install_authenticated_read_execution_receipt_authority():
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
-            transport_identity=transport_identity,
-            network_policy_identity=network_policy_identity,
         )
         register(
             observation,
@@ -4972,6 +4970,8 @@ def _install_authenticated_read_execution_receipt_authority():
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
+            transport_identity=transport_identity,
+            network_policy_identity=network_policy_identity,
         )
         return observation
 

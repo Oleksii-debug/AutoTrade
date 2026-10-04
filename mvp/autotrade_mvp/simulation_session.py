@@ -1710,6 +1710,41 @@ def _recover_autonomous_zero_wire_completion(
         datetime.fromisoformat(protocol["start_time"].replace("Z", "+00:00"))
         + timedelta(seconds=episode - 1)
     ).isoformat().replace("+00:00", "Z")
+
+    # The Started cut is the last admissible pre-completion mutation point for
+    # a zero-wire episode. A prior exact after-checkpoint is the only additional
+    # event that may already exist when a response/crash happened after
+    # reconciliation but before AutonomousEpisodeCompleted.
+    from .reconciliation_journal import load_latest_reconciliation_checkpoint
+
+    existing_after = load_latest_reconciliation_checkpoint(
+        store,
+        reconciliation_id=f"{key}:after",
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+    )
+    allowed_event_ids = {
+        _uuid("AutonomousEpisodeStarted", f"{run_id}:{episode}")
+    }
+    if existing_after is not None:
+        allowed_event_ids.add(existing_after["event_id"])
+    post_cut = store.load_events_after_journal_sequence(
+        financial_cut,
+        limit=max(store.current_journal_sequence() - financial_cut, 1),
+    )
+    if (
+        not post_cut
+        or post_cut[0].get("event_id")
+        != _uuid("AutonomousEpisodeStarted", f"{run_id}:{episode}")
+        or post_cut[0].get("payload") != active
+        or any(event.get("event_id") not in allowed_event_ids for event in post_cut)
+        or len({event.get("event_id") for event in post_cut}) != len(post_cut)
+    ):
+        raise ValueError(
+            "zero-wire autonomous cut changed after start"
+        )
+
     provider = SimulatedProvider.from_state(prior_state)
     economic = DurableProviderEconomicBook(
         store,
@@ -1725,6 +1760,24 @@ def _recover_autonomous_zero_wire_completion(
         raise ValueError(
             "zero-wire autonomous economics changed after start"
         )
+    expected_causes = {
+        _uuid("loop-seed-cause", run_id),
+        *(
+            fill["provider_execution_id"]
+            for fill in provider.activity_fills()
+        ),
+    }
+    if (
+        len(economic.transactions) != len(expected_causes)
+        or {
+            transaction.cause_event_id
+            for transaction in economic.transactions
+        }
+        != expected_causes
+    ):
+        raise ValueError(
+            "zero-wire autonomous economic history changed after start"
+        )
 
     artifacts = ArtifactStore(root / "artifacts")
     reservations = DurableReservationBook(
@@ -1734,9 +1787,12 @@ def _recover_autonomous_zero_wire_completion(
         resolution_artifact_store=artifacts,
         resolution_artifact_root=root / "artifacts",
     )
-    if reservations.active():
+    if (
+        reservations.active()
+        or reservations.version != 2 * len(provider.activity_fills())
+    ):
         raise ValueError(
-            "zero-wire autonomous episode has active reservations"
+            "zero-wire autonomous reservation history changed after start"
         )
     orders = DurableOrderBookProjection(
         store,
@@ -1746,9 +1802,17 @@ def _recover_autonomous_zero_wire_completion(
         host_id="local-simulation",
         owner_epoch="1",
     )
-    if any(order.state != "FILLED" for order in orders.snapshots):
+    if (
+        len(orders.snapshots) != len(provider.orders)
+        or any(order.state != "FILLED" for order in orders.snapshots)
+        or {
+            order.client_order_id
+            for order in orders.snapshots
+        }
+        != set(provider.orders)
+    ):
         raise ValueError(
-            "zero-wire autonomous episode has unresolved OMS obligations"
+            "zero-wire autonomous OMS history changed after start"
         )
     attempt_id = _uuid("loop-attempt", key)
     if store.load_events(

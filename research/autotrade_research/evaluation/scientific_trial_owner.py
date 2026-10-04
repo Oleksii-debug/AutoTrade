@@ -69,6 +69,62 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
     return authority
 
 
+def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
+    """Detach and revalidate one complete GateProfile value for trust use."""
+
+    if type(profile) is not GateProfile:
+        raise TypeError("profile must be exact GateProfile")
+
+    baseline_ids = object.__getattribute__(profile, "baseline_ids")
+    required_regimes = object.__getattribute__(profile, "required_regimes")
+    for name, values in (
+        ("baseline_ids", baseline_ids),
+        ("required_regimes", required_regimes),
+    ):
+        if type(values) is not tuple or any(
+            type(value) is not str for value in values
+        ):
+            raise TypeError(
+                f"{name} must remain an exact tuple of built-in text"
+            )
+
+    return GateProfile(
+        profile_id=object.__getattribute__(profile, "profile_id"),
+        minimum_net_advantage=object.__getattribute__(
+            profile, "minimum_net_advantage"
+        ),
+        max_drawdown=object.__getattribute__(profile, "max_drawdown"),
+        max_adverse_cost_loss=object.__getattribute__(
+            profile, "max_adverse_cost_loss"
+        ),
+        min_power=object.__getattribute__(profile, "min_power"),
+        primary_baseline_id=object.__getattribute__(
+            profile, "primary_baseline_id"
+        ),
+        baseline_ids=baseline_ids,
+        selection_correction=object.__getattribute__(
+            profile, "selection_correction"
+        ),
+        max_trials=object.__getattribute__(profile, "max_trials"),
+        required_regimes=required_regimes,
+        require_complete_trials=object.__getattribute__(
+            profile, "require_complete_trials"
+        ),
+        require_causal_audit=object.__getattribute__(
+            profile, "require_causal_audit"
+        ),
+        require_financial_invariants=object.__getattribute__(
+            profile, "require_financial_invariants"
+        ),
+        require_untouched_holdout=object.__getattribute__(
+            profile, "require_untouched_holdout"
+        ),
+        require_walk_forward=object.__getattribute__(
+            profile, "require_walk_forward"
+        ),
+    )
+
+
 def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
     """Return the complete immutable GateProfile subject payload.
 
@@ -76,27 +132,30 @@ def gate_profile_subject_payload(profile: GateProfile) -> dict[str, object]:
     Sequence order is preserved exactly because GateProfile itself preserves it;
     the subject digest must not silently canonicalize two distinct exact values
     into one identity.
+
+    Frozen dataclasses are not a trust boundary in Python: object.__setattr__
+    can still mutate an instance after construction. Revalidate and detach the
+    complete profile at the moment the scientific subject is hashed.
     """
 
-    if type(profile) is not GateProfile:
-        raise TypeError("profile must be exact GateProfile")
+    canonical = _canonical_gate_profile_authority_view(profile)
     return {
         "schema_version": "wp36-gate-profile-subject-v1",
-        "profile_id": profile.profile_id,
-        "minimum_net_advantage": _decimal_text(profile.minimum_net_advantage),
-        "max_drawdown": _decimal_text(profile.max_drawdown),
-        "max_adverse_cost_loss": _decimal_text(profile.max_adverse_cost_loss),
-        "min_power": _decimal_text(profile.min_power),
-        "primary_baseline_id": profile.primary_baseline_id,
-        "baseline_ids": list(profile.baseline_ids),
-        "selection_correction": profile.selection_correction,
-        "max_trials": profile.max_trials,
-        "required_regimes": list(profile.required_regimes),
-        "require_complete_trials": profile.require_complete_trials,
-        "require_causal_audit": profile.require_causal_audit,
-        "require_financial_invariants": profile.require_financial_invariants,
-        "require_untouched_holdout": profile.require_untouched_holdout,
-        "require_walk_forward": profile.require_walk_forward,
+        "profile_id": canonical.profile_id,
+        "minimum_net_advantage": _decimal_text(canonical.minimum_net_advantage),
+        "max_drawdown": _decimal_text(canonical.max_drawdown),
+        "max_adverse_cost_loss": _decimal_text(canonical.max_adverse_cost_loss),
+        "min_power": _decimal_text(canonical.min_power),
+        "primary_baseline_id": canonical.primary_baseline_id,
+        "baseline_ids": list(canonical.baseline_ids),
+        "selection_correction": canonical.selection_correction,
+        "max_trials": canonical.max_trials,
+        "required_regimes": list(canonical.required_regimes),
+        "require_complete_trials": canonical.require_complete_trials,
+        "require_causal_audit": canonical.require_causal_audit,
+        "require_financial_invariants": canonical.require_financial_invariants,
+        "require_untouched_holdout": canonical.require_untouched_holdout,
+        "require_walk_forward": canonical.require_walk_forward,
     }
 
 
@@ -203,8 +262,9 @@ def resolve_gate_profile_protocol_binding(
     bindings, id/digest rebinds and malformed bindings fail closed.
     """
 
-    profile_id = profile.profile_id
-    profile_digest = gate_profile_subject_digest(profile)
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
+    profile_id = canonical_profile.profile_id
+    profile_digest = gate_profile_subject_digest(canonical_profile)
     candidates: list[GateProfileProtocolBinding] = []
     for row in _registered_protocol_rows(registry):
         payload = row["payload"]
@@ -270,15 +330,14 @@ def resolve_scientific_trial_owner(
     """
 
     authority = _registry_authority_view(registry)
-    if type(profile) is not GateProfile:
-        raise TypeError("profile must be exact GateProfile")
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
     with ScientificRegistry._connect(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
             registry=authority,
-            profile=profile,
+            profile=canonical_profile,
         )
         trial_evidence = ScientificRegistry.trial_completeness_evidence(
             authority,
@@ -288,7 +347,7 @@ def resolve_scientific_trial_owner(
             raise ProtocolViolation(
                 "trial completeness snapshot does not match bound protocol hash"
             )
-        if trial_evidence.trial_budget > profile.max_trials:
+        if trial_evidence.trial_budget > canonical_profile.max_trials:
             raise ProtocolViolation(
                 "bound scientific protocol trial budget exceeds gate profile max_trials"
             )
@@ -324,19 +383,18 @@ def evaluate_gates_with_scientific_trial_owner(
     semantic-owner INCONCLUSIVE remains unavailable for terminal PASS.
     """
 
-    if type(profile) is not GateProfile:
-        raise TypeError("profile must be exact GateProfile")
+    canonical_profile = _canonical_gate_profile_authority_view(profile)
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
     _assert_registry_dispatch_unshadowed(scientific_registry)
-    base = evaluate_gates(profile, evidence, **gate_kwargs)
+    base = evaluate_gates(canonical_profile, evidence, **gate_kwargs)
     checks = dict(base.checks)
     provenance = dict(base.provenance or {})
     reasons = list(base.reasons)
     try:
         owner = resolve_scientific_trial_owner(
             registry=scientific_registry,
-            profile=profile,
+            profile=canonical_profile,
             evidence=evidence,
         )
     except KeyError:

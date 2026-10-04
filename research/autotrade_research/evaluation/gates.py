@@ -119,12 +119,14 @@ class GateEvidenceRef:
     sha256: str
 
     def __post_init__(self) -> None:
+        if type(self.artifact_id) is not str:
+            raise ValueError("evidence artifact_id must be a UUID")
         try:
             artifact_id = str(UUID(self.artifact_id))
         except (ValueError, AttributeError, TypeError) as error:
             raise ValueError("evidence artifact_id must be a UUID") from error
         if (
-            not isinstance(self.sha256, str)
+            type(self.sha256) is not str
             or len(self.sha256) != 71
             or not self.sha256.startswith("sha256:")
             or any(ch not in "0123456789abcdef" for ch in self.sha256[7:])
@@ -152,8 +154,9 @@ class GateProfile:
     require_walk_forward: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.profile_id, str) or not self.profile_id.strip():
+        if type(self.profile_id) is not str or not self.profile_id.strip():
             raise ValueError("profile_id is required")
+        profile_id = self.profile_id.strip()
         practical_advantage = _decimal(
             self.minimum_net_advantage,
             name="minimum_net_advantage",
@@ -173,13 +176,13 @@ class GateProfile:
         if power <= 0 or power > 1:
             raise ValueError("min_power must be in (0, 1]")
 
-        if not isinstance(self.primary_baseline_id, str) or not self.primary_baseline_id.strip():
+        if type(self.primary_baseline_id) is not str or not self.primary_baseline_id.strip():
             raise ValueError("primary_baseline_id is required")
         if isinstance(self.baseline_ids, (str, bytes)):
             raise TypeError("baseline_ids must be a collection")
         baselines_raw = tuple(self.baseline_ids)
-        if any(not isinstance(value, str) for value in baselines_raw):
-            raise TypeError("baseline_ids must contain text values")
+        if any(type(value) is not str for value in baselines_raw):
+            raise TypeError("baseline_ids must contain exact text values")
         baselines = tuple(value.strip() for value in baselines_raw)
         if not baselines or any(not value for value in baselines):
             raise ValueError("baseline_ids must be non-empty")
@@ -189,7 +192,7 @@ class GateProfile:
         if primary_baseline not in baselines:
             raise ValueError("primary_baseline_id must be registered in baseline_ids")
 
-        if not isinstance(self.selection_correction, str) or not self.selection_correction.strip():
+        if type(self.selection_correction) is not str or not self.selection_correction.strip():
             raise ValueError("selection_correction is required")
         correction = self.selection_correction.strip()
         if type(self.max_trials) is not int or self.max_trials <= 0:
@@ -208,8 +211,8 @@ class GateProfile:
         if isinstance(self.required_regimes, (str, bytes)):
             raise TypeError("required_regimes must be a collection")
         regimes_raw = tuple(self.required_regimes)
-        if any(not isinstance(value, str) for value in regimes_raw):
-            raise TypeError("required_regimes must contain text values")
+        if any(type(value) is not str for value in regimes_raw):
+            raise TypeError("required_regimes must contain exact text values")
         regimes = tuple(value.strip() for value in regimes_raw)
         if not regimes or any(not value for value in regimes):
             raise ValueError("required_regimes must be non-empty")
@@ -226,7 +229,7 @@ class GateProfile:
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be boolean")
 
-        object.__setattr__(self, "profile_id", self.profile_id.strip())
+        object.__setattr__(self, "profile_id", profile_id)
         object.__setattr__(self, "minimum_net_advantage", practical_advantage)
         object.__setattr__(self, "max_drawdown", drawdown)
         object.__setattr__(self, "max_adverse_cost_loss", adverse_cost_limit)
@@ -309,7 +312,7 @@ class EvaluationEvidence:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.registered_profile_id, str)
+            type(self.registered_profile_id) is not str
             or not self.registered_profile_id.strip()
         ):
             raise ValueError("registered_profile_id must be a non-empty string")
@@ -368,8 +371,8 @@ class EvaluationEvidence:
                 raise TypeError("baseline_advantages must be a mapping or None")
             normalized_baselines: dict[str, Decimal] = {}
             for key, value in self.baseline_advantages.items():
-                if not isinstance(key, str) or not key.strip():
-                    raise ValueError("baseline advantage id is required")
+                if type(key) is not str or not key.strip():
+                    raise ValueError("baseline advantage id must be exact text")
                 normalized = key.strip()
                 if normalized in normalized_baselines:
                     raise ValueError("duplicate normalized baseline advantage id")
@@ -388,8 +391,8 @@ class EvaluationEvidence:
                 raise TypeError("evidence_refs must be a mapping or None")
             normalized_refs: dict[str, GateEvidenceRef] = {}
             for raw_kind, raw_ref in self.evidence_refs.items():
-                if not isinstance(raw_kind, str) or not raw_kind.strip():
-                    raise ValueError("evidence ref kind is required")
+                if type(raw_kind) is not str or not raw_kind.strip():
+                    raise ValueError("evidence ref kind must be exact text")
                 kind = raw_kind.strip()
                 if kind in normalized_refs:
                     raise ValueError("duplicate normalized evidence ref kind")
@@ -404,7 +407,7 @@ class EvaluationEvidence:
 
         if self.selection_correction_applied is not None:
             if (
-                not isinstance(self.selection_correction_applied, str)
+                type(self.selection_correction_applied) is not str
                 or not self.selection_correction_applied.strip()
             ):
                 raise ValueError(
@@ -427,8 +430,8 @@ class EvaluationEvidence:
             if isinstance(self.regime_coverage, (str, bytes)):
                 raise TypeError("regime_coverage must be a collection or None")
             coverage_raw = tuple(self.regime_coverage)
-            if any(not isinstance(value, str) for value in coverage_raw):
-                raise TypeError("regime_coverage must contain text values")
+            if any(type(value) is not str for value in coverage_raw):
+                raise TypeError("regime_coverage must contain exact text values")
             normalized_regimes = frozenset(value.strip() for value in coverage_raw)
             if not normalized_regimes or any(not value for value in normalized_regimes):
                 raise ValueError("regime_coverage cannot contain empty values")
@@ -447,24 +450,24 @@ class GateDecision:
     provenance: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
-        status = self.status.strip() if isinstance(self.status, str) else ""
+        status = self.status.strip() if type(self.status) is str else ""
         if status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
             raise ValueError("GateDecision status must be PASS, FAIL or INCONCLUSIVE")
         if isinstance(self.reasons, (str, bytes)):
             raise TypeError("GateDecision reasons must be a collection")
         reasons = tuple(self.reasons)
         if not reasons or any(
-            not isinstance(reason, str) or not reason.strip() for reason in reasons
+            type(reason) is not str or not reason.strip() for reason in reasons
         ):
             raise ValueError("GateDecision reasons must contain non-empty text")
         if not isinstance(self.checks, Mapping):
             raise TypeError("GateDecision checks must be a mapping")
         frozen_checks: dict[str, str] = {}
         for raw_name, raw_value in self.checks.items():
-            if not isinstance(raw_name, str) or not raw_name.strip():
-                raise ValueError("GateDecision check name is required")
-            if not isinstance(raw_value, str):
-                raise TypeError("GateDecision check status must be text")
+            if type(raw_name) is not str or not raw_name.strip():
+                raise ValueError("GateDecision check name must be exact text")
+            if type(raw_value) is not str:
+                raise TypeError("GateDecision check status must be exact text")
             name = raw_name.strip()
             value = raw_value.strip()
             if name in frozen_checks:
@@ -482,10 +485,10 @@ class GateDecision:
                 raise TypeError("GateDecision provenance must be a mapping")
             frozen_provenance = {}
             for raw_name, raw_value in self.provenance.items():
-                if not isinstance(raw_name, str) or not raw_name.strip():
-                    raise ValueError("GateDecision provenance name is required")
-                if not isinstance(raw_value, str) or not raw_value.strip():
-                    raise ValueError("GateDecision provenance value is required")
+                if type(raw_name) is not str or not raw_name.strip():
+                    raise ValueError("GateDecision provenance name must be exact text")
+                if type(raw_value) is not str or not raw_value.strip():
+                    raise ValueError("GateDecision provenance value must be exact text")
                 name = raw_name.strip()
                 if name in frozen_provenance:
                     raise ValueError("duplicate normalized GateDecision provenance name")

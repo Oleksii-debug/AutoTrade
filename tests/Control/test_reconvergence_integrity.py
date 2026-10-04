@@ -317,6 +317,24 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertEqual(exact_authority.protected_violations, ())
         self.assertEqual(exact_authority.scope_violations, ())
 
+    def test_wrong_case_scope_does_not_authorize_trust_root_content_change(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("CONTROL/TOOLS/RECONVERGENCE_INTEGRITY.PY",),
+        )
+
+        # Ordinary mutation-scope overlap remains conservatively
+        # case-insensitive for Windows coordination, but that must not grant
+        # the stricter literal-path capability to modify the guard itself.
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.scope_violations, ())
+        self.assertIn(
+            f"{sentinel} (content change without exact-path authorization)",
+            result.protected_violations,
+        )
+
     def test_exact_scope_does_not_authorize_destructive_sentinel_change(self):
         sentinel = ".github/workflows/reconvergence-integrity.yml"
         result = assess_reconvergence(

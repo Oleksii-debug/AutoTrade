@@ -447,13 +447,13 @@ class BybitCredentialProbeWireResponse:
         provider_transport_confirmed = (
             _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
         )
-        if ret_code == 0 and not provider_transport_confirmed:
-            raise ProviderCoreError(
-                "successful Bybit credential probe requires direct provider transport attestation"
-            )
         if ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential probe requires exact API key echo confirmation"
+            )
+        if ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential probe requires provider-derived direct transport attestation"
             )
         if ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
             raise ProviderCoreError(
@@ -577,13 +577,13 @@ class BybitCredentialProbeEvidence:
         provider_transport_confirmed = (
             _provider_transport_attestation is _PROVIDER_TRANSPORT_ATTESTATION
         )
-        if self.ret_code == 0 and not provider_transport_confirmed:
-            raise ProviderCoreError(
-                "successful Bybit credential evidence requires direct provider transport attestation"
-            )
         if self.ret_code == 0 and not self.api_key_echo_confirmed:
             raise ProviderCoreError(
                 "successful Bybit credential evidence requires API key echo confirmation"
+            )
+        if self.ret_code == 0 and not provider_transport_confirmed:
+            raise ProviderCoreError(
+                "successful Bybit credential evidence requires provider-derived direct transport attestation"
             )
         if self.ret_code == 0 and _provider_echo_attestation is not _PROVIDER_ECHO_ATTESTATION:
             raise ProviderCoreError(

@@ -652,7 +652,7 @@ def trusted_authenticated_reader(
 
 def _windows_path_mutex_name(self) -> str:
     key = getattr(self, "_configured_artifact_root_key", None)
-    if not isinstance(key, str) or not key:
+    if type(key) is not str or not key:
         raise ResourceLockError("configured artifact store path key is unavailable")
     digest = sha256(key.encode("utf-8", errors="surrogatepass")).hexdigest()
     return f"Global\\AutoTrade-ArtifactPath-{digest}"
@@ -726,7 +726,7 @@ def _posix_parent_lock(self) -> Iterator[None]:
     import fcntl
 
     root_key = getattr(self, "_configured_artifact_root_key", None)
-    if not isinstance(root_key, str) or not root_key:
+    if type(root_key) is not str or not root_key:
         raise ResourceLockError("configured artifact store path key is unavailable")
     parent = Path(root_key).parent
     flags = (

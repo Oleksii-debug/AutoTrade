@@ -103,7 +103,7 @@ def candidate_wave(*, promotion_mode="CONFIRMATION") -> CandidateWave:
         change_summary="Correct observed errors without changing hard risk",
         training_population=training,
         validation_population=validation,
-        validation_opened_at=BASE + timedelta(minutes=16),
+        validation_opened_at=BASE + timedelta(minutes=20),
     )
 
 
@@ -449,6 +449,35 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 training_population=training,
                 validation_population=validation,
                 validation_opened_at=BASE + timedelta(minutes=14),
+            )
+
+    def test_validation_population_cannot_open_before_its_evidence_is_available(self):
+        p, snap, decision = paused_decision()
+        training = population(
+            "train",
+            causal_cut=snap.source_cut_hash,
+            available_at=BASE,
+            observations=("train",),
+        )
+        validation = population(
+            "validation",
+            causal_cut=digest("validation-cut"),
+            available_at=BASE + timedelta(minutes=30),
+            observations=("validation",),
+        )
+        with self.assertRaisesRegex(ValueError, "before it is available"):
+            CandidateWave.from_pause(
+                pause=decision,
+                policy=p,
+                champion_artifact_hash=snap.champion_artifact_hash,
+                candidate_id="candidate",
+                candidate_artifact_hash=digest("candidate"),
+                candidate_created_at=BASE + timedelta(minutes=15),
+                error_analysis_hash=digest("error-analysis"),
+                change_summary="Correct observed errors without changing hard risk",
+                training_population=training,
+                validation_population=validation,
+                validation_opened_at=BASE + timedelta(minutes=20),
             )
 
     def test_candidate_artifact_must_differ_from_champion(self):

@@ -75,6 +75,7 @@ def forward_paper_protocol_hash(
     required_simulation_limitations: Sequence[str] = (),
     reporting_currency: str = "USD",
     maximum_drawdown: object | None = None,
+    evaluation_profile_hash: str | None = None,
 ) -> str:
     """Canonical semantic identity of a frozen forward-paper protocol."""
 
@@ -131,12 +132,18 @@ def forward_paper_protocol_hash(
         if maximum_drawdown is None
         else _decimal(maximum_drawdown, name="maximum_drawdown", nonnegative=True)
     )
+    evaluation_profile = (
+        None
+        if evaluation_profile_hash is None
+        else _hash(evaluation_profile_hash, name="evaluation_profile_hash")
+    )
     extended = bool(
         regimes
         or limitations
         or drawdown is not None
         or independent_minimum != 1
         or currency != "USD"
+        or evaluation_profile is not None
     )
     payload = {
         "schema_version": 2 if extended else 1,
@@ -158,6 +165,7 @@ def forward_paper_protocol_hash(
                 "required_simulation_limitations": list(limitations),
                 "reporting_currency": currency,
                 "maximum_drawdown": None if drawdown is None else str(drawdown),
+                "evaluation_profile_hash": evaluation_profile,
             }
         )
     encoded = json.dumps(
@@ -219,6 +227,7 @@ class ForwardPaperProtocol:
     required_simulation_limitations: tuple[str, ...] = ()
     reporting_currency: str = "USD"
     maximum_drawdown: Decimal | None = None
+    evaluation_profile_hash: str | None = None
 
     def __post_init__(self) -> None:
         build = _git_sha(self.exact_build_sha, name="exact_build_sha")
@@ -275,6 +284,14 @@ class ForwardPaperProtocol:
                 nonnegative=True,
             )
         )
+        evaluation_profile = (
+            None
+            if self.evaluation_profile_hash is None
+            else _hash(
+                self.evaluation_profile_hash,
+                name="evaluation_profile_hash",
+            )
+        )
         object.__setattr__(
             self,
             "campaign_id",
@@ -297,6 +314,7 @@ class ForwardPaperProtocol:
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,
+            evaluation_profile_hash=evaluation_profile,
         )
         if provided_hash != expected_hash:
             raise ForwardPaperError(
@@ -339,6 +357,11 @@ class ForwardPaperProtocol:
         )
         object.__setattr__(self, "reporting_currency", currency)
         object.__setattr__(self, "maximum_drawdown", drawdown)
+        object.__setattr__(
+            self,
+            "evaluation_profile_hash",
+            evaluation_profile,
+        )
 
     @classmethod
     def create(
@@ -359,6 +382,7 @@ class ForwardPaperProtocol:
         required_simulation_limitations: Sequence[str] = (),
         reporting_currency: str = "USD",
         maximum_drawdown: object | None = None,
+        evaluation_profile_hash: str | None = None,
     ) -> "ForwardPaperProtocol":
         build = _git_sha(exact_build_sha, name="exact_build_sha")
         registered = _instant(registered_at, name="registered_at")
@@ -408,6 +432,11 @@ class ForwardPaperProtocol:
             if maximum_drawdown is None
             else _decimal(maximum_drawdown, name="maximum_drawdown", nonnegative=True)
         )
+        evaluation_profile = (
+            None
+            if evaluation_profile_hash is None
+            else _hash(evaluation_profile_hash, name="evaluation_profile_hash")
+        )
         return cls(
             campaign_id=_text(campaign_id, name="campaign_id"),
             exact_build_sha=build,
@@ -431,6 +460,7 @@ class ForwardPaperProtocol:
             required_simulation_limitations=limitations,
             reporting_currency=currency,
             maximum_drawdown=drawdown,
+            evaluation_profile_hash=evaluation_profile,
         )
 
 
@@ -762,6 +792,7 @@ class ForwardPaperEvidence:
     account_reconciliation_complete: bool
     paper_economics: tuple[PaperDecisionEconomics, ...] = ()
     simulation_limitations: tuple[str, ...] = ()
+    evaluation_profile_hash: str | None = None
 
     def __post_init__(self) -> None:
         build = _git_sha(self.exact_build_sha, name="exact_build_sha")
@@ -811,6 +842,15 @@ class ForwardPaperEvidence:
                 "simulation_limitations contains case-insensitive duplicates"
             )
         object.__setattr__(self, "simulation_limitations", limitations)
+        profile = (
+            None
+            if self.evaluation_profile_hash is None
+            else _hash(
+                self.evaluation_profile_hash,
+                name="evaluation_profile_hash",
+            )
+        )
+        object.__setattr__(self, "evaluation_profile_hash", profile)
 
     @classmethod
     def create(
@@ -827,6 +867,7 @@ class ForwardPaperEvidence:
         account_reconciliation_complete: bool,
         paper_economics: Sequence[PaperDecisionEconomics] = (),
         simulation_limitations: Sequence[str] = (),
+        evaluation_profile_hash: str | None = None,
     ) -> "ForwardPaperEvidence":
         build = _git_sha(exact_build_sha, name="exact_build_sha")
         _instant(observed_until, name="observed_until")
@@ -854,6 +895,7 @@ class ForwardPaperEvidence:
             account_reconciliation_complete=account_reconciliation_complete,
             paper_economics=tuple(paper_economics),
             simulation_limitations=tuple(simulation_limitations),
+            evaluation_profile_hash=evaluation_profile_hash,
         )
 
 
@@ -907,6 +949,12 @@ def assess_forward_paper(
         incomplete.append("simulation_limitations_not_registered")
     if protocol.maximum_drawdown is None:
         incomplete.append("maximum_drawdown_not_registered")
+    if protocol.evaluation_profile_hash is None:
+        incomplete.append("evaluation_profile_not_registered")
+    elif evidence.evaluation_profile_hash is None:
+        incomplete.append("evaluation_profile_evidence_missing")
+    elif evidence.evaluation_profile_hash != protocol.evaluation_profile_hash:
+        invalid.append("evaluation_profile_hash_mismatch")
 
     prediction_by_id: dict[str, SealedPrediction] = {}
     capability_counts = {

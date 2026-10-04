@@ -369,17 +369,20 @@ def assess_strategy_economics_authority(
 def require_qualified_strategy_economics(
     value: object,
 ) -> StrategyEconomicsAuthorityAssessment:
-    """Fail closed until every independent WP-33 owner is composed."""
+    """Fail closed until a non-caller-forgeable positive issuer exists.
+
+    Current main deliberately has no terminal positive WP-33 issuer.  The
+    in-process issuance registry is useful for detecting accidental mutation of
+    diagnostic INCONCLUSIVE assessments, but Python module-private objects are
+    not a security boundary: a same-process caller can import private symbols,
+    mutate an object and attempt to re-register a matching seal.  Therefore no
+    registry state can promote an assessment to terminal financial authority.
+    """
 
     assessment = require_strategy_economics_assessment(value)
-    if assessment.status != "QUALIFIED":
-        missing = ", ".join(assessment.unresolved_owners)
-        raise StrategyEconomicsAuthorityError(
-            "terminal strategy economics is INCONCLUSIVE; unresolved owners: "
-            + missing
-        )
-    if assessment.unresolved_owners:
-        raise StrategyEconomicsAuthorityError(
-            "qualified strategy economics retained unresolved owners"
-        )
-    return assessment
+    missing = ", ".join(assessment.unresolved_owners)
+    raise StrategyEconomicsAuthorityError(
+        "positive strategy economics issuance is unavailable on current main; "
+        "terminal strategy economics is INCONCLUSIVE"
+        + (f"; unresolved owners: {missing}" if missing else "")
+    )

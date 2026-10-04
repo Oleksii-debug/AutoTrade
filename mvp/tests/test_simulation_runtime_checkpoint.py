@@ -158,6 +158,44 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                     run(directory)
             self.assertEqual(store.whole_store_state_cut(), mutated)
 
+    def test_crash_after_durable_completion_before_checkpoint_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=2)
+            path = checkpoint_path(directory)
+            before_checkpoint = path.read_bytes()
+
+            with patch(
+                "mvp.autotrade_mvp.simulation_runtime_checkpoint."
+                "persist_autonomous_runtime_checkpoint",
+                side_effect=RuntimeError("checkpoint persistence crash"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "checkpoint persistence crash"):
+                    run(directory, stop_after_episodes=3)
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            completed = store.load_events(
+                "canonical_autonomous_simulation",
+                "wp12-runtime-checkpoint",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in completed[-2:]],
+                ["AutonomousEpisodeStarted", "AutonomousEpisodeCompleted"],
+            )
+            self.assertEqual(path.read_bytes(), before_checkpoint)
+            durable_cut = store.whole_store_state_cut()
+
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("stale checkpoint cannot send"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "runtime checkpoint identity differs|does not match current authorities",
+                ):
+                    run(directory)
+            self.assertEqual(store.whole_store_state_cut(), durable_cut)
+
     def test_unknown_episode_does_not_mint_a_new_terminal_checkpoint(self):
         with TemporaryDirectory() as directory:
             first = run(directory, stop_after_episodes=2)

@@ -656,6 +656,43 @@ class AccessibleStatusTests(unittest.TestCase):
         )
         self.assertIn("Recorded evidence items: 0", text)
 
+    def test_canonical_economic_arithmetic_overflow_fails_closed(self):
+        huge = "9" * 256
+        negative_huge = "-" + huge
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": negative_huge,
+            "cash": huge,
+            "position": "0",
+            "journal_sequence": "20",
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "reconciled": True,
+            "fills": {},
+            "active_reservations": [],
+        }
+        report = {
+            "environment": "SIMULATION",
+            "currency": "USD",
+            "initial_equity": negative_huge,
+            "cash": huge,
+            "ending_position": "0",
+            "valuation_status": "CASH_ONLY",
+            "final_equity": huge,
+            "net_pnl": "0",
+            "total_fees": "0",
+            "turnover": "0",
+            "trade_count": 0,
+            "reconciled": True,
+            "journal_sequence": "20",
+        }
+        text = format_accessible_status(status, report)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn("Final equity: Unavailable", text)
+        self.assertIn("Economic edge: unproven", text)
+
     def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
         text = format_accessible_status(
             {

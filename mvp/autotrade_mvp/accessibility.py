@@ -174,12 +174,16 @@ def _canonical_economic_report_is_readable(
             net_pnl = parse_canonical_decimal_text(report.get("net_pnl"))
         except ExactDecimalError:
             return False
-        if (
-            final_equity != matched_values["cash"]
-            or net_pnl != exact_subtract(
+        try:
+            expected_net_pnl = exact_subtract(
                 final_equity,
                 matched_values["initial_equity"],
             )
+        except ExactDecimalError:
+            return False
+        if (
+            final_equity != matched_values["cash"]
+            or net_pnl != expected_net_pnl
         ):
             return False
     elif valuation_status == "MARK_UNAVAILABLE":

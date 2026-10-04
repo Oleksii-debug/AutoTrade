@@ -290,6 +290,8 @@ def record_reconciliation_checkpoint(
     host_id: str,
     owner_epoch: str,
     evidence_artifact_store: ArtifactStore | None = None,
+    expected_journal_sequence: int | None = None,
+    expected_whole_store_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
@@ -346,6 +348,8 @@ def record_reconciliation_checkpoint(
     store.append_event(
         envelope,
         outbox_topic="autotrade.reconciliation.events",
+        expected_journal_sequence=expected_journal_sequence,
+        expected_whole_store_counts=expected_whole_store_counts,
     )
     event = store.get_event(event_id)
     if event is None:
@@ -733,10 +737,12 @@ def load_account_resource_availability_evidence(
 
     if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
+    if isinstance(max_age_seconds, Decimal) and type(max_age_seconds) is not Decimal:
+        raise TypeError("max_age_seconds must be an exact built-in Decimal")
     try:
         max_age = (
             max_age_seconds
-            if isinstance(max_age_seconds, Decimal)
+            if type(max_age_seconds) is Decimal
             else Decimal(max_age_seconds)
         )
     except Exception as error:

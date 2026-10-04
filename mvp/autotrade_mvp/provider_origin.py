@@ -343,6 +343,14 @@ def _response_artifact_id(
     )
 
 
+def _provider_response_artifact_rights() -> dict[str, object]:
+    return {
+        "storage": True,
+        "export": False,
+        "rights_id": "qualified-provider-origin-response:v1",
+    }
+
+
 def _event(
     *,
     event_id: str,
@@ -1181,11 +1189,7 @@ class ProviderOriginJournal:
                 artifact_id=artifact_id,
                 data=raw,
                 media_type="application/octet-stream",
-                rights={
-                    "storage": True,
-                    "export": False,
-                    "rights_id": "qualified-provider-origin-response:v1",
-                },
+                rights=_provider_response_artifact_rights(),
                 source_refs=[],
                 metadata=metadata,
             )
@@ -1197,11 +1201,7 @@ class ProviderOriginJournal:
             or manifest.get("sha256") != response_digest
             or manifest.get("bytes") != len(raw)
             or manifest.get("media_type") != "application/octet-stream"
-            or manifest.get("rights") != {
-                    "storage": True,
-                    "export": False,
-                    "rights_id": "qualified-provider-origin-response:v1",
-                }
+            or manifest.get("rights") != _provider_response_artifact_rights()
             or manifest.get("source_refs") != []
             or manifest.get("metadata") != metadata
         ):
@@ -1409,11 +1409,7 @@ class ProviderOriginJournal:
                 or manifest.get("sha256") != response_digest
                 or manifest.get("bytes") != len(raw)
                 or manifest.get("media_type") != "application/octet-stream"
-                or manifest.get("rights") != {
-                    "storage": True,
-                    "export": False,
-                    "rights_id": "qualified-provider-origin-response:v1",
-                }
+                or manifest.get("rights") != _provider_response_artifact_rights()
                 or manifest.get("source_refs") != []
                 or manifest.get("metadata") != expected_metadata
                 or "sha256:" + sha256(raw).hexdigest() != response_digest
@@ -1651,11 +1647,7 @@ class ProviderOriginJournal:
             or manifest.get("sha256") != response_digest
             or manifest.get("bytes") != len(raw)
             or manifest.get("media_type") != "application/octet-stream"
-            or manifest.get("rights") != {
-                    "storage": True,
-                    "export": False,
-                    "rights_id": "qualified-provider-origin-response:v1",
-                }
+            or manifest.get("rights") != _provider_response_artifact_rights()
             or manifest.get("source_refs") != []
         ):
             raise ProviderOriginError(

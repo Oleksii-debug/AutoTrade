@@ -452,6 +452,79 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 protected_sentinels=frozenset(),
             )
 
+    def test_change_graph_rejects_duplicate_mutation_of_one_base_path(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "multiple mutating Git changes",
+        ):
+            assess_reconvergence(
+                base_paths=["src/runtime.py", "README.md"],
+                changes=[
+                    Change(status="M", path="src/runtime.py"),
+                    Change(status="D", path="src/runtime.py"),
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_rejects_duplicate_candidate_destination(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "target the same candidate path",
+        ):
+            assess_reconvergence(
+                base_paths=["src/a.py", "src/b.py", "README.md"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/a.py",
+                        path="src/new.py",
+                    ),
+                    Change(
+                        status="C100",
+                        previous_path="src/b.py",
+                        path="src/new.py",
+                    ),
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_rejects_rename_onto_unremoved_base_path(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "destination already exists in base tree",
+        ):
+            assess_reconvergence(
+                base_paths=["src/a.py", "src/b.py", "README.md"],
+                changes=[
+                    Change(
+                        status="R100",
+                        previous_path="src/a.py",
+                        path="src/b.py",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_change_graph_allows_rename_onto_explicitly_removed_base_path(self):
+        result = assess_reconvergence(
+            base_paths=["src/a.py", "src/b.py", "README.md"],
+            changes=[
+                Change(status="D", path="src/b.py"),
+                Change(
+                    status="R100",
+                    previous_path="src/a.py",
+                    path="src/b.py",
+                ),
+            ],
+            max_deletions=50,
+            max_deleted_fraction=0.9,
+            protected_sentinels=frozenset(),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.deletion_count, 1)
+        self.assertEqual(result.destructive_change_count, 2)
+
     def test_candidate_tree_rejects_case_insensitive_add_collision(self):
         with self.assertRaisesRegex(
             ValueError,

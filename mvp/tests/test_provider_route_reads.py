@@ -177,6 +177,58 @@ class ProviderRouteReadTests(unittest.TestCase):
                     at=NOW + timedelta(seconds=2),
                 )
 
+    def test_changed_q_parser_semantics_change_exact_qualified_read_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, q1, harness = self.setup_route(directory)
+            first = self.prepare(route, capabilities, qualifications)
+
+            q2, receipt2, protocol2 = successor_spot_q(
+                old_qualification_id=q1.qualification_id,
+                ordinal=51,
+            )
+            harness.register(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_accepted(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_supersession(
+                old_id=q1.qualification_id,
+                new_id=q2.qualification_id,
+            )
+
+            selection = select_provider(
+                route_request(),
+                [candidate()],
+                at=NOW + timedelta(seconds=2),
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertEqual(selection.status, "SELECTED_UNAMBIGUOUS")
+            self.assertIsNotNone(selection.selected)
+            second = self.prepare(
+                selection.selected,
+                capabilities,
+                qualifications,
+                at=NOW + timedelta(seconds=2),
+            )
+            self.assertNotEqual(first.qualification_id, second.qualification_id)
+            self.assertNotEqual(
+                first.route_semantics_digest,
+                second.route_semantics_digest,
+            )
+            self.assertNotEqual(
+                first.qualified_route_rule_digest,
+                second.qualified_route_rule_digest,
+            )
+            self.assertEqual(first.data_entitlement, second.data_entitlement)
+            self.assertEqual(first.accepted_success_statuses, second.accepted_success_statuses)
+            self.assertNotEqual(first.parser_identity, second.parser_identity)
+
     def test_new_current_capability_invalidates_old_selected_route_for_new_read(self):
         with TemporaryDirectory() as directory:
             _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)

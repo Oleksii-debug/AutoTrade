@@ -396,6 +396,13 @@ def _evidence_by_pair(evidence, resolved_evidence, *, active, environment, decis
     # prevents a resolver conversion from mutating the evidence sequence that
     # will be assessed.
     resolver = dict.copy(resolved_evidence)
+    for key, value in dict.items(resolver):
+        if type(key) is not str:
+            raise TypeError("resolved_evidence keys must be exact str")
+        if type(value) is not CorrelationEvidence:
+            raise TypeError(
+                "resolved_evidence values must be exact CorrelationEvidence"
+            )
     point = _instant(decision_time)
     result = {}
     stale = []

@@ -844,6 +844,10 @@ class CompositeReplayCheckpoint:
 
     @classmethod
     def from_canonical_json(cls, document: str) -> "CompositeReplayCheckpoint":
+        if cls is not CompositeReplayCheckpoint:
+            raise TypeError(
+                "composite replay checkpoint parser requires canonical class"
+            )
         if type(document) is not str:
             raise TypeError("composite replay checkpoint document must be exact text")
         try:

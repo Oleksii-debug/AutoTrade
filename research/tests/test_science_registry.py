@@ -50,6 +50,10 @@ def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30",
 
 
 def exhaust_trials(store, protocol_id):
+    store.preregister_locked_holdout(
+        protocol_id,
+        holdout_identity=holdout_identity(),
+    )
     state = store.completeness(protocol_id)
     for index in range(state["remaining_trial_budget"]):
         store.record_trial(
@@ -124,6 +128,10 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             before = store.completeness(registered.protocol_id)
             store.record_trial(
                 registered.protocol_id,
@@ -255,6 +263,10 @@ class ScientificRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 1
             registered = store.register_protocol(value)
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             store.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -317,6 +329,10 @@ class ScientificRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 1
             registered = store.register_protocol(value)
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             store.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -361,6 +377,10 @@ class ScientificRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 1
             registered = store.register_protocol(value)
+            store.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             store.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -412,6 +432,10 @@ class ScientificRegistryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = store.register_protocol(protocol())
+            store.preregister_locked_holdout(
+                p.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             store.record_trial(p.protocol_id, status="FAILED", payload={"reason": "fit"})
             store.record_trial(p.protocol_id, status="DISCARDED", payload={"reason": "constraint"})
             state = store.completeness(p.protocol_id)
@@ -425,6 +449,10 @@ class ScientificRegistryTests(unittest.TestCase):
             value = protocol()
             value["trial_budget"] = 1
             p = store.register_protocol(value)
+            store.preregister_locked_holdout(
+                p.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             store.record_trial(p.protocol_id, status="COMPLETED", payload={"x": 1})
             with self.assertRaises(ProtocolViolation):
                 store.record_trial(p.protocol_id, status="COMPLETED", payload={"x": 2})
@@ -455,6 +483,10 @@ class ScientificRegistryTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             p = first.register_protocol(protocol())
+            first.preregister_locked_holdout(
+                p.protocol_id,
+                holdout_identity=holdout_identity(),
+            )
             first.record_trial(p.protocol_id, status="CANCELLED", payload={"reason": "budget"})
             second = ScientificRegistry(path)
             self.assertEqual(second.completeness(p.protocol_id)["statuses"]["CANCELLED"], 1)

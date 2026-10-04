@@ -576,6 +576,78 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 )
             self.assertTrue(injected)
 
+    def test_restart_with_local_capital_rejects_legacy_cash_admission_without_capital_cut(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            _seed_settlement, _seed_economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            legacy_authority = AuthorityService(store)
+            legacy_authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                legacy_authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            risk_event = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]
+            self.assertNotIn(
+                "settlement_capital_adjustment",
+                risk_event["payload"]["reservation_availability_evidence"],
+            )
+            self.assertEqual(
+                _dispatch(legacy_authority, admitted),
+                (True, "allowed"),
+            )
+
+            restarted_store = JournalStore(path)
+            artifact_root = Path(directory) / "settlement-evidence"
+            artifacts = ArtifactStore(artifact_root)
+            restarted_settlement = DurableSettlementBook(
+                restarted_store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+            restarted_economic = DurableProviderEconomicBook(
+                restarted_store,
+                provider_id=PROVIDER_ID,
+                account_id=ACCOUNT_ID,
+                environment=ENVIRONMENT,
+            )
+            restarted_authority = AuthorityService(
+                restarted_store,
+                settlement_book=restarted_settlement,
+                economic_book=restarted_economic,
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "lacks required settlement capital evidence",
+            ):
+                restarted_authority._validate_durable_financial_evidence(
+                    admitted,
+                    restarted_authority._policies[admitted.policy_id],
+                    require_transaction_cut=True,
+                )
+            self.assertEqual(
+                _dispatch(restarted_authority, admitted),
+                (False, "financial_evidence_invalid"),
+            )
+
     def test_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
         cases = (
             ("BYBIT", "bybit-account", "TESTNET"),

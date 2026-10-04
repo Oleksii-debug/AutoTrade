@@ -22,6 +22,12 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
 
 
+# Retain the installed JournalStore CAS primitives once. The final-send boundary
+# must not be redirected by later mutation of public class attributes.
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_JOURNAL_COMMIT_COMMAND = JournalStore.commit_command
+
+
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
@@ -648,7 +654,7 @@ class GuardedDispatcher:
                 envelope,
                 outbox_topic="autotrade.submission.events",
             )
-        _, inserted, appended = JournalStore.commit_command(
+        _, inserted, appended = _CANONICAL_JOURNAL_COMMIT_COMMAND(
             store,
             command_id=envelope["event_id"],
             actor=f"dispatcher:{self.scope_key}",
@@ -944,7 +950,7 @@ class GuardedDispatcher:
             # recovery-owner/takeover predicate: any intervening journal write
             # fails closed instead of leaving a check->send race.
             store = self._journal_store_authority()
-            barrier_journal_sequence = JournalStore.current_journal_sequence(store)
+            barrier_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(store)
 
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"

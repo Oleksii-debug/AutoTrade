@@ -194,7 +194,7 @@ def resolve_simulation_action(journal, action, payload):
 
 def execute_simulation_action(journal, action, payload, accepted_at):
     from .simulation_session import run_autonomous_simulation
-    from .backup import create_backup, verify_backup
+    from .backup import BackupError, create_backup, verify_backup
     existing = resolve_simulation_action(journal, action, payload)
     if existing is not None:
         return existing
@@ -207,9 +207,17 @@ def execute_simulation_action(journal, action, payload, accepted_at):
     if action == 'BACKUP_SIMULATION':
         destination = root.parent / 'backups' / payload['command_id']
         # A crash after atomic backup publication must re-verify those same bytes.
-        if not destination.exists():
-            create_backup(root, root / 'artifacts', destination)
-        manifest = verify_backup(destination)
+        # Backup/source races are execution uncertainty at this boundary, not a
+        # reason to let a RuntimeError escape the durable Host operation state
+        # machine. Normalize them into its existing resumable validation path.
+        try:
+            if not destination.exists():
+                create_backup(root, root / 'artifacts', destination)
+            manifest = verify_backup(destination)
+        except (BackupError, OSError) as error:
+            raise ValueError(
+                'simulation backup did not reach a verified terminal state'
+            ) from error
         result = {'backup_id': payload['command_id'], 'manifest_digest': payload_digest(manifest),
                   'status': 'VERIFIED', 'restore_trading_gate': 'RECONCILIATION_REQUIRED'}
     else:

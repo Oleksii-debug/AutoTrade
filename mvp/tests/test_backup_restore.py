@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import backup as backup_module
 from mvp.autotrade_mvp.backup import (
     BACKUP_SCHEMA_VERSION,
     BackupCompatibilityError,
@@ -328,6 +329,283 @@ class BackupRestoreTests(unittest.TestCase):
                 manifest["runtime_consistency_check"],
                 "JOURNAL_ONLY",
             )
+
+    def test_new_order_intent_during_backup_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_copy = backup_module._copy_stable_file
+            injected = False
+
+            def copy_then_add_intent(source, destination):
+                nonlocal injected
+                result = original_copy(source, destination)
+                if not injected:
+                    injected = True
+                    intents = state / "order-intents"
+                    intents.mkdir(parents=True, exist_ok=True)
+                    (intents / "concurrent.json").write_text(
+                        '{"intent_id":"concurrent"}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_copy_stable_file",
+                side_effect=copy_then_add_intent,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source inventory changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_new_artifact_during_backup_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_copy = backup_module._copy_stable_file
+            injected = False
+
+            def copy_then_add_artifact(source, destination):
+                nonlocal injected
+                result = original_copy(source, destination)
+                if not injected:
+                    injected = True
+                    payload = b"concurrent-evidence"
+                    digest = sha256(payload).hexdigest()
+                    object_path = (
+                        artifacts
+                        / "objects"
+                        / "sha256"
+                        / digest[:2]
+                        / digest
+                    )
+                    object_path.parent.mkdir(parents=True, exist_ok=True)
+                    object_path.write_bytes(payload)
+                    manifest_path = (
+                        artifacts
+                        / "manifests"
+                        / "sha256"
+                        / digest[:2]
+                        / f"{digest}.json"
+                    )
+                    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                    manifest_path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "algorithm": "sha256",
+                                "digest": digest,
+                                "size_bytes": len(payload),
+                                "media_type": "application/octet-stream",
+                                "rights_basis": "first-party-test-evidence",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_copy_stable_file",
+                side_effect=copy_then_add_artifact,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source inventory changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_new_source_after_staging_fsync_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_fsync = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_add_source(stage_root):
+                nonlocal injected
+                result = original_fsync(stage_root)
+                if not injected:
+                    injected = True
+                    intents = state / "order-intents"
+                    intents.mkdir(parents=True, exist_ok=True)
+                    (intents / "late-concurrent.json").write_text(
+                        '{"intent_id":"late-concurrent"}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_add_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source inventory changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_existing_source_change_after_staging_fsync_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            self.assertTrue(checkpoint.is_file())
+            original_fsync = backup_module._fsync_directory_tree
+            injected = False
+
+            def fsync_then_change_source(stage_root):
+                nonlocal injected
+                result = original_fsync(stage_root)
+                if not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_after_staging_fsync":true}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory_tree",
+                side_effect=fsync_then_change_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_source_aba_during_copy_cannot_publish_transient_generation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_bytes = checkpoint.read_bytes()
+            original_copy = backup_module._copy_stable_file
+            injected = False
+
+            def copy_transient_then_restore(source, destination):
+                nonlocal injected
+                if Path(source) == checkpoint and not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"transient_generation":true}\n',
+                        encoding="utf-8",
+                    )
+                    try:
+                        return original_copy(source, destination)
+                    finally:
+                        checkpoint.write_bytes(original_bytes)
+                return original_copy(source, destination)
+
+            with patch.object(
+                backup_module,
+                "_copy_stable_file",
+                side_effect=copy_transient_then_restore,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed across journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertEqual(checkpoint.read_bytes(), original_bytes)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_existing_source_change_during_sqlite_snapshot_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            self.assertTrue(checkpoint.is_file())
+            original_backup = backup_module._backup_sqlite
+            injected = False
+
+            def backup_then_change_source(source, destination):
+                nonlocal injected
+                result = original_backup(source, destination)
+                if not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_during_sqlite_backup":true}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=backup_then_change_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_source_hash_io_race_is_a_controlled_backup_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_hash = backup_module._sha256_file
+            injected = False
+
+            def fail_checkpoint_hash(path):
+                nonlocal injected
+                if Path(path) == checkpoint and not injected:
+                    injected = True
+                    raise OSError("simulated concurrent source disappearance")
+                return original_hash(path)
+
+            with patch.object(
+                backup_module,
+                "_sha256_file",
+                side_effect=fail_checkpoint_hash,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "changed before journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
     def test_partial_runtime_consistency_evidence_is_rejected(self):
         with TemporaryDirectory() as directory:

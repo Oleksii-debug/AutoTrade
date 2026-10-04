@@ -9,6 +9,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import re
+import weakref
 from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -321,6 +322,60 @@ class RawMarketUpdate:
             )
 
 
+def _make_normalized_event_build_identity_guard():
+    """Keep normalized event/build binding outside caller-mutable dataclass state."""
+
+    bindings: dict[int, tuple[weakref.ReferenceType[object], str, str]] = {}
+
+    def bind(event: object, event_id: str, adapter_version: str) -> None:
+        identity = id(event)
+        existing = bindings.get(identity)
+        if existing is not None and existing[0]() is event:
+            if existing[1:] != (event_id, adapter_version):
+                raise MarketDataError(
+                    "normalized market event build identity cannot be rebound"
+                )
+            return
+
+        def release(
+            reference: weakref.ReferenceType[object],
+            *,
+            identity: int = identity,
+        ) -> None:
+            current = bindings.get(identity)
+            if current is not None and current[0] is reference:
+                bindings.pop(identity, None)
+
+        reference = weakref.ref(event, release)
+        bindings[identity] = (reference, event_id, adapter_version)
+
+    def require(event: object) -> None:
+        current = bindings.get(id(event))
+        if current is None or current[0]() is not event:
+            raise MarketDataError(
+                "normalized market event build identity authority is unavailable"
+            )
+        event_id = object.__getattribute__(event, "event_id")
+        adapter_version = object.__getattribute__(event, "adapter_version")
+        if type(event_id) is not str or type(adapter_version) is not str:
+            raise MarketDataError(
+                "normalized market event build identity changed after construction"
+            )
+        if current[1] != event_id or current[2] != adapter_version:
+            raise MarketDataError(
+                "normalized market event build identity changed after construction"
+            )
+
+    return bind, require
+
+
+(
+    _bind_normalized_event_build_identity,
+    _require_normalized_event_build_identity,
+) = _make_normalized_event_build_identity_guard()
+del _make_normalized_event_build_identity_guard
+
+
 @dataclass(frozen=True)
 class NormalizedMarketEvent:
     event_id: str
@@ -338,11 +393,29 @@ class NormalizedMarketEvent:
     source_sequence: int | None = None
     stream_generation: int | None = None
 
+    def __post_init__(
+        self,
+        _bind=_bind_normalized_event_build_identity,
+    ) -> None:
+        event_id = _admission_text(self.event_id, "event_id")
+        try:
+            UUID(event_id)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise MarketDataError("event_id must be a UUID") from error
+        adapter_version = _adapter_version(self.adapter_version)
+        object.__setattr__(self, "event_id", event_id)
+        object.__setattr__(self, "adapter_version", adapter_version)
+        _bind(self, event_id, adapter_version)
+
     @property
     def payload(self) -> dict[str, Any]:
         return json.loads(self.payload_json)
 
-    def to_contract_dict(self) -> dict[str, Any]:
+    def to_contract_dict(
+        self,
+        _require=_require_normalized_event_build_identity,
+    ) -> dict[str, Any]:
+        _require(self)
         result = {
             "event_id": self.event_id,
             "instrument_version": self.instrument_version,
@@ -362,6 +435,10 @@ class NormalizedMarketEvent:
         if self.stream_generation is not None:
             result["stream_generation"] = str(self.stream_generation)
         return result
+
+
+del _bind_normalized_event_build_identity
+del _require_normalized_event_build_identity
 
 
 @dataclass(frozen=True)

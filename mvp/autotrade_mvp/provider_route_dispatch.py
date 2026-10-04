@@ -251,6 +251,8 @@ def compose_selected_provider_route_authority(
     expected_qualification_id = route.qualification_id
     current_scope = _current_scope(route)
 
+    point_function = _point
+    point_code = point_function.__code__
     journal_cut_function = _journal_cut
     journal_cut_code = journal_cut_function.__code__
     journal_store_type = JournalStore
@@ -277,7 +279,9 @@ def compose_selected_provider_route_authority(
 
     def executable_authority_current() -> bool:
         return (
-            _journal_cut is journal_cut_function
+            _point is point_function
+            and point_function.__code__ is point_code
+            and _journal_cut is journal_cut_function
             and journal_cut_function.__code__ is journal_cut_code
             and JournalStore is journal_store_type
             and journal_store_type.whole_store_state_cut is whole_store_cut_function
@@ -306,7 +310,7 @@ def compose_selected_provider_route_authority(
             return False, reason.strip()
         if not executable_authority_current():
             return False, "provider_route_executable_authority_changed"
-        point = _point(at_text)
+        point = point_function(at_text)
         cut = journal_cut_function(store)
         try:
             capability = capability_reader(

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 from weakref import ref as weakref_ref
 
@@ -1610,6 +1611,27 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_outcome_artifact_ref_rejects_text_subclass_before_uuid_callbacks(self):
+        calls: list[str] = []
+
+        class HostileText(str):
+            def replace(self, *args, **kwargs):
+                calls.append("replace")
+                return super().replace(*args, **kwargs)
+
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                return super().strip(*args, **kwargs)
+
+        with self.assertRaisesRegex(TypeError, "exact canonical UUID text"):
+            AblationOutcomeArtifactRef(
+                artifact_id=HostileText(
+                    "77777777-7777-4777-8777-777777777770"
+                ),
+                sha256="sha256:" + "7" * 64,
+            )
+        self.assertEqual(calls, [])
+
     def test_registered_projection_rule_authentication_is_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "artifacts")
@@ -1662,6 +1684,27 @@ class AblationTests(unittest.TestCase):
                 descriptor.owner_authority,
                 "CANONICAL_RECONCILED_OUTCOME",
             )
+            with (
+                patch.object(
+                    ArtifactStore,
+                    "load_manifest",
+                    side_effect=AssertionError("split manifest read executed"),
+                ),
+                patch.object(
+                    ArtifactStore,
+                    "read_bytes",
+                    side_effect=AssertionError("split object read executed"),
+                ),
+            ):
+                snapshot_descriptor = (
+                    ablation_module._load_registered_projection_descriptor(
+                        store,
+                        reference,
+                        projection_kind="UTILITY",
+                        value_unit="USD",
+                    )
+                )
+            self.assertEqual(snapshot_descriptor, descriptor)
 
             wrong_owner = publish(
                 "77777777-7777-4777-8777-777777777772",
@@ -2007,6 +2050,23 @@ class AblationTests(unittest.TestCase):
                 tuple(sorted(units)),
             )
             self.assertIsNotNone(population_preflight.coverage_digest)
+            with (
+                patch.object(
+                    ArtifactStore,
+                    "load_manifest",
+                    side_effect=AssertionError("split manifest read executed"),
+                ),
+                patch.object(
+                    ArtifactStore,
+                    "read_bytes",
+                    side_effect=AssertionError("split object read executed"),
+                ),
+            ):
+                one_snapshot_outcome = authority._load_outcome(
+                    refs[0],
+                    population_root=population.root_hash,
+                )
+            self.assertEqual(one_snapshot_outcome.evidence_digest, refs[0].sha256)
 
             for field, forged_value in (
                 ("scientific_registry", attacker_science),

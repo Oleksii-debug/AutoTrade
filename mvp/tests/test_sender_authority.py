@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.sender_authority import (
     SenderAuthorityError,
     sender_authority_gate_path,
@@ -28,6 +28,71 @@ class SenderAuthorityTests(unittest.TestCase):
             self.assertNotEqual(paper, live)
             self.assertNotEqual(paper, other)
             self.assertEqual(paper.parent, store.path.parent)
+
+    def test_rebound_store_identity_property_cannot_retarget_gate_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            expected = sender_authority_gate_path(store, owner_scope="PAPER:acct")
+            forged_calls = 0
+
+            def forged_store_identity(_store):
+                nonlocal forged_calls
+                forged_calls += 1
+                raise AssertionError("rebound store identity must not execute")
+
+            with patch.object(
+                JournalStore,
+                "store_identity",
+                new=property(forged_store_identity),
+            ):
+                observed = sender_authority_gate_path(
+                    store,
+                    owner_scope="PAPER:acct",
+                )
+
+            self.assertEqual(observed, expected)
+            self.assertEqual(forged_calls, 0)
+
+    def test_rebound_takeover_reader_cannot_hide_pending_durable_takeover(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            payload = {"owner_scope": "PAPER:acct"}
+            JournalStore.append_event(
+                store,
+                {
+                    "event_id": "sender-authority-rebind-pending-takeover",
+                    "event_type": "RecoveryTakeoverStarted",
+                    "aggregate_type": "recovery_takeover",
+                    "aggregate_id": "takeover/rebind-probe",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T20:00:00Z",
+                },
+            )
+            forged_calls = 0
+
+            def hide_takeover_events(_store, _aggregate_type):
+                nonlocal forged_calls
+                forged_calls += 1
+                return []
+
+            with patch.object(
+                JournalStore,
+                "load_events_by_aggregate_type",
+                new=hide_takeover_events,
+            ):
+                with self.assertRaisesRegex(
+                    SenderAuthorityError,
+                    "pending durable takeover",
+                ):
+                    with sender_authority_window(
+                        store,
+                        owner_scope="PAPER:acct",
+                    ):
+                        self.fail("rebound reader must not erase durable takeover")
+
+            self.assertEqual(forged_calls, 0)
 
     @unittest.skipIf(sys.platform == "win32", "POSIX flock pathname test")
     def test_posix_gate_revalidates_pathname_after_lock_acquisition(self):

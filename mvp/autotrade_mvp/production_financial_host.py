@@ -418,6 +418,11 @@ def compose_financial_authority(
             owner_store=authority.journal,
             owner_scope=scope,
         )
+        # Revoke recovery-issued sender authority inside the canonical host's
+        # teardown, after command drain/join and before listener/fence release.
+        # Bind before any durable owner mutation so failed composition cannot
+        # mint an owner without a guaranteed terminal revocation path.
+        host.bind_terminal_finalizer(recovery.stop)
         chain = recovery.durable_owner_chain()
         dispatcher: HostBoundFinancialDispatcher | None = None
         if not chain:

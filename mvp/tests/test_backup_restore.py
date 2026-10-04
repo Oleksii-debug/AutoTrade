@@ -295,10 +295,10 @@ class BackupRestoreTests(unittest.TestCase):
             root = Path(directory)
             state, artifacts = self._build_sources(root)
             checkpoint_bytes = b'{"opaque":"autonomous-runtime-checkpoint-evidence"}'
-            (root / "autonomous-runtime-checkpoint.json").write_bytes(
+            (state / "autonomous-runtime-checkpoint.json").write_bytes(
                 checkpoint_bytes
             )
-            (root / ".autonomous-runtime-authority.key").write_bytes(b"k" * 32)
+            (state / ".autonomous-runtime-authority.key").write_bytes(b"k" * 32)
 
             backup = create_backup(state, artifacts, root / "backup")
             manifest = verify_backup(backup)
@@ -330,10 +330,14 @@ class BackupRestoreTests(unittest.TestCase):
                 checkpoint_bytes,
             )
             self.assertFalse(
-                (restored / "autonomous-runtime-checkpoint.json").exists()
+                (
+                    restored
+                    / "state"
+                    / "autonomous-runtime-checkpoint.json"
+                ).exists()
             )
             self.assertFalse(
-                (restored / ".autonomous-runtime-authority.key").exists()
+                (restored / "state" / ".autonomous-runtime-authority.key").exists()
             )
             marker = json.loads(
                 (
@@ -362,7 +366,7 @@ class BackupRestoreTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             state, artifacts = self._build_sources(root)
-            (root / "autonomous-runtime-checkpoint.json").write_bytes(
+            (state / "autonomous-runtime-checkpoint.json").write_bytes(
                 b'{"checkpoint":"source-generation"}'
             )
             backup = create_backup(state, artifacts, root / "backup")

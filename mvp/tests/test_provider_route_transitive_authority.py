@@ -17,6 +17,32 @@ class ProviderRouteTransitiveAuthorityTests(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         return fixture.setup_route(directory)
 
+    @staticmethod
+    def _compose(journal, capabilities, qualifications, route):
+        return provider_route_dispatch.compose_selected_provider_route_authority(
+            store=journal,
+            environment="PAPER",
+            account_id="paper-account",
+            route=route,
+            capability_registry=capabilities,
+            qualification_registry=qualifications,
+            authority_check=lambda _intent_hash, _at: (
+                True,
+                "financial_authority_current",
+            ),
+        )
+
+    @staticmethod
+    def _assert_retarget_rejected_without_call(combined, calls):
+        result = combined("intent-hash", _AT)
+        if result != (False, "provider_route_executable_authority_changed"):
+            raise AssertionError(
+                "retargeted provider-route executable was not rejected canonically: "
+                f"{result!r}"
+            )
+        if calls:
+            raise AssertionError(f"retargeted executable was invoked: {calls!r}")
+
     def test_composed_c_q_barrier_cannot_retarget_journal_cut_helper_after_composition(self):
         """Pin transitive barrier executables, not only the outer composer."""
 
@@ -24,18 +50,7 @@ class ProviderRouteTransitiveAuthorityTests(unittest.TestCase):
             journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
                 self._fixture(directory)
             )
-            combined = provider_route_dispatch.compose_selected_provider_route_authority(
-                store=journal,
-                environment="PAPER",
-                account_id="paper-account",
-                route=route,
-                capability_registry=capabilities,
-                qualification_registry=qualifications,
-                authority_check=lambda _intent_hash, _at: (
-                    True,
-                    "financial_authority_current",
-                ),
-            )
+            combined = self._compose(journal, capabilities, qualifications, route)
 
             original = provider_route_dispatch._journal_cut
             calls = []
@@ -46,19 +61,63 @@ class ProviderRouteTransitiveAuthorityTests(unittest.TestCase):
 
             provider_route_dispatch._journal_cut = forged
             try:
-                # A provider-route authority composed under the original code
-                # must fail closed on executable retargeting before calling the
-                # replacement. Merely pinning the outer composer is insufficient
-                # because the returned closure otherwise resolves globals later.
-                result = combined("intent-hash", _AT)
-                self.assertEqual(
-                    result,
-                    (False, "provider_route_executable_authority_changed"),
-                )
+                self._assert_retarget_rejected_without_call(combined, calls)
             finally:
                 provider_route_dispatch._journal_cut = original
 
-            self.assertEqual(calls, [])
+    def test_composed_c_q_barrier_rejects_store_cut_instance_shadow_before_call(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            combined = self._compose(journal, capabilities, qualifications, route)
+            calls = []
+
+            def forged():
+                calls.append("forged")
+                raise AssertionError("forged whole-store cut executed")
+
+            journal.whole_store_state_cut = forged
+            try:
+                self._assert_retarget_rejected_without_call(combined, calls)
+            finally:
+                del journal.whole_store_state_cut
+
+    def test_composed_c_q_barrier_rejects_capability_reader_instance_shadow_before_call(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            combined = self._compose(journal, capabilities, qualifications, route)
+            calls = []
+
+            def forged(**_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged capability reader executed")
+
+            capabilities.require_verified = forged
+            try:
+                self._assert_retarget_rejected_without_call(combined, calls)
+            finally:
+                del capabilities.require_verified
+
+    def test_composed_c_q_barrier_rejects_qualification_reader_instance_shadow_before_call(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            combined = self._compose(journal, capabilities, qualifications, route)
+            calls = []
+
+            def forged(**_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged qualification reader executed")
+
+            qualifications.require_exact_current = forged
+            try:
+                self._assert_retarget_rejected_without_call(combined, calls)
+            finally:
+                del qualifications.require_exact_current
 
 
 if __name__ == "__main__":

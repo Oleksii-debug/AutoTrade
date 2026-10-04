@@ -16,6 +16,7 @@ from .capabilities import (
     CapabilityRegistry,
     CapabilitySnapshot,
     _DERIVED_SNAPSHOT_TOKEN,
+    _instant,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 
@@ -106,12 +107,14 @@ class DurableCapabilityRegistry:
     """Journal-backed history plus process-local refresh fencing."""
 
     def __init__(self, store: JournalStore) -> None:
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
         self.store = store
         self._session_verified: dict[str, CapabilitySnapshot] = {}
 
-    def _history(self) -> CapabilityRegistry:
+    def _history_with_versions(
+        self,
+    ) -> tuple[CapabilityRegistry, dict[str, int]]:
         registry = CapabilityRegistry()
         events = self.store.load_events_by_aggregate_type(_AGGREGATE_TYPE)
         seen_versions: dict[str, int] = {}
@@ -131,14 +134,19 @@ class DurableCapabilityRegistry:
             if _identity_id(snapshot) != aggregate_id:
                 raise CapabilityError("durable capability aggregate identity mismatch")
             registry.add(snapshot)
+        return registry, seen_versions
+
+    def _history(self) -> CapabilityRegistry:
+        registry, _versions = self._history_with_versions()
         return registry
 
     def add(self, snapshot: CapabilitySnapshot) -> bool:
-        if not isinstance(snapshot, CapabilitySnapshot):
-            raise TypeError("snapshot must be CapabilitySnapshot")
+        if type(snapshot) is not CapabilitySnapshot:
+            raise TypeError("snapshot must be exact CapabilitySnapshot")
         # Rebuild durable truth first so stale writers cannot append after a
         # newer refresh for the same identity.
-        registry = self._history()
+        registry, seen_versions = self._history_with_versions()
+        aggregate_id = _identity_id(snapshot)
         try:
             existing = registry.latest(
                 provider_id=snapshot.provider_id,
@@ -155,18 +163,16 @@ class DurableCapabilityRegistry:
                 raise CapabilityError(
                     "snapshot observed_at conflicts with durable capability history"
                 )
-            if snapshot.status == "VERIFIED":
-                # Exact replay is not a fresh current-process derivation.
-                return False
+            if (
+                snapshot.status == "VERIFIED"
+                and getattr(snapshot, "_can_admit", False)
+            ):
+                self._session_verified[snapshot.snapshot_id] = snapshot
             return False
 
         # Canonical in-memory registry owns ordering/content semantics.
         registry.add(snapshot)
-        aggregate_id = _identity_id(snapshot)
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            aggregate_id,
-        )
+        version = seen_versions.get(aggregate_id, 0) + 1
         payload = _payload(snapshot)
         envelope = {
             "event_id": f"capability-snapshot:{snapshot.snapshot_id}",
@@ -197,12 +203,21 @@ class DurableCapabilityRegistry:
                     "capability history changed concurrently; refresh required"
                 ) from error
             if persisted == snapshot:
+                if (
+                    snapshot.status == "VERIFIED"
+                    and getattr(snapshot, "_can_admit", False)
+                ):
+                    self._session_verified[snapshot.snapshot_id] = snapshot
                 return False
             raise CapabilityError(
                 "capability history changed concurrently; refresh required"
             ) from error
 
-        if result.inserted and snapshot.status == "VERIFIED":
+        if (
+            result.inserted
+            and snapshot.status == "VERIFIED"
+            and getattr(snapshot, "_can_admit", False)
+        ):
             self._session_verified[snapshot.snapshot_id] = snapshot
         return result.inserted
 
@@ -210,9 +225,21 @@ class DurableCapabilityRegistry:
         return self._history().latest(**kwargs)
 
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
-        snapshot = self._history().require_verified(**kwargs)
+        snapshot = self._history().latest(**kwargs)
+        point = _instant(kwargs["at"], "at")
+        if type(snapshot) is not CapabilitySnapshot:
+            raise CapabilityError("capability snapshot is not canonical")
+        if snapshot.status != "VERIFIED":
+            raise CapabilityError(f"capability status is {snapshot.status}")
+        if point >= snapshot.expires_at:
+            raise CapabilityError("capability snapshot is expired")
         fresh = self._session_verified.get(snapshot.snapshot_id)
-        if fresh is None or fresh != snapshot:
+        if (
+            fresh is None
+            or fresh != snapshot
+            or type(fresh) is not CapabilitySnapshot
+            or not getattr(fresh, "_can_admit", False)
+        ):
             raise CapabilityError(
                 "capability requires fresh current-process verification after restart"
             )

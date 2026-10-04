@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.provider_core import (
     QualificationEvidence,
     REQUIRED_QUALIFICATION_CASES,
@@ -50,12 +51,12 @@ def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MAR
                 },
             )
         )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid5(NAMESPACE_URL, f"snapshot:{provider}:{environment}")),
         claims=claims,
         observed_at=NOW,
         evidence_verifier=lambda claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def candidate(

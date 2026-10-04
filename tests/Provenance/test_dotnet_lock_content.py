@@ -640,6 +640,39 @@ class NugetLockGateCandidateTests(unittest.TestCase):
                 ['DOTNET_PROJECT_LOCK_MISSING:src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'],
             )
 
+    def test_explicit_project_import_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            imported = root / 'external' / 'Injected.targets'
+            project.parent.mkdir(parents=True)
+            imported.parent.mkdir(parents=True)
+            imported.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="9.9.9" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            project.write_text(
+                '<Project>'
+                '<Import Project="../../external/Injected.targets" />'
+                '<ItemGroup><PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" /></ItemGroup>'
+                '</Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj'
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                'imported MSBuild PackageReference',
+            ):
+                dotnet_locked_dependency_graph(root, [project])
+
     def test_root_props_package_reference_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

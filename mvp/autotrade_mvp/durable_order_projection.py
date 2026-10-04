@@ -267,7 +267,21 @@ class DurableOrderBookProjection:
             raise TypeError(
                 "evidence_artifact_store must be the exact canonical ArtifactStore"
             )
-        self.evidence_artifact_store = evidence_artifact_store
+        self._evidence_artifact_store = evidence_artifact_store
+        self._evidence_artifact_store_namespace = (
+            None
+            if evidence_artifact_store is None
+            else tuple(
+                (type(value), value)
+                for value in (
+                    evidence_artifact_store.root,
+                    evidence_artifact_store.objects,
+                    evidence_artifact_store.manifests,
+                    evidence_artifact_store.staging,
+                    evidence_artifact_store.lock_path,
+                )
+            )
+        )
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -279,6 +293,10 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         self._reload()
+
+    @property
+    def evidence_artifact_store(self) -> ArtifactStore | None:
+        return self._evidence_artifact_store
 
     def _new_book(self) -> OrderBookProjection:
         return OrderBookProjection(
@@ -322,7 +340,8 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "local lifecycle mutation must not claim provider-result evidence"
             )
-        if self.evidence_artifact_store is None:
+        artifact_store = self._evidence_artifact_store
+        if artifact_store is None:
             if self.environment in {"PAPER", "LIVE"}:
                 raise OrderProjectionConflict(
                     "provider evidence requires the trusted ArtifactStore boundary"
@@ -331,6 +350,34 @@ class DurableOrderBookProjection:
             # may carry canonical evidence identity without claiming that a
             # real provider artifact has been qualified by the trusted store.
             return refs
+
+        if type(artifact_store) is not ArtifactStore:
+            raise OrderProjectionConflict(
+                "provider evidence ArtifactStore authority changed after construction"
+            )
+        expected_namespace = self._evidence_artifact_store_namespace
+        current_namespace_values = (
+            artifact_store.root,
+            artifact_store.objects,
+            artifact_store.manifests,
+            artifact_store.staging,
+            artifact_store.lock_path,
+        )
+        if (
+            expected_namespace is None
+            or len(expected_namespace) != len(current_namespace_values)
+            or any(
+                type(current) is not expected_type or current != expected_value
+                for current, (expected_type, expected_value) in zip(
+                    current_namespace_values,
+                    expected_namespace,
+                    strict=True,
+                )
+            )
+        ):
+            raise OrderProjectionConflict(
+                "provider evidence ArtifactStore namespace authority changed after construction"
+            )
 
         committed = _instant(committed_at, name="committed_at")
         committed_dt = datetime.fromisoformat(
@@ -366,7 +413,7 @@ class DurableOrderBookProjection:
                         "provider evidence authenticated snapshot reader authority changed"
                     )
                 manifest, artifact_bytes = authenticated_snapshot_read(
-                    self.evidence_artifact_store,
+                    artifact_store,
                     ref["artifact_id"],
                 )
             except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:

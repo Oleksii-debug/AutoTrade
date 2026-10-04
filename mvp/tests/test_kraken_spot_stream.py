@@ -753,6 +753,31 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         )
         self.assertFalse(evidence.trading_ready)
 
+    def test_snapshot_rejects_trade_events_when_snap_trades_is_false(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        self.acknowledge(recovery)
+        trade_snapshot = self.parse(
+            recovery=recovery,
+            frame_type="snapshot",
+            sequence=1,
+            reports=[
+                {
+                    "order_id": "O-TRADE-SNAPSHOT",
+                    "exec_id": "E-TRADE-SNAPSHOT",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                }
+            ],
+        )
+        before = recovery.evidence()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "snap_trades=false snapshot contains trade events",
+        ):
+            recovery.apply_frame(trade_snapshot)
+        self.assertEqual(recovery.evidence(), before)
+
     def test_snapshot_rejects_terminal_orders_under_snap_orders_contract(self):
         recovery = self.make_recovery()
         recovery.begin_connection()

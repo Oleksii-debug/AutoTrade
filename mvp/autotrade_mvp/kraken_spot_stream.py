@@ -1063,6 +1063,10 @@ class KrakenSpotExecutionStreamRecovery:
                 raise KrakenSpotStreamError(
                     "Kraken stream generation requires snapshot before updates"
                 )
+            if any(report.exec_type == "trade" for report in frame.reports):
+                raise KrakenSpotStreamError(
+                    "Kraken snap_trades=false snapshot contains trade events"
+                )
             terminal = sorted(
                 {
                     report.order_id

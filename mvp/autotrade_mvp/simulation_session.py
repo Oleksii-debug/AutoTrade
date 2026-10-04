@@ -1597,6 +1597,16 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
                 "reason": "unfinished_episode_requires_reconciliation", "resumed": True}
+    if completed:
+        # Missing, malformed or causally stale checkpoint bytes are rejected
+        # before rebuilding any provider projection.  Full cross-authority
+        # equality is checked below after owner-specific recovery diagnostics.
+        from .simulation_runtime_checkpoint import preflight_autonomous_runtime_checkpoint
+        preflight_autonomous_runtime_checkpoint(
+            root,
+            protocol=protocol,
+            completed_episodes=len(completed),
+        )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
     provider = SimulatedProvider.from_state(state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)

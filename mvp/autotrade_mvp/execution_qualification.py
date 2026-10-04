@@ -25,6 +25,7 @@ from .execution_realism import (
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
+    _detached_dataclass_input,
     simulate_execution,
 )
 
@@ -254,10 +255,13 @@ def simulate_qualified_execution(
     no provider credentials, admission, confirmation or live trading authority.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
+    order = _detached_dataclass_input(order, SimulatedOrder, name="order")
+    observation = _detached_dataclass_input(
+        observation,
+        LiquidityObservation,
+        name="observation",
+    )
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
 
     validate_execution_qualification(
         model=model,

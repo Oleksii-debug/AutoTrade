@@ -2261,5 +2261,43 @@ class AblationTests(unittest.TestCase):
                 self.assertEqual(calls, [])
 
 
+    def test_direct_trusted_resolvers_reject_outer_subclasses_before_authority_reads(self):
+        calls: list[str] = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("hostile iterable callback executed")
+
+        authority = object.__new__(AblationQualificationAuthority)
+        cases = [
+            pair("direct-ingress-a", "2", population_unit="direct-ingress-unit-a"),
+            pair("direct-ingress-b", "2", population_unit="direct-ingress-unit-b"),
+        ]
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "pairs must be an exact list or tuple",
+        ):
+            authority.resolve_population(HostileList(cases))
+        self.assertEqual(calls, [])
+
+        calls.clear()
+        with self.assertRaisesRegex(
+            TypeError,
+            "pairs must be an exact list or tuple",
+        ):
+            authority.resolve(HostileList(cases), outcome_refs=[])
+        self.assertEqual(calls, [])
+
+        calls.clear()
+        with self.assertRaisesRegex(
+            TypeError,
+            "outcome_refs must be an exact list or tuple",
+        ):
+            authority.resolve(cases, outcome_refs=HostileList())
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

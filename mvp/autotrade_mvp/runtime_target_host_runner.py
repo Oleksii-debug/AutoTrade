@@ -623,6 +623,21 @@ def run_declared_target_host_campaign(
     campaign_evidence_type = RuntimeCampaignEvidence
     durable_sample_type = DurableFinancialLatencySample
     inventory_type = RuntimeTargetHostInventory
+    runner_error_type = RuntimeTargetHostRunnerError
+    function_type_authority = FunctionType
+    method_type_authority = MethodType
+    callable_authority_verifier = _require_callable_authority
+    class_authority_verifier = _require_class_authority
+    callable_authority_verifier_state = (
+        callable_authority_verifier.__code__,
+        callable_authority_verifier.__defaults__,
+        callable_authority_verifier.__kwdefaults__,
+    )
+    class_authority_verifier_state = (
+        class_authority_verifier.__code__,
+        class_authority_verifier.__defaults__,
+        class_authority_verifier.__kwdefaults__,
+    )
 
     class_states = tuple(
         (name, value, _class_authority_state(value))
@@ -660,8 +675,30 @@ def run_declared_target_host_campaign(
     )
 
     def require_callback_authority() -> None:
+        if (
+            RuntimeTargetHostRunnerError is not runner_error_type
+            or FunctionType is not function_type_authority
+            or MethodType is not method_type_authority
+            or _require_callable_authority is not callable_authority_verifier
+            or _require_class_authority is not class_authority_verifier
+            or callable_authority_verifier.__code__
+            is not callable_authority_verifier_state[0]
+            or callable_authority_verifier.__defaults__
+            is not callable_authority_verifier_state[1]
+            or callable_authority_verifier.__kwdefaults__
+            is not callable_authority_verifier_state[2]
+            or class_authority_verifier.__code__
+            is not class_authority_verifier_state[0]
+            or class_authority_verifier.__defaults__
+            is not class_authority_verifier_state[1]
+            or class_authority_verifier.__kwdefaults__
+            is not class_authority_verifier_state[2]
+        ):
+            raise runner_error_type(
+                "callback authority verifier changed during campaign callback"
+            )
         if JournalStore is not journal_store_type:
-            raise RuntimeTargetHostRunnerError(
+            raise runner_error_type(
                 "JournalStore authority changed during campaign callback"
             )
         class_bindings = (
@@ -687,11 +724,11 @@ def run_declared_target_host_campaign(
                     f"{name} authority changed during campaign callback"
                 )
         for name, resolve, state in callable_states:
-            _require_callable_authority(resolve(), state, name=name)
+            callable_authority_verifier(resolve(), state, name=name)
         for name, callback, state in callback_states:
-            _require_callable_authority(callback, state, name=name)
+            callable_authority_verifier(callback, state, name=name)
         for name, value, state in class_states:
-            _require_class_authority(value, state, name=name)
+            class_authority_verifier(value, state, name=name)
 
     inventory = collect_runtime_target_host_inventory(
         expected_host_fingerprint=spec.host_fingerprint,

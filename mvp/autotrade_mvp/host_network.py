@@ -279,7 +279,14 @@ class AuthenticatedHostApplication:
                     result = self.store.execute_authority_operation(operation_id)
                 except (TypeError, ValueError, OverflowError):
                     current = self.store.get_operation(operation_id)
-                    if current.phase in self.store.TERMINAL_PHASES:
+                    if (
+                        current.phase in self.store.TERMINAL_PHASES
+                        or current.phase == "UNKNOWN"
+                    ):
+                        # UNKNOWN is deliberately resumable, but the state
+                        # machine forbids UNKNOWN -> UNKNOWN rewrites. A repeated
+                        # recoverable execution fault must preserve the first
+                        # durable uncertainty rather than crash host startup.
                         result = current
                     else:
                         result = self.store.update_operation(

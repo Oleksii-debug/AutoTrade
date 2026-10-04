@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.product_runtime import build_product, restore_product_backup
@@ -157,6 +158,58 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 self.assertEqual(operation['phase'], 'SUCCEEDED', operation)
                 self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
             finally: client.close()
+
+    def test_worker_timeout_remains_resumable_without_poisoning_host_recovery(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                with patch(
+                    'subprocess.run',
+                    side_effect=subprocess.TimeoutExpired(
+                        cmd=['provider-free-worker'],
+                        timeout=300,
+                    ),
+                ):
+                    _command_id, operation = client.command('START_SIMULATION')
+                    self.assertEqual(operation['phase'], 'UNKNOWN', operation)
+                    self.assertEqual(
+                        operation['remaining_uncertainty'],
+                        ['authority_execution_fault'],
+                    )
+                    self.assertTrue(any(
+                        item.get('kind') == 'authority-execution-fault'
+                        for item in operation['evidence']
+                    ))
+                    # A second startup-equivalent recovery attempt may fail for
+                    # the same external reason. It must preserve UNKNOWN rather
+                    # than attempt an illegal UNKNOWN -> UNKNOWN journal write.
+                    resumed = client.runtime.application.resume_authority_operations()
+                    self.assertIn(operation['operation_id'], resumed)
+                    status, repeated, _ = client.request(
+                        'GET',
+                        '/api/v1/operations/' + operation['operation_id'],
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(repeated['phase'], 'UNKNOWN')
+                    self.assertEqual(
+                        repeated['remaining_uncertainty'],
+                        ['authority_execution_fault'],
+                    )
+
+                # Once the worker is available again, resume the same accepted
+                # durable operation. No replacement command or resend identity
+                # is fabricated.
+                resumed = client.runtime.application.resume_authority_operations()
+                self.assertIn(operation['operation_id'], resumed)
+                status, recovered, _ = client.request(
+                    'GET',
+                    '/api/v1/operations/' + operation['operation_id'],
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(recovered['phase'], 'SUCCEEDED', recovered)
+                self.assertEqual(recovered['remaining_uncertainty'], [])
+            finally:
+                client.close()
 
     def test_second_host_cannot_own_same_product(self):
         with TemporaryDirectory() as directory:

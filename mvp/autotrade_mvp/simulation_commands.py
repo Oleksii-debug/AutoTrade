@@ -97,7 +97,14 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
-        completed = subprocess.run(command, capture_output=True, timeout=300)
+        try:
+            completed = subprocess.run(command, capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as error:
+            # Process-launch failure and timeout are recoverable execution
+            # uncertainty, not permission to strand a durable Host operation in
+            # RUNNING or make startup recovery crash. subprocess.run kills and
+            # waits for a timed-out child before raising TimeoutExpired.
+            raise ValueError('simulation worker stopped; recovery required') from error
         if completed.returncode != 0 or len(completed.stdout) > 65536:
             raise ValueError('simulation worker stopped; recovery required')
         result = json.loads(completed.stdout)

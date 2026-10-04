@@ -219,6 +219,33 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     build_product(directory, port=client.port + 1)
             finally: client.close()
 
+    def test_duplicate_cookie_headers_fail_closed_before_session_resolution(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                connection = http.client.HTTPConnection(
+                    '127.0.0.1',
+                    client.port,
+                    timeout=30,
+                )
+                try:
+                    connection.putrequest('GET', '/api/v1/state')
+                    connection.putheader('Origin', client.origin)
+                    connection.putheader('Cookie', client.cookie)
+                    connection.putheader('Cookie', client.cookie)
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    body = json.loads(response.read())
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(body, {'error': 'INVALID_REQUEST'})
+                finally:
+                    connection.close()
+
+                # The unambiguous cookie remains valid after the rejected request.
+                self.assertEqual(client.state()['environment'], 'SIMULATION')
+            finally:
+                client.close()
+
     def test_pairing_rejects_duplicate_json_keys_without_consuming_code(self):
         with TemporaryDirectory() as directory:
             probe = socket.socket(); probe.bind(('127.0.0.1', 0))

@@ -65,6 +65,7 @@ _SINGLETON_REQUEST_HEADERS = (
     "Content-Length",
     "Content-Type",
     "Accept",
+    "Cookie",
 )
 
 

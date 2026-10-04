@@ -72,15 +72,22 @@ def verified_read_capability(
 
 
 class ProviderRouteReadTests(unittest.TestCase):
-    def setup_route(self, directory: str, *, include_read_rule=True):
+    def setup_route(
+        self,
+        directory: str,
+        *,
+        include_read_rule=True,
+        permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}),
+        data_entitlements=frozenset({"QUOTE", "BALANCES"}),
+    ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
         capabilities.add(
-            verified(
+            verified_read_capability(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 NOW - timedelta(minutes=1),
-                provider_id="BYBIT",
-                provider_environment="TESTNET",
+                permission_scopes=permission_scopes,
+                data_entitlements=data_entitlements,
             )
         )
         evidence_root = Path(directory) / "evidence"

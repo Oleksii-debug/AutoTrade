@@ -342,6 +342,8 @@ def evaluate_declared_runtime_budget(
     financial_staleness_us: Sequence[int],
     research_interference_us: Sequence[int],
     reconnect_backlog_remaining: int,
+    financial_latency_event_ids: Sequence[str] = (),
+    financial_staleness_event_ids: Sequence[str] = (),
     declared_duration_us: int | None = None,
     observed_duration_us: int | None = None,
 ) -> tuple[
@@ -355,7 +357,8 @@ def evaluate_declared_runtime_budget(
     start cut. All are reloaded from the immutable declaration issued before
     campaign events, eliminating post-outcome caller selection of those facts.
 
-    Metric series remain caller-supplied at this layer. Hard failures are useful
+    Metric series remain caller-supplied at this layer and stay anonymous unless
+    explicit event IDs are supplied alongside them. Hard failures are useful
     diagnostics, but a favorable result cannot become qualification PASS until
     those series are recomputed from retained target-host measurement provenance.
     """
@@ -371,6 +374,8 @@ def evaluate_declared_runtime_budget(
         financial_staleness_us=financial_staleness_us,
         research_interference_us=research_interference_us,
         reconnect_backlog_remaining=reconnect_backlog_remaining,
+        financial_latency_event_ids=financial_latency_event_ids,
+        financial_staleness_event_ids=financial_staleness_event_ids,
         declared_duration_us=declared_duration_us,
         observed_duration_us=observed_duration_us,
         max_journal_events=plan.max_journal_events,

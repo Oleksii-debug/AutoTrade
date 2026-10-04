@@ -6,13 +6,7 @@ Baseline 2026-09-22. Contracts: document 02. Trading is API-only. Registration, 
 
 Each adapter has separate public-data, authenticated-read and trading capabilities. Market subscriptions are shared within a host to reduce duplicate fees and quota consumption. Raw evidence is written before normalized publication when retention is permitted. Every normalized observation carries the raw reference, adapter version, instrument version and availability time.
 
-`adapter_version` is immutable provenance for the exact parser/adapter build that produced a market observation. Its canonical syntax is 1–128 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,127}# AutoTrade — data, providers and execution
-
-Baseline 2026-09-22. Contracts: document 02. Trading is API-only. Registration, identity verification and provider administration are outside the runtime. All six providers remain architectural targets; country assumptions do not determine selection.
-
-## 1. Data pipeline and ownership
-
-Each adapter has separate public-data, authenticated-read and trading capabilities. Market subscriptions are shared within a host to reduce duplicate fees and quota consumption. ; surrounding whitespace, ambient defaults and caller normalization are forbidden. The token participates in normalized event identity and sequence/revision causal identity, but possession of a token does not qualify a provider or grant trading authority. A sequenced stream generation is bound to one adapter version; changing the build requires an explicit new compatible generation/rebootstrap, otherwise ingress fails closed before book mutation.
+`adapter_version` is immutable provenance for the exact parser/adapter build that produced a market observation. Its canonical syntax is 1–128 ASCII characters matching `^[A-Za-z0-9][A-Za-z0-9._:+@/-]{0,127}$`; surrounding whitespace, ambient defaults and caller normalization are forbidden. The token participates in normalized event identity and sequence/revision causal identity, but possession of a token does not qualify a provider or grant trading authority. A sequenced stream generation is bound to one adapter version; changing the build requires an explicit new compatible generation/rebootstrap, otherwise ingress fails closed before book mutation.
 
 The data coordinator owns sequence validation, freshness and subscription state; adapters own provider-specific parsing and reconnect rules. Analytical transforms never mutate raw records. A provider correction produces a new revision and an invalidation event for affected derived features/experiments. Frozen experiments remain reproducible on their original manifests and are labelled superseded if their data was materially wrong.
 

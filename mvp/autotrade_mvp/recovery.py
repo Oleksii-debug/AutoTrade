@@ -161,6 +161,7 @@ class RecoveryController:
                 self._owner_store_identity,
             ) = _canonical_journal_authority_snapshot(owner_store)
         self._owner_scope = owner_scope.strip()
+        self._owner_scope_authority = self._owner_scope
         self.state = HostState.STOPPED
         self.owner: OwnerFence | None = None
         self.reason_codes: set[str] = set()
@@ -182,9 +183,23 @@ class RecoveryController:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    def _canonical_owner_scope(self) -> str:
+        """Return only the exact owner scope selected at construction."""
+
+        scope = self._owner_scope
+        authority = self._owner_scope_authority
+        if (
+            type(scope) is not str
+            or type(authority) is not str
+            or scope != authority
+        ):
+            raise PermissionError("recovery owner scope authority changed")
+        return authority
+
     def _canonical_owner_store(self) -> JournalStore | None:
         """Return only the exact pinned JournalStore generation selected at construction."""
 
+        self._canonical_owner_scope()
         store = self._owner_store
         if store is None:
             if self._owner_store_path is not None or self._owner_store_identity is not None:
@@ -204,7 +219,7 @@ class RecoveryController:
     def owner_scope(self) -> str:
         """Canonical durable owner scope used by this recovery controller."""
 
-        return self._owner_scope
+        return self._canonical_owner_scope()
 
     @property
     def durable_owner_store_path(self) -> Path | None:
@@ -220,13 +235,14 @@ class RecoveryController:
         changes sender ownership.
         """
 
+        owner_scope = self._canonical_owner_scope()
         store = self._canonical_owner_store()
         if store is None:
             return ()
         events = JournalStore.load_events(
             store,
             self._OWNER_AGGREGATE_TYPE,
-            self._owner_scope,
+            owner_scope,
         )
         chain: list[OwnerFence] = []
         for expected_epoch, event in enumerate(events, start=1):
@@ -279,6 +295,7 @@ class RecoveryController:
         *,
         expected_journal_sequence: int | None = None,
     ) -> None:
+        owner_scope = self._canonical_owner_scope()
         store = self._canonical_owner_store()
         if store is None:
             return
@@ -290,7 +307,7 @@ class RecoveryController:
             uuid5(
                 NAMESPACE_URL,
                 "https://recovery.autotrade.local/"
-                f"{self._owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
+                f"{owner_scope!r}/{owner.epoch}/{owner.owner_id!r}",
             )
         )
         JournalStore.append_event(
@@ -299,7 +316,7 @@ class RecoveryController:
                 "event_id": event_id,
                 "event_type": self._OWNER_EVENT_TYPE,
                 "aggregate_type": self._OWNER_AGGREGATE_TYPE,
-                "aggregate_id": self._owner_scope,
+                "aggregate_id": owner_scope,
                 "aggregate_version": str(owner.epoch),
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -360,10 +377,11 @@ class RecoveryController:
         journal after process restart, before READY can be established.
         """
 
+        owner_scope = self._canonical_owner_scope()
         store = self._canonical_owner_store()
-        if store is None or ":" not in self._owner_scope:
+        if store is None or ":" not in owner_scope:
             return
-        environment, account_id = self._owner_scope.split(":", 1)
+        environment, account_id = owner_scope.split(":", 1)
         if environment.strip().upper() not in {
             "REPLAY", "SIMULATION", "PAPER", "LIVE"
         }:

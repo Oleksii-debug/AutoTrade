@@ -21,6 +21,7 @@ from autotrade_foundation.windows_namespace import (
     retain_windows_directory_namespace,
     retain_windows_relative_directory_namespace,
     retain_windows_regular_file,
+    windows_handle_information,
 )
 
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -321,6 +322,39 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
+def _windows_descriptor_identity(
+    descriptor: int,
+    *,
+    subject: str,
+) -> tuple[int, int, int]:
+    """Return one canonical Windows file identity for an already-open descriptor.
+
+    CPython/CRT stat device and inode fields are not a cross-descriptor
+    authority on Windows. Convert each descriptor back to its native HANDLE
+    and reuse the foundation GetFileInformationByHandle authority instead.
+    """
+
+    if sys.platform != "win32":
+        raise BundleError("Windows descriptor identity is Windows-only")
+    try:
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(descriptor)
+        information = windows_handle_information(handle, subject=subject)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(f"{subject} identity cannot be verified") from error
+
+    if information.number_of_links > 1:
+        raise BundleError("hardlinked staged files are forbidden")
+    if information.number_of_links != 1:
+        raise BundleError("staged file changed during collection")
+    return (
+        information.volume_serial,
+        information.file_index_high,
+        information.file_index_low,
+    )
+
+
 def _read_retained_windows_regular_file(
     authority,
     *,
@@ -347,10 +381,10 @@ def _read_retained_windows_regular_file(
             admitted = os.fstat(admission_stream.fileno())
             if not stat.S_ISREG(admitted.st_mode):
                 raise BundleError(f"staged entry must remain a regular file: {path}")
-            if admitted.st_nlink > 1:
-                raise BundleError(f"hardlinked staged files are forbidden: {path}")
-            if admitted.st_nlink != 1:
-                raise BundleError(f"staged file changed during collection: {path}")
+            admitted_identity = _windows_descriptor_identity(
+                admission_stream.fileno(),
+                subject="Windows bundle admitted staged file",
+            )
 
             with retain_windows_regular_file(
                 authority,
@@ -362,14 +396,14 @@ def _read_retained_windows_regular_file(
                     raise BundleError(
                         f"staged entry must remain a regular file: {path}"
                     )
-                if before.st_nlink > 1:
-                    raise BundleError(f"hardlinked staged files are forbidden: {path}")
-                if before.st_nlink != 1:
+                retained_identity = _windows_descriptor_identity(
+                    descriptor,
+                    subject="Windows bundle retained staged file",
+                )
+                if admitted_identity != retained_identity:
                     raise BundleError(f"staged file changed during collection: {path}")
                 if (
-                    (admitted.st_dev, admitted.st_ino)
-                    != (before.st_dev, before.st_ino)
-                    or admitted.st_size != before.st_size
+                    admitted.st_size != before.st_size
                     or admitted.st_mtime_ns != before.st_mtime_ns
                     or admitted.st_ctime_ns != before.st_ctime_ns
                 ):
@@ -385,11 +419,9 @@ def _read_retained_windows_regular_file(
 
                 admitted_after = os.fstat(admission_stream.fileno())
                 if (
-                    (admitted_after.st_dev, admitted_after.st_ino)
-                    != (before.st_dev, before.st_ino)
-                    or admitted_after.st_size != before.st_size
-                    or admitted_after.st_mtime_ns != before.st_mtime_ns
-                    or admitted_after.st_ctime_ns != before.st_ctime_ns
+                    admitted_after.st_size != admitted.st_size
+                    or admitted_after.st_mtime_ns != admitted.st_mtime_ns
+                    or admitted_after.st_ctime_ns != admitted.st_ctime_ns
                 ):
                     raise BundleError(f"staged file changed during collection: {path}")
     except BundleError:
@@ -408,8 +440,7 @@ def _read_retained_windows_regular_file(
         ) from error
 
     if (
-        (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-        or before.st_size != after.st_size
+        before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or before.st_ctime_ns != after.st_ctime_ns
         or len(chunks) != after.st_size

@@ -57,6 +57,20 @@ _PAYLOAD_FIELDS = frozenset(
     }
 )
 
+# Retain the installed authority primitives once. Public module/class rebinding
+# after import must not redirect credential-currentness or durable lineage proof.
+_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT = (
+    verify_trade_credential_transition_receipt
+)
+_CANONICAL_REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY = (
+    require_exact_journal_store_authority
+)
+_CANONICAL_JOURNAL_STORE_AUTHORITY_SCOPE = journal_store_authority_scope
+_CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
+_CANONICAL_JOURNAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
+_CANONICAL_PAYLOAD_DIGEST = payload_digest
+
 
 class CredentialTransitionAnchorError(PermissionError):
     """Raised when durable transition-anchor authority is absent or inconsistent."""
@@ -244,7 +258,7 @@ def _validate_chain(
             raise CredentialTransitionAnchorError(
                 "credential transition anchor logical scope changed"
             )
-        if event.get("payload_hash") != payload_digest(payload):
+        if event.get("payload_hash") != _CANONICAL_PAYLOAD_DIGEST(payload):
             raise CredentialTransitionAnchorError(
                 "credential transition anchor payload hash mismatch"
             )
@@ -315,26 +329,34 @@ def record_current_trade_credential_transition_anchor(
     if type(receipt) is not CredentialTransitionReceipt:
         raise TypeError("receipt must be exact CredentialTransitionReceipt")
 
-    store_identity = require_exact_journal_store_authority(
+    require_store_authority = _CANONICAL_REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY
+    authority_scope = _CANONICAL_JOURNAL_STORE_AUTHORITY_SCOPE
+    verify_receipt = _CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT
+    load_events = _CANONICAL_JOURNAL_LOAD_EVENTS
+    append_event = _CANONICAL_JOURNAL_APPEND_EVENT
+    current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+    digest_payload = _CANONICAL_PAYLOAD_DIGEST
+
+    store_identity = require_store_authority(
         store,
         subject="credential transition anchor JournalStore",
     )
-    verified = verify_trade_credential_transition_receipt(vault, receipt)
+    verified = verify_receipt(vault, receipt)
     aggregate_id = _aggregate_id(verified)
 
-    with journal_store_authority_scope(store, store_identity):
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
+    with authority_scope(store, store_identity):
+        events = load_events(store, _AGGREGATE_TYPE, aggregate_id)
         chain = _validate_chain(aggregate_id, events)
 
         if chain:
             latest = chain[-1]
             if latest.receipt_id == verified.receipt_id:
-                current = verify_trade_credential_transition_receipt(vault, verified)
+                current = verify_receipt(vault, verified)
                 if current != latest:
                     raise CredentialTransitionAnchorError(
                         "current vault receipt differs from latest durable anchor"
                     )
-                cut = JournalStore.current_journal_sequence(store)
+                cut = current_sequence(store)
                 return _witness(
                     aggregate_id,
                     events[-1],
@@ -363,23 +385,23 @@ def record_current_trade_credential_transition_anchor(
             "aggregate_id": aggregate_id,
             "aggregate_version": str(version),
             "payload": payload,
-            "payload_hash": payload_digest(payload),
+            "payload_hash": digest_payload(payload),
             "committed_at": _now(),
         }
-        JournalStore.append_event(store, event)
+        append_event(store, event)
 
-        readback = JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
+        readback = load_events(store, _AGGREGATE_TYPE, aggregate_id)
         readback_chain = _validate_chain(aggregate_id, readback)
         if len(readback_chain) != version or readback_chain[-1] != verified:
             raise CredentialTransitionAnchorError(
                 "credential transition durable anchor readback mismatch"
             )
-        current = verify_trade_credential_transition_receipt(vault, verified)
+        current = verify_receipt(vault, verified)
         if current != verified:
             raise CredentialTransitionAnchorError(
                 "credential transition changed during durable anchor publication"
             )
-        cut = JournalStore.current_journal_sequence(store)
+        cut = current_sequence(store)
         return _witness(
             aggregate_id,
             readback[-1],
@@ -407,16 +429,22 @@ def require_current_trade_credential_transition_anchor(
     if type(receipt) is not CredentialTransitionReceipt:
         raise TypeError("receipt must be exact CredentialTransitionReceipt")
 
-    store_identity = require_exact_journal_store_authority(
+    require_store_authority = _CANONICAL_REQUIRE_EXACT_JOURNAL_STORE_AUTHORITY
+    authority_scope = _CANONICAL_JOURNAL_STORE_AUTHORITY_SCOPE
+    verify_receipt = _CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT
+    load_events = _CANONICAL_JOURNAL_LOAD_EVENTS
+    current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
+
+    store_identity = require_store_authority(
         store,
         subject="credential transition anchor JournalStore",
     )
     aggregate_id = _aggregate_id(receipt)
 
-    with journal_store_authority_scope(store, store_identity):
-        cut_before = JournalStore.current_journal_sequence(store)
-        verified = verify_trade_credential_transition_receipt(vault, receipt)
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
+    with authority_scope(store, store_identity):
+        cut_before = current_sequence(store)
+        verified = verify_receipt(vault, receipt)
+        events = load_events(store, _AGGREGATE_TYPE, aggregate_id)
         chain = _validate_chain(aggregate_id, events)
         if not chain:
             raise CredentialTransitionAnchorError(
@@ -426,8 +454,8 @@ def require_current_trade_credential_transition_anchor(
             raise CredentialTransitionAnchorError(
                 "credential transition receipt is not the latest durable anchor"
             )
-        verified_again = verify_trade_credential_transition_receipt(vault, verified)
-        cut_after = JournalStore.current_journal_sequence(store)
+        verified_again = verify_receipt(vault, verified)
+        cut_after = current_sequence(store)
         if cut_after != cut_before:
             raise CredentialTransitionAnchorError(
                 "credential transition anchor journal cut moved during verification"

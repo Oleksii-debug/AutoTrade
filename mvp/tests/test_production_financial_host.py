@@ -25,8 +25,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
         journal: JournalStore | None = None,
     ) -> ProductionHostRuntime:
         journal = journal or JournalStore(Path(directory) / "journal.sqlite3")
-        host = object.__new__(ProductionHostRuntime)
-        host.config = ProductionHostConfig(
+        config = ProductionHostConfig(
             journal_path=journal.path,
             account_id="acct",
             environment="PAPER",
@@ -35,12 +34,32 @@ class ProductionFinancialHostTests(unittest.TestCase):
             bind_port=19001,
             public_origin="http://127.0.0.1:19001",
         )
-        host.journal = journal
-        host.store_identity = journal.store_identity
-        host._lifecycle_condition = Condition()
-        host._serve_state = "IDLE"
-        host._instance_fence = _FenceStub()
-        return host
+        return ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=object(),
+            server=object(),
+            instance_fence=_FenceStub(),
+            admission_gate=object(),
+        )
+
+    def test_exposed_config_mutation_cannot_retarget_financial_scope(self):
+        with TemporaryDirectory() as directory:
+            host = self._host(directory)
+            exposed = host.config
+            object.__setattr__(exposed, "environment", "LIVE")
+            object.__setattr__(exposed, "account_id", "other-account")
+            object.__setattr__(exposed, "host_id", "host-forged")
+
+            runtime = compose_financial_authority(host)
+
+            self.assertEqual(host.config.environment, "PAPER")
+            self.assertEqual(host.config.account_id, "acct")
+            self.assertEqual(host.config.host_id, "host-a")
+            self.assertEqual(runtime.config.environment, "PAPER")
+            self.assertEqual(runtime.config.account_id, "acct")
+            self.assertEqual(runtime.recovery_controller.owner_scope, "PAPER:acct")
+            self.assertEqual(runtime.recovery_controller.owner.owner_id, "host-a")
 
     def test_fresh_host_mints_epoch_one_but_remains_recovering_and_cannot_send(self):
         with TemporaryDirectory() as directory:

@@ -1,7 +1,7 @@
 """Product entrypoint checks for the canonical network-free simulation session."""
 
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
-from datetime import datetime
+from datetime import date, datetime
 import json
 import subprocess
 import sys
@@ -368,6 +368,20 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 started["payload"]["protocol_version"],
                 "canonical-simulation@4",
             )
+
+    def test_simulation_rule_rejects_provider_date_outside_frozen_same_day_policy(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            with self.assertRaisesRegex(
+                ValueError,
+                "same-day settlement policy conflicts with provider fill",
+            ):
+                simulation_module._simulation_settlement_rule(
+                    artifacts,
+                    trade_date=date(2026, 9, 30),
+                    settlement_date=date(2026, 10, 1),
+                )
+            self.assertEqual(list(artifacts.manifests.glob("*.json")), [])
 
     def test_changed_settlement_configuration_cannot_reinterpret_completed_state(self):
         with TemporaryDirectory() as directory:

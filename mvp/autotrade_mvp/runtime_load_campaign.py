@@ -203,7 +203,9 @@ def collect_vertical_slice_load_evidence(
     Unrelated durable events cannot compensate for a missing measured event.
     This collector intentionally leaves staleness and research-interference
     sample sets empty because this synchronous slice does not measure either
-    dimension; the canonical evaluator must therefore remain INCONCLUSIVE.
+    dimension. It reports the actual durable outbox backlog rather than a
+    synthetic zero, so the canonical evaluator cannot produce a favorable
+    reconnect result from missing measurement authority.
     """
 
     if not isinstance(spec, RuntimeBudgetSpec):
@@ -238,6 +240,9 @@ def collect_vertical_slice_load_evidence(
         store, after_sequence=before
     )
     after = store.current_journal_sequence()
+    reconnect_backlog = store.pending_outbox_count()
+    if type(reconnect_backlog) is not int or reconnect_backlog < 0:
+        raise RuntimeError("canonical JournalStore returned invalid reconnect backlog")
 
     observation = RuntimeLoadObservation.create(
         scenario_id=spec.scenario_id,
@@ -250,11 +255,11 @@ def collect_vertical_slice_load_evidence(
         financial_latency_us=latencies,
         # This bounded collector does not have a wall-clock source-availability
         # signal or a concurrent research workload. Empty samples deliberately
-        # force the canonical evaluator to INCONCLUSIVE rather than fabricating
-        # zero staleness/interference evidence.
+        # prevent a terminal PASS rather than fabricating zero staleness or
+        # interference evidence.
         financial_staleness_us=(),
         research_interference_us=(),
-        reconnect_backlog_remaining=0,
+        reconnect_backlog_remaining=reconnect_backlog,
         declared_duration_us=declared_duration_us,
         observed_duration_us=campaign_us,
     )

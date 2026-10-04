@@ -8,34 +8,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
 from typing import Iterable
 from uuid import UUID
 
+from autotrade_numeric import ExactDecimalError, parse_bounded_exact_decimal
+
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact built-in Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    if type(value) is not datetime or value.tzinfo is None:
+        raise ValueError(f"{name} must be an exact timezone-aware datetime")
+    if type(value.tzinfo) is not timezone:
+        raise ValueError(f"{name} must use a built-in timezone")
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -93,22 +94,22 @@ class StrategyDescriptor:
             object.__setattr__(self, name, _text(getattr(self, name), name=name))
         for name in ("version", "minimum_history", "horizon_seconds"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("market_requirements", "supported_regimes"):
             value = getattr(self, name)
-            if isinstance(value, (str, bytes)) or not isinstance(value, tuple):
+            if type(value) is not tuple:
                 raise ValueError(f"{name} must be a tuple")
             normalized = tuple(_text(item, name=f"{name} item") for item in value)
             if not normalized or len(set(normalized)) != len(normalized):
                 raise ValueError(f"{name} must contain unique non-empty values")
             object.__setattr__(self, name, normalized)
-        if not isinstance(self.parameter_bounds, tuple) or not self.parameter_bounds:
+        if type(self.parameter_bounds) is not tuple or not self.parameter_bounds:
             raise ValueError("parameter_bounds must be a non-empty tuple")
         normalized_bounds = []
         names = set()
         for item in self.parameter_bounds:
-            if not isinstance(item, tuple) or len(item) != 3:
+            if type(item) is not tuple or len(item) != 3:
                 raise ValueError("parameter bound must be (name, minimum, maximum)")
             parameter = _text(item[0], name="parameter name")
             minimum = _decimal(item[1], name=f"{parameter} minimum")
@@ -162,6 +163,30 @@ class StrategyDescriptor:
         return "sha256:" + sha256(payload).hexdigest()
 
 
+def _readmit_strategy_descriptor(value: StrategyDescriptor) -> StrategyDescriptor:
+    """Detach a descriptor so later caller mutation cannot retarget a strategy."""
+
+    if type(value) is not StrategyDescriptor:
+        raise TypeError("descriptor must be StrategyDescriptor")
+    return StrategyDescriptor(
+        strategy_id=value.strategy_id,
+        version=value.version,
+        family=value.family,
+        feature_schema=value.feature_schema,
+        market_requirements=value.market_requirements,
+        minimum_history=value.minimum_history,
+        horizon_seconds=value.horizon_seconds,
+        decision_schedule=value.decision_schedule,
+        proposal_semantics=value.proposal_semantics,
+        parameter_bounds=value.parameter_bounds,
+        resource_profile=value.resource_profile,
+        supported_regimes=value.supported_regimes,
+        source_license=value.source_license,
+        evaluation_protocol_sha256=value.evaluation_protocol_sha256,
+        artifact_sha256=value.artifact_sha256,
+    )
+
+
 @dataclass(frozen=True)
 class CausalObservation:
     event_id: str
@@ -194,6 +219,19 @@ class CausalObservation:
         )
 
 
+def _readmit_causal_observation(value: CausalObservation) -> CausalObservation:
+    """Detach and revalidate one observation at the semantic use boundary."""
+
+    if type(value) is not CausalObservation:
+        raise TypeError("observation must be CausalObservation")
+    return CausalObservation(
+        event_id=value.event_id,
+        symbol=value.symbol,
+        available_at=value.available_at,
+        price=value.price,
+    )
+
+
 @dataclass(frozen=True)
 class DeterministicProposal:
     symbol: str
@@ -224,10 +262,7 @@ class DeterministicProposal:
         if action in {"BUY", "SELL"} and quantity <= 0:
             raise ValueError("BUY/SELL proposal quantity must be positive")
         decision_time = _time(self.decision_time, name="decision_time")
-        if (
-            isinstance(self.evidence_event_ids, (str, bytes))
-            or not isinstance(self.evidence_event_ids, tuple)
-        ):
+        if type(self.evidence_event_ids) is not tuple:
             raise ValueError("evidence_event_ids must be a tuple")
         evidence = tuple(
             _text(value, name="evidence_event_id")
@@ -235,7 +270,7 @@ class DeterministicProposal:
         )
         if len(set(evidence)) != len(evidence):
             raise ValueError("evidence_event_ids contains duplicates")
-        if isinstance(self.model_calls, bool) or not isinstance(self.model_calls, int):
+        if type(self.model_calls) is not int:
             raise ValueError("model_calls must be integer zero")
         if self.model_calls != 0:
             raise ValueError("deterministic proposal cannot contain model calls")
@@ -262,8 +297,7 @@ class DeterministicProposal:
             object.__setattr__(self, "expiry", _time(self.expiry, name="expiry"))
         if self.horizon_seconds is not None:
             if (
-                isinstance(self.horizon_seconds, bool)
-                or not isinstance(self.horizon_seconds, int)
+                type(self.horizon_seconds) is not int
                 or self.horizon_seconds <= 0
             ):
                 raise ValueError("horizon_seconds must be a positive integer")
@@ -322,6 +356,31 @@ class DeterministicProposal:
                 raise ValueError(
                     "registered strategy identity requires cutoff, horizon and expiry"
                 )
+
+
+def _readmit_deterministic_proposal(
+    value: DeterministicProposal,
+) -> DeterministicProposal:
+    """Detach and re-run proposal invariants before economics can consume it."""
+
+    if type(value) is not DeterministicProposal:
+        raise TypeError("proposal must be DeterministicProposal")
+    return DeterministicProposal(
+        symbol=value.symbol,
+        action=value.action,
+        quantity=value.quantity,
+        decision_time=value.decision_time,
+        evidence_event_ids=value.evidence_event_ids,
+        model_calls=value.model_calls,
+        economic_edge_claim=value.economic_edge_claim,
+        reason=value.reason,
+        information_cutoff=value.information_cutoff,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        strategy_version=value.strategy_version,
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+    )
 
 
 @dataclass(frozen=True)
@@ -399,9 +458,7 @@ class StrategyEconomicsBinding:
         object.__setattr__(self, "expiry", expiry)
         object.__setattr__(self, "available_at", available)
 
-        if isinstance(self.input_manifest_refs, (str, bytes)) or not isinstance(
-            self.input_manifest_refs, tuple
-        ):
+        if type(self.input_manifest_refs) is not tuple:
             raise ValueError("input_manifest_refs must be a tuple")
         manifests = tuple(
             _digest(value, name="input_manifest_ref")
@@ -447,9 +504,7 @@ class StrategyEconomicsBinding:
         object.__setattr__(self, "max_feasible_quantity", capacity)
         object.__setattr__(self, "lot_size", lot_size)
 
-        if isinstance(self.required_evidence_dimensions, (str, bytes)) or not isinstance(
-            self.required_evidence_dimensions, tuple
-        ):
+        if type(self.required_evidence_dimensions) is not tuple:
             raise ValueError("required_evidence_dimensions must be a tuple")
         required = tuple(
             _text(value, name="required_evidence_dimension").upper()
@@ -459,12 +514,12 @@ class StrategyEconomicsBinding:
             raise ValueError("required_evidence_dimensions contains duplicates")
         object.__setattr__(self, "required_evidence_dimensions", required)
 
-        if not isinstance(self.dimension_evidence, tuple):
+        if type(self.dimension_evidence) is not tuple:
             raise ValueError("dimension_evidence must be a tuple")
         evidence: list[tuple[str, str]] = []
         evidence_names: set[str] = set()
         for item in self.dimension_evidence:
-            if not isinstance(item, tuple) or len(item) != 2:
+            if type(item) is not tuple or len(item) != 2:
                 raise ValueError(
                     "dimension_evidence entries must be (dimension, sha256)"
                 )
@@ -550,6 +605,38 @@ class StrategyEconomicsBinding:
         ).hexdigest()
 
 
+def _readmit_strategy_economics_binding(
+    value: StrategyEconomicsBinding,
+) -> StrategyEconomicsBinding:
+    """Detach and re-run ex-ante economics invariants at the decision boundary."""
+
+    if type(value) is not StrategyEconomicsBinding:
+        raise TypeError("economics must be StrategyEconomicsBinding")
+    return StrategyEconomicsBinding(
+        strategy_fingerprint=value.strategy_fingerprint,
+        strategy_configuration_fingerprint=value.strategy_configuration_fingerprint,
+        instrument_version=value.instrument_version,
+        information_cutoff=value.information_cutoff,
+        decision_time=value.decision_time,
+        horizon_seconds=value.horizon_seconds,
+        expiry=value.expiry,
+        available_at=value.available_at,
+        input_manifest_refs=value.input_manifest_refs,
+        gross_return_distribution_sha256=value.gross_return_distribution_sha256,
+        after_cost_return_distribution_sha256=value.after_cost_return_distribution_sha256,
+        after_cost_lower_bound=value.after_cost_lower_bound,
+        execution_model_fingerprint=value.execution_model_fingerprint,
+        execution_calibration_sha256=value.execution_calibration_sha256,
+        execution_fidelity=value.execution_fidelity,
+        capacity_assessment_sha256=value.capacity_assessment_sha256,
+        max_feasible_quantity=value.max_feasible_quantity,
+        lot_size=value.lot_size,
+        required_evidence_dimensions=value.required_evidence_dimensions,
+        dimension_evidence=value.dimension_evidence,
+        status=value.status,
+    )
+
+
 @dataclass(frozen=True)
 class EconomicsBoundProposal:
     """Gross deterministic signal plus a non-expansive ex-ante economics gate."""
@@ -598,10 +685,8 @@ def bind_strategy_economics(
 ) -> EconomicsBoundProposal:
     """Bind frozen decision-time economics without expanding the gross signal."""
 
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
-    if not isinstance(economics, StrategyEconomicsBinding):
-        raise TypeError("economics must be StrategyEconomicsBinding")
+    proposal = _readmit_deterministic_proposal(proposal)
+    economics = _readmit_strategy_economics_binding(economics)
     instrument = _text(instrument_version, name="instrument_version")
     if (
         proposal.information_cutoff is None
@@ -688,8 +773,7 @@ class NoTradeBaseline:
     """Deterministic null baseline that can never propose financial exposure."""
 
     def __init__(self, *, descriptor: StrategyDescriptor):
-        if not isinstance(descriptor, StrategyDescriptor):
-            raise TypeError("descriptor must be StrategyDescriptor")
+        descriptor = _readmit_strategy_descriptor(descriptor)
         if descriptor.family != "NO_TRADE_CONTROL":
             raise ValueError("no-trade descriptor family must be NO_TRADE_CONTROL")
         self.descriptor = descriptor
@@ -703,10 +787,7 @@ class NoTradeBaseline:
     ) -> DeterministicProposal:
         name = _text(symbol, name="symbol")
         cutoff = _time(decision_time, name="decision_time")
-        if isinstance(evidence_event_ids, (str, bytes)) or not isinstance(
-            evidence_event_ids,
-            tuple,
-        ):
+        if type(evidence_event_ids) is not tuple:
             raise ValueError("evidence_event_ids must be a tuple")
         evidence = tuple(
             _text(value, name="evidence_event_id")
@@ -745,7 +826,7 @@ class ReturnThresholdBaseline:
         proposal_quantity,
         descriptor: StrategyDescriptor | None = None,
     ):
-        if not isinstance(lookback, int) or isinstance(lookback, bool) or lookback < 2:
+        if type(lookback) is not int or lookback < 2:
             raise ValueError("lookback must be an integer >= 2")
         self.lookback = lookback
         self.threshold = _decimal(threshold, name="threshold")
@@ -755,8 +836,7 @@ class ReturnThresholdBaseline:
         if self.proposal_quantity <= 0:
             raise ValueError("proposal_quantity must be positive")
         if descriptor is not None:
-            if not isinstance(descriptor, StrategyDescriptor):
-                raise TypeError("descriptor must be StrategyDescriptor or None")
+            descriptor = _readmit_strategy_descriptor(descriptor)
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
             bounds = {name: (Decimal(minimum), Decimal(maximum)) for name, minimum, maximum in descriptor.parameter_bounds}
@@ -790,6 +870,7 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
+        observation = _readmit_causal_observation(observation)
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
@@ -1084,6 +1165,8 @@ def run_baseline(
     decision_time: datetime,
     symbol: str,
 ) -> DeterministicProposal:
+    if type(strategy) is not ReturnThresholdBaseline:
+        raise TypeError("strategy must be ReturnThresholdBaseline")
     cutoff = _time(decision_time, name="decision_time")
     for observation in observations:
         strategy.ingest(observation, simulation_time=cutoff)
@@ -1113,8 +1196,7 @@ def to_decision_proposal(
     financial authority and never consumes realized post-arrival liquidity.
     """
 
-    if not isinstance(proposal, DeterministicProposal):
-        raise TypeError("proposal must be DeterministicProposal")
+    proposal = _readmit_deterministic_proposal(proposal)
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -1133,10 +1215,7 @@ def to_decision_proposal(
     instrument = _text(instrument_version, name="instrument_version")
     exit_ref = _text(exit_policy_ref, name="exit_policy_ref")
     currency = _text(compute_cost_currency, name="compute_cost_currency")
-    if isinstance(counterarguments, (str, bytes)) or not isinstance(
-        counterarguments,
-        tuple,
-    ):
+    if type(counterarguments) is not tuple:
         raise ValueError("counterarguments must be a tuple")
     normalized_counterarguments = tuple(
         _text(value, name="counterargument")
@@ -1150,6 +1229,8 @@ def to_decision_proposal(
         economics_binding,
         instrument_version=instrument,
     )
+    proposal = bound.gross_proposal
+    economics_binding = bound.economics
     no_trade = bound.action == "HOLD"
     body: dict[str, object] = {
         "proposal_id": normalized_proposal_id,

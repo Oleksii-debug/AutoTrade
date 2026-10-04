@@ -1,12 +1,21 @@
 from decimal import Decimal
+from hashlib import sha256
+import os
 from pathlib import Path
 import platform
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
+    _git,
+    _git_bytes,
     _observed_source_sha,
+    _qualifier_sha256,
+    _require_clean_checkout,
     _require_exact_checkout,
     _require_source_sha,
+    _trusted_git_environment,
     qualify,
 )
 
@@ -44,6 +53,7 @@ class ZeroModelQualificationTests(unittest.TestCase):
         )
         self.assertEqual(evidence["source_sha"], observed)
         self.assertEqual(evidence["observed_source_sha"], observed)
+        self.assertTrue(evidence["source_checkout_clean"])
         self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")
         route = evidence["model_route"]
         self.assertEqual(route["status"], "NO_MODEL")
@@ -155,6 +165,77 @@ class ZeroModelQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "actual Git checkout"):
             _require_exact_checkout(different)
         self.assertEqual(_require_exact_checkout(observed), observed)
+
+    def test_qualifier_digest_is_bound_to_exact_source_blob(self):
+        source_sha = "a" * 40
+        canonical_blob = b"canonical zero-model qualifier bytes\n"
+        with patch(
+            "qualification.zero_model.qualify._git_bytes",
+            return_value=SimpleNamespace(stdout=canonical_blob),
+        ) as git:
+            digest = _qualifier_sha256(source_sha)
+
+        self.assertEqual(digest, "sha256:" + sha256(canonical_blob).hexdigest())
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "cat-file",
+                "blob",
+                f"{source_sha}:qualification/zero_model/qualify.py",
+            ),
+        )
+
+    def test_source_identity_is_read_from_exact_qualifier_checkout_root(self):
+        expected = "a" * 40
+        with patch(
+            "qualification.zero_model.qualify._git",
+            side_effect=(
+                SimpleNamespace(stdout=str(ROOT) + "\n"),
+                SimpleNamespace(stdout=expected + "\n"),
+            ),
+        ) as git:
+            self.assertEqual(_observed_source_sha(), expected)
+        self.assertEqual(git.call_args_list[0].args, ("rev-parse", "--show-toplevel"))
+        self.assertEqual(git.call_args_list[1].args, ("rev-parse", "HEAD"))
+
+    def test_dirty_checkout_cannot_issue_zero_model_qualification(self):
+        with patch(
+            "qualification.zero_model.qualify._git",
+            return_value=SimpleNamespace(
+                stdout=" M mvp/autotrade_mvp/simulation_session.py\n"
+            ),
+        ) as git:
+            with self.assertRaisesRegex(RuntimeError, "source changes"):
+                _require_clean_checkout()
+        self.assertEqual(
+            git.call_args.args,
+            (
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.untrackedCache=false",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ),
+        )
+
+    def test_git_inspection_environment_drops_caller_repository_authority(self):
+        poisoned = {
+            "PATH": str(ROOT / "attacker-bin"),
+            "GIT_DIR": str(ROOT / "attacker.git"),
+            "GIT_WORK_TREE": str(ROOT / "attacker-worktree"),
+            "GIT_CONFIG_GLOBAL": str(ROOT / "attacker.gitconfig"),
+        }
+        with patch.dict(os.environ, poisoned, clear=False):
+            environment = _trusted_git_environment()
+
+        self.assertNotIn("PATH", environment)
+        self.assertNotIn("GIT_DIR", environment)
+        self.assertNotIn("GIT_WORK_TREE", environment)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
 
     def test_source_sha_accepts_canonical_sha1_or_sha256_only(self):
         self.assertEqual(_require_source_sha("a" * 40), "a" * 40)

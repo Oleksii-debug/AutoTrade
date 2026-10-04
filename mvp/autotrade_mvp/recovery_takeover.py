@@ -214,10 +214,9 @@ def _started_owners(
             payload.get("target_owner_epoch"), name="target_owner_epoch"
         ),
     )
-    if target.owner_id == source.owner_id:
-        raise DurableTakeoverError(
-            "takeover target owner must differ from source owner"
-        )
+    # owner_id may be stable across a process restart. Epoch is the durable
+    # sender-fence generation, so the successor identity remains distinct only
+    # when it advances exactly by one below.
     if target.epoch != source.epoch + 1:
         raise DurableTakeoverError(
             "takeover owner epoch transition is invalid"
@@ -758,10 +757,8 @@ def execute_durable_takeover(
                 raise DurableTakeoverError(
                     "source owner is not current durable owner"
                 )
-            if target_owner_id == source.owner_id:
-                raise DurableTakeoverError(
-                    "target owner must differ from source owner"
-                )
+            # A production host_id is stable configuration, not a process nonce.
+            # Same-id restart takeover is valid only through the mandatory next epoch.
             target = OwnerFence(
                 target_owner_id, source.epoch + 1
             )

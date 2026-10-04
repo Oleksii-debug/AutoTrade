@@ -220,6 +220,25 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
                 evidence_artifact_store=artifact_store_for(self.store),
             )
 
+    def test_projection_binding_weakrefs_expose_no_callable_eraser(self):
+        artifacts = artifact_store_for(self.store)
+        projection = DurableBorrowRecallProjection(
+            self.store,
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+            instrument_id=INSTRUMENT_ID,
+            instrument_version=1,
+            evidence_artifact_store=artifacts,
+        )
+        callbacks = [
+            ref.__callback__
+            for ref in weakref.getweakrefs(projection)
+            if ref.__callback__ is not None
+        ]
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projection.active_quantity, Decimal("0"))
+
     def test_projection_binding_releases_artifact_authority_on_collection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

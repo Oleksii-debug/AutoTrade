@@ -616,9 +616,9 @@ class BorrowRecallResolutionEvidence:
 
 @dataclass(frozen=True)
 class _BorrowProjectionBinding:
-    store: JournalStore
+    store_ref: weakref.ReferenceType
     store_identity: object
-    evidence_artifact_store: ArtifactStore
+    evidence_artifact_store_ref: weakref.ReferenceType
     provider_id: str
     account_id: str
     environment: str
@@ -633,15 +633,6 @@ def _build_borrow_projection_binding_accessors():
 
     bindings: dict[int, tuple[weakref.ReferenceType, _BorrowProjectionBinding]] = {}
     lock = RLock()
-
-    def discard_dead(
-        object_id: int,
-        value_ref: weakref.ReferenceType,
-    ) -> None:
-        with lock:
-            entry = bindings.get(object_id)
-            if entry is not None and entry[0] is value_ref:
-                bindings.pop(object_id, None)
 
     def registered(value: object) -> _BorrowProjectionBinding | None:
         object_id = id(value)
@@ -729,17 +720,15 @@ def _build_borrow_projection_binding_accessors():
             object.__setattr__(value, name, item)
 
         object_id = id(value)
-        value_ref = weakref.ref(
-            value,
-            lambda dead_ref, object_id=object_id: discard_dead(
-                object_id,
-                dead_ref,
-            ),
-        )
+        # Callback-free weakrefs are deliberate: a discoverable weakref callback
+        # would be a caller-invokable eraser for a live financial trust binding.
+        # The live projection itself owns the strong store/artifact references;
+        # this registry must not extend either resource lifetime.
+        value_ref = weakref.ref(value)
         binding = _BorrowProjectionBinding(
-            store=store,
+            store_ref=weakref.ref(store),
             store_identity=store_identity,
-            evidence_artifact_store=evidence_artifact_store,
+            evidence_artifact_store_ref=weakref.ref(evidence_artifact_store),
             provider_id=normalized_provider,
             account_id=normalized_account,
             environment=normalized_environment,
@@ -789,9 +778,20 @@ def _build_borrow_projection_binding_accessors():
             raise BorrowRecallConflict(
                 "borrow projection instance state shadows authority methods"
             )
-        expected = {
-            "store": binding.store,
-            "evidence_artifact_store": binding.evidence_artifact_store,
+        store = binding.store_ref()
+        evidence_artifact_store = binding.evidence_artifact_store_ref()
+        if store is None or evidence_artifact_store is None:
+            raise BorrowRecallConflict(
+                "borrow projection authority resource was released while projection is live"
+            )
+        if (
+            state.get("store") is not store
+            or state.get("evidence_artifact_store") is not evidence_artifact_store
+        ):
+            raise BorrowRecallConflict(
+                "borrow projection authority object changed after construction"
+            )
+        expected_scalars = {
             "provider_id": binding.provider_id,
             "account_id": binding.account_id,
             "environment": binding.environment,
@@ -800,15 +800,15 @@ def _build_borrow_projection_binding_accessors():
             "resource_key": binding.resource_key,
             "aggregate_id": binding.aggregate_id,
         }
-        for name, item in expected.items():
+        for name, item in expected_scalars.items():
             actual = state.get(name)
-            if actual is not item and actual != item:
+            if type(actual) is not type(item) or actual != item:
                 raise BorrowRecallConflict(
                     "borrow projection authority state changed after construction"
                 )
         try:
             current_identity = require_exact_journal_store_authority(
-                binding.store,
+                store,
                 subject="securities-borrow JournalStore",
             )
         except (TypeError, RuntimeError) as error:
@@ -834,9 +834,12 @@ del _build_borrow_projection_binding_accessors
 
 def _borrow_store_load_events(value: object) -> list[dict[str, object]]:
     binding = _require_borrow_projection_binding(value)
-    with journal_store_authority_scope(binding.store, binding.store_identity):
+    store = binding.store_ref()
+    if store is None:
+        raise BorrowRecallConflict("securities-borrow JournalStore was released")
+    with journal_store_authority_scope(store, binding.store_identity):
         return JournalStore.load_events(
-            binding.store,
+            store,
             _AGGREGATE_TYPE,
             binding.aggregate_id,
         )
@@ -847,8 +850,11 @@ def _borrow_store_get_event(
     event_id: str,
 ) -> dict[str, object] | None:
     binding = _require_borrow_projection_binding(value)
-    with journal_store_authority_scope(binding.store, binding.store_identity):
-        return JournalStore.get_event(binding.store, event_id)
+    store = binding.store_ref()
+    if store is None:
+        raise BorrowRecallConflict("securities-borrow JournalStore was released")
+    with journal_store_authority_scope(store, binding.store_identity):
+        return JournalStore.get_event(store, event_id)
 
 
 def _borrow_store_append_event(
@@ -856,8 +862,11 @@ def _borrow_store_append_event(
     envelope: Mapping[str, object],
 ) -> None:
     binding = _require_borrow_projection_binding(value)
-    with journal_store_authority_scope(binding.store, binding.store_identity):
-        JournalStore.append_event(binding.store, envelope)
+    store = binding.store_ref()
+    if store is None:
+        raise BorrowRecallConflict("securities-borrow JournalStore was released")
+    with journal_store_authority_scope(store, binding.store_identity):
+        JournalStore.append_event(store, envelope)
 
 
 class DurableBorrowRecallProjection:

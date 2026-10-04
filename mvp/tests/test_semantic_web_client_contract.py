@@ -49,7 +49,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
         self.assertIn("function renderPermissionSummary(permissionSummary)", js)
-        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary, {preserveSelection: !scopeChanged})", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
@@ -846,9 +846,12 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-previous" type="button"', html)
+            self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
         self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
-        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true, resetPage = false} = {})", js)
         self.assertIn("function copyVisibleTableRows(tool)", js)
         self.assertIn("function bindTableTools()", js)
         self.assertIn("bindTableTools();", js)
@@ -885,6 +888,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         reset = js[js.index("function resetTableFiltersForScopeChange"):js.index("function visibleTableRows")]
         self.assertIn("for (const tool of TABLE_TOOLS)", reset)
         self.assertIn('filter.value = ""', reset)
+        self.assertIn('sort.value = "host"', reset)
+        self.assertIn("tableViewFor(tool).page = 0", reset)
         self.assertEqual(reset.count("queuePoliteAnnouncement("), 1)
         snapshot = js[js.index("function renderSnapshot(snapshot"):js.index("async function refreshSnapshot")]
         self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index("resetEventHistoryForScope();"))
@@ -913,6 +918,9 @@ class SemanticWebClientContractTests(unittest.TestCase):
             tag, attrs = by_id[f"{prefix}-filter"]
             self.assertEqual(tag, "input", prefix)
             self.assertIn(status_id, attrs.get("aria-describedby", "").split())
+            tag, attrs = by_id[f"{prefix}-sort"]
+            self.assertEqual(tag, "select", prefix)
+            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
         # Native output is implicitly a polite status region even without ARIA.
         # Snapshot metadata must remain readable without announcing every poll.
         live_ids = [
@@ -927,9 +935,12 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_table_tool_focus_targets_survive_browser_page_restore(self):
         js = APP.read_text(encoding="utf-8")
         for target in (
-            "strategy-filter", "strategy-copy", "portfolio-filter", "portfolio-copy",
-            "risk-filter", "risk-copy", "jobs-filter", "jobs-copy",
-            "event-history-filter", "event-history-copy",
+            "strategy-filter", "strategy-copy", "strategy-sort", "strategy-previous", "strategy-next",
+            "portfolio-filter", "portfolio-copy", "portfolio-sort", "portfolio-previous", "portfolio-next",
+            "risk-filter", "risk-copy", "risk-sort", "risk-previous", "risk-next",
+            "jobs-filter", "jobs-copy", "jobs-sort", "jobs-previous", "jobs-next",
+            "event-history-filter", "event-history-copy", "event-history-sort",
+            "event-history-previous", "event-history-next",
         ):
             self.assertIn(f'"{target}"', js)
 
@@ -949,6 +960,52 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("notification-history", queue)
         copy = js[js.index("async function copyVisibleTableRows"):js.index("function bindTableTools")]
         self.assertNotIn("announce(message", copy)
+
+
+    def test_table_sort_and_paging_are_bounded_local_and_stably_described(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("const TABLE_PAGE_SIZE = 25;", js)
+        self.assertIn("const tableViewState = new Map();", js)
+        self.assertIn("function orderedTableRows(tool, rows, mode)", js)
+        self.assertIn('if (mode === "host") return compareHostOrder(tool, left, right);', js)
+        self.assertIn('"Rows " + String(pageStart + 1) + "-" + String(pageEnd)', js)
+        self.assertIn('"Sort: " + tableSortDescription(mode) + "."', js)
+        self.assertIn("previous.disabled = matching.length === 0 || view.page === 0;", js)
+        self.assertIn("next.disabled = matching.length === 0 || view.page >= pageCount - 1;", js)
+        table_scope = js[js.index("function tableViewFor"):js.index("function announceLiveText")]
+        self.assertNotIn("fetch(", table_scope)
+        self.assertNotIn("submitCanonicalCommand", table_scope)
+        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+            self.assertIn('<option value="host">Host order</option>', html)
+            self.assertIn(f'id="{prefix}-previous" type="button"', html)
+            self.assertIn(f'id="{prefix}-next" type="button"', html)
+
+    def test_filter_and_sort_changes_restart_paging_but_passive_refresh_preserves_page(self):
+        js = APP.read_text(encoding="utf-8")
+        bind = js[js.index("function bindTableTools"):js.index("function announceLiveText")]
+        self.assertGreaterEqual(bind.count("applyTableFilter(tool, {resetPage: true})"), 2)
+        reapply = js[js.index("function reapplyTableFilter"):js.index("function resetTableFiltersForScopeChange")]
+        self.assertIn("applyTableFilter(tool, {announce: false})", reapply)
+        self.assertNotIn("resetPage: true", reapply)
+
+    def test_event_history_host_order_uses_exact_cursor_comparison(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("row.dataset.tableHostOrder = cursor.toString();", js)
+        compare = js[js.index("function compareHostOrder"):js.index("function orderedTableRows")]
+        self.assertIn('if (tool.bodyId === "event-history-body")', compare)
+        self.assertIn("const a = BigInt(left.dataset.tableHostOrder);", compare)
+        self.assertIn("const b = BigInt(right.dataset.tableHostOrder);", compare)
+        self.assertNotIn("Number(left.dataset.tableHostOrder)", compare)
+
+    def test_current_page_is_the_copyable_visible_table_surface(self):
+        js = APP.read_text(encoding="utf-8")
+        apply_scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
+        self.assertIn("if (index < pageStart || index >= pageEnd) row.hidden = true;", apply_scope)
+        copy_scope = js[js.index("function visibleTableRows"):js.index("function bindTableTools")]
+        self.assertIn("filterableRows(body).filter((row) => !row.hidden)", copy_scope)
+        self.assertIn("rows.map((row) => tabSeparatedRowText(row)).join", copy_scope)
+
 
 
 if __name__ == "__main__":

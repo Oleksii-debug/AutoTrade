@@ -72,6 +72,567 @@ class AccessibleStatusTests(unittest.TestCase):
         ):
             self.assertIn(expected, text)
 
+    def test_canonical_journal_financial_scalars_fail_closed_on_noncanonical_types(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": 1000,
+                "cash": "1000.00",
+                "position": 1.0,
+                "journal_sequence": "007",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "final_equity": 1000,
+                "net_pnl": "0.00",
+                "total_fees": 0.0,
+                "turnover": "+1",
+                "max_drawdown": "1e2",
+                "reconciled": True,
+            },
+        )
+        for expected in (
+            "Initial capital: Unavailable",
+            "Cash (USD): Unavailable",
+            "Position (shares): Unavailable",
+            "Journal sequence: Unavailable",
+            "Final equity: Unavailable",
+            "Net profit or loss: Unavailable",
+            "Total fees: Unavailable",
+            "Turnover: Unavailable",
+            "Maximum drawdown: Unavailable",
+        ):
+            self.assertIn(expected, text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn(
+            "Economic report validation: unavailable; malformed or incomplete canonical state",
+            text,
+        )
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_malformed_canonical_report_suppresses_plausible_financial_details(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "7",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "CASH_ONLY",
+                "final_equity": "987654321",
+                "net_pnl": "876543210",
+                "total_fees": "not-a-decimal",
+                "turnover": "765432109",
+                "max_drawdown": "654321098",
+                "reconciled": True,
+            },
+        )
+
+        for label in (
+            "Final equity: Unavailable",
+            "Net profit or loss: Unavailable",
+            "Total fees: Unavailable",
+            "Turnover: Unavailable",
+            "Maximum drawdown: Unavailable",
+        ):
+            self.assertIn(label, text)
+        for untrusted_value in (
+            "987654321",
+            "876543210",
+            "765432109",
+            "654321098",
+        ):
+            self.assertNotIn(untrusted_value, text)
+        self.assertIn("Economic reconciliation: not confirmed", text)
+        self.assertIn(
+            "Economic report validation: unavailable; malformed or incomplete canonical state",
+            text,
+        )
+
+    def test_valid_canonical_cash_only_report_can_confirm_reconciliation(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "1000",
+                "position": "0",
+                "journal_sequence": "7",
+                "fills": {},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "CASH_ONLY",
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "reconciled": True,
+            },
+        )
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertNotIn("Economic report validation: unavailable", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_valid_canonical_mark_unavailable_report_can_confirm_reconciliation(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "cash": "900",
+                "position": "1",
+                "journal_sequence": "8",
+                "fills": {"fill-1": {}},
+                "active_reservations": [],
+            },
+            {
+                "valuation_status": "MARK_UNAVAILABLE",
+                "final_equity": None,
+                "net_pnl": None,
+                "total_fees": "1",
+                "turnover": "100",
+                "reconciled": True,
+            },
+        )
+        self.assertIn("Economic reconciliation: passed", text)
+        self.assertIn(
+            "Portfolio valuation and profit or loss: unavailable; no retained current market mark",
+            text,
+        )
+        self.assertNotIn("Economic report validation: unavailable", text)
+
+    def test_malformed_canonical_reservations_remain_readable_and_truthful(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": {"unexpected": "mapping"},
+            }
+        )
+        self.assertIn("Active reservations: unavailable; malformed state", text)
+        self.assertIn("inspect or restore reservation state", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_malformed_reservation_items_do_not_hide_status_surface(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    None,
+                    {"state": "WORKING", "remaining": "not-a-mapping"},
+                    {"state": "WORKING", "remaining": {"USD": "25"}},
+                ],
+            }
+        )
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 1", text)
+        self.assertNotIn("Active reservations: 3", text)
+        self.assertIn("inspect or restore reservation state", text)
+        self.assertIn("Reservation detail: unavailable; malformed state", text)
+        self.assertIn("malformed remaining resources", text)
+        self.assertIn("Reserved USD: 25; state: WORKING", text)
+
+    def test_unknown_top_level_state_fails_closed_as_corrupt(self):
+        text = format_accessible_status(
+            {
+                "status": "UNKNOWN_VENDOR_STATE",
+                "state_format": "canonical_journal",
+                "cash": "999999",
+                "position": "123",
+                "fills": {"fake": {}},
+            }
+        )
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn(
+            "Action required: inspect or restore the simulated state before continuing",
+            text,
+        )
+        self.assertNotIn("Cash (USD): 999999", text)
+        self.assertNotIn("Position (shares): 123", text)
+        self.assertNotIn("Recorded fills: 1", text)
+
+    def test_hostile_top_level_dict_subclass_fails_closed_without_get(self):
+        class HostileStatus(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("malformed status must not execute overridden get")
+
+        text = format_accessible_status(HostileStatus({"status": "running"}))
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_unknown_reservation_state_is_not_announced_as_valid_exposure(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {"state": "FILLED", "remaining": {"CASH:USD": "0"}},
+                    {"state": float("nan"), "remaining": {"CASH:USD": "1"}},
+                ],
+            }
+        )
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertGreaterEqual(
+            text.count("Reservation state: unavailable; malformed value"),
+            2,
+        )
+
+    def test_invalid_reservation_state_suppresses_untrusted_remaining_amounts(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {
+                        "state": "FILLED",
+                        "remaining": {
+                            "CASH:USD": "999999999",
+                            "POSITION:ABC": "777",
+                        },
+                    }
+                ],
+            }
+        )
+        self.assertIn("Reservation state: unavailable; malformed value", text)
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertNotIn("999999999", text)
+        self.assertNotIn("Reserved CASH:USD", text)
+        self.assertNotIn("Reserved POSITION:ABC", text)
+
+    def test_active_reservation_requires_text_resource_and_nonnegative_finite_text_amount(self):
+        malformed_cases = (
+            {True: "1"},
+            {"CASH:USD": True},
+            {"CASH:USD": -1},
+            {"CASH:USD": "-1"},
+            {"CASH:USD": "NaN"},
+            {"CASH:USD": "Infinity"},
+            {"CASH:USD": "25.00"},
+            {"CASH:USD": "+1"},
+            {"CASH:USD": "1e2"},
+            {"CASH:USD": "-0"},
+            {"CASH:USD": "9" * 1000},
+            {"": "1"},
+            {" CASH:USD": "1"},
+        )
+        for remaining in malformed_cases:
+            with self.subTest(remaining=remaining):
+                text = format_accessible_status(
+                    {
+                        "status": "running",
+                        "state_format": "canonical_journal",
+                        "symbol": "SIM",
+                        "initial_cash": "1000",
+                        "fills": {},
+                        "active_reservations": [
+                            {"state": "WORKING", "remaining": remaining}
+                        ],
+                    }
+                )
+                self.assertIn(
+                    "Active reservations: unavailable; one or more reservation entries are malformed",
+                    text,
+                )
+                self.assertIn("Structurally readable reservation entries: 0", text)
+                self.assertIn(
+                    "Reservation resource detail: unavailable; malformed value",
+                    text,
+                )
+                self.assertNotIn("Reserved CASH:USD: -1", text)
+                self.assertNotIn("Reserved CASH:USD: NaN", text)
+                self.assertNotIn("Reserved CASH:USD: Infinity", text)
+
+    def test_zero_remaining_reservation_amount_remains_readable(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {"state": "WORKING", "remaining": {"CASH:USD": "0"}}
+                ],
+            }
+        )
+        self.assertIn("Active reservations: 1", text)
+        self.assertIn("Reserved CASH:USD: 0; state: WORKING", text)
+
+    def test_dict_subclass_reservation_does_not_execute_overridden_get(self):
+        class HostileDict(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("malformed mapping must not execute overridden get")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [HostileDict()],
+            }
+        )
+        self.assertIn("Reservation detail: unavailable; malformed state", text)
+        self.assertIn("Structurally readable reservation entries: 0", text)
+
+    def test_hostile_reservation_values_cannot_crash_status_surface(self):
+        class HostileText:
+            def __str__(self):
+                raise AssertionError("malformed state must not execute __str__")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [
+                    {
+                        "state": HostileText(),
+                        "remaining": {
+                            HostileText(): "25.00",
+                            "USD": HostileText(),
+                            "EUR": "10.00",
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertIn(
+            "Active reservations: unavailable; one or more reservation entries are malformed",
+            text,
+        )
+        self.assertIn("Structurally readable reservation entries: 0", text)
+        self.assertIn("Reservation state: unavailable; malformed value", text)
+        self.assertNotIn("25.00", text)
+        self.assertNotIn("Reserved EUR: 10.00", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_hostile_status_equality_cannot_execute_at_accessible_boundaries(self):
+        class HostileEquality:
+            def __eq__(self, other):
+                raise AssertionError("malformed scalar must not execute __eq__")
+
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": HostileEquality(),
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+            },
+            {
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": False,
+                "valuation_status": HostileEquality(),
+            },
+        )
+
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn(
+            "Action required: inspect or restore the simulated state before continuing",
+            text,
+        )
+        self.assertNotIn("Final equity: 1000", text)
+        self.assertNotIn("Journal sequence:", text)
+        self.assertNotIn(
+            "Portfolio valuation and profit or loss: unavailable",
+            text,
+        )
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_explicit_unknown_state_format_cannot_downgrade_to_legacy_rendering(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "unknown-format",
+                "symbol": "SIM",
+                "initial_cash": 999999999,
+                "fills": {"plausible-fill": {}},
+                "replay_verified": True,
+            },
+            {
+                "final_equity": 999999999,
+                "net_pnl": 999999999,
+                "total_fees": 0,
+                "turnover": 999999999,
+                "max_drawdown": 0,
+                "reconciled": True,
+            },
+        )
+
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Replay verification: unavailable", text)
+        self.assertNotIn("999999999", text)
+        self.assertNotIn("Recorded fills:", text)
+        self.assertNotIn("Economic reconciliation:", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_legacy_status_without_state_format_remains_readable(self):
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "replay_verified": True,
+            },
+            {
+                "final_equity": "1000",
+                "net_pnl": "0",
+                "total_fees": "0",
+                "turnover": "0",
+                "max_drawdown": "0",
+                "reconciled": True,
+            },
+        )
+
+        self.assertIn("System state: Running", text)
+        self.assertIn("Initial capital: 1000", text)
+        self.assertIn("Final equity: 1000", text)
+        self.assertNotIn("Journal sequence:", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_hostile_mapping_keys_fail_closed_before_dict_lookup_callbacks(self):
+        touched = []
+
+        class HostileKey:
+            def __init__(self, target):
+                self.target = target
+
+            def __hash__(self):
+                return hash(self.target)
+
+            def __eq__(self, other):
+                touched.append(("eq", other))
+                raise AssertionError("hostile mapping key equality")
+
+        top_key = HostileKey("state_format")
+        status = {
+            top_key: "malformed",
+            "status": "running",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+        }
+        touched.clear()
+        text = format_accessible_status(status)
+        self.assertEqual(touched, [])
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertNotIn("Initial capital: 1000", text)
+
+        report_key = HostileKey("valuation_status")
+        report = {
+            report_key: "CASH_ONLY",
+            "final_equity": "999991",
+            "net_pnl": "999992",
+            "total_fees": "0",
+            "turnover": "999993",
+            "reconciled": True,
+        }
+        touched.clear()
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [],
+            },
+            report,
+        )
+        self.assertEqual(touched, [])
+        self.assertIn("Economic report: unavailable; malformed state", text)
+        self.assertNotIn("999991", text)
+        self.assertNotIn("999992", text)
+        self.assertNotIn("999993", text)
+
+        reservation_key = HostileKey("remaining")
+        reservation = {
+            reservation_key: {"USD": "999994"},
+            "state": "WORKING",
+        }
+        touched.clear()
+        text = format_accessible_status(
+            {
+                "status": "running",
+                "state_format": "canonical_journal",
+                "symbol": "SIM",
+                "initial_cash": "1000",
+                "fills": {},
+                "active_reservations": [reservation],
+            }
+        )
+        self.assertEqual(touched, [])
+        self.assertIn("Reservation detail: unavailable; malformed state", text)
+        self.assertNotIn("999994", text)
+
+    def test_hostile_nested_status_containers_fail_closed_without_execution(self):
+        class HostileDict(dict):
+            def __len__(self):
+                raise AssertionError("malformed nested mapping must not execute __len__")
+
+            def get(self, *args, **kwargs):
+                raise AssertionError("malformed nested mapping must not execute get")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("malformed reservation list must not execute iteration")
+
+        status = {
+            "status": "running",
+            "state_format": "canonical_journal",
+            "symbol": "SIM",
+            "initial_cash": "1000",
+            "fills": HostileDict(),
+            "active_reservations": HostileList(),
+        }
+        text = format_accessible_status(status, HostileDict())
+
+        self.assertIn("Recorded fills: Unavailable", text)
+        self.assertIn("Active reservations: unavailable; malformed state", text)
+        self.assertIn("Economic report: unavailable; malformed state", text)
+        self.assertIn("Economic edge: unproven", text)
+
     def test_cli_accessible_status_after_simulation(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

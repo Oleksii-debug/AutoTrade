@@ -6,7 +6,9 @@ import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from uuid import UUID
 
+from research.autotrade_research.data.vintages import HistoricalVintageRegistry
 from research.autotrade_research.science import (
     ProtocolConflict,
     ProtocolViolation,
@@ -43,21 +45,112 @@ def protocol() -> dict:
     }
 
 
+def _token_uuid(token: str) -> str:
+    return str(UUID(hex=sha256(("uuid:" + token).encode("utf-8")).hexdigest()[:32]))
+
+
+def _vintage_manifest(token: str = "a") -> dict:
+    return {
+        "dataset_id": _token_uuid("dataset:" + token),
+        "version": "1",
+        "content_hashes": [
+            "sha256:" + sha256(("content:" + token).encode("utf-8")).hexdigest()
+        ],
+        "instrument_universe_version": "universe:test-v1",
+        "calendar_version": "calendar:test-v1",
+        "coverage": {
+            "from": "2026-01-01T00:00:00Z",
+            "to": "2026-06-30T23:59:59Z",
+        },
+        "availability_policy": {
+            "point_in_time": True,
+            "no_future_leakage": True,
+            "cutoff": "2026-06-30T23:59:59Z",
+            "basis": "test-fixture-evidence",
+        },
+        "revision_policy": {
+            "append_only": True,
+            "replace_prior_vintages": False,
+        },
+        "normalization_version": "normalization:test-v1",
+        "adjustment_policy": {
+            "raw_retained": True,
+            "adjusted_available": False,
+            "method": "none",
+        },
+        "rights": {
+            "storage": True,
+            "research_use": True,
+            "redistribution": False,
+            "basis": "first-party-test-fixture",
+        },
+        "missingness_report": {
+            "expected_count": 1,
+            "observed_count": 1,
+            "missing_keys": [],
+            "invented_count": 0,
+        },
+        "source_evidence": [
+            {
+                "artifact_id": _token_uuid("evidence:" + token),
+                "sha256": "sha256:"
+                + sha256(("evidence:" + token).encode("utf-8")).hexdigest(),
+                "observed_at": "2026-06-30T23:59:59Z",
+            }
+        ],
+        "created_at": "2026-07-01T00:00:00Z",
+    }
+
+
+def _manifest_digest(token: str = "a") -> str:
+    raw = json.dumps(
+        _vintage_manifest(token),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
+
+
 def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30", role="LOCKED_FORWARD"):
     return {
-        "dataset_digest": "sha256:" + dataset_digit * 64,
+        "dataset_digest": _manifest_digest(dataset_digit),
         "segment_start": start,
         "segment_end": end,
         "role": role,
     }
 
 
+def preregister_holdout(
+    registry: ScientificRegistry,
+    protocol_id: str,
+    *,
+    dataset_digit: str = "a",
+):
+    vintages = HistoricalVintageRegistry(
+        registry.path.parent / "historical-vintages"
+    )
+    manifest = _vintage_manifest(dataset_digit)
+    committed_digest = vintages.commit(manifest)
+    if committed_digest != _manifest_digest(dataset_digit):
+        raise AssertionError("test vintage digest drifted from canonical manifest")
+    return registry.preregister_locked_holdout(
+        protocol_id,
+        vintage_registry=vintages,
+        dataset_id=manifest["dataset_id"],
+        dataset_version=1,
+    )
+
+
 def exhaust_trials(registry: ScientificRegistry, protocol_id: str) -> None:
     """Close the registered development population before testing holdout semantics."""
-    registry.preregister_locked_holdout(
-        protocol_id,
-        holdout_identity=holdout_identity(),
-    )
+    try:
+        registry.locked_holdout_registration(protocol_id)
+    except ProtocolViolation as error:
+        if "lacks preregistered physical locked holdout" not in str(error):
+            raise
+        preregister_holdout(registry, protocol_id)
     remaining = registry.completeness(protocol_id)["remaining_trial_budget"]
     for index in range(remaining):
         registry.record_trial(
@@ -258,179 +351,11 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             ):
                 registry.register_protocol(empty)
 
-    def test_locked_holdout_is_frozen_before_trial_one_and_cannot_rebind(self):
-        with TemporaryDirectory() as directory:
-            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registered = registry.register_protocol(protocol())
-            locked_a = holdout_identity("a")
-            locked_b = holdout_identity("b")
-
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "must be preregistered before the first trial",
-            ):
-                registry.record_trial(
-                    registered.protocol_id,
-                    status="FAILED",
-                    payload={"reason": "no-physical-holdout-yet"},
-                )
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "must be preregistered before the first trial",
-            ):
-                registry.record_holdout_access(
-                    registered.protocol_id,
-                    holdout_id="unbound-peek",
-                    holdout_identity=locked_a,
-                    purpose="must-fail-before-physical-freeze",
-                )
-
-            first_hash = registry.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=locked_a,
-            )
-            self.assertEqual(
-                registry.preregister_locked_holdout(
-                    registered.protocol_id,
-                    holdout_identity=locked_a,
-                ),
-                first_hash,
-            )
-            with self.assertRaisesRegex(ProtocolConflict, "immutable"):
-                registry.preregister_locked_holdout(
-                    registered.protocol_id,
-                    holdout_identity=locked_b,
-                )
-
-            registry.record_trial(
-                registered.protocol_id,
-                status="FAILED",
-                payload={"reason": "registered-after-physical-freeze"},
-            )
-            self.assertEqual(
-                registry.completeness(registered.protocol_id)["recorded_trials"],
-                1,
-            )
-
-    def test_legacy_trial_cannot_gain_first_holdout_binding_after_outcomes(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "science.sqlite3"
-            registry = ScientificRegistry(path)
-            registered = registry.register_protocol(protocol())
-            payload = {"reason": "legacy-trial-before-holdout-freeze"}
-            canonical = json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            payload_hash = "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
-
-            with sqlite3.connect(path) as connection:
-                connection.execute(
-                    "INSERT INTO trials("
-                    "trial_id,protocol_id,status,payload_hash,payload_json,created_at"
-                    ") VALUES(?,?,?,?,?,?)",
-                    (
-                        "11111111-1111-4111-8111-111111111111",
-                        registered.protocol_id,
-                        "FAILED",
-                        payload_hash,
-                        canonical,
-                        "2026-09-28T12:00:00Z",
-                    ),
-                )
-                connection.commit()
-
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "must be preregistered before the first trial",
-            ):
-                registry.preregister_locked_holdout(
-                    registered.protocol_id,
-                    holdout_identity=holdout_identity("a"),
-                )
-
-    def test_full_trials_cannot_switch_to_fresh_physical_holdout(self):
-        with TemporaryDirectory() as directory:
-            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registered = registry.register_protocol(protocol())
-            locked_a = holdout_identity("a")
-            registry.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=locked_a,
-            )
-            exhaust_trials(registry, registered.protocol_id)
-
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "does not match the preregistered protocol holdout",
-            ):
-                registry.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="fresh-B-after-outcomes",
-                    holdout_identity=holdout_identity("b"),
-                    result={"score": "0.99"},
-                )
-            self.assertEqual(
-                registry.holdout_access_count(
-                    registered.protocol_id,
-                    "fresh-B-after-outcomes",
-                ),
-                0,
-            )
-
-            accepted = registry.register_evaluation(
-                registered.protocol_id,
-                holdout_id="locked-A",
-                holdout_identity=locked_a,
-                result={"score": "0.10"},
-            )
-            self.assertEqual(accepted["untouched"], 1)
-
-    def test_preregistered_holdout_survives_restart_and_alias_cannot_rebind(self):
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "science.sqlite3"
-            first = ScientificRegistry(path)
-            registered = first.register_protocol(protocol())
-            locked_a = holdout_identity("a")
-            expected_hash = first.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=locked_a,
-            )
-            exhaust_trials(first, registered.protocol_id)
-
-            reopened = ScientificRegistry(path)
-            self.assertEqual(
-                reopened.preregister_locked_holdout(
-                    registered.protocol_id,
-                    holdout_identity=locked_a,
-                ),
-                expected_hash,
-            )
-            with self.assertRaisesRegex(ProtocolConflict, "immutable"):
-                reopened.preregister_locked_holdout(
-                    registered.protocol_id,
-                    holdout_identity=holdout_identity("b"),
-                )
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "does not match the preregistered protocol holdout",
-            ):
-                reopened.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="restart-alias",
-                    holdout_identity=holdout_identity("b"),
-                    result={"score": "0.50"},
-                )
-
     def test_failed_and_discarded_trials_consume_registered_budget(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
-            registry.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=holdout_identity(),
-            )
+            preregister_holdout(registry, registered.protocol_id)
             registry.record_trial(
                 registered.protocol_id,
                 status="FAILED",
@@ -452,6 +377,435 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     status="COMPLETED",
                     payload={"metric": "0.02"},
                 )
+
+    def test_locked_holdout_vintage_must_cover_full_forward_period(self):
+        cases = (
+            (
+                "late-start",
+                {
+                    "from": "2026-01-02T00:00:00Z",
+                    "to": "2026-06-30T23:59:59Z",
+                },
+            ),
+            (
+                "early-end",
+                {
+                    "from": "2026-01-01T00:00:00Z",
+                    "to": "2026-06-29T23:59:59Z",
+                },
+            ),
+        )
+        for token, coverage in cases:
+            with self.subTest(token=token), TemporaryDirectory() as directory:
+                root = Path(directory)
+                science = ScientificRegistry(root / "science.sqlite3")
+                registered = science.register_protocol(protocol())
+                vintages = HistoricalVintageRegistry(root / "historical-vintages")
+                manifest = _vintage_manifest(token)
+                manifest["coverage"] = coverage
+                vintages.commit(manifest)
+
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "does not cover protocol forward_period",
+                ):
+                    science.preregister_locked_holdout(
+                        registered.protocol_id,
+                        vintage_registry=vintages,
+                        dataset_id=manifest["dataset_id"],
+                        dataset_version=1,
+                    )
+
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "lacks preregistered physical locked holdout",
+                ):
+                    science.locked_holdout_registration(registered.protocol_id)
+                self.assertEqual(
+                    science.completeness(registered.protocol_id)["recorded_trials"],
+                    0,
+                )
+
+    def test_locked_holdout_vintage_availability_cutoff_must_cover_full_forward_period(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            registered = science.register_protocol(protocol())
+            vintages = HistoricalVintageRegistry(root / "historical-vintages")
+            manifest = _vintage_manifest("stale-cutoff")
+            manifest["availability_policy"]["cutoff"] = "2026-06-29T23:59:59Z"
+            vintages.commit(manifest)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "availability cutoff does not cover protocol forward_period",
+            ):
+                science.preregister_locked_holdout(
+                    registered.protocol_id,
+                    vintage_registry=vintages,
+                    dataset_id=manifest["dataset_id"],
+                    dataset_version=1,
+                )
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                science.locked_holdout_registration(registered.protocol_id)
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+    def test_trial_admission_requires_physical_holdout_preregistered_first(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            registry = ScientificRegistry(path)
+            registered = registry.register_protocol(protocol())
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                registry.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-start-search"},
+                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                registry.record_holdout_access(
+                    registered.protocol_id,
+                    holdout_id="unbound-peek",
+                    holdout_identity=holdout_identity(),
+                    purpose="must-not-select-after-observation",
+                )
+            self.assertEqual(
+                registry.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+            first = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            again = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            self.assertEqual(first, again)
+
+            registry.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "registered-negative-result"},
+            )
+            reopened = ScientificRegistry(path)
+            self.assertEqual(
+                reopened.locked_holdout_registration(registered.protocol_id),
+                first,
+            )
+            self.assertEqual(
+                preregister_holdout(
+                    reopened,
+                    registered.protocol_id,
+                    dataset_digit="a",
+                ),
+                first,
+            )
+
+            with self.assertRaisesRegex(
+                ProtocolConflict,
+                "immutable",
+            ):
+                preregister_holdout(
+                    reopened,
+                    registered.protocol_id,
+                    dataset_digit="b",
+                )
+
+    def test_legacy_trial_cannot_gain_first_physical_holdout_after_outcome(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            registry = ScientificRegistry(path)
+            registered = registry.register_protocol(protocol())
+            payload = {"reason": "legacy-trial-before-holdout-freeze"}
+            canonical = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            payload_hash = (
+                "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+            )
+
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO trials("
+                    "trial_id,protocol_id,status,payload_hash,payload_json,created_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "11111111-1111-4111-8111-111111111111",
+                        registered.protocol_id,
+                        "FAILED",
+                        payload_hash,
+                        canonical,
+                        "2026-09-28T12:00:00Z",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "before the first trial",
+            ):
+                preregister_holdout(
+                    registry,
+                    registered.protocol_id,
+                    dataset_digit="a",
+                )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                registry.locked_holdout_registration(registered.protocol_id)
+
+    def test_fresh_dataset_cannot_replace_preregistered_holdout_after_search(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(protocol())
+            frozen = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            exhaust_trials(registry, registered.protocol_id)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "match preregistered physical holdout",
+            ):
+                registry.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="fresh-b-after-search",
+                    holdout_identity=holdout_identity("b"),
+                    result={"net_utility": "0.999"},
+                )
+            self.assertEqual(
+                registry.holdout_access_count(
+                    registered.protocol_id,
+                    "fresh-b-after-search",
+                ),
+                0,
+            )
+
+            accepted = registry.register_evaluation(
+                registered.protocol_id,
+                holdout_id="frozen-a",
+                holdout_identity=frozen.identity(),
+                result={"net_utility": "0.020"},
+            )
+            self.assertEqual(accepted["prior_access_count"], 0)
+            self.assertEqual(accepted["untouched"], 1)
+
+    def test_vintage_registry_instance_shadow_cannot_mint_holdout_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            registered = science.register_protocol(protocol())
+            vintages = HistoricalVintageRegistry(root / "historical-vintages")
+            manifest = _vintage_manifest("shadow")
+            vintages.commit(manifest)
+
+            # Python instances permit method shadowing through __dict__.  The
+            # science boundary must reconstruct a clean WP-10 owner rather than
+            # dispatching an attacker-supplied instance attribute.
+            vintages.load = lambda *_args, **_kwargs: _vintage_manifest("b")
+            with self.assertRaisesRegex(
+                TypeError,
+                "unexpected mutable instance state",
+            ):
+                science.preregister_locked_holdout(
+                    registered.protocol_id,
+                    vintage_registry=vintages,
+                    dataset_id=manifest["dataset_id"],
+                    dataset_version=1,
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+    def test_generic_parent_binding_schema_migrates_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            science = ScientificRegistry(path)
+            registered = science.register_protocol(protocol())
+            identity = holdout_identity()
+            identity_hash = "sha256:" + sha256(
+                json.dumps(
+                    identity,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+
+            with sqlite3.connect(path) as connection:
+                connection.execute("DROP TABLE protocol_locked_holdouts")
+                connection.execute(
+                    "CREATE TABLE protocol_locked_holdouts("
+                    "protocol_id TEXT PRIMARY KEY,"
+                    "holdout_identity_hash TEXT NOT NULL,"
+                    "created_at TEXT NOT NULL"
+                    ")"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO holdouts("
+                    "holdout_identity_hash,identity_json,created_at"
+                    ") VALUES(?,?,?)",
+                    (
+                        identity_hash,
+                        json.dumps(
+                            identity,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ),
+                        "2026-09-28T11:00:00+00:00",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO protocol_locked_holdouts("
+                    "protocol_id,holdout_identity_hash,created_at"
+                    ") VALUES(?,?,?)",
+                    (
+                        registered.protocol_id,
+                        identity_hash,
+                        "2026-09-28T11:00:00+00:00",
+                    ),
+                )
+                connection.commit()
+
+            reopened = ScientificRegistry(path)
+            with sqlite3.connect(path) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(protocol_locked_holdouts)"
+                    )
+                }
+            self.assertTrue(
+                {"dataset_id", "dataset_version", "dataset_digest", "binding_hash"}
+                <= columns
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset identity is corrupt|binding integrity mismatch",
+            ):
+                reopened.locked_holdout_registration(registered.protocol_id)
+
+    def test_locked_holdout_dataset_uuid_is_exact_durable_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "science.sqlite3"
+            science = ScientificRegistry(path)
+            registered = science.register_protocol(protocol())
+            vintages = HistoricalVintageRegistry(root / "historical-vintages")
+            manifest = _vintage_manifest("uuid-exact")
+            vintages.commit(manifest)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset_id must be a canonical UUID",
+            ):
+                science.preregister_locked_holdout(
+                    registered.protocol_id,
+                    vintage_registry=vintages,
+                    dataset_id="{" + manifest["dataset_id"] + "}",
+                    dataset_version=1,
+                )
+
+            locked = science.preregister_locked_holdout(
+                registered.protocol_id,
+                vintage_registry=vintages,
+                dataset_id=manifest["dataset_id"],
+                dataset_version=1,
+            )
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DROP TRIGGER protocol_locked_holdouts_no_update"
+                )
+                cursor = connection.execute(
+                    "UPDATE protocol_locked_holdouts SET dataset_id=? "
+                    "WHERE protocol_id=?",
+                    ("{" + locked.dataset_id + "}", registered.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset identity is noncanonical",
+            ):
+                science.locked_holdout_registration(registered.protocol_id)
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "dataset identity is noncanonical",
+            ):
+                science.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-consume-aliased-dataset-id"},
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+    def test_corrupt_preregistration_binding_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            science = ScientificRegistry(path)
+            registered = science.register_protocol(protocol())
+            preregister_holdout(science, registered.protocol_id)
+
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "DROP TRIGGER protocol_locked_holdouts_no_update"
+                )
+                cursor = connection.execute(
+                    "UPDATE protocol_locked_holdouts SET dataset_version=? "
+                    "WHERE protocol_id=?",
+                    (2, registered.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "binding integrity mismatch",
+            ):
+                science.locked_holdout_registration(registered.protocol_id)
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "binding integrity mismatch",
+            ):
+                science.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-admit-under-corrupt-prereg"},
+                )
+            self.assertEqual(
+                science.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
 
     def test_repeated_holdout_use_cannot_remain_untouched(self):
         with TemporaryDirectory() as directory:
@@ -485,10 +839,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             first_protocol = registry.register_protocol(protocol())
-            registry.preregister_locked_holdout(
-                first_protocol.protocol_id,
-                holdout_identity=holdout_identity(),
-            )
+            preregister_holdout(registry, first_protocol.protocol_id)
 
             second_payload = protocol()
             second_payload["hypothesis"] = "independent candidate over same locked segment"
@@ -519,10 +870,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             first = ScientificRegistry(path)
             p1 = first.register_protocol(protocol())
             identity = holdout_identity()
-            first.preregister_locked_holdout(
-                p1.protocol_id,
-                holdout_identity=identity,
-            )
+            preregister_holdout(first, p1.protocol_id)
             first.record_holdout_access(
                 p1.protocol_id,
                 holdout_id="forward-display-A",
@@ -546,10 +894,11 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             self.assertEqual(evaluation["prior_access_count"], 1)
             self.assertEqual(evaluation["untouched"], 0)
 
-    def test_locked_holdout_preregistration_must_match_forward_period_and_role(self):
+    def test_locked_evaluation_must_match_preregistered_forward_period_and_role(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = registry.register_protocol(protocol())
+            exhaust_trials(registry, p.protocol_id)
 
             wrong_window = holdout_identity(
                 start="2026-02-01",
@@ -557,28 +906,27 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "must match forward_period with role LOCKED_FORWARD",
+                "match preregistered physical holdout",
             ):
-                registry.preregister_locked_holdout(
+                registry.register_evaluation(
                     p.protocol_id,
+                    holdout_id="wrong-window",
                     holdout_identity=wrong_window,
+                    result={"net_utility": "0.030"},
                 )
 
             wrong_role = holdout_identity(role="VALIDATION")
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "must match forward_period with role LOCKED_FORWARD",
+                "match preregistered physical holdout",
             ):
-                registry.preregister_locked_holdout(
+                registry.register_evaluation(
                     p.protocol_id,
+                    holdout_id="wrong-role",
                     holdout_identity=wrong_role,
+                    result={"net_utility": "0.030"},
                 )
 
-            registry.preregister_locked_holdout(
-                p.protocol_id,
-                holdout_identity=holdout_identity(),
-            )
-            exhaust_trials(registry, p.protocol_id)
             accepted = registry.register_evaluation(
                 p.protocol_id,
                 holdout_id="registered-forward",
@@ -591,10 +939,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             first = registry.register_protocol(protocol())
-            registry.preregister_locked_holdout(
-                first.protocol_id,
-                holdout_identity=holdout_identity("a"),
-            )
+            preregister_holdout(registry, first.protocol_id, dataset_digit="a")
             registry.record_holdout_access(
                 first.protocol_id,
                 holdout_id="locked-forward",
@@ -605,16 +950,8 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             second_payload = protocol()
             second_payload["hypothesis"] = "independent protocol bound to dataset B"
             second = registry.register_protocol(second_payload)
-            registry.preregister_locked_holdout(
-                second.protocol_id,
-                holdout_identity=holdout_identity("b"),
-            )
-            for index in range(second_payload["trial_budget"]):
-                registry.record_trial(
-                    second.protocol_id,
-                    status="FAILED",
-                    payload={"reason": "registered", "index": index},
-                )
+            preregister_holdout(registry, second.protocol_id, dataset_digit="b")
+            exhaust_trials(registry, second.protocol_id)
 
             with self.assertRaisesRegex(ProtocolConflict, "cannot be rebound"):
                 registry.register_evaluation(
@@ -674,10 +1011,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             registry = ScientificRegistry(path)
             registered = registry.register_protocol(protocol())
-            identity_hash = registry.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=holdout_identity(),
-            )
+            locked = preregister_holdout(registry, registered.protocol_id)
             connection = sqlite3.connect(path)
             try:
                 with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
@@ -692,9 +1026,9 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     )
                 with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
                     connection.execute(
-                        "UPDATE protocol_locked_holdouts "
-                        "SET holdout_identity_hash=? WHERE protocol_id=?",
-                        (identity_hash, registered.protocol_id),
+                        "UPDATE protocol_locked_holdouts SET dataset_version=? "
+                        "WHERE protocol_id=?",
+                        (locked.dataset_version, registered.protocol_id),
                     )
                 with self.assertRaisesRegex(sqlite3.DatabaseError, "append-only"):
                     connection.execute(
@@ -709,10 +1043,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             registered = first.register_protocol(protocol())
-            first.preregister_locked_holdout(
-                registered.protocol_id,
-                holdout_identity=holdout_identity(),
-            )
+            preregister_holdout(first, registered.protocol_id)
             first.record_trial(
                 registered.protocol_id,
                 status="FAILED",

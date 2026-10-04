@@ -530,6 +530,30 @@ class EmbeddedWebTests(unittest.TestCase):
             self.web_bundle.asset_for_path("/index.html").body,
         )
 
+    def test_static_header_mapping_fails_before_mapping_callbacks(self):
+        touched = []
+
+        class HostileHeaders(dict):
+            def items(self):
+                touched.append("items")
+                raise AssertionError("unexpected header iteration")
+
+            def get(self, *args, **kwargs):
+                touched.append("get")
+                raise AssertionError("unexpected header lookup")
+
+        response = self.app.dispatch(
+            method="GET",
+            target="/index.html",
+            headers=HostileHeaders(),
+        )
+        self.assertEqual(response.status, 400)
+        self.assertEqual(
+            json.loads(response.body.decode("utf-8"))["error"],
+            "INVALID_STATIC_REQUEST",
+        )
+        self.assertEqual(touched, [])
+
     def test_non_exact_static_target_fails_before_url_parsing(self):
         touched = []
 

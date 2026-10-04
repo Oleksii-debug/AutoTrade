@@ -48,6 +48,7 @@ _ABSOLUTE_DATE_PATTERNS = (
 )
 _SCHEMA_VERSION = 1
 _PRICE_SCALE_MODE = "IDENTITY"
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 _NAMESPACE_LABELS = {
     "INSTRUMENT": "Instrument",
@@ -89,11 +90,16 @@ def _path(value: tuple[str, ...], *, name: str) -> tuple[str, ...]:
 
 
 def _freeze(value: object, *, path: str = "payload") -> object:
-    if value is None or isinstance(value, (str, bool, int)):
+    # Blinded strategy data must contain only exact built-in/frozen values.
+    # Caller-defined str/int/container subclasses can otherwise evade the leak
+    # scan or execute behavior after crossing the strategy boundary.
+    if value is None:
+        return None
+    if type(value) in {str, bool, int}:
         return value
-    if isinstance(value, float):
+    if type(value) is float:
         raise TypeError(f"{path} must not contain binary floating-point values")
-    if isinstance(value, Mapping):
+    if type(value) in {dict, _MAPPING_PROXY_TYPE}:
         frozen: dict[str, object] = {}
         for raw_key, raw_value in value.items():
             key = _text(raw_key, name=f"{path} key")
@@ -101,17 +107,21 @@ def _freeze(value: object, *, path: str = "payload") -> object:
                 raise BlindingError(f"{path} has duplicate keys after normalization")
             frozen[key] = _freeze(raw_value, path=f"{path}.{key}")
         return MappingProxyType(frozen)
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if type(value) is tuple:
         return tuple(_freeze(item, path=f"{path}[]") for item in value)
-    raise TypeError(f"{path} contains unsupported value type {type(value).__name__}")
+    raise TypeError(
+        f"{path} must contain only exact JSON-like blinded value types"
+    )
 
 
 def _plain(value: object) -> object:
-    if isinstance(value, Mapping):
+    if type(value) in {dict, _MAPPING_PROXY_TYPE}:
         return {key: _plain(value[key]) for key in sorted(value)}
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return [_plain(item) for item in value]
-    return value
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    raise TypeError("canonical blinded content contains a non-exact value type")
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -219,8 +229,10 @@ def _scan_payload(
     calendar_paths: frozenset[tuple[str, ...]],
     path: tuple[str, ...] = (),
 ) -> None:
-    if isinstance(value, Mapping):
+    if type(value) in {dict, _MAPPING_PROXY_TYPE}:
         for key, child in value.items():
+            if type(key) is not str:
+                raise TypeError("blinded payload keys must be exact str")
             child_path = path + (key,)
             for raw in raw_identities:
                 if raw and _contains_identity(key, raw):
@@ -239,7 +251,7 @@ def _scan_payload(
                 path=child_path,
             )
         return
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         for index, child in enumerate(value):
             _scan_payload(
                 child,
@@ -249,8 +261,13 @@ def _scan_payload(
                 path=path + (f"[{index}]",),
             )
         return
-    if type(value) is not str:
+    if value is None or type(value) in {bool, int}:
         return
+    if type(value) is not str:
+        raise TypeError(
+            f"payload value at {'.'.join(path) or '<root>'} "
+            "must use an exact JSON-like blinded scalar type"
+        )
     if path not in identity_paths:
         for raw in raw_identities:
             if raw and _contains_identity(value, raw):
@@ -331,11 +348,16 @@ class BlindingProfile:
             raise TypeError("strict_text_scan must be an exact bool")
         if self.strict_text_scan is not True:
             raise BlindingError("strict_text_scan cannot be disabled for blinded replay")
-        if self.price_scale_mode != _PRICE_SCALE_MODE:
+        price_scale_mode = _text(
+            self.price_scale_mode,
+            name="price_scale_mode",
+        )
+        if price_scale_mode != _PRICE_SCALE_MODE:
             raise BlindingError(
                 "non-identity price scaling is unsupported without complete "
                 "instrument/execution invariant qualification"
             )
+        object.__setattr__(self, "price_scale_mode", price_scale_mode)
         paths = [item.path for item in identities] + [item.path for item in calendars]
         for index, left in enumerate(paths):
             for right in paths[index + 1 :]:
@@ -449,7 +471,11 @@ class BlindedReplayDataset:
         uncertainty = _text(
             self.training_cutoff_uncertainty, name="training_cutoff_uncertainty"
         )
-        if self.price_scale_mode != _PRICE_SCALE_MODE:
+        price_scale_mode = _text(
+            self.price_scale_mode,
+            name="price_scale_mode",
+        )
+        if price_scale_mode != _PRICE_SCALE_MODE:
             raise BlindingError("blinded artifact must preserve original economics")
         if type(self.events) is not tuple or any(type(item) is not BlindedEvent for item in self.events):
             raise TypeError("events must be an exact tuple of exact BlindedEvent")
@@ -473,6 +499,7 @@ class BlindedReplayDataset:
         )
         object.__setattr__(self, "experiment_id", experiment)
         object.__setattr__(self, "training_cutoff_uncertainty", uncertainty)
+        object.__setattr__(self, "price_scale_mode", price_scale_mode)
         object.__setattr__(self, "blinded_dataset_sha256", supplied)
 
     @property

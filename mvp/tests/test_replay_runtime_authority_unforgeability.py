@@ -201,6 +201,25 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
 
+    def test_composite_schema_version_rejects_text_subclass(self):
+        hostile = _HostileText("4.0.0")
+        with self.assertRaisesRegex(
+            TypeError,
+            "schema_version must be exact text",
+        ):
+            CompositeReplayCheckpoint(
+                replay=self._checkpoint_value(),
+                runtime_components=_components(),
+                runtime_cut_id="cut:hostile-schema",
+                runtime_authority_id="runtime:hostile-schema",
+                runtime_verifier_id="verifier:hostile-schema",
+                runtime_authority_seal="a" * 64,
+                build_sha="b" * 40,
+                protocol_ref="protocol:hostile-schema",
+                schema_version=hostile,
+            )
+        self.assertFalse(hostile.touched)
+
     def test_composite_document_rejects_text_subclass_before_callback(self):
         hostile = _HostileText("{}")
         with self.assertRaisesRegex(TypeError, "exact text"):

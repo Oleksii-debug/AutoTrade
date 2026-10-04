@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any, Callable, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from mvp.autotrade_mvp.model_gateway import (
     BudgetLedger,
@@ -48,6 +49,14 @@ def _environment(value: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _route_now(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if type(value) is not datetime or type(value.tzinfo) not in (timezone, ZoneInfo):
+        raise ValueError("now_utc must be an exact timezone-aware datetime")
+    return value
 
 
 def _reservation_context(
@@ -489,9 +498,7 @@ class DurableModelBudget:
             materialized,
             reservation_context=reservation_context,
         )
-        now = now_utc or datetime.now(timezone.utc)
-        if now.tzinfo is None:
-            raise ValueError("now_utc must be timezone-aware")
+        now = _route_now(now_utc)
         if request.cancelled:
             return RouteDecision(
                 RouteStatus.REJECTED,

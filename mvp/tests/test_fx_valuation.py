@@ -661,6 +661,57 @@ class FxValuationAuthorityBoundaryTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_portfolio_valuation_reseals_nested_quotes_at_mapping_cut(self):
+        eur_quote = eurusd(bid="1.1000", ask="1.1002")
+        gbp_quote = FxQuote.create(
+            base_currency="GBP",
+            quote_currency="USD",
+            bid="1.3000",
+            ask="1.3002",
+            available_at=NOW,
+            source_id="provider:fx-gbp",
+            evidence_sha256=DIGEST,
+        )
+        balances = {"EUR": "100", "GBP": "100"}
+        quotes = {"EUR": eur_quote, "GBP": gbp_quote}
+        original_currency = fx_valuation._currency
+        mutated = False
+
+        def mutate_nested_quotes_after_mapping_cut(value, name):
+            nonlocal mutated
+            if name == "reporting_currency" and not mutated:
+                mutated = True
+                object.__setattr__(eur_quote, "bid", Decimal("9"))
+                object.__setattr__(eur_quote, "ask", Decimal("9"))
+                object.__setattr__(gbp_quote, "bid", Decimal("8"))
+                object.__setattr__(gbp_quote, "ask", Decimal("8"))
+            return original_currency(value, name)
+
+        with patch(
+            "mvp.autotrade_mvp.fx_valuation._currency",
+            side_effect=mutate_nested_quotes_after_mapping_cut,
+        ):
+            result = value_cash_balances(
+                balances,
+                reporting_currency="USD",
+                quotes=quotes,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertTrue(mutated)
+        self.assertEqual(eur_quote.bid, Decimal("9"))
+        self.assertEqual(gbp_quote.bid, Decimal("8"))
+        self.assertEqual(result.status, "CERTAIN")
+        self.assertEqual(result.total, Decimal("240.0000"))
+        component_rates = {
+            row.source_currency: row.rate_used
+            for row in result.components
+        }
+        self.assertEqual(component_rates["EUR"], Decimal("1.1000"))
+        self.assertEqual(component_rates["GBP"], Decimal("1.3000"))
+
+
     def test_portfolio_valuation_holds_balance_and_quote_bindings_once(self):
         balances = {"EUR": "100"}
         quotes = {"EUR": eurusd(bid="1.1000", ask="1.1002")}

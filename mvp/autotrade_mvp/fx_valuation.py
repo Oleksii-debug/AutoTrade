@@ -272,6 +272,35 @@ class FxQuote:
         )
 
 
+def _validated_quote(value: FxQuote) -> FxQuote:
+    """Reseal one exact quote from one held object-state cut."""
+
+    if type(value) is not FxQuote:
+        raise FxValuationError("quote must be exact FxQuote or None")
+    snapshot = _exact_state_snapshot(
+        value,
+        (
+            "base_currency",
+            "quote_currency",
+            "bid",
+            "ask",
+            "available_at",
+            "source_id",
+            "evidence_sha256",
+        ),
+        name="quote",
+    )
+    return FxQuote.create(
+        base_currency=snapshot["base_currency"],
+        quote_currency=snapshot["quote_currency"],
+        bid=snapshot["bid"],
+        ask=snapshot["ask"],
+        available_at=snapshot["available_at"],
+        source_id=snapshot["source_id"],
+        evidence_sha256=snapshot["evidence_sha256"],
+    )
+
+
 @dataclass(frozen=True)
 class FxValuation:
     source_amount: Decimal
@@ -422,30 +451,7 @@ def value_amount(
             haircut=haircut_value,
             reason="direct or inverse one-hop FX quote is missing",
         )
-    if type(quote) is not FxQuote:
-        raise FxValuationError("quote must be exact FxQuote or None")
-    quote_snapshot = _exact_state_snapshot(
-        quote,
-        (
-            "base_currency",
-            "quote_currency",
-            "bid",
-            "ask",
-            "available_at",
-            "source_id",
-            "evidence_sha256",
-        ),
-        name="quote",
-    )
-    quote = FxQuote.create(
-        base_currency=quote_snapshot["base_currency"],
-        quote_currency=quote_snapshot["quote_currency"],
-        bid=quote_snapshot["bid"],
-        ask=quote_snapshot["ask"],
-        available_at=quote_snapshot["available_at"],
-        source_id=quote_snapshot["source_id"],
-        evidence_sha256=quote_snapshot["evidence_sha256"],
-    )
+    quote = _validated_quote(quote)
 
     if quote.available_at > point:
         return _unavailable(
@@ -615,7 +621,7 @@ def value_cash_balances(
             raise FxValuationError(
                 "quotes contain duplicate normalized currency codes"
             )
-        normalized_quotes[currency] = quote
+        normalized_quotes[currency] = _validated_quote(quote)
     reporting = _currency(reporting_currency, "reporting_currency")
     point = _instant(as_of, "as_of")
     age_limit = _age_limit(max_age)

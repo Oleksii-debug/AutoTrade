@@ -204,7 +204,7 @@ class ProviderRouteReadTests(unittest.TestCase):
             selection = select_provider(
                 route_request(),
                 [candidate()],
-                at=NOW + timedelta(seconds=2),
+                at=NOW,
                 capability_registry=capabilities,
                 qualification_registry=qualifications,
             )
@@ -214,7 +214,11 @@ class ProviderRouteReadTests(unittest.TestCase):
                 selection.selected,
                 capabilities,
                 qualifications,
-                at=NOW + timedelta(seconds=2),
+                at=NOW,
+            )
+            self.assertEqual(
+                first.query_binding.query_digest,
+                second.query_binding.query_digest,
             )
             self.assertNotEqual(first.qualification_id, second.qualification_id)
             self.assertNotEqual(
@@ -226,8 +230,38 @@ class ProviderRouteReadTests(unittest.TestCase):
                 second.qualified_route_rule_digest,
             )
             self.assertEqual(first.data_entitlement, second.data_entitlement)
-            self.assertEqual(first.accepted_success_statuses, second.accepted_success_statuses)
+            self.assertEqual(
+                first.accepted_success_statuses,
+                second.accepted_success_statuses,
+            )
             self.assertNotEqual(first.parser_identity, second.parser_identity)
+
+            raw = b'{"retCode":0,"result":{"equity":"10.25"}}'
+            first_response = observe_qualified_provider_json_response(
+                query_binding=first,
+                http_status=200,
+                response_bytes=raw,
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            second_response = observe_qualified_provider_json_response(
+                query_binding=second,
+                http_status=200,
+                response_bytes=raw,
+                observed_at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(
+                first_response.observation.evidence_ref,
+                second_response.observation.evidence_ref,
+            )
+            self.assertNotEqual(
+                first_response.evidence_ref,
+                second_response.evidence_ref,
+            )
+            self.assertTrue(
+                first_response.evidence_ref.startswith(
+                    "qualified-provider-read:sha256:"
+                )
+            )
 
     def test_new_current_capability_invalidates_old_selected_route_for_new_read(self):
         with TemporaryDirectory() as directory:

@@ -244,6 +244,70 @@ class DispatchSenderBarrierLinearizationTests(unittest.TestCase):
                 ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
             )
 
+    def test_concurrent_committed_send_barrier_is_unknown_not_blocked(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner-a",
+                owner_epoch=1,
+            )
+            outbound = 0
+            captured_client_id = ""
+
+            def sender_check(_owner: str, _epoch: int) -> None:
+                cut = store.current_journal_sequence()
+                inserted = dispatcher._append(
+                    attempt_id="concurrent-sending",
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": captured_client_id,
+                        "owner_token": "owner-a",
+                        "owner_epoch": 1,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=NOW,
+                    expected_journal_sequence=cut,
+                )
+                self.assertTrue(inserted.inserted)
+
+            def transport(client_id, _request, final_guard):
+                nonlocal outbound, captured_client_id
+                captured_client_id = client_id
+                final_guard()
+                outbound += 1
+                return {"ok": True}
+
+            outcome = dispatcher.dispatch(
+                attempt_id="concurrent-sending",
+                intent_id="intent-concurrent-sending",
+                intent_hash="hash-concurrent-sending",
+                provider="provider",
+                request={"side": "BUY"},
+                now=NOW,
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=sender_check,
+            )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(
+                outcome.reason,
+                "concurrent_send_barrier_already_committed",
+            )
+            self.assertEqual(outbound, 0)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("concurrent-sending"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
     def test_committed_sending_barrier_replay_cannot_authorize_second_send(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

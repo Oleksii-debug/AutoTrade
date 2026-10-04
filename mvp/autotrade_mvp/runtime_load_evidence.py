@@ -26,6 +26,7 @@ from .performance_qualification import (
 )
 from .persistence import (
     JournalStore,
+    journal_store_authority_scope,
     payload_digest,
     require_exact_journal_store_authority,
 )
@@ -268,29 +269,34 @@ def collect_journal_conservation_evidence(
         store,
         subject="runtime qualification JournalStore",
     )
-    # Freeze the exact durable terminal cut before readback.  A later writer may
-    # extend the journal, but it cannot move the evidence horizon after outcomes
-    # are visible.  Bound the read to precisely this cut using the canonical
-    # JournalStore API rather than relying on a non-existent partial-tail mode.
-    cut_end = JournalStore.current_journal_sequence(store)
-    if type(cut_end) is not int or cut_end < start:
-        raise RuntimeLoadEvidenceError(
-            "journal terminal cut is invalid for the declared campaign start"
+    # Freeze the selected physical store generation through the terminal-cut
+    # readback.  Exact-type validation alone is insufficient: another thread
+    # could otherwise retarget the same JournalStore object's path/identity
+    # between authority selection and the first SQLite connection.
+    with journal_store_authority_scope(store, identity):
+        # Freeze the exact durable terminal cut before readback.  A later writer
+        # may extend the journal, but it cannot move the evidence horizon after
+        # outcomes are visible.  Bound the read to precisely this cut using the
+        # canonical JournalStore API rather than a synthetic partial-tail mode.
+        cut_end = JournalStore.current_journal_sequence(store)
+        if type(cut_end) is not int or cut_end < start:
+            raise RuntimeLoadEvidenceError(
+                "journal terminal cut is invalid for the declared campaign start"
+            )
+        tail_length = cut_end - start
+        if tail_length > limit:
+            raise RuntimeLoadEvidenceError("journal tail is incomplete")
+        events = (
+            []
+            if tail_length == 0
+            else JournalStore.load_events_after_journal_sequence(
+                store,
+                start,
+                limit=tail_length,
+            )
         )
-    tail_length = cut_end - start
-    if tail_length > limit:
-        raise RuntimeLoadEvidenceError("journal tail is incomplete")
-    events = (
-        []
-        if tail_length == 0
-        else JournalStore.load_events_after_journal_sequence(
-            store,
-            start,
-            limit=tail_length,
-        )
-    )
-    if len(events) != tail_length:
-        raise RuntimeLoadEvidenceError("journal tail is incomplete")
+        if len(events) != tail_length:
+            raise RuntimeLoadEvidenceError("journal tail is incomplete")
 
     end = start
     recovered_records: list[dict[str, object]] = []

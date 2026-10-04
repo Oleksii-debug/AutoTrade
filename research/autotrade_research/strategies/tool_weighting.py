@@ -219,6 +219,15 @@ def _detach_coverage_assessment(
             "coverage_assessment must be exact "
             "CrossMarketGeneralizationAssessment"
         )
+    if type(value.reasons) is not tuple:
+        raise TypeError(
+            "coverage_assessment reasons must remain an exact tuple"
+        )
+    if type(value.cell_statuses) not in {dict, MappingProxyType}:
+        raise TypeError(
+            "coverage_assessment cell_statuses must remain an exact "
+            "dict or mapping proxy"
+        )
     return CrossMarketGeneralizationAssessment(
         status=value.status,
         reasons=value.reasons,

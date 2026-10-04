@@ -300,6 +300,91 @@ class ProductionHostCompositionTests(unittest.TestCase):
                 )
                 successor.close()
 
+    def test_build_readmits_exact_config_before_host_side_effects(self):
+        with TemporaryDirectory() as directory:
+            base = self._config(directory)
+            touched = []
+
+            class HostileText(str):
+                def strip(self):
+                    touched.append("strip")
+                    raise AssertionError("hostile config text executed")
+
+                def __bool__(self):
+                    touched.append("bool")
+                    raise AssertionError("hostile config text executed")
+
+            class HostileInt(int):
+                def __le__(self, other):
+                    touched.append("le")
+                    raise AssertionError("hostile config integer executed")
+
+                def __gt__(self, other):
+                    touched.append("gt")
+                    raise AssertionError("hostile config integer executed")
+
+            for field, hostile, message in (
+                ("host_id", HostileText("host-a"), "host_id must be exact text"),
+                (
+                    "bind_port",
+                    HostileInt(8765),
+                    "bind_port must be an exact integer",
+                ),
+            ):
+                with self.subTest(field=field):
+                    config = self._config(directory)
+                    object.__setattr__(config, field, hostile)
+                    fence = Mock()
+                    with (
+                        patch.object(
+                            production_host,
+                            "SecurityBoundary",
+                            self.DummySecurityBoundary,
+                        ),
+                        patch.object(
+                            production_host,
+                            "_InstanceFence",
+                            fence,
+                        ),
+                    ):
+                        with self.assertRaisesRegex(TypeError, message):
+                            build_production_host(
+                                config,
+                                security_boundary=self.DummySecurityBoundary(),
+                                principal_resolver=Mock(),
+                                snapshot_provider=Mock(),
+                            )
+                    fence.acquire.assert_not_called()
+            self.assertEqual(touched, [])
+
+    def test_build_rejects_security_boundary_subclass_before_host_side_effects(self):
+        with TemporaryDirectory() as directory:
+            config = self._config(directory)
+
+            class HostileSecurityBoundary(self.DummySecurityBoundary):
+                pass
+
+            fence = Mock()
+            with (
+                patch.object(
+                    production_host,
+                    "SecurityBoundary",
+                    self.DummySecurityBoundary,
+                ),
+                patch.object(production_host, "_InstanceFence", fence),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "security_boundary must be exact SecurityBoundary",
+                ):
+                    build_production_host(
+                        config,
+                        security_boundary=HostileSecurityBoundary(),
+                        principal_resolver=Mock(),
+                        snapshot_provider=Mock(),
+                    )
+            fence.acquire.assert_not_called()
+
     def test_https_requires_tls_context(self):
         with TemporaryDirectory() as directory:
             config = ProductionHostConfig(

@@ -15,6 +15,7 @@ scope or credential authority.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from .capabilities import CapabilityRegistry

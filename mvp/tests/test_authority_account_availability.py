@@ -387,9 +387,20 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     transaction_id="capital-during-provider-query",
                     cause_event_id="capital-during-provider-query-event",
                     currency="USD",
-                    amount="950",
+                    amount="900",
                 ),
                 committed_at="2026-09-24T18:00:10Z",
+            )
+            # A later journal event with a backdated committed_at must not hide
+            # the earlier economic mutation that occurred inside the provider cut.
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-backdated-after-query-mutation",
+                    cause_event_id="capital-backdated-after-query-mutation-event",
+                    currency="USD",
+                    amount="50",
+                ),
+                committed_at="2026-09-24T17:59:30Z",
             )
             authority = AuthorityService(
                 store,

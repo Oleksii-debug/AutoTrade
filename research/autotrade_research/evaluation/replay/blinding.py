@@ -197,9 +197,9 @@ def _scan_payload(
         for key, child in value.items():
             child_path = path + (key,)
             for raw in raw_identities:
-                if raw and key.casefold() == raw.casefold():
+                if raw and _contains_identity(key, raw):
                     raise BlindingError(
-                        f"payload key at {'.'.join(child_path)} is a declared raw identity"
+                        f"payload key at {'.'.join(child_path)} contains a declared raw identity"
                     )
             if _ABSOLUTE_DATE.search(key):
                 raise BlindingError(
@@ -393,7 +393,7 @@ class BlindedReplayDataset:
     experiment_id: str
     profile_sha256: str
     mapping_sha256: str
-    shuffle_key_sha256: str
+    shuffle_key_commitment_sha256: str
     training_cutoff_uncertainty: str
     price_scale_mode: str
     events: tuple[BlindedEvent, ...]
@@ -403,7 +403,10 @@ class BlindedReplayDataset:
         source = _digest(self.source_dataset_sha256, name="source_dataset_sha256")
         profile = _digest(self.profile_sha256, name="profile_sha256")
         mapping = _digest(self.mapping_sha256, name="mapping_sha256")
-        shuffle = _digest(self.shuffle_key_sha256, name="shuffle_key_sha256")
+        shuffle_commitment = _digest(
+            self.shuffle_key_commitment_sha256,
+            name="shuffle_key_commitment_sha256",
+        )
         experiment = _text(self.experiment_id, name="experiment_id")
         uncertainty = _text(
             self.training_cutoff_uncertainty, name="training_cutoff_uncertainty"
@@ -417,7 +420,7 @@ class BlindedReplayDataset:
             experiment_id=experiment,
             profile_sha256=profile,
             mapping_sha256=mapping,
-            shuffle_key_sha256=shuffle,
+            shuffle_key_commitment_sha256=shuffle_commitment,
             training_cutoff_uncertainty=uncertainty,
             events=self.events,
         )
@@ -427,7 +430,9 @@ class BlindedReplayDataset:
         object.__setattr__(self, "source_dataset_sha256", source)
         object.__setattr__(self, "profile_sha256", profile)
         object.__setattr__(self, "mapping_sha256", mapping)
-        object.__setattr__(self, "shuffle_key_sha256", shuffle)
+        object.__setattr__(
+            self, "shuffle_key_commitment_sha256", shuffle_commitment
+        )
         object.__setattr__(self, "experiment_id", experiment)
         object.__setattr__(self, "training_cutoff_uncertainty", uncertainty)
         object.__setattr__(self, "blinded_dataset_sha256", supplied)
@@ -447,7 +452,7 @@ def _blinded_dataset_digest(
     experiment_id: str,
     profile_sha256: str,
     mapping_sha256: str,
-    shuffle_key_sha256: str,
+    shuffle_key_commitment_sha256: str,
     training_cutoff_uncertainty: str,
     events: tuple[BlindedEvent, ...],
 ) -> str:
@@ -457,7 +462,7 @@ def _blinded_dataset_digest(
         "experiment_id": experiment_id,
         "profile_sha256": profile_sha256,
         "mapping_sha256": mapping_sha256,
-        "shuffle_key_sha256": shuffle_key_sha256,
+        "shuffle_key_commitment_sha256": shuffle_key_commitment_sha256,
         "training_cutoff_uncertainty": training_cutoff_uncertainty,
         "price_scale_mode": _PRICE_SCALE_MODE,
         "forward_evidence_required": True,
@@ -482,6 +487,9 @@ def blind_dataset(
         raise TypeError("profile must be exact BlindingProfile")
     experiment = _text(experiment_id, name="experiment_id")
     shuffle_key = _digest(shuffle_key_sha256, name="shuffle_key_sha256")
+    shuffle_key_commitment = "sha256:" + sha256(
+        shuffle_key.encode("utf-8")
+    ).hexdigest()
     uncertainty = _text(
         training_cutoff_uncertainty, name="training_cutoff_uncertainty"
     )
@@ -633,7 +641,7 @@ def blind_dataset(
         experiment_id=experiment,
         profile_sha256=profile.digest,
         mapping_sha256=mapping_sha256,
-        shuffle_key_sha256=shuffle_key,
+        shuffle_key_commitment_sha256=shuffle_key_commitment,
         training_cutoff_uncertainty=uncertainty,
         events=events_tuple,
     )
@@ -642,7 +650,7 @@ def blind_dataset(
         experiment_id=experiment,
         profile_sha256=profile.digest,
         mapping_sha256=mapping_sha256,
-        shuffle_key_sha256=shuffle_key,
+        shuffle_key_commitment_sha256=shuffle_key_commitment,
         training_cutoff_uncertainty=uncertainty,
         price_scale_mode=_PRICE_SCALE_MODE,
         events=events_tuple,

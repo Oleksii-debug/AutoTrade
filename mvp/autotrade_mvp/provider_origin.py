@@ -690,6 +690,19 @@ class ProviderOriginObservation:
         require_provider_origin_response_binding_authority(self.response_binding)
         if type(self.response_binding) is not AuthenticatedReadResponseBinding:
             raise ProviderOriginError("response_binding is not exact durable binding")
+        if self.response_binding.execution_class != _DIRECT_EXECUTION_CLASS:
+            raise ProviderOriginError(
+                "provider-origin observation requires DIRECT_PROVIDER_WIRE evidence"
+            )
+        if (
+            self.response_binding.transport_identity
+            != direct_authenticated_read_transport_identity()
+            or self.response_binding.network_policy_identity
+            != direct_authenticated_read_network_policy_identity()
+        ):
+            raise ProviderOriginError(
+                "provider-origin observation requires canonical direct network policy"
+            )
         if type(self.qualified_observation) is not QualifiedProviderResponseObservation:
             raise ProviderOriginError("qualified observation is not canonical")
         if (

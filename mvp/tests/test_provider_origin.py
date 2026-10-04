@@ -507,6 +507,33 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 first.response_sha256,
             )
 
+    def test_imported_observation_token_cannot_promote_test_injected_origin(self):
+        with TemporaryDirectory() as directory:
+            _fixture, journal, *_rest, binding = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            attempt_id = origin.prepare(
+                binding,
+                transport_identity="BybitV5AuthenticatedReadTransport:direct-v1",
+                network_policy_identity="sha256:" + "8" * 64,
+                recorded_at=NOW,
+            )
+            recorded = self._record(origin, attempt_id, binding)
+            qualified = provider_origin_module.observe_qualified_provider_json_response(
+                query_binding=binding,
+                http_status=recorded.http_status,
+                response_bytes=recorded.response_bytes,
+                observed_at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderOriginError,
+                "DIRECT_PROVIDER_WIRE",
+            ):
+                provider_origin_module.ProviderOriginObservation(
+                    response_binding=recorded,
+                    qualified_observation=qualified,
+                    _observation_token=provider_origin_module._OBSERVATION_TOKEN,
+                )
+
     def test_imported_module_token_cannot_mint_direct_provider_origin(self):
         with TemporaryDirectory() as directory:
             _fixture, _journal, *_rest, binding = self._route_fixture(directory)

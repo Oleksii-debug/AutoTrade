@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from mvp.autotrade_mvp.accounting import AccountingConflict
 
 from mvp.autotrade_mvp.durable_financing import (
     DurableFinancingBook,
@@ -170,11 +171,13 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
             source_account="BORROW_LIABILITY:BTC",
             economic_delta="0.01",
         )
-        self.economic.append_batch((expected, duplicate))
+        self.economic.append(expected)
+        before = self.store.current_journal_sequence()
+        with self.assertRaisesRegex(AccountingConflict, "cause_event_id was already booked"):
+            self.economic.append(duplicate)
+        self.assertEqual(self.store.current_journal_sequence(), before)
         _, restarted = self._reopened()
-
-        with self.assertRaisesRegex(FinancingConflict, "duplicate economic postings"):
-            restarted.latest(CHARGE_ID)
+        self.assertEqual(restarted.latest(CHARGE_ID), event)
 
     def test_restart_rejects_expected_transaction_in_noncanonical_batch(self) -> None:
         event = self._event()

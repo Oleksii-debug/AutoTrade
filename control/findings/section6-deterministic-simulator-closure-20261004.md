@@ -38,3 +38,16 @@ Section 6 is DONE only after:
 6. post-merge readback confirms accepted source identity.
 
 No provider/PAPER/LIVE, profitability, economic-edge, signed-release or NVDA qualification is granted.
+
+## Follow-up source review: qualification authority closure
+
+Exact source review after the initial convergence found additional qualification gaps and repaired them on the same canonical Section 6 lineage:
+
+- execution_qualification imported ArtifactStore from a runtime package absent from this exact current-main tree; production and test imports now use the existing canonical autotrade_research.artifacts authority on this lineage;
+- execution qualification used non-canonical asset labels (EQUITY/SPOT/MARGIN) instead of the InstrumentVersion asset enum; qualification now uses CASH_EQUITY/FUND/FX/CRYPTO_SPOT/FUTURE/PERPETUAL/OPTION and requires caller/qualification asset identity to equal the canonical instrument;
+- qualified order lot size and quantity are bound to InstrumentVersion quantity_step/min/max rules;
+- qualified limit/stop and bid/ask/bar prices are bound to InstrumentVersion price_tick/bands;
+- qualified order time and market observation time must both lie inside the exact InstrumentVersion effective interval;
+- regressions cover false asset-class agreement, sub-step lots, off-grid order/liquidity prices and pre/post-effective instrument use.
+
+These are qualification-integrity repairs only. They do not turn simulation evidence into provider/PAPER/LIVE authority or profitability/edge evidence. Fresh exact-head baseline and Verify are required after these changes.

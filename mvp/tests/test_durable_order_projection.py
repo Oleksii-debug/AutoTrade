@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.durable_order_projection as durable_order_projection_module
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
@@ -760,6 +761,54 @@ class DurableOrderProjectionTests(unittest.TestCase):
 
             self.assertEqual(acknowledged.snapshot.state, "WORKING")
 
+    def test_provider_evidence_class_snapshot_replacement_is_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-class-shadow-evidence",
+                client_order_id="class-shadow-evidence",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            request = {
+                "client_order_id": "class-shadow-evidence",
+                "provider_order_id": "provider-class-shadow-evidence",
+                "status": "ACCEPTED",
+                "attempt_id": None,
+            }
+            ref = publish_provider_evidence(
+                artifacts,
+                operation="ACKNOWLEDGE",
+                request=request,
+                observed_at=T1,
+            )
+
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=AssertionError(
+                    "public class snapshot replacement must not become authority"
+                ),
+            ):
+                acknowledged = book.acknowledge(
+                    event_key="ack-class-shadow-evidence",
+                    client_order_id="class-shadow-evidence",
+                    provider_order_id="provider-class-shadow-evidence",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+            self.assertEqual(acknowledged.snapshot.state, "WORKING")
+
     def test_provider_evidence_store_subclass_is_rejected(self):
         class DerivedArtifactStore(ArtifactStore):
             pass
@@ -808,8 +857,8 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             manifest = artifacts.load_manifest(ref["artifact_id"])
             with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+                durable_order_projection_module,
+                "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
                 return_value=(manifest, b"different provider evidence bytes"),
             ):
                 with self.assertRaisesRegex(
@@ -855,8 +904,8 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 observed_at=T1,
             )
             with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
+                durable_order_projection_module,
+                "_CANONICAL_AUTHENTICATED_SNAPSHOT_READ",
                 side_effect=OSError("simulated evidence I/O failure"),
             ):
                 with self.assertRaisesRegex(

@@ -360,6 +360,10 @@ class ProductionBybitOrderSender:
         "__transport",
         "__transport_call",
         "__transport_call_code",
+        "__wire_client",
+        "__wire_send",
+        "__wire_send_function",
+        "__wire_send_code",
         "__dispatcher",
         "__recovery",
         "__owner",
@@ -397,6 +401,17 @@ class ProductionBybitOrderSender:
             raise TypeError("transport must be exact BybitV5HttpTransport")
         transport_call = BybitV5HttpTransport.__call__
         transport_call_code = transport_call.__code__
+        wire_client = transport.wire_client
+        wire_send = getattr(wire_client, "send", None)
+        if not callable(wire_send):
+            raise TypeError("Bybit wire client must expose a callable send")
+        wire_send_function = getattr(wire_send, "__func__", None)
+        if wire_send_function is not None:
+            if getattr(wire_send, "__self__", None) is not wire_client:
+                raise TypeError("Bybit wire send binding is inconsistent")
+            wire_send_code = getattr(wire_send_function, "__code__", None)
+        else:
+            wire_send_code = getattr(wire_send, "__code__", None)
         dispatcher = runtime.financial_dispatcher
         recovery = runtime.recovery_controller
         owner = dispatcher.owner
@@ -434,6 +449,10 @@ class ProductionBybitOrderSender:
         self.__transport = transport
         self.__transport_call = transport_call
         self.__transport_call_code = transport_call_code
+        self.__wire_client = wire_client
+        self.__wire_send = wire_send
+        self.__wire_send_function = wire_send_function
+        self.__wire_send_code = wire_send_code
         self.__dispatcher = dispatcher
         self.__recovery = recovery
         self.__owner = owner
@@ -466,6 +485,34 @@ class ProductionBybitOrderSender:
         if transport_call.__code__ is not self.__transport_call_code:
             raise PermissionError("Bybit transport executable authority code changed")
 
+    def _require_wire_authority(self) -> None:
+        transport = self.__transport
+        wire_client = self.__wire_client
+        if transport.wire_client is not wire_client:
+            raise PermissionError("Bybit wire client authority changed")
+        current_send = getattr(wire_client, "send", None)
+        wire_send_function = self.__wire_send_function
+        if wire_send_function is not None:
+            if (
+                getattr(current_send, "__self__", None) is not wire_client
+                or getattr(current_send, "__func__", None) is not wire_send_function
+            ):
+                raise PermissionError("Bybit wire send authority changed")
+            if (
+                self.__wire_send_code is not None
+                and getattr(wire_send_function, "__code__", None)
+                is not self.__wire_send_code
+            ):
+                raise PermissionError("Bybit wire send authority code changed")
+        else:
+            if current_send is not self.__wire_send:
+                raise PermissionError("Bybit wire send authority changed")
+            if (
+                self.__wire_send_code is not None
+                and getattr(current_send, "__code__", None) is not self.__wire_send_code
+            ):
+                raise PermissionError("Bybit wire send authority code changed")
+
     def _require_send_authority(self) -> None:
         runtime = self.__runtime
         transport = self.__transport
@@ -482,6 +529,7 @@ class ProductionBybitOrderSender:
         if type(transport) is not BybitV5HttpTransport:
             raise PermissionError("Bybit transport authority changed")
         self._require_transport_executable()
+        self._require_wire_authority()
         if BYBIT_V5_ENDPOINT_POLICIES is not self.__policy_registry:
             raise PermissionError("Bybit provider policy registry authority changed")
         canonical_policy = self.__policy_registry.get(self.__provider_environment)
@@ -538,12 +586,18 @@ class ProductionBybitOrderSender:
         request: Mapping[str, Any],
         final_guard: Callable[[], None],
     ):
-        # Guard again at the irreversible transport boundary. The outer dispatch
-        # validation alone would leave a class-level executable retargeting window
-        # while durable preparation/final financial checks are in progress.
+        # Guard before transport work and once more after the dispatcher's final
+        # authority callback. BybitV5HttpTransport performs wire_client.send()
+        # immediately after final_guard(), so the second wire check closes the
+        # caller-callback retargeting window at the terminal I/O boundary.
         self._require_send_authority()
+
+        def terminal_guard() -> None:
+            final_guard()
+            self._require_wire_authority()
+
         transport_call = self.__transport_call
-        return transport_call(self.__transport, client_order_id, request, final_guard)
+        return transport_call(self.__transport, client_order_id, request, terminal_guard)
 
     def dispatch(
         self,

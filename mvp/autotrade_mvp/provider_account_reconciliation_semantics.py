@@ -35,9 +35,7 @@ _ALLOWED_ACQUISITION_MODES = frozenset(
     }
 )
 _METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_VERSION_RE = re.compile(
-    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
-)
+_VERSION_RE = re.compile(r"^[1-9][0-9]{0,8}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
 
@@ -50,7 +48,7 @@ def account_reconciliation_route_semantics(
     *,
     acquisition_mode: str,
     consistency_method_id: str,
-    consistency_method_version: str,
+    consistency_method_version: int,
 ) -> dict[str, str]:
     """Canonical semantic claims for an authenticated provider-Q campaign.
 
@@ -70,17 +68,18 @@ def account_reconciliation_route_semantics(
             "consistency_method_id must be canonical bounded uppercase identity"
         )
     if (
-        type(consistency_method_version) is not str
-        or _VERSION_RE.fullmatch(consistency_method_version) is None
+        type(consistency_method_version) is not int
+        or consistency_method_version < 1
+        or consistency_method_version > 999_999_999
     ):
         raise ProviderAccountReconciliationSemanticsError(
-            "consistency_method_version must be canonical semantic version"
+            "consistency_method_version must be a bounded positive exact integer"
         )
     return {
         _KEY_SCHEMA: _SCHEMA_VERSION,
         _KEY_ACQUISITION: acquisition_mode,
         _KEY_METHOD: consistency_method_id,
-        _KEY_METHOD_VERSION: consistency_method_version,
+        _KEY_METHOD_VERSION: str(consistency_method_version),
     }
 
 
@@ -125,7 +124,7 @@ class QualifiedProviderAccountReconciliationSemantics:
     qualification_route_semantics_digest: str
     acquisition_mode: str
     consistency_method_id: str
-    consistency_method_version: str
+    consistency_method_version: int
 
     def __init__(self, *_args, **_kwargs) -> None:
         raise ProviderAccountReconciliationSemanticsError(
@@ -321,10 +320,16 @@ def resolve_current_provider_account_reconciliation_semantics(
         raise ProviderAccountReconciliationSemanticsError(
             "provider Q account reconciliation schema is unsupported"
         )
+    version_text = route_semantics[_KEY_METHOD_VERSION]
+    if type(version_text) is not str or _VERSION_RE.fullmatch(version_text) is None:
+        raise ProviderAccountReconciliationSemanticsError(
+            "provider Q consistency_method_version is non-canonical"
+        )
+    version = int(version_text)
     claims = account_reconciliation_route_semantics(
         acquisition_mode=route_semantics[_KEY_ACQUISITION],
         consistency_method_id=route_semantics[_KEY_METHOD],
-        consistency_method_version=route_semantics[_KEY_METHOD_VERSION],
+        consistency_method_version=version,
     )
     if any(route_semantics.get(key) != value for key, value in claims.items()):
         raise ProviderAccountReconciliationSemanticsError(
@@ -343,7 +348,7 @@ def resolve_current_provider_account_reconciliation_semantics(
     object.__setattr__(
         value,
         "consistency_method_version",
-        claims[_KEY_METHOD_VERSION],
+        version,
     )
     _register_provider_account_reconciliation_semantics_authority(
         value,

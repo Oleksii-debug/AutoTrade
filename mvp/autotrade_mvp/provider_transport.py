@@ -32,7 +32,10 @@ from typing import Any, Callable, ContextManager, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
+    AbstractHTTPHandler,
     HTTPRedirectHandler,
+    HTTPSHandler,
+    OpenerDirector,
     Request,
     ProxyHandler,
     build_opener,
@@ -1409,7 +1412,13 @@ class UrllibJsonWireClient:
 
 
 def _install_direct_authenticated_read_execution_authority():
-    clients: dict[int, tuple[weakref.ReferenceType, object]] = {}
+    clients: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+        ],
+    ] = {}
     receipts: dict[
         int,
         tuple[
@@ -1418,6 +1427,91 @@ def _install_direct_authenticated_read_execution_authority():
             tuple[str, str, str, str, int, str, object],
         ],
     ] = {}
+    canonical_opener_open = OpenerDirector.open
+    canonical_opener_dispatch = OpenerDirector._open
+    canonical_opener_call_chain = OpenerDirector._call_chain
+    canonical_http_do_open = AbstractHTTPHandler.do_open
+    canonical_https_open = HTTPSHandler.https_open
+    canonical_proxy_open = ProxyHandler.proxy_open
+    canonical_redirect_request = _NoRedirectHandler.redirect_request
+
+    def freeze_authority_state(value: object) -> object:
+        if value is None or type(value) in {bool, int, str, bytes}:
+            return value
+        if type(value) is tuple:
+            return ("tuple", tuple(freeze_authority_state(item) for item in value))
+        if type(value) is list:
+            return ("list", tuple(freeze_authority_state(item) for item in value))
+        if type(value) is dict:
+            frozen_items = tuple(
+                sorted(
+                    (
+                        (
+                            freeze_authority_state(key),
+                            freeze_authority_state(item),
+                        )
+                        for key, item in value.items()
+                    ),
+                    key=repr,
+                )
+            )
+            return ("dict", frozen_items)
+        if type(value) is set:
+            return (
+                "set",
+                tuple(sorted((freeze_authority_state(item) for item in value), key=repr)),
+            )
+        return ("identity", type(value), id(value))
+
+    def client_network_authority(client: UrllibJsonWireClient) -> tuple[object, ...]:
+        opener = getattr(client, "_opener", None)
+        if type(opener) is not OpenerDirector:
+            raise ProviderTransportError(
+                "direct authenticated-read wire client opener is not canonical"
+            )
+        opener_state = vars(opener)
+        if "open" in opener_state:
+            raise ProviderTransportError(
+                "direct authenticated-read wire client opener method is shadowed"
+            )
+        if (
+            OpenerDirector.open is not canonical_opener_open
+            or OpenerDirector._open is not canonical_opener_dispatch
+            or OpenerDirector._call_chain is not canonical_opener_call_chain
+            or AbstractHTTPHandler.do_open is not canonical_http_do_open
+            or HTTPSHandler.https_open is not canonical_https_open
+            or ProxyHandler.proxy_open is not canonical_proxy_open
+            or _NoRedirectHandler.redirect_request is not canonical_redirect_request
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read wire client network implementation changed"
+            )
+        handlers = tuple(getattr(opener, "handlers", ()))
+        proxies = tuple(handler for handler in handlers if type(handler) is ProxyHandler)
+        redirects = tuple(
+            handler for handler in handlers if isinstance(handler, HTTPRedirectHandler)
+        )
+        if (
+            len(proxies) != 1
+            or getattr(proxies[0], "proxies", None) != {}
+            or len(redirects) != 1
+            or type(redirects[0]) is not _NoRedirectHandler
+        ):
+            raise ProviderTransportError(
+                "direct authenticated-read wire client direct-only policy changed"
+            )
+        handler_state = tuple(
+            (
+                handler,
+                freeze_authority_state(vars(handler)),
+            )
+            for handler in handlers
+        )
+        return (
+            opener,
+            freeze_authority_state(opener_state),
+            handler_state,
+        )
 
     def prune() -> None:
         for states in (clients, receipts):
@@ -1429,7 +1523,13 @@ def _install_direct_authenticated_read_execution_authority():
         if type(client) is not UrllibJsonWireClient:
             return
         prune()
-        clients[id(client)] = (weakref.ref(client), client._opener)
+        try:
+            authority = client_network_authority(client)
+        except ProviderTransportError:
+            # Neutral/injected clients remain usable for transport tests, but
+            # they are never registered as direct provider-origin authority.
+            return
+        clients[id(client)] = (weakref.ref(client), authority)
 
     def require_client(client: object) -> UrllibJsonWireClient:
         if type(client) is not UrllibJsonWireClient:
@@ -1438,10 +1538,16 @@ def _install_direct_authenticated_read_execution_authority():
             )
         prune()
         client_state = clients.get(id(client))
+        try:
+            current_authority = client_network_authority(client)
+        except ProviderTransportError as error:
+            raise ProviderTransportError(
+                "direct authenticated-read wire client network authority changed"
+            ) from error
         if (
             client_state is None
             or client_state[0]() is not client
-            or client_state[1] is not client._opener
+            or client_state[1] != current_authority
         ):
             raise ProviderTransportError(
                 "direct authenticated-read wire client network authority changed"
@@ -1572,8 +1678,16 @@ def _bind_direct_authenticated_read_client_init(init_impl, register_client):
     return __init__
 
 
-def _bind_direct_authenticated_read_send(send_impl, mint_receipt):
+def _bind_direct_authenticated_read_send(send_impl, mint_receipt, require_client):
     def send(self, request):
+        direct_authority = (
+            type(request) is AuthenticatedReadHttpRequest
+            and getattr(request, "_terminal_qualified_read_authority", None) is not None
+        )
+        if direct_authority:
+            # Synthetic/instance-shadowed network methods must fail before I/O;
+            # otherwise local bytes could be mislabeled as DIRECT_PROVIDER_WIRE.
+            require_client(self)
         response = send_impl(self, request)
         mint_receipt(self, request, response)
         return response
@@ -1588,6 +1702,7 @@ UrllibJsonWireClient.__init__ = _bind_direct_authenticated_read_client_init(
 UrllibJsonWireClient.send = _bind_direct_authenticated_read_send(
     UrllibJsonWireClient.send,
     _mint_direct_authenticated_read_execution_receipt,
+    require_direct_authenticated_read_client,
 )
 del _bind_direct_authenticated_read_client_init
 del _bind_direct_authenticated_read_send

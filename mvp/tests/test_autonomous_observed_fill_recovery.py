@@ -214,6 +214,68 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                     completed["position"], reference["position"]
                 )
 
+    def test_zero_wire_recovery_rejects_conflicting_existing_checkpoint(self):
+        original_event = session._loop_event
+
+        def lose_completion(store, run_id, kind, key, payload, now):
+            if (
+                kind == "AutonomousEpisodeCompleted"
+                and payload["episode"] == 4
+            ):
+                raise RuntimeError("completion response lost")
+            return original_event(
+                store, run_id, kind, key, payload, now
+            )
+
+        with TemporaryDirectory() as directory:
+            with patch.object(session, "_loop_event", lose_completion):
+                with self.assertRaisesRegex(
+                    RuntimeError, "completion response lost"
+                ):
+                    run(directory)
+
+            store = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            )
+            original_loader = (
+                session.load_latest_reconciliation_checkpoint
+            )
+            existing = original_loader(
+                store,
+                reconciliation_id="acceptance:4:after",
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            self.assertIsNotNone(existing)
+            conflicting = {
+                **existing,
+                "payload": {
+                    **existing["payload"],
+                    "complete": False,
+                },
+            }
+
+            def loader(*args, **kwargs):
+                if kwargs.get("reconciliation_id") == "acceptance:4:after":
+                    return conflicting
+                return original_loader(*args, **kwargs)
+
+            cut = store.current_journal_sequence()
+            with patch.object(
+                session,
+                "load_latest_reconciliation_checkpoint",
+                loader,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reconciliation checkpoint conflicts",
+                ):
+                    run(directory)
+            self.assertEqual(
+                store.current_journal_sequence(), cut
+            )
+
     def test_zero_wire_recovery_rejects_offsetting_post_start_economics(self):
         original_event = session._loop_event
 

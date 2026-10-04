@@ -28,6 +28,63 @@ def _event() -> dict:
 
 
 class HardCrashPersistenceTests(unittest.TestCase):
+    def _assert_clean_then_retry(self, path: Path, expected_exit: int, child: str) -> None:
+        env = os.environ.copy()
+        completed = subprocess.run(
+            [sys.executable, "-c", child, str(path)],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, expected_exit)
+
+        reopened = JournalStore(path)
+        self.assertEqual(
+            reopened.whole_store_state_cut(),
+            {
+                "journal_sequence": 0,
+                "counts": {
+                    "events": 0,
+                    "outbox": 0,
+                    "command_dedupe": 0,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            },
+        )
+
+        saved, inserted, appended = reopened.commit_command(
+            actor="crash-test",
+            environment="SIMULATION",
+            command_id="cmd-hard-crash",
+            idempotency_key="key-hard-crash",
+            request={"action": "ORDER.SUBMIT"},
+            result={"status": "ACCEPTED"},
+            state_version=1,
+            events=[(_event(), "events")],
+            expected_journal_sequence=0,
+        )
+        self.assertTrue(inserted)
+        self.assertEqual(saved, {"status": "ACCEPTED"})
+        self.assertEqual([item.event_id for item in appended], ["evt-hard-crash"])
+        self.assertEqual(
+            reopened.whole_store_state_cut(),
+            {
+                "journal_sequence": 1,
+                "counts": {
+                    "events": 1,
+                    "outbox": 1,
+                    "command_dedupe": 1,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            },
+        )
+        pending = reopened.pending_outbox()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["event_id"], "evt-hard-crash")
+
     def test_process_exit_before_outbox_insert_rolls_back_whole_command_transaction(self):
         """Command/event writes cannot survive without their atomic outbox intent."""
 
@@ -92,61 +149,70 @@ class HardCrashPersistenceTests(unittest.TestCase):
                 raise SystemExit(91)
                 """
             )
-            env = os.environ.copy()
-            completed = subprocess.run(
-                [sys.executable, "-c", child, str(path)],
-                cwd=Path(__file__).resolve().parents[2],
-                env=env,
-                check=False,
-                timeout=30,
-            )
-            self.assertEqual(completed.returncode, 77)
+            self._assert_clean_then_retry(path, 77, child)
 
-            reopened = JournalStore(path)
-            self.assertEqual(
-                reopened.whole_store_state_cut(),
-                {
-                    "journal_sequence": 0,
-                    "counts": {
-                        "events": 0,
-                        "outbox": 0,
-                        "command_dedupe": 0,
-                        "projection_checkpoints": 0,
-                        "global_projection_checkpoints": 0,
-                    },
-                },
-            )
 
-            saved, inserted, appended = reopened.commit_command(
-                actor="crash-test",
-                environment="SIMULATION",
-                command_id="cmd-hard-crash",
-                idempotency_key="key-hard-crash",
-                request={"action": "ORDER.SUBMIT"},
-                result={"status": "ACCEPTED"},
-                state_version=1,
-                events=[(_event(), "events")],
-                expected_journal_sequence=0,
+    def test_process_exit_at_final_commit_rolls_back_command_event_and_outbox(self):
+        """A hard exit on COMMIT cannot expose a partial durable transaction."""
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            JournalStore(path)
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+
+                path = sys.argv[1]
+                store = JournalStore(path)
+                payload = {"kind": "fill", "quantity": "1"}
+                envelope = {
+                    "event_id": "evt-hard-crash",
+                    "event_type": "ExecutionFillObserved",
+                    "aggregate_type": "account",
+                    "aggregate_id": "paper-1",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-10-04T15:20:00+00:00",
+                }
+
+                original_connect = store._connect
+
+                class CrashOnCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(78)
+
+                @contextmanager
+                def crashing_connect():
+                    with original_connect() as connection:
+                        yield CrashOnCommit(connection)
+
+                store._connect = crashing_connect
+                store.commit_command(
+                    actor="crash-test",
+                    environment="SIMULATION",
+                    command_id="cmd-hard-crash",
+                    idempotency_key="key-hard-crash",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(envelope, "events")],
+                    expected_journal_sequence=0,
+                )
+                raise SystemExit(91)
+                """
             )
-            self.assertTrue(inserted)
-            self.assertEqual(saved, {"status": "ACCEPTED"})
-            self.assertEqual([item.event_id for item in appended], ["evt-hard-crash"])
-            self.assertEqual(
-                reopened.whole_store_state_cut(),
-                {
-                    "journal_sequence": 1,
-                    "counts": {
-                        "events": 1,
-                        "outbox": 1,
-                        "command_dedupe": 1,
-                        "projection_checkpoints": 0,
-                        "global_projection_checkpoints": 0,
-                    },
-                },
-            )
-            pending = reopened.pending_outbox()
-            self.assertEqual(len(pending), 1)
-            self.assertEqual(pending[0]["event_id"], "evt-hard-crash")
+            self._assert_clean_then_retry(path, 78, child)
 
 
 if __name__ == "__main__":

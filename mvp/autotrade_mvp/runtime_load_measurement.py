@@ -243,10 +243,12 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
 
     function_states: list[tuple] = []
     global_bindings: list[tuple[dict[str, object], str, object]] = []
+    builtin_bindings: list[tuple[dict[str, object], str, object]] = []
     module_members: list[tuple[ModuleType, str, object]] = []
     closure_bindings: list[tuple[object, bool, object | None]] = []
     seen_functions: set[int] = set()
     seen_globals: set[tuple[int, str]] = set()
+    seen_builtins: set[tuple[int, str]] = set()
     seen_members: set[tuple[int, str]] = set()
 
     def is_first_party(function: FunctionType) -> bool:
@@ -267,37 +269,55 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
                 target.__code__,
                 target.__defaults__,
                 kwdefaults,
-                None if kwdefaults is None else tuple(sorted(kwdefaults.items())),
+                None if kwdefaults is None else tuple_for(sorted_for(kwdefaults.items())),
             )
         )
         namespace = target.__globals__
+        builtins_namespace = target.__builtins__
+        if type(builtins_namespace) is not dict:
+            raise RuntimeLoadMeasurementError(
+                "measurement dependency function builtins must be an exact dictionary"
+            )
         referenced_names = target.__code__.co_names
         for dependency_name in referenced_names:
-            if dependency_name not in namespace:
+            if dependency_name in namespace:
+                dependency = namespace[dependency_name]
+                binding_key = (id(namespace), dependency_name)
+                if binding_key not in seen_globals:
+                    seen_globals.add(binding_key)
+                    global_bindings.append((namespace, dependency_name, dependency))
+                if type(dependency) is ModuleType:
+                    for member_name in referenced_names:
+                        if not hasattr(dependency, member_name):
+                            continue
+                        member_key = (id(dependency), member_name)
+                        if member_key in seen_members:
+                            continue
+                        seen_members.add(member_key)
+                        module_members.append(
+                            (dependency, member_name, getattr(dependency, member_name))
+                        )
+                dependency_target = (
+                    dependency.__func__
+                    if type(dependency) is MethodType
+                    else dependency
+                )
+                if type(dependency_target) is FunctionType and is_first_party(
+                    dependency_target
+                ):
+                    capture(dependency_target)
                 continue
-            dependency = namespace[dependency_name]
-            binding_key = (id(namespace), dependency_name)
-            if binding_key not in seen_globals:
-                seen_globals.add(binding_key)
-                global_bindings.append((namespace, dependency_name, dependency))
-            if type(dependency) is ModuleType:
-                for member_name in referenced_names:
-                    if not hasattr(dependency, member_name):
-                        continue
-                    member_key = (id(dependency), member_name)
-                    if member_key in seen_members:
-                        continue
-                    seen_members.add(member_key)
-                    module_members.append(
-                        (dependency, member_name, getattr(dependency, member_name))
+            if dependency_name in builtins_namespace:
+                binding_key = (id(builtins_namespace), dependency_name)
+                if binding_key not in seen_builtins:
+                    seen_builtins.add(binding_key)
+                    builtin_bindings.append(
+                        (
+                            builtins_namespace,
+                            dependency_name,
+                            builtins_namespace[dependency_name],
+                        )
                     )
-            dependency_target = (
-                dependency.__func__ if type(dependency) is MethodType else dependency
-            )
-            if type(dependency_target) is FunctionType and is_first_party(
-                dependency_target
-            ):
-                capture(dependency_target)
         for cell in target.__closure__ or ():
             try:
                 expected_value = cell.cell_contents
@@ -320,6 +340,7 @@ def _capture_operation_dependency_graph(values: tuple[object, ...]) -> tuple:
     return (
         tuple(function_states),
         tuple(global_bindings),
+        tuple(builtin_bindings),
         tuple(module_members),
         tuple(closure_bindings),
     )
@@ -347,7 +368,14 @@ def measure_declared_financial_operation(
     # before a forged readback/decoder can commit a durable latency sample.
     clock = perf_counter_ns
     type_for = type
+    dict_type = dict
+    int_type = int
+    tuple_for = tuple
+    sorted_for = sorted
+    getattr_for = getattr
+    str_for = str
     object_getattribute = object.__getattribute__
+    missing = object()
     error_type = RuntimeLoadMeasurementError
     journal_store_type = JournalStore
     get_event = JournalStore.get_event
@@ -473,23 +501,25 @@ def measure_declared_financial_operation(
         (name, getattr(journal_store_type, name)) for name in journal_dependency_names
     )
     journal_schema_version = journal_store_type.SCHEMA_VERSION
+    protected_dependency_values = tuple(
+        function for _name, function, *_state in protected_functions
+    )
     journal_dependency_graph = _capture_operation_dependency_graph(
-        (canonical_json_for, get_event, current_journal_sequence, append_event)
+        protected_dependency_values
         + tuple(value for _name, value in journal_dependencies)
     )
 
     def require_operation_authority() -> None:
-        missing = object()
         if type_for(store) is not journal_store_type:
             raise error_type(
                 "measurement JournalStore exact class changed during financial operation"
             )
         current_store_state = object_getattribute(store, "__dict__")
-        if type_for(current_store_state) is not dict:
+        if type_for(current_store_state) is not dict_type:
             raise error_type(
                 "measurement JournalStore instance state became non-canonical"
             )
-        if tuple(current_store_state) != store_state_names:
+        if tuple_for(current_store_state) != store_state_names:
             raise error_type(
                 "measurement JournalStore instance state shape changed during financial operation"
             )
@@ -506,16 +536,16 @@ def measure_declared_financial_operation(
             if type_for(value) is not identity_type:
                 raise error_type(f"measurement {label} class changed during financial operation")
             current_identity_state = object_getattribute(value, "__dict__")
-            if type_for(current_identity_state) is not dict:
+            if type_for(current_identity_state) is not dict_type:
                 raise error_type(f"measurement {label} state became non-canonical")
-            if tuple(current_identity_state) != identity_state_names:
+            if tuple_for(current_identity_state) != identity_state_names:
                 raise error_type(f"measurement {label} state shape changed during financial operation")
             for name, expected_value in snapshot:
                 if current_identity_state.get(name, missing) is not expected_value:
                     raise error_type(
                         f"measurement {label} state changed during financial operation: {name}"
                     )
-        if tuple(identity_type.__dict__) != identity_class_member_names:
+        if tuple_for(identity_type.__dict__) != identity_class_member_names:
             raise error_type(
                 "measurement JournalStoreIdentity class shape changed during financial operation"
             )
@@ -569,7 +599,7 @@ def measure_declared_financial_operation(
                 "measurement class authority changed during financial operation"
             )
         for name, expected_dependency in journal_dependencies:
-            if getattr(journal_store_type, name, missing) is not expected_dependency:
+            if getattr_for(journal_store_type, name, missing) is not expected_dependency:
                 raise error_type(
                     "measurement JournalStore dependency changed during financial "
                     f"operation: {name}"
@@ -601,6 +631,7 @@ def measure_declared_financial_operation(
         (
             graph_functions,
             graph_globals,
+            graph_builtins,
             graph_module_members,
             graph_closures,
         ) = journal_dependency_graph
@@ -624,8 +655,14 @@ def measure_declared_financial_operation(
                     "measurement transitive global dependency changed during "
                     f"financial operation: {dependency_name}"
                 )
+        for namespace, dependency_name, expected_dependency in graph_builtins:
+            if namespace.get(dependency_name, missing) is not expected_dependency:
+                raise error_type(
+                    "measurement transitive builtin dependency changed during "
+                    f"financial operation: {dependency_name}"
+                )
         for module, member_name, expected_member in graph_module_members:
-            if getattr(module, member_name, missing) is not expected_member:
+            if getattr_for(module, member_name, missing) is not expected_member:
                 raise error_type(
                     "measurement transitive module dependency changed during financial "
                     f"operation: {module.__name__}.{member_name}"
@@ -711,8 +748,8 @@ def measure_declared_financial_operation(
         )
         end_ns = clock()
         if (
-            type(start_ns) is not int
-            or type(end_ns) is not int
+            type_for(start_ns) is not int_type
+            or type_for(end_ns) is not int_type
             or start_ns < 0
             or end_ns < start_ns
         ):
@@ -743,7 +780,7 @@ def measure_declared_financial_operation(
                 "event_type": measurement_event_type,
                 "aggregate_type": measurement_aggregate_type,
                 "aggregate_id": plan.plan_id,
-                "aggregate_version": str(expected_index + 1),
+                "aggregate_version": str_for(expected_index + 1),
                 "payload": payload,
                 "payload_hash": payload_digest_for(payload),
                 "committed_at": datetime_type.now(timezone_type.utc)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,6 +97,42 @@ class RuntimeLoadMeasurementJournalTransitiveAuthorityTests(unittest.TestCase):
 
     def _measurement_id(self, plan_id: str, event_id: str) -> str:
         return measurement_module._measurement_event_id(plan_id, event_id)
+
+    def test_operation_cannot_retarget_builtin_used_by_journal_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            expected = _expected()
+            plan_id = self._declare(store, expected)
+            original = builtins.isinstance
+            touched = False
+            caught: RuntimeLoadMeasurementError | None = None
+
+            def hostile_isinstance(*_args, **_kwargs):
+                nonlocal touched
+                touched = True
+                raise AssertionError("forged builtin executed after callback")
+
+            def attack() -> None:
+                _append(store, expected)
+                builtins.isinstance = hostile_isinstance
+
+            try:
+                try:
+                    self._measure(store, expected, plan_id, attack)
+                except RuntimeLoadMeasurementError as error:
+                    caught = error
+            finally:
+                builtins.isinstance = original
+
+            self.assertIsNotNone(caught)
+            self.assertRegex(
+                str(caught),
+                r"transitive builtin dependency changed.*isinstance",
+            )
+            self.assertFalse(touched)
+            self.assertIsNone(
+                store.get_event(self._measurement_id(plan_id, expected.event_id))
+            )
 
     def test_operation_cannot_retarget_json_dumps_below_canonical_json(self) -> None:
         with tempfile.TemporaryDirectory() as root:

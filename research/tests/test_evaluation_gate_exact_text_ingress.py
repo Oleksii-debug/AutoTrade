@@ -91,6 +91,11 @@ class EvaluationGateExactTextIngressTests(unittest.TestCase):
             gate_profile_subject_digest(mutated)
         self.assertNoHostileCallbacks()
 
+        mutated = profile()
+        object.__setattr__(mutated, "max_trials", True)
+        with self.assertRaises(ValueError):
+            gate_profile_subject_digest(mutated)
+
     def test_evaluation_evidence_identity_text_rejects_subclasses_before_dispatch(self):
         base = evidence()
 

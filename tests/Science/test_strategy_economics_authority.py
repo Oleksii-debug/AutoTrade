@@ -278,6 +278,35 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 _token=economics_authority._ISSUE_TOKEN,
             )
 
+    def test_private_registry_cannot_reseal_mutated_positive_authority(self):
+        item = _proposal()
+        assessment = assess_strategy_economics_authority(
+            item,
+            _binding(item),
+            instrument_registry=_registry(),
+        )
+
+        # Python-private symbols are importable by same-process callers.  Prove
+        # that even a caller who mutates an issued diagnostic and re-registers
+        # a matching private seal still cannot obtain terminal authority.
+        object.__setattr__(assessment, "status", "QUALIFIED")
+        object.__setattr__(assessment, "unresolved_owners", ())
+        economics_authority._register_issued(
+            assessment,
+            _token=economics_authority._ISSUE_TOKEN,
+        )
+
+        self.assertIs(
+            require_strategy_economics_assessment(assessment),
+            assessment,
+        )
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "positive strategy economics issuance is unavailable on current main",
+        ):
+            require_qualified_strategy_economics(assessment)
+
+
     def test_unknown_instrument_fails_before_assessment_issuance(self):
         item = _proposal()
         empty_registry = InstrumentRegistry(

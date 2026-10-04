@@ -1178,7 +1178,7 @@ def probe_bybit_credential_with_vault(
             is not _PROVIDER_TRANSPORT_ATTESTATION
         ):
             raise ProviderCoreError(
-                "successful Bybit credential wire result lost provider transport attestation"
+                "successful Bybit credential wire result lost provider-derived attestation for direct transport"
             )
         if (
             wire_response.ret_code == 0

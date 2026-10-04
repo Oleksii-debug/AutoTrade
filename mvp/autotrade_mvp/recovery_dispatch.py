@@ -85,8 +85,15 @@ def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
 
 
 def _takeover_source_owner(recovery: RecoveryController) -> OwnerFence | None:
+    """Diagnostic reader for the takeover-only source marker.
+
+    Financial issuance paths intentionally do not dispatch through this mutable
+    module helper after composition. They read and validate the exact marker
+    state directly so rebinding this convenience reader cannot relax authority.
+    """
+
     state = vars(recovery)
-    source = state.get(_TAKEOVER_SOURCE_ATTR)
+    source = state.get("_autotrade_takeover_source_owner")
     if source is None:
         return None
     if type(source) is not OwnerFence:
@@ -105,7 +112,7 @@ def mark_recovery_takeover_source(
     """Mark an attached durable restart owner as takeover-only authority.
 
     The marker lives on the exact controller already bound to the canonical
-    journal.  It does not create another recovery state machine; it only prevents
+    journal. It does not create another recovery state machine; it only prevents
     the recovery-issued sender seam from reissuing the pre-takeover generation.
     """
 
@@ -118,10 +125,18 @@ def mark_recovery_takeover_source(
     chain = recovery.durable_owner_chain()
     if not chain or chain[-1] != source:
         raise PermissionError("takeover source is not the current durable owner")
-    existing = _takeover_source_owner(recovery)
-    if existing is not None and existing != source:
-        raise PermissionError("takeover source owner marker already belongs elsewhere")
-    vars(recovery)[_TAKEOVER_SOURCE_ATTR] = source
+    state = vars(recovery)
+    existing = state.get("_autotrade_takeover_source_owner")
+    if existing is not None:
+        if type(existing) is not OwnerFence:
+            raise PermissionError("takeover source owner authority changed")
+        if type(existing.owner_id) is not str or not existing.owner_id:
+            raise PermissionError("takeover source owner identity is invalid")
+        if type(existing.epoch) is not int or existing.epoch < 1:
+            raise PermissionError("takeover source owner epoch is invalid")
+        if existing != source:
+            raise PermissionError("takeover source owner marker already belongs elsewhere")
+    state["_autotrade_takeover_source_owner"] = source
     recovery.provider_reconciled = False
     recovery.reason_codes.add("takeover_source_only")
     recovery.reason_codes.add("startup_reconciliation_required")
@@ -141,9 +156,16 @@ def activate_recovery_takeover_target(
         raise TypeError("recovery must be exact RecoveryController")
     if type(source) is not OwnerFence or type(target) is not OwnerFence:
         raise TypeError("source and target must be exact OwnerFence values")
-    marked_source = _takeover_source_owner(recovery)
+    state = vars(recovery)
+    marked_source = state.get("_autotrade_takeover_source_owner")
     if marked_source is None:
         raise PermissionError("recovery controller is not attached takeover-only")
+    if type(marked_source) is not OwnerFence:
+        raise PermissionError("takeover source owner authority changed")
+    if type(marked_source.owner_id) is not str or not marked_source.owner_id:
+        raise PermissionError("takeover source owner identity is invalid")
+    if type(marked_source.epoch) is not int or marked_source.epoch < 1:
+        raise PermissionError("takeover source owner epoch is invalid")
     if marked_source != source:
         raise PermissionError("durable takeover source does not match attached source")
     if target.epoch != source.epoch + 1:
@@ -153,7 +175,7 @@ def activate_recovery_takeover_target(
     chain = recovery.durable_owner_chain()
     if not chain or chain[-1] != target:
         raise PermissionError("takeover target is not the current durable owner")
-    vars(recovery).pop(_TAKEOVER_SOURCE_ATTR, None)
+    state.pop("_autotrade_takeover_source_owner", None)
     recovery.provider_reconciled = False
     recovery.reason_codes.discard("takeover_source_only")
     recovery.reason_codes.add("startup_reconciliation_required")
@@ -215,11 +237,18 @@ class RecoveryIssuedDispatcher:
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
-        source = _takeover_source_owner(recovery)
-        if source is not None and owner == source:
-            raise PermissionError(
-                "takeover source owner cannot receive recovery-issued sender authority"
-            )
+        source = vars(recovery).get("_autotrade_takeover_source_owner")
+        if source is not None:
+            if type(source) is not OwnerFence:
+                raise PermissionError("takeover source owner authority changed")
+            if type(source.owner_id) is not str or not source.owner_id:
+                raise PermissionError("takeover source owner identity is invalid")
+            if type(source.epoch) is not int or source.epoch < 1:
+                raise PermissionError("takeover source owner epoch is invalid")
+            if owner == source:
+                raise PermissionError(
+                    "takeover source owner cannot receive recovery-issued sender authority"
+                )
         sender_function = _CANONICAL_VALIDATE_SENDER
         snapshot_reader = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
         self.__recovery = recovery
@@ -277,11 +306,18 @@ class RecoveryIssuedDispatcher:
             or self.__account_id != self.__account_id.strip()
         ):
             raise PermissionError("issued dispatcher account authority changed")
-        source = _takeover_source_owner(self.__recovery)
-        if source is not None and self.__owner == source:
-            raise PermissionError(
-                "takeover source owner cannot retain recovery-issued sender authority"
-            )
+        source = vars(self.__recovery).get("_autotrade_takeover_source_owner")
+        if source is not None:
+            if type(source) is not OwnerFence:
+                raise PermissionError("takeover source owner authority changed")
+            if type(source.owner_id) is not str or not source.owner_id:
+                raise PermissionError("takeover source owner identity is invalid")
+            if type(source.epoch) is not int or source.epoch < 1:
+                raise PermissionError("takeover source owner epoch is invalid")
+            if self.__owner == source:
+                raise PermissionError(
+                    "takeover source owner cannot retain recovery-issued sender authority"
+                )
 
         # Do not dynamically dispatch through module helper aliases here. This
         # method is the post-composition issuance boundary, so it validates and
@@ -397,11 +433,18 @@ def build_recovery_issued_dispatcher(
         raise PermissionError("recovery owner identity is not canonical exact text")
     if type(owner.epoch) is not int or owner.epoch < 1:
         raise PermissionError("recovery owner epoch is not a positive exact integer")
-    source = _takeover_source_owner(recovery)
-    if source is not None and owner == source:
-        raise PermissionError(
-            "takeover source owner cannot receive recovery-issued sender authority"
-        )
+    source = state.get("_autotrade_takeover_source_owner")
+    if source is not None:
+        if type(source) is not OwnerFence:
+            raise PermissionError("takeover source owner authority changed")
+        if type(source.owner_id) is not str or not source.owner_id:
+            raise PermissionError("takeover source owner identity is invalid")
+        if type(source.epoch) is not int or source.epoch < 1:
+            raise PermissionError("takeover source owner epoch is invalid")
+        if owner == source:
+            raise PermissionError(
+                "takeover source owner cannot receive recovery-issued sender authority"
+            )
     durable_chain = recovery.durable_owner_chain()
     if not durable_chain or durable_chain[-1] != owner:
         raise PermissionError("recovery owner is not the current durable owner")

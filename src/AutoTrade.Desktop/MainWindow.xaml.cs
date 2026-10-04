@@ -134,6 +134,8 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
+        bool restoreKeyboardFocus =
+            returnFocus && RefreshStatusButton.IsKeyboardFocusWithin;
         RefreshStatusButton.IsEnabled = false;
 
         try
@@ -154,8 +156,13 @@ public partial class MainWindow : Window
         }
         finally
         {
+            System.Windows.Input.IInputElement? focusedElement =
+                System.Windows.Input.Keyboard.FocusedElement;
             RefreshStatusButton.IsEnabled = true;
-            if (returnFocus && IsLoaded)
+            if (restoreKeyboardFocus && IsLoaded && (
+                focusedElement is null
+                || ReferenceEquals(focusedElement, RefreshStatusButton)
+                || ReferenceEquals(focusedElement, this)))
             {
                 RefreshStatusButton.Focus();
             }
@@ -346,6 +353,7 @@ public partial class MainWindow : Window
 
     private async void BlockNewExposure_Click(object sender, RoutedEventArgs e)
     {
+        bool restoreKeyboardFocus = BlockNewExposureButton.IsKeyboardFocusWithin;
         BlockNewExposureButton.IsEnabled = false;
         EmergencyOperationValue.Text = "Unavailable";
         SetLiveRegionText(
@@ -394,8 +402,13 @@ public partial class MainWindow : Window
         }
         finally
         {
+            System.Windows.Input.IInputElement? focusedElement =
+                System.Windows.Input.Keyboard.FocusedElement;
             BlockNewExposureButton.IsEnabled = true;
-            if (IsLoaded)
+            if (restoreKeyboardFocus && IsLoaded && (
+                focusedElement is null
+                || ReferenceEquals(focusedElement, BlockNewExposureButton)
+                || ReferenceEquals(focusedElement, this)))
             {
                 BlockNewExposureButton.Focus();
             }

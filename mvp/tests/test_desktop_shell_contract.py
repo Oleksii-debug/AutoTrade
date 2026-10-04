@@ -144,6 +144,14 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("MainWindow_Loaded", text)
         self.assertIn("MainWindow_Closed", text)
         self.assertIn("returnFocus: false", code)
+        self.assertIn(
+            "returnFocus && RefreshStatusButton.IsKeyboardFocusWithin",
+            code,
+        )
+        self.assertIn(
+            "ReferenceEquals(focusedElement, RefreshStatusButton)",
+            code,
+        )
         self.assertIn("_lifetime.Cancel()", code)
 
     def test_live_regions_raise_automation_events_without_moving_focus(self):
@@ -297,6 +305,14 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("durable block is not yet confirmed", code)
         self.assertIn("Durable block confirmed by the host", code)
         self.assertIn("Outstanding in-flight actions", code)
+        self.assertIn(
+            "BlockNewExposureButton.IsKeyboardFocusWithin",
+            code,
+        )
+        self.assertIn(
+            "ReferenceEquals(focusedElement, BlockNewExposureButton)",
+            code,
+        )
 
     def test_disconnected_default_never_fabricates_host_state_or_acceptance(self):
         client = CLIENT.read_text(encoding="utf-8")

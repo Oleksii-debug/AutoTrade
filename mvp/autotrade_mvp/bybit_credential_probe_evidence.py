@@ -408,6 +408,11 @@ class BybitCredentialProbeWireResponse:
     _provider_echo_attestation: InitVar[object | None] = None
     ret_code: int = field(init=False)
     response_sha256: str = field(init=False)
+    _provider_echo_proof: object | None = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(
         self,
@@ -441,6 +446,7 @@ class BybitCredentialProbeWireResponse:
             )
         object.__setattr__(self, "ret_code", ret_code)
         object.__setattr__(self, "response_sha256", response_sha256)
+        object.__setattr__(self, "_provider_echo_proof", _provider_echo_attestation)
 
 
 BybitCredentialProbeWireQuery = Callable[..., BybitCredentialProbeWireResponse]
@@ -1001,6 +1007,20 @@ def probe_bybit_credential_with_vault(
             raise ProviderCoreError(
                 "Bybit credential probe non-200 HTTP result is not rejection evidence"
             )
+        if (
+            wire_response.ret_code == 0
+            and wire_response._provider_echo_proof is not _PROVIDER_ECHO_ATTESTATION
+        ):
+            raise ProviderCoreError(
+                "successful Bybit credential wire result lost provider-derived attestation"
+            )
+        if (
+            wire_response.ret_code != 0
+            and wire_response._provider_echo_proof is not None
+        ):
+            raise ProviderCoreError(
+                "non-success Bybit credential wire result cannot carry provider attestation"
+            )
         observed_at = _clock_utc_text(clock_utc())
         return BybitCredentialProbeEvidence(
             credential_handle=credential_handle,
@@ -1015,11 +1035,7 @@ def probe_bybit_credential_with_vault(
             response_sha256=wire_response.response_sha256,
             observed_at=observed_at,
             api_key_echo_confirmed=wire_response.api_key_echo_confirmed,
-            _provider_echo_attestation=(
-                _PROVIDER_ECHO_ATTESTATION
-                if wire_response.api_key_echo_confirmed
-                else None
-            ),
+            _provider_echo_attestation=wire_response._provider_echo_proof,
         )
 
 

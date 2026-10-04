@@ -17,10 +17,10 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 from .qualification_attestation import (

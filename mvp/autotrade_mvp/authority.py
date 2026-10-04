@@ -707,6 +707,7 @@ def _authority_service_capital_operations():
         provider_available: Mapping[str, object],
         resources: tuple[str, ...],
         *,
+        provider_evidence: Mapping[str, object] | None = None,
         required: bool = False,
     ) -> dict[str, object] | None:
         settlement_book, economic_book = binding(service, required=required)
@@ -717,8 +718,78 @@ def _authority_service_capital_operations():
         )
         if not cash_resources:
             return None
+        if not isinstance(provider_evidence, Mapping):
+            raise AuthorityConflict(
+                "settlement capital requires provider availability evidence"
+            )
 
         store = _authority_service_store(service, required=True)
+        checkpoint_event_id = _text(
+            provider_evidence.get("checkpoint_event_id"),
+            name="checkpoint_event_id",
+        )
+        checkpoint = _authority_store_call(service, "get_event", checkpoint_event_id)
+        if (
+            checkpoint is None
+            or checkpoint.get("event_type") != "AccountReconciled"
+            or checkpoint.get("aggregate_type") != "account_reconciliation"
+        ):
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint is unavailable"
+            )
+        checkpoint_sequence = checkpoint.get("journal_sequence")
+        if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint sequence is invalid"
+            )
+        if (
+            provider_evidence.get("scope_latest_checkpoint_journal_sequence")
+            != checkpoint_sequence
+        ):
+            raise AuthorityConflict(
+                "settlement capital requires the current provider checkpoint"
+            )
+        checkpoint_payload = checkpoint.get("payload")
+        if not isinstance(checkpoint_payload, Mapping):
+            raise AuthorityConflict(
+                "settlement capital provider checkpoint is malformed"
+            )
+        resource_evidence = checkpoint_payload.get("resource_availability")
+        if not isinstance(resource_evidence, Mapping):
+            raise AuthorityConflict(
+                "settlement capital provider resource evidence is missing"
+            )
+        provider_query_started = _instant(
+            resource_evidence.get("query_started_at"),
+            name="resource_availability.query_started_at",
+        )
+
+        economic_events = _authority_store_call(
+            service,
+            "load_events",
+            "economic_book",
+            economic_book.book_id,
+        )
+        if economic_events:
+            economic_head = economic_events[-1]
+            economic_sequence = economic_head.get("journal_sequence")
+            if type(economic_sequence) is not int or economic_sequence <= 0:
+                raise AuthorityConflict(
+                    "settlement capital economic head sequence is invalid"
+                )
+            if economic_sequence >= checkpoint_sequence:
+                raise AuthorityConflict(
+                    "provider availability predates local economic financial truth"
+                )
+            economic_committed_at = _instant(
+                economic_head.get("committed_at"),
+                name="economic_book.committed_at",
+            )
+            if economic_committed_at >= provider_query_started:
+                raise AuthorityConflict(
+                    "provider availability predates local economic financial truth"
+                )
+
         before = _authority_store_call(service, "current_journal_sequence")
         DurableProviderEconomicBook.refresh(economic_book)
         projection = DurableSettlementBook.project(
@@ -4557,6 +4628,7 @@ class AuthorityService:
                     self,
                     canonical_available,
                     required_resource_names,
+                    provider_evidence=availability_evidence,
                     required=False,
                 )
                 if capital_cut is not None:
@@ -5298,6 +5370,7 @@ class AuthorityService:
                         self,
                         current_provider_available,
                         tuple(sorted(risk_requirements)),
+                        provider_evidence=current_provider_evidence,
                         required=True,
                     )
                     assert current_capital is not None

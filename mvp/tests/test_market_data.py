@@ -3338,6 +3338,15 @@ class MarketNormalizationTests(unittest.TestCase):
         )
         original_contract = event.to_contract_dict()
 
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "adapter build differs from identity material",
+        ):
+            replace(
+                event,
+                adapter_version="autotrade-test-market-adapter@2",
+            )
+
         object.__setattr__(
             event,
             "adapter_version",

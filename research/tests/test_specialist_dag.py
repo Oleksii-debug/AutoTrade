@@ -497,6 +497,44 @@ class SpecialistDagTests(unittest.TestCase):
         self.assertEqual(low_precision, high_precision)
         self.assertEqual(low_precision, Decimal("0.000000009"))
 
+
+    def test_zero_confidence_group_has_no_numerical_influence(self):
+        specs = [
+            spec("signal", "independent"),
+            spec("zero", "zero-confidence"),
+        ]
+        result = aggregate(
+            specs,
+            [
+                run("signal", "1", confidence="1"),
+                run("zero", "-1", confidence="0"),
+            ],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.score, Decimal("1"))
+        self.assertEqual(result.direction, "LONG")
+        self.assertEqual(result.accepted_roles, ("signal", "zero"))
+
+    def test_all_zero_confidence_groups_are_flat_without_division(self):
+        specs = [
+            spec("long", "g1"),
+            spec("short", "g2"),
+        ]
+        result = aggregate(
+            specs,
+            [
+                run("long", "1", confidence="0"),
+                run("short", "-1", confidence="0"),
+            ],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.score, Decimal("0"))
+        self.assertEqual(result.direction, "FLAT")
+        self.assertEqual(result.accepted_roles, ("long", "short"))
+        self.assertFalse(result.live_authority_granted)
+
     def test_correlated_clones_do_not_outvote_independent_group(self):
         specs = [
             spec("clone1", "same-source"),

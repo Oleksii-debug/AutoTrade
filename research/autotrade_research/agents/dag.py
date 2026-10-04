@@ -577,7 +577,9 @@ def aggregate_specialists(
                 "specialist group weighted score",
             )
         if weight_sum == 0:
-            group_scores.append(Fraction(0, 1))
+            # A zero-confidence group is evidence with no numerical weight.
+            # Counting it in the equal-group denominator would let a
+            # zero-confidence specialist dilute an independent signal.
             continue
         group_scores.append(
             _bounded_fraction(
@@ -586,17 +588,20 @@ def aggregate_specialists(
             )
         )
 
-    aggregate_fraction = Fraction(0, 1)
-    for group_score in group_scores:
+    if group_scores:
+        aggregate_fraction = Fraction(0, 1)
+        for group_score in group_scores:
+            aggregate_fraction = _bounded_fraction(
+                aggregate_fraction + group_score,
+                "aggregate specialist score",
+            )
         aggregate_fraction = _bounded_fraction(
-            aggregate_fraction + group_score,
+            aggregate_fraction / len(group_scores),
             "aggregate specialist score",
         )
-    aggregate_fraction = _bounded_fraction(
-        aggregate_fraction / len(group_scores),
-        "aggregate specialist score",
-    )
-    aggregate = _score_decimal(aggregate_fraction)
+        aggregate = _score_decimal(aggregate_fraction)
+    else:
+        aggregate = Decimal("0")
     if aggregate > 0:
         direction: Literal["LONG", "SHORT", "FLAT"] = "LONG"
     elif aggregate < 0:

@@ -607,7 +607,7 @@ class CandidateWaveIsolationTests(unittest.TestCase):
                 change_summary="Correct observed errors without changing hard risk",
                 training_population=training,
                 validation_population=validation,
-                validation_opened_at=BASE + timedelta(minutes=2),
+                validation_opened_at=BASE + timedelta(minutes=16),
             )
 
     def test_population_identity_is_immutable_unique_tuple(self):

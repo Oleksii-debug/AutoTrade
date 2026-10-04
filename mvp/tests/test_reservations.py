@@ -149,6 +149,31 @@ class ReservationFoundationTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
 
+    def test_reversed_fill_restores_consumed_amount_to_held_capacity(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "1000"},
+        )
+        consumed = book.consume("r1", {"CASH:USD": "40"})
+        self.assertEqual(consumed.remaining["CASH:USD"], Decimal("60"))
+        self.assertEqual(consumed.consumed["CASH:USD"], Decimal("40"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+
+        restored = book.restore_consumption("r1", {"CASH:USD": "40"})
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("100"))
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "exceeds consumed reservation",
+        ):
+            book.restore_consumption("r1", {"CASH:USD": "1"})
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
+
     def test_partial_fill_reduces_reservation_and_cancel_releases_remainder(self):
         book = ReservationBook()
         book.reserve(

@@ -40,14 +40,31 @@ def _economic_store_load_command_event_batch(
     """Require an OMS-bound EVENT_BATCH to own the OMS event it names.
 
     JournalStore authenticates the stored EVENT_BATCH descriptors and returns
-    their integrity-checked events. The atomic fill request/result also names
-    the canonical OMS event. Exact replay is authoritative only when those two
-    provenance statements join on the same durable event rather than merely on
-    command metadata that happens to mention its identifier.
+    their integrity-checked events. Atomic fill and fill-bust requests both name
+    their canonical OMS event. Exact replay is authoritative only when command
+    provenance and the immutable OMS event join on the same durable fact.
     """
 
     request_value = kwargs.get("request")
-    order_value = request_value.get("order_fill") if type(request_value) is dict else None
+    order_value = None
+    order_field = None
+    expected_operation = None
+    if type(request_value) is dict:
+        fill_value = request_value.get("order_fill")
+        bust_value = request_value.get("order_bust")
+        if fill_value is not None and bust_value is not None:
+            raise ValueError(
+                "atomic OMS command request cannot bind fill and bust authorities together"
+            )
+        if fill_value is not None:
+            order_field = "order_fill"
+            order_value = fill_value
+            expected_operation = "RECORD_FILL"
+        elif bust_value is not None:
+            order_field = "order_bust"
+            order_value = bust_value
+            expected_operation = "BUST_FILL"
+
     if type(order_value) is dict and type(order_value.get("event_id")) is str:
         kwargs["referenced_event_ids"] = (order_value["event_id"],)
     authority = _original_economic_store_load_command_event_batch(
@@ -58,27 +75,25 @@ def _economic_store_load_command_event_batch(
         return None
 
     request = kwargs.get("request")
-    if not isinstance(request, Mapping):
+    if not isinstance(request, Mapping) or order_field is None:
         return authority
-    order_fill = request.get("order_fill")
-    if order_fill is None:
-        return authority
-    if not isinstance(order_fill, Mapping):
-        raise ValueError("atomic OMS command request has invalid order fill authority")
+    order_value = request.get(order_field)
+    if not isinstance(order_value, Mapping):
+        raise ValueError("atomic OMS command request has invalid order authority")
 
-    event_id = order_fill.get("event_id")
-    event_key = order_fill.get("event_key")
-    operation = order_fill.get("operation")
-    order_request = order_fill.get("request")
+    event_id = order_value.get("event_id")
+    event_key = order_value.get("event_key")
+    operation = order_value.get("operation")
+    order_request = order_value.get("request")
     if (
         not isinstance(event_id, str)
         or not event_id
         or not isinstance(event_key, str)
         or not event_key
-        or operation != "RECORD_FILL"
+        or operation != expected_operation
         or not isinstance(order_request, Mapping)
     ):
-        raise ValueError("atomic OMS command request has invalid order fill authority")
+        raise ValueError("atomic OMS command request has invalid order authority")
 
     raw_events = authority.get("events")
     if not isinstance(raw_events, tuple):
@@ -90,16 +105,28 @@ def _economic_store_load_command_event_batch(
     )
     if not matching:
         references = authority.get("referenced_events", ())
-        matching = tuple(
-            event for event in references
-            if type(event) is dict and event.get("event_id") == event_id
-        ) if type(references) is tuple else ()
-        if len(matching) != 1 or not raw_events or matching[0]["journal_sequence"] >= min(
-            event["journal_sequence"] for event in raw_events
+        matching = (
+            tuple(
+                event
+                for event in references
+                if type(event) is dict and event.get("event_id") == event_id
+            )
+            if type(references) is tuple
+            else ()
+        )
+        if (
+            len(matching) != 1
+            or not raw_events
+            or matching[0]["journal_sequence"]
+            >= min(event["journal_sequence"] for event in raw_events)
         ):
-            raise ValueError("atomic OMS command authority does not own the OMS fill event")
+            raise ValueError(
+                "atomic OMS command authority does not own the referenced OMS event"
+            )
     if len(matching) != 1:
-        raise ValueError("atomic OMS command authority does not own the OMS fill event")
+        raise ValueError(
+            "atomic OMS command authority does not own the referenced OMS event"
+        )
 
     event = matching[0]
     payload = event.get("payload")
@@ -108,10 +135,17 @@ def _economic_store_load_command_event_batch(
         or event.get("aggregate_type") != "order_projection_book"
         or not isinstance(payload, Mapping)
         or payload.get("event_key") != event_key
-        or payload.get("operation") != "RECORD_FILL"
+        or payload.get("operation") != expected_operation
         or payload.get("request") != order_request
-        or payload_digest({"request_hash": payload.get("request_hash"), "evidence_refs": event.get("evidence_refs", [])}) != order_fill.get("mutation_hash")
-        or payload_digest(payload.get("snapshot")) != order_fill.get("snapshot_digest")
+        or payload_digest(
+            {
+                "request_hash": payload.get("request_hash"),
+                "evidence_refs": event.get("evidence_refs", []),
+            }
+        )
+        != order_value.get("mutation_hash")
+        or payload_digest(payload.get("snapshot"))
+        != order_value.get("snapshot_digest")
         or payload.get("scope", {}).get("provider_id") != economic_book.provider_id
         or payload.get("scope", {}).get("account_id") != economic_book.account_id
         or payload.get("scope", {}).get("environment") != economic_book.environment

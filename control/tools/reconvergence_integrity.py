@@ -90,18 +90,56 @@ def reconvergence_evidence(
     base_sha: str,
     head_sha: str,
     assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
 ) -> dict[str, object]:
     """Machine-readable exact-revision evidence from the trusted-base guard."""
 
     if type(assessment) is not IntegrityAssessment:
         raise TypeError("assessment must be IntegrityAssessment")
+    if type(max_deletions) is not int or max_deletions < 1:
+        raise ValueError("max_deletions must be a positive exact integer")
+    if (
+        type(max_deleted_fraction) is not float
+        or not (0.0 < max_deleted_fraction <= 1.0)
+    ):
+        raise ValueError("max_deleted_fraction must be an exact float in (0, 1]")
+    if type(scope_enforced) is not bool:
+        raise TypeError("scope_enforced must be bool")
     base_sha = _exact_git_object_id(base_sha, field="base_sha")
     head_sha = _exact_git_object_id(head_sha, field="head_sha")
+    unresolved_limits = (
+        []
+        if scope_enforced
+        else [
+            "mutation_scope_not_enforced_without_trusted_external_scope"
+        ]
+    )
     return {
         "schema_version": "1.0.0",
+        "source_sha": head_sha,
+        "trusted_guard_source_sha": base_sha,
         "base_sha": base_sha,
         "head_sha": head_sha,
+        "input_schema_version": "git-tree-reconvergence/v1",
         "result": "PASS" if assessment.allowed else "FAIL",
+        "policy": {
+            "max_deletions": max_deletions,
+            "max_deleted_fraction": max_deleted_fraction,
+            "scope_enforced": scope_enforced,
+        },
+        "checks_run": [
+            "exact-base-ancestry",
+            "protected-sentinel-integrity",
+            "mass-base-tree-deletion",
+            *(
+                ["trusted-mutation-scope"]
+                if scope_enforced
+                else []
+            ),
+        ],
+        "unresolved_limits": unresolved_limits,
         "base_is_ancestor": assessment.base_is_ancestor,
         "base_path_count": assessment.base_path_count,
         "deletion_count": assessment.deletion_count,
@@ -120,11 +158,17 @@ def write_reconvergence_evidence(
     base_sha: str,
     head_sha: str,
     assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
 ) -> None:
     evidence = reconvergence_evidence(
         base_sha=base_sha,
         head_sha=head_sha,
         assessment=assessment,
+        max_deletions=max_deletions,
+        max_deleted_fraction=max_deleted_fraction,
+        scope_enforced=scope_enforced,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -386,6 +430,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_sha=base_sha,
             head_sha=head_sha,
             assessment=assessment,
+            max_deletions=args.max_deletions,
+            max_deleted_fraction=args.max_deleted_fraction,
+            scope_enforced=allowed_scopes is not None,
         )
     print(
         "Reconvergence tree guard: "

@@ -116,6 +116,24 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                 set(),
             )
             self.assertEqual(len(added_reader_capabilities), 1)
+            self.assertTrue(
+                all(
+                    reference.__callback__ is None
+                    for reference in weakref.getweakrefs(book)
+                )
+            )
+            self.assertTrue(
+                all(
+                    reference.__callback__ is None
+                    for reference in weakref.getweakrefs(store)
+                )
+            )
+            self.assertTrue(
+                all(
+                    reference.__callback__ is None
+                    for reference in weakref.getweakrefs(artifacts)
+                )
+            )
 
             book_ref = weakref.ref(book)
             store_ref = weakref.ref(store)
@@ -133,6 +151,81 @@ class ProviderEvidenceAuthenticatedSnapshotTests(unittest.TestCase):
                 set(root_authority._READER_CAPABILITIES),
                 reader_capabilities_before,
             )
+
+    def test_caller_cannot_retarget_live_provider_evidence_reader(self):
+        with TemporaryDirectory() as directory:
+            book, _artifacts, _request, ref = prepared_book(directory)
+            original_reader = object.__getattribute__(
+                book,
+                "_provider_evidence_reader",
+            )
+            object.__setattr__(
+                book,
+                "_provider_evidence_reader",
+                object(),
+            )
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "trusted reader authority changed",
+            ):
+                book.acknowledge(
+                    event_key="ack-reader-retarget",
+                    client_order_id="c1",
+                    provider_order_id="provider-order-1",
+                    status="ACCEPTED",
+                    committed_at=T1,
+                    evidence_refs=[ref],
+                )
+
+            self.assertTrue(callable(original_reader))
+
+    def test_failed_initial_reload_releases_binding_for_same_object_retry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = object.__new__(DurableOrderBookProjection)
+            gc.collect()
+            reader_capabilities_before = set(root_authority._READER_CAPABILITIES)
+            original_reload = DurableOrderBookProjection._reload
+
+            def fail_initial_reload(_value):
+                raise RuntimeError("forced initial OMS reload failure")
+
+            DurableOrderBookProjection._reload = fail_initial_reload
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced initial OMS reload failure",
+                ):
+                    book.__init__(
+                        store,
+                        provider_id="PROVIDER-A",
+                        account_id="acct-1",
+                        environment="PAPER",
+                        host_id="host-1",
+                        owner_epoch="1",
+                        evidence_artifact_store=artifacts,
+                    )
+            finally:
+                DurableOrderBookProjection._reload = original_reload
+
+            gc.collect()
+            self.assertEqual(
+                set(root_authority._READER_CAPABILITIES),
+                reader_capabilities_before,
+            )
+
+            book.__init__(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(book.snapshots, ())
 
     def test_order_projection_import_is_hermetic_without_research_package(self):
         root = Path(__file__).resolve().parents[2]

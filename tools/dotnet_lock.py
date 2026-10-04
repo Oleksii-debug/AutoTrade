@@ -54,16 +54,35 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
 
 
 def dotnet_restore_tokens_are_locked(tokens: tuple[str, ...] | list[str]) -> bool:
-    """Accept only exact locked-restore switches, never substring lookalikes."""
-    canonical_properties = {
-        '-p:RestoreLockedMode=true',
-        '/p:RestoreLockedMode=true',
-        '-property:RestoreLockedMode=true',
-        '/property:RestoreLockedMode=true',
-    }
-    return '--locked-mode' in tokens or any(
-        token in canonical_properties for token in tokens
-    )
+    """Accept only effective locked-restore authority before any -- sentinel."""
+    arguments = tuple(tokens[2:])
+    if '--' in arguments:
+        arguments = arguments[:arguments.index('--')]
+
+    locked_flag = '--locked-mode' in arguments
+    property_values: list[str] = []
+    prefixes = ('-p:', '/p:', '-property:', '/property:')
+    for token in arguments:
+        lowered = token.casefold()
+        prefix = next(
+            (candidate for candidate in prefixes if lowered.startswith(candidate)),
+            None,
+        )
+        if prefix is None:
+            continue
+        payload = token[len(prefix):]
+        for assignment in payload.split(';'):
+            if '=' not in assignment:
+                continue
+            name, value = assignment.split('=', 1)
+            if name.casefold() == 'restorelockedmode':
+                property_values.append(value.casefold())
+
+    # Any explicit contradictory/non-true assignment defeats the assertion,
+    # including a later value that could override --locked-mode.
+    if property_values and any(value != 'true' for value in property_values):
+        return False
+    return locked_flag or bool(property_values)
 
 
 def dotnet_project_package_references(project: Path) -> list[tuple[str | None, str | None]]:
@@ -129,6 +148,10 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         except (OSError, ET.ParseError):
             blockers.append(f'DOTNET_MSBUILD_DEPENDENCY_SOURCE_INVALID:{relative}')
             continue
+        if _xml_elements(tree, 'Import'):
+            blockers.append(
+                f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
+            )
         if _xml_elements(tree, 'PackageReference'):
             blockers.append(
                 f'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:{relative}'

@@ -2,12 +2,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import financial_send_authority, production_host
+from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
+from mvp.autotrade_mvp.financial_send_authority import (
+    FinancialSendAuthorityError,
+    build_financial_send_authority_issuer,
+)
+from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
+from mvp.autotrade_mvp.production_host import ProductionHostConfig, ProductionHostRuntime
 from mvp.autotrade_mvp.provider_route_dispatch import (
     ProviderRouteDispatchError,
     compose_selected_provider_route_authority,
 )
+from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.tests.test_provider_route_dispatch import (
     ProviderRouteDispatchTests,
     successor_spot_q,
@@ -16,6 +26,11 @@ from mvp.tests.test_provider_selection import NOW
 
 
 _AT = NOW.isoformat().replace("+00:00", "Z")
+
+
+class _FenceStub:
+    def __init__(self) -> None:
+        self.released = False
 
 
 class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
@@ -37,6 +52,31 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
             qualification_registry=qualifications,
             authority_check=authority_check,
         )
+
+    @staticmethod
+    def _runtime(directory: str, journal: JournalStore):
+        config = ProductionHostConfig(
+            journal_path=journal.path,
+            account_id="paper-account",
+            environment="PAPER",
+            host_id="host-route-authority",
+            bind_host="127.0.0.1",
+            bind_port=18767,
+            public_origin="http://127.0.0.1:18767",
+        )
+        boundary = object.__new__(SecurityBoundary)
+        application = object.__new__(AuthenticatedHostApplication)
+        application.security_boundary = boundary
+        host = ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=application,
+            server=object(),
+            instance_fence=_FenceStub(),
+            admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
+        )
+        return compose_financial_authority(host)
 
     def test_exact_current_c_q_extend_upstream_financial_guard(self):
         with TemporaryDirectory() as directory:
@@ -120,6 +160,88 @@ class SelectedRouteAuthorityCompositionTests(unittest.TestCase):
                     route,
                     lambda intent_hash, at: (True, "financial_authority_current"),
                 )
+
+    def test_financial_issuer_can_be_bound_to_exact_selected_route_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            self.assertTrue(issuer.provider_route_bound)
+            self.assertIs(issuer.runtime, runtime)
+
+    def test_partial_provider_route_binding_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            journal, _capabilities, _qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "requires selected_route plus durable C/Q registries",
+            ):
+                build_financial_send_authority_issuer(
+                    AuthorityService(journal),
+                    runtime,
+                    selected_route=route,
+                )
+
+    def test_provider_route_issuer_rejects_cross_store_c_q_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, _capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            other = JournalStore(Path(directory) / "other-issuer.sqlite3")
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "share one exact JournalStore",
+            ):
+                build_financial_send_authority_issuer(
+                    AuthorityService(journal),
+                    runtime,
+                    selected_route=route,
+                    capability_registry=DurableCapabilityRegistry(other),
+                    qualification_registry=qualifications,
+                )
+
+    def test_route_authority_composer_rebinding_fails_before_use(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            runtime = self._runtime(directory, journal)
+            issuer = build_financial_send_authority_issuer(
+                AuthorityService(journal),
+                runtime,
+                selected_route=route,
+                capability_registry=capabilities,
+                qualification_registry=qualifications,
+            )
+            original = financial_send_authority.compose_selected_provider_route_authority
+            calls = []
+
+            def forged(*_args, **_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged provider route authority executed")
+
+            financial_send_authority.compose_selected_provider_route_authority = forged
+            try:
+                with self.assertRaisesRegex(
+                    FinancialSendAuthorityError,
+                    "provider route authority composer changed",
+                ):
+                    _ = issuer.provider_route_bound
+            finally:
+                financial_send_authority.compose_selected_provider_route_authority = original
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -282,15 +282,22 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 if (!string.Equals(
                         existing.Actor,
                         currentSession.Actor,
-                        StringComparison.Ordinal)
-                    || !FixedTimeEquals(
-                        existing.SessionReference,
-                        currentSessionReference))
+                        StringComparison.Ordinal))
                 {
                     throw new EmergencyCommandUncertainException(
                         existing.CommandId,
-                        "The unresolved emergency command is bound to a different or expired host session. "
+                        "The unresolved emergency command is bound to a different actor. "
                         + "Its identity is preserved and will not be retargeted.");
+                }
+
+                if (!FixedTimeEquals(
+                        existing.SessionReference,
+                        currentSessionReference))
+                {
+                    return await RecoverAcceptedOperationAfterSessionRotationAsync(
+                        existing,
+                        currentSession,
+                        cancellationToken);
                 }
 
                 pending = existing;
@@ -423,7 +430,8 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(
                             operationId,
-                            cancellationToken);
+                            cancellationToken,
+                            currentSession);
                         bool terminal = operation.State is
                             EmergencyOperationState.Succeeded
                             or EmergencyOperationState.Failed
@@ -495,6 +503,97 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         {
             _commandGate.Release();
         }
+    }
+
+    private async Task<EmergencyCommandResult> RecoverAcceptedOperationAfterSessionRotationAsync(
+        PendingCommand pending,
+        EmergencyHostSession currentSession,
+        CancellationToken cancellationToken)
+    {
+        Snapshot snapshot;
+        try
+        {
+            snapshot = await GetSnapshotAsync(
+                cancellationToken,
+                currentSession);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            throw new EmergencyCommandUncertainException(
+                pending.CommandId,
+                "The unresolved emergency command is bound to an earlier session, and the current session "
+                + "could not prove the same authenticated host scope. The command remains unresolved and "
+                + "will not be resent or retargeted.",
+                error);
+        }
+
+        if (!string.Equals(
+                snapshot.Status.AccountId,
+                pending.AccountId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                snapshot.Status.Environment,
+                pending.Environment,
+                StringComparison.Ordinal))
+        {
+            throw new EmergencyCommandUncertainException(
+                pending.CommandId,
+                "The current authenticated host scope does not match the unresolved emergency command. "
+                + "The command remains unresolved and will not be resent or retargeted.");
+        }
+
+        string operationId = HostOperationIdentity.Derive(
+            pending.AccountId,
+            pending.Environment,
+            pending.CommandId);
+        EmergencyOperationStatus operation;
+        try
+        {
+            // The read-only operation lookup is the journal-continuity proof.
+            // A replacement session never replays or rewrites the persisted
+            // command. If this exact operation is absent, malformed, foreign,
+            // unauthenticated or unreachable, recovery remains unresolved.
+            operation = await GetOperationAsync(
+                operationId,
+                cancellationToken,
+                currentSession);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            throw new EmergencyCommandUncertainException(
+                pending.CommandId,
+                "The current authenticated host did not prove the exact durable operation derived from "
+                + "the unresolved command. The command remains unresolved and will not be resent or retargeted.",
+                error);
+        }
+
+        bool terminal = operation.State is
+            EmergencyOperationState.Succeeded
+            or EmergencyOperationState.Failed
+            or EmergencyOperationState.Cancelled;
+        bool recoveryRecordCleared =
+            terminal && TryClearPendingCommand();
+        return new EmergencyCommandResult(
+            accepted: true,
+            durableBlockConfirmed: operation.DurableBlockConfirmed,
+            inFlightActions: operation.InFlightActions,
+            operationId: operationId,
+            message: "A replacement authenticated session recovered the exact durable operation "
+                + operationId
+                + " by read-only identity lookup; the original command was not resent or retargeted"
+                + (terminal
+                    ? (recoveryRecordCleared
+                        ? "."
+                        : ". The terminal operation was observed, but the secure local recovery record could not be cleared.")
+                    : ". The operation is not terminal; the secure local recovery record is retained."));
     }
 
     private void PersistPendingCommand(PendingCommand pending)
@@ -627,12 +726,18 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         _pendingCommand = null;
     }
 
-    public async Task<EmergencyOperationStatus> GetOperationAsync(
+    public Task<EmergencyOperationStatus> GetOperationAsync(
         string operationId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken) =>
+        GetOperationAsync(operationId, cancellationToken, knownSession: null);
+
+    private async Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken,
+        EmergencyHostSession? knownSession)
     {
         string canonicalId = CanonicalGuid(operationId, nameof(operationId));
-        EmergencyHostSession session = GetBoundSession();
+        EmergencyHostSession session = GetBoundSession(knownSession);
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             HostApiRoutes.GetOperation(canonicalId),

@@ -179,7 +179,7 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
             "append_event",
             new=append_event_without_owner_cut,
         ), patch(
-            "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
+            "mvp.autotrade_mvp.recovery_takeover._CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR",
             new=self._anchor_injector(
                 event_id="owner-append-rebinding-race-1",
                 aggregate_id="owner-append-rebinding-race",
@@ -210,7 +210,7 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
             "current_journal_sequence",
             new=forged_next_sequence,
         ), patch(
-            "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
+            "mvp.autotrade_mvp.recovery_takeover._CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR",
             new=self._anchor_injector(
                 event_id="owner-cursor-rebinding-race-1",
                 aggregate_id="owner-cursor-rebinding-race",
@@ -232,7 +232,7 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
 
     def test_rebound_takeover_scan_cannot_hide_pending_takeover_from_sender_gate(self) -> None:
         with patch(
-            "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
+            "mvp.autotrade_mvp.recovery_takeover._CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR",
             new=self._anchor_injector(
                 event_id="sender-gate-pending-race-1",
                 aggregate_id="sender-gate-pending-race",

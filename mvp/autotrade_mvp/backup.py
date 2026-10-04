@@ -23,9 +23,16 @@ from .diagnostics import build_diagnostic_snapshot
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .recovery import OwnerFence, RecoveryController
+from .simulation_runtime_checkpoint import (
+    checkpoint_path as autonomous_runtime_checkpoint_path,
+)
 
 
-BACKUP_SCHEMA_VERSION = 1
+BACKUP_SCHEMA_VERSION = 2
+_SUPPORTED_BACKUP_SCHEMA_VERSIONS = frozenset({1, BACKUP_SCHEMA_VERSION})
+_RUNTIME_CHECKPOINT_EVIDENCE_PATH = (
+    "restore-evidence/autonomous-runtime-checkpoint.json"
+)
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
@@ -789,6 +796,8 @@ def _expected_kind(path: str) -> str:
         ("state", "learning-evidence.jsonl"),
     }:
         return "runtime-state"
+    if parts == ("restore-evidence", "autonomous-runtime-checkpoint.json"):
+        return "runtime-checkpoint-evidence"
     if len(parts) >= 3 and parts[:2] == ("state", "order-intents") and parts[-1].endswith(".json"):
         return "order-intent"
     if (
@@ -1079,6 +1088,33 @@ def create_backup(
                 entries.append(_entry(relative.as_posix(), digest, size, "runtime-state"))
                 source_rechecks.append((source, digest))
 
+        # The autonomous whole-runtime checkpoint is bound to the source
+        # JournalStore identity and a local signing key. Preserve its exact
+        # bytes only as restore evidence; never copy it to the live checkpoint
+        # pathname and never copy the local authority key into a portable
+        # backup. A restored generation must issue fresh authority after the
+        # existing reconciliation/fencing gate is completed.
+        runtime_checkpoint_evidence = "ABSENT"
+        runtime_checkpoint_source = autonomous_runtime_checkpoint_path(state.parent)
+        if runtime_checkpoint_source.exists():
+            evidence_relative = Path(*PurePosixPath(
+                _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+            ).parts)
+            digest, size = _copy_stable_file(
+                runtime_checkpoint_source,
+                stage / evidence_relative,
+            )
+            entries.append(
+                _entry(
+                    _RUNTIME_CHECKPOINT_EVIDENCE_PATH,
+                    digest,
+                    size,
+                    "runtime-checkpoint-evidence",
+                )
+            )
+            source_rechecks.append((runtime_checkpoint_source, digest))
+            runtime_checkpoint_evidence = "QUARANTINED"
+
         intents_root = state / "order-intents"
         if intents_root.exists():
             for source in sorted(intents_root.rglob("*.json")):
@@ -1114,6 +1150,7 @@ def create_backup(
             "journal_schema_version": journal_schema,
             "reconciliation_required_after_restore": True,
             "runtime_consistency_check": runtime_consistency_check,
+            "runtime_checkpoint_evidence": runtime_checkpoint_evidence,
             "files": sorted(entries, key=lambda item: item["path"]),
         }
         manifest_bytes = _canonical_json(manifest)
@@ -1150,7 +1187,10 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
     if expected_manifest_digest != actual_manifest_digest:
         raise BackupIntegrityError("Backup manifest digest does not match")
 
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != BACKUP_SCHEMA_VERSION:
+    if not isinstance(manifest, dict):
+        raise BackupCompatibilityError("Unsupported backup schema version")
+    backup_schema_version = manifest.get("schema_version")
+    if backup_schema_version not in _SUPPORTED_BACKUP_SCHEMA_VERSIONS:
         raise BackupCompatibilityError("Unsupported backup schema version")
     if manifest.get("journal_schema_version") != JournalStore.SCHEMA_VERSION:
         raise BackupCompatibilityError("Unsupported backed-up journal schema version")
@@ -1201,6 +1241,26 @@ def verify_backup(backup_root: str | Path) -> dict[str, Any]:
             object_digest = path.name.lower()
             if item["sha256"] != f"sha256:{object_digest}":
                 raise BackupIntegrityError("Content-addressed artifact object identity mismatch")
+
+    runtime_checkpoint_present = (
+        _RUNTIME_CHECKPOINT_EVIDENCE_PATH in expected_paths
+    )
+    if backup_schema_version == 1:
+        if runtime_checkpoint_present or "runtime_checkpoint_evidence" in manifest:
+            raise BackupIntegrityError(
+                "Backup schema v1 cannot carry autonomous runtime checkpoint evidence"
+            )
+    else:
+        expected_runtime_checkpoint_claim = (
+            "QUARANTINED" if runtime_checkpoint_present else "ABSENT"
+        )
+        if (
+            manifest.get("runtime_checkpoint_evidence")
+            != expected_runtime_checkpoint_claim
+        ):
+            raise BackupIntegrityError(
+                "Runtime checkpoint evidence claim does not match backup inventory"
+            )
 
     checkpoint_present = "state/checkpoint.json" in expected_paths
     learning_evidence_present = "state/learning-evidence.jsonl" in expected_paths
@@ -1311,6 +1371,14 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             owner_scope=owner_scope,
         )
         source_owner = owner_chain[-1] if owner_chain else None
+        runtime_checkpoint_entry = next(
+            (
+                item
+                for item in manifest["files"]
+                if item["path"] == _RUNTIME_CHECKPOINT_EVIDENCE_PATH
+            ),
+            None,
+        )
         marker = {
             "schema_version": 2,
             "status": "RECONCILIATION_REQUIRED",
@@ -1319,6 +1387,19 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
             "backup_manifest_sha256": (backup / MANIFEST_DIGEST_NAME)
             .read_text(encoding="ascii")
             .strip(),
+            "runtime_checkpoint_evidence": (
+                manifest.get("runtime_checkpoint_evidence")
+                if manifest.get("schema_version") == BACKUP_SCHEMA_VERSION
+                else "UNAVAILABLE_LEGACY_BACKUP"
+            ),
+            "runtime_checkpoint_reconstitution_required": (
+                runtime_checkpoint_entry is not None
+            ),
+            "runtime_checkpoint_evidence_sha256": (
+                runtime_checkpoint_entry["sha256"]
+                if runtime_checkpoint_entry is not None
+                else None
+            ),
             "source_owner_scope": owner_scope,
             "source_owner_id": (
                 source_owner.owner_id if source_owner is not None else None

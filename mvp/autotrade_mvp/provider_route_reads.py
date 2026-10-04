@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
+from types import MappingProxyType
 from typing import Mapping
 
 from .capabilities import CapabilityError
@@ -76,11 +77,13 @@ def _q_scope(route: SelectedProviderRoute) -> ProviderQualificationCurrentScope:
     )
 
 
-_READ_ENDPOINTS = {
-    "BINANCE": BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
-    "BYBIT": BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
-    "KRAKEN": KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
-}
+_READ_ENDPOINTS = MappingProxyType(
+    {
+        "BINANCE": BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+        "BYBIT": BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS,
+        "KRAKEN": KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS,
+    }
+)
 
 
 def _qualified_read_endpoint_rule(

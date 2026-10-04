@@ -18,7 +18,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: provider-free-product-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 env:
   AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -42,7 +42,7 @@ jobs:
         working-directory: tests/Product
       - run: npx playwright install --with-deps chromium
         working-directory: tests/Product
-      - run: python -m unittest mvp.tests.test_provider_free_product -v
+      - run: python -m unittest mvp.tests.test_provider_free_product mvp.tests.test_provider_free_candidate_builder -v
         env:
           PYTHONPATH: research:.
       - run: npm test

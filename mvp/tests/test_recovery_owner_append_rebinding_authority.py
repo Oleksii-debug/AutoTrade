@@ -19,6 +19,10 @@ from mvp.autotrade_mvp.recovery_takeover import (
     DurableTakeoverError,
     execute_durable_takeover,
 )
+from mvp.autotrade_mvp.sender_authority import (
+    SenderAuthorityError,
+    sender_authority_window,
+)
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
 
@@ -225,6 +229,35 @@ class RecoveryOwnerAppendRebindingAuthorityTests(unittest.TestCase):
             ],
             [("host-a", 1)],
         )
+
+    def test_rebound_takeover_scan_cannot_hide_pending_takeover_from_sender_gate(self) -> None:
+        with patch(
+            "mvp.autotrade_mvp.recovery_takeover.require_current_trade_credential_transition_anchor",
+            new=self._anchor_injector(
+                event_id="sender-gate-pending-race-1",
+                aggregate_id="sender-gate-pending-race",
+            ),
+        ):
+            with self.assertRaisesRegex(
+                DurableTakeoverError,
+                "journal changed during takeover owner validation",
+            ):
+                self._takeover()
+
+        with patch.object(
+            JournalStore,
+            "load_events_by_aggregate_type",
+            return_value=[],
+        ):
+            with self.assertRaisesRegex(
+                SenderAuthorityError,
+                "pending durable takeover",
+            ):
+                with sender_authority_window(
+                    self.store,
+                    owner_scope="PAPER:paper-1",
+                ):
+                    self.fail("pending takeover must not yield sender authority")
 
 
 if __name__ == "__main__":

@@ -383,7 +383,6 @@ class CandidateWave:
     training_population: EvidencePopulation
     validation_population: EvidencePopulation
     validation_opened_at: datetime
-    promotion_mode: str
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _text(self.wave_id, name="wave_id"))

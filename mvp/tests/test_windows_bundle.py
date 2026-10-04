@@ -254,23 +254,35 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             encoding="utf-8",
         )
         components = []
+        runtime_descriptors = {
+            descriptor.path: descriptor
+            for descriptor in _RELEASE_RUNTIME_REQUIRED
+        }
         for path in sorted(self.staging.rglob("*")):
             if path.is_file() and not path.is_symlink():
                 relative = path.relative_to(self.staging).as_posix()
-                if relative == "dependency-lock.json":
-                    kind = "dependency-lock"
-                elif relative == "sbom.spdx.json":
-                    kind = "sbom"
-                elif relative.endswith(".exe"):
-                    kind = "runtime"
+                descriptor = runtime_descriptors.get(relative)
+                if descriptor is not None:
+                    component_id = descriptor.component_id
+                    kind = descriptor.kind
+                    version = "source-controlled"
                 else:
-                    kind = "asset"
+                    component_id = relative.replace("/", "-")
+                    version = "1.0.0"
+                    if relative == "dependency-lock.json":
+                        kind = "dependency-lock"
+                    elif relative == "sbom.spdx.json":
+                        kind = "sbom"
+                    elif relative.endswith(".exe"):
+                        kind = "runtime"
+                    else:
+                        kind = "asset"
                 components.append(
                     {
-                        "component_id": relative.replace("/", "-"),
+                        "component_id": component_id,
                         "kind": kind,
                         "path": relative,
-                        "version": "1.0.0",
+                        "version": version,
                         "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
                     }
                 )
@@ -802,6 +814,41 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=True),
                 composition_path=bad_case,
             )
+
+    def test_release_composition_requires_canonical_ordered_schema_range(self):
+        cases = (
+            (
+                {"minimum": "latest", "maximum": "1.0.x"},
+                "schema minimum must use major.minor.patch",
+            ),
+            (
+                {"minimum": "1.0.0", "maximum": "1.x"},
+                "schema maximum must use major.minor.patch or major.minor.x",
+            ),
+            (
+                {"minimum": "2.0.0", "maximum": "1.9.x"},
+                "schema compatibility maximum precedes minimum",
+            ),
+            (
+                {"minimum": "1.0.2", "maximum": "1.0.1"},
+                "schema compatibility maximum precedes minimum",
+            ),
+        )
+        for index, (schema_range, expected) in enumerate(cases):
+            with self.subTest(schema_range=schema_range):
+                composition = self.composition(
+                    overrides={"schema_compatibility": schema_range}
+                )
+                with self.assertRaisesRegex(BundleError, expected):
+                    build_bundle(
+                        staging=self.staging,
+                        output=self.root / f"invalid-schema-{index}.zip",
+                        version="1.0.0",
+                        source_sha=SOURCE_SHA,
+                        mode="release",
+                        provenance_path=self.provenance(eligible=True),
+                        composition_path=composition,
+                    )
 
     def test_release_mode_requires_exact_head_provenance_binding(self):
         missing = self.root / "eligible-without-sha.json"

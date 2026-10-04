@@ -3756,19 +3756,26 @@ def commit_provider_fill_bust_with_economic_reversal(
     bust_provider_revision: str,
     bust_observed_at: str,
     order_event_key: str,
+    reservation_book: DurableReservationBook | None = None,
+    reservation_id: str | None = None,
     correction_fill_id: str | None = None,
     committed_at: str | None = None,
     order_evidence_refs: Sequence[Mapping[str, object]] | None = None,
 ) -> bool:
     """Atomically compose provider BUST_FILL with its exact economic reversal.
 
-    A bust never releases reservation capacity. Unsettled settlement obligations
-    remain immutable historical evidence and become inactive with their reversed
-    economic source. A source that already has settlement-completion evidence is
-    blocked until a distinct provider settlement-compensation authority exists.
-    Fresh OMS + reversal commit in one EVENT_BATCH. An exact OMS-only legacy
-    split may recover the missing reversal under a global journal-sequence CAS.
-    Finance-without-OMS and unproven fully split state fail closed.
+    A bust never releases reservation capacity. When the caller supplies the
+    canonical reservation authority, the exact provider-fill binding is loaded
+    from durable history and its original derived usage is moved from consumed
+    back to remaining in the same JournalStore transaction as the OMS bust and
+    economic reversal. That restores held capacity; it does not free it.
+
+    Unsettled settlement obligations remain immutable historical evidence and
+    become inactive with their reversed economic source. A source that already
+    has settlement-completion evidence is blocked until a distinct provider
+    settlement-compensation authority exists. An exact OMS-only legacy split
+    may recover the missing financial effects under a global journal-sequence
+    CAS. Finance-without-OMS and unproven split state fail closed.
     """
 
     if type(economic_book) is not DurableProviderEconomicBook:
@@ -3823,6 +3830,198 @@ def commit_provider_fill_bust_with_economic_reversal(
     )
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
+
+    reservation_plan = None
+    reservation_usage: Mapping[str, Decimal] | None = None
+    reservation_cut_digest: str | None = None
+    initial_fill_binding_event_id: str | None = None
+    initial_fill_binding_request_digest: str | None = None
+    rid: str | None = None
+
+    if reservation_book is None:
+        if reservation_id is not None:
+            raise ValueError("reservation_id requires reservation_book")
+    else:
+        if type(reservation_book) is not DurableReservationBook:
+            raise TypeError(
+                "reservation_book must be exact DurableReservationBook"
+            )
+        if reservation_id is None:
+            raise ValueError("reservation_id is required with reservation_book")
+        _require_same_financial_journal_generation(
+            economic_book,
+            reservation_book,
+            expected_type=DurableReservationBook,
+            subject="reservation book",
+        )
+        if (
+            reservation_book.account_id != economic_book.account_id
+            or reservation_book.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "reservation book must share account/environment scope"
+            )
+        if projected_fill.correction_of is not None:
+            raise AccountingConflict(
+                "reservation-aware fill bust is not qualified for corrected fill evidence"
+            )
+
+        rid = _text(reservation_id, name="reservation_id")
+        binding_aggregate_id = _provider_fill_binding_aggregate_id(
+            provider_id=economic_book.provider_id,
+            account_id=economic_book.account_id,
+            environment=economic_book.environment,
+            provider_execution_id=projected_fill.provider_execution_id,
+        )
+        binding_events = _economic_store_load_events(
+            economic_book,
+            _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+            binding_aggregate_id,
+        )
+        if len(binding_events) != 1:
+            raise AccountingConflict(
+                "reservation-aware fill bust requires exactly one initial financial binding"
+            )
+        binding_event = binding_events[0]
+        if (
+            binding_event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE
+            or int(binding_event.get("aggregate_version", 0)) != 1
+        ):
+            raise AccountingConflict(
+                "initial provider fill financial binding is invalid"
+            )
+        binding_payload = binding_event.get("payload")
+        if type(binding_payload) is not dict:
+            raise AccountingConflict(
+                "initial provider fill financial binding payload is invalid"
+            )
+        _require_plain_financial_json(
+            binding_payload,
+            name="initial provider fill financial binding payload",
+        )
+        if payload_digest(binding_payload) != binding_event.get("payload_hash"):
+            raise AccountingConflict(
+                "initial provider fill financial binding payload hash is invalid"
+            )
+        binding_request = binding_payload.get("request")
+        if type(binding_request) is not dict:
+            raise AccountingConflict(
+                "initial provider fill financial binding request is invalid"
+            )
+        binding_request = dict(binding_request)
+        binding_request_digest = payload_digest(binding_request)
+        if binding_payload.get("request_digest") != binding_request_digest:
+            raise AccountingConflict(
+                "initial provider fill financial binding request digest is invalid"
+            )
+
+        expected_projected_payload = _projected_fill_binding_payload(
+            projected_fill
+        )
+        expected_provider_payload = _provider_fill_binding_payload(
+            provider_fill
+        )
+        if (
+            binding_request.get("provider_id") != economic_book.provider_id
+            or binding_request.get("account_id") != economic_book.account_id
+            or binding_request.get("environment") != economic_book.environment
+            or binding_request.get("provider_execution_id")
+            != projected_fill.provider_execution_id
+            or binding_request.get("reservation_id") != rid
+            or binding_request.get("intent_id") != projected_fill.intent_id
+            or binding_request.get("fill_id") != projected_fill.fill_id
+            or binding_request.get("provider_revision")
+            != projected_fill.provider_revision
+            or binding_request.get("projected_fill")
+            != expected_projected_payload
+            or binding_request.get("provider_fill")
+            != expected_provider_payload
+            or binding_request.get("projected_fill_digest")
+            != payload_digest(expected_projected_payload)
+            or binding_request.get("provider_fill_digest")
+            != payload_digest(expected_provider_payload)
+        ):
+            raise AccountingConflict(
+                "fill bust evidence does not match the initial financial binding"
+            )
+
+        reservation_usage = _positive_usage_map(
+            binding_request.get("derived_usage"),
+            name="initial provider fill usage",
+        )
+        snapshot = reservation_book.get(rid)
+        if snapshot.intent_id != projected_fill.intent_id:
+            raise AccountingConflict(
+                "fill bust intent does not match admitted reservation"
+            )
+        for resource, amount in reservation_usage.items():
+            if (
+                resource not in snapshot.original
+                or amount > snapshot.original[resource]
+                or resource not in snapshot.consumed
+                or amount > snapshot.consumed[resource]
+            ):
+                raise AccountingConflict(
+                    "fill bust usage is not present in consumed reservation capacity"
+                )
+
+        source_transaction_id = _text(
+            binding_request.get("transaction_id"),
+            name="initial transaction_id",
+        )
+        source_transactions = tuple(
+            transaction
+            for transaction in economic_book.transactions
+            if transaction.transaction_id == source_transaction_id
+        )
+        if len(source_transactions) != 1:
+            raise AccountingConflict(
+                "initial provider fill binding does not identify one economic transaction"
+            )
+        source_transaction = source_transactions[0]
+        if binding_request.get("transaction_digest") != payload_digest(
+            canonical_transaction(source_transaction)
+        ):
+            raise AccountingConflict(
+                "initial provider fill transaction digest is invalid"
+            )
+        stored_cut = _text(
+            binding_request.get("reservation_cut_digest"),
+            name="initial reservation_cut_digest",
+        )
+        if (
+            not stored_cut.startswith("sha256:")
+            or len(stored_cut) != 71
+            or any(ch not in "0123456789abcdef" for ch in stored_cut[7:])
+        ):
+            raise AccountingConflict(
+                "initial provider fill reservation cut is invalid"
+            )
+        usage_payload = _usage_payload(reservation_usage)
+        expected_plan_digest = payload_digest(
+            {
+                "schema_version": "1.1.0",
+                "provider_id": economic_book.provider_id,
+                "account_id": economic_book.account_id,
+                "environment": economic_book.environment,
+                "reservation_id": rid,
+                "intent_id": projected_fill.intent_id,
+                "provider_execution_id": projected_fill.provider_execution_id,
+                "reservation_cut_digest": stored_cut,
+                "transaction": canonical_transaction(source_transaction),
+                "derived_usage": usage_payload,
+            }
+        )
+        if binding_request.get("plan_digest") != expected_plan_digest:
+            raise AccountingConflict(
+                "initial provider fill financial plan digest is invalid"
+            )
+        reservation_cut_digest = reservation_snapshot_digest(snapshot)
+        initial_fill_binding_event_id = _text(
+            binding_event.get("event_id"),
+            name="initial fill binding event_id",
+        )
+        initial_fill_binding_request_digest = binding_request_digest
 
     order = order_book.order(projected_fill.client_order_id)
     if order.side != projected_fill.side:

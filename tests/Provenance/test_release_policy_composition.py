@@ -114,21 +114,59 @@ class ProvenanceGitAuthorityTests(unittest.TestCase):
         target = repository_root / "global.json"
         object_id = "f" * 40
 
+        def trusted_git_result(*args, **kwargs):
+            if args[0] == "check-attr":
+                self.assertIs(kwargs["text"], False)
+                return (
+                    b"global.json\0text\0set\0"
+                    b"global.json\0eol\0lf\0"
+                )
+            if args[0] == "hash-object":
+                return object_id + "\n"
+            self.fail(f"unexpected trusted Git call: {args}")
+
         with patch(
             "tools.build_provenance_manifest._trusted_git",
-            return_value=object_id + "\n",
+            side_effect=trusted_git_result,
         ) as trusted_git:
             observed = git_blob_sha(target)
 
         self.assertEqual(observed, object_id)
+        self.assertEqual(trusted_git.call_count, 2)
+        attribute_call = trusted_git.call_args_list[0]
+        self.assertEqual(
+            attribute_call.args,
+            ("check-attr", "-z", "text", "eol", "--", "global.json"),
+        )
+        self.assertEqual(
+            attribute_call.kwargs["source_root"],
+            repository_root.resolve(),
+        )
+        hash_call = trusted_git.call_args_list[1]
+        self.assertEqual(hash_call.args[0], "hash-object")
+        self.assertEqual(hash_call.args[1], "--path=global.json")
+        self.assertEqual(hash_call.args[2], str(target.resolve()))
+        self.assertEqual(hash_call.kwargs["source_root"], repository_root.resolve())
+        self.assertIs(hash_call.kwargs["text"], True)
+
+    def test_git_blob_identity_rejects_unpinned_checkout_text_policy(self):
+        repository_root = Path(__file__).resolve().parents[2]
+        target = repository_root / "global.json"
+
+        with patch(
+            "tools.build_provenance_manifest._trusted_git",
+            return_value=(
+                b"global.json\0text\0set\0"
+                b"global.json\0eol\0unspecified\0"
+            ),
+        ) as trusted_git:
+            with self.assertRaisesRegex(
+                ValueError,
+                "repository-controlled text eol=lf",
+            ):
+                git_blob_sha(target)
+
         self.assertEqual(trusted_git.call_count, 1)
-        args = trusted_git.call_args.args
-        kwargs = trusted_git.call_args.kwargs
-        self.assertEqual(args[0], "hash-object")
-        self.assertEqual(args[1], "--path=global.json")
-        self.assertEqual(args[2], str(target.resolve()))
-        self.assertEqual(kwargs["source_root"], repository_root.resolve())
-        self.assertIs(kwargs["text"], True)
 
 
 class QualificationTrustPolicyPinSourceTests(unittest.TestCase):

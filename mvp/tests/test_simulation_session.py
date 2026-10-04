@@ -252,6 +252,51 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "another simulation input"):
                 run_canonical_simulation(HOLD, directory, episode_id="buy")
 
+    def test_completed_buy_rejects_missing_settlement_rule_artifact_on_restart(self):
+        with TemporaryDirectory() as directory:
+            first = run_canonical_simulation(
+                BUY, directory, episode_id="missing-settlement-rule", now=NOW
+            )
+            self.assertEqual(
+                first["status"], "FILL_RECONCILED_ORDER_UNCONFIRMED"
+            )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                evidence_artifact_root=Path(directory) / "artifacts",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(len(settlements.obligations), 1)
+            artifact_ref = next(
+                ref
+                for ref in settlements.obligations[0].rule_binding.evidence_refs
+                if ref.startswith("artifact:")
+            )
+            artifact_id = artifact_ref.removeprefix("artifact:").split("@", 1)[0]
+            artifacts._manifest_path(artifact_id).unlink()
+            before_submissions = store.load_events_by_aggregate_type(
+                "submission_attempt"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "artifact verification failed",
+            ):
+                run_canonical_simulation(
+                    BUY, directory, episode_id="missing-settlement-rule"
+                )
+
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"),
+                before_submissions,
+            )
+
     def test_hold_has_no_submission_or_financial_fill_and_resumes(self):
         with TemporaryDirectory() as directory:
             first = run_canonical_simulation(HOLD, directory, episode_id="hold", now=NOW)

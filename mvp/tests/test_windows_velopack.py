@@ -223,6 +223,8 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
             {
                 "name": "Velopack",
                 "version": "1.2.158",
+                "tool_manifest_sha256": "sha256:"
+                + sha256(velopack_module.TOOL_MANIFEST.read_bytes()).hexdigest(),
                 "pack_id": "AutoTrade",
                 "delivery_mode": "PER_USER_SETUP",
             },

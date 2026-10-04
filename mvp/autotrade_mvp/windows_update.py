@@ -153,6 +153,22 @@ def _positive_version(value: object, *, name: str) -> int:
     return value
 
 
+def _validated_trust_context(
+    value: WindowsUpdateTrustContext,
+) -> WindowsUpdateTrustContext:
+    """Detach and revalidate trust inputs before consuming authority."""
+
+    if type(value) is not WindowsUpdateTrustContext:
+        raise TypeError("trust must be exact WindowsUpdateTrustContext")
+    return WindowsUpdateTrustContext(
+        evidence_store=value.evidence_store,
+        evidence_root=value.evidence_root,
+        qualification_policy=value.qualification_policy,
+        expected_policy_id=value.expected_policy_id,
+        expected_policy_version=value.expected_policy_version,
+    )
+
+
 @dataclass(frozen=True)
 class BackupEvidence:
     manifest_sha256: str
@@ -261,6 +277,38 @@ class MigrationEvidence:
         object.__setattr__(self, "verification_status", status)
         object.__setattr__(self, "rollback_mode", rollback_mode)
         object.__setattr__(self, "reverse_evidence_sha256", reverse_digest)
+
+
+def _validated_backup_evidence(value: BackupEvidence) -> BackupEvidence:
+    """Rebuild caller-held evidence so post-construction mutation fails closed."""
+
+    if type(value) is not BackupEvidence:
+        raise TypeError("backup_evidence must be exact BackupEvidence")
+    return BackupEvidence(
+        manifest_sha256=value.manifest_sha256,
+        source_sha=value.source_sha,
+        journal_schema_version=value.journal_schema_version,
+        verification_status=value.verification_status,
+        reconciliation_required_after_restore=(
+            value.reconciliation_required_after_restore
+        ),
+    )
+
+
+def _validated_migration_evidence(value: MigrationEvidence) -> MigrationEvidence:
+    """Rebuild migration evidence before any status or identity comparison."""
+
+    if type(value) is not MigrationEvidence:
+        raise TypeError("migration_evidence must be exact MigrationEvidence")
+    return MigrationEvidence(
+        from_schema_version=value.from_schema_version,
+        to_schema_version=value.to_schema_version,
+        source_sha=value.source_sha,
+        evidence_sha256=value.evidence_sha256,
+        verification_status=value.verification_status,
+        rollback_mode=value.rollback_mode,
+        reverse_evidence_sha256=value.reverse_evidence_sha256,
+    )
 
 
 @dataclass(frozen=True)
@@ -519,6 +567,11 @@ def build_windows_update_plan(
     installer was executed, reconciliation completed, or trading was authorized.
     """
 
+    trust = _validated_trust_context(trust)
+    backup_evidence = _validated_backup_evidence(backup_evidence)
+    if migration_evidence is not None:
+        migration_evidence = _validated_migration_evidence(migration_evidence)
+
     current = _release_manifest(
         current_release,
         name="current_release",
@@ -537,11 +590,6 @@ def build_windows_update_plan(
         candidate_journal_schema_version,
         name="candidate_journal_schema_version",
     )
-    if type(backup_evidence) is not BackupEvidence:
-        raise TypeError("backup_evidence must be exact BackupEvidence")
-    if migration_evidence is not None and type(migration_evidence) is not MigrationEvidence:
-        raise TypeError("migration_evidence must be exact MigrationEvidence or None")
-
     reasons: list[str] = []
     if (
         current["release_id"] == candidate["release_id"]
@@ -680,6 +728,21 @@ class WindowsUpdateCheckpoint:
             )
 
 
+def _validated_update_checkpoint(
+    value: WindowsUpdateCheckpoint,
+) -> WindowsUpdateCheckpoint:
+    """Detach checkpoint state before using it to order update side effects."""
+
+    if type(value) is not WindowsUpdateCheckpoint:
+        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    return WindowsUpdateCheckpoint(
+        plan_sha256=value.plan_sha256,
+        update_completed_steps=value.update_completed_steps,
+        rollback_started=value.rollback_started,
+        rollback_completed_steps=value.rollback_completed_steps,
+    )
+
+
 def _validated_plan_release(
     value: object,
     *,
@@ -811,6 +874,9 @@ def _plan_document(
         raise TypeError("plan must be exact WindowsUpdatePlan")
     if type(plan.status) is not str or plan.status != "PLAN_READY":
         raise WindowsUpdateError("plan must be PLAN_READY")
+    if type(plan.reasons) is not tuple or plan.reasons:
+        raise WindowsUpdateError("PLAN_READY plan reasons must be an empty exact tuple")
+    trust = _validated_trust_context(trust)
     plan_json = plan.plan_json
     if type(plan_json) is not str or not plan_json:
         raise WindowsUpdateError("plan must be PLAN_READY")
@@ -1016,8 +1082,7 @@ def advance_update_checkpoint(
     trust: WindowsUpdateTrustContext,
 ) -> WindowsUpdateCheckpoint:
     document = _plan_document(plan, trust=trust)
-    if type(checkpoint) is not WindowsUpdateCheckpoint:
-        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    checkpoint = _validated_update_checkpoint(checkpoint)
     if checkpoint.plan_sha256 != plan.plan_sha256:
         raise WindowsUpdateError("checkpoint belongs to a different update plan")
     if checkpoint.rollback_started:
@@ -1053,8 +1118,7 @@ def start_rollback_checkpoint(
     trust: WindowsUpdateTrustContext,
 ) -> WindowsUpdateCheckpoint:
     document = _plan_document(plan, trust=trust)
-    if type(checkpoint) is not WindowsUpdateCheckpoint:
-        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    checkpoint = _validated_update_checkpoint(checkpoint)
     if checkpoint.plan_sha256 != plan.plan_sha256:
         raise WindowsUpdateError("checkpoint belongs to a different update plan")
     expected_update = _step_sequence(document, rollback=False)
@@ -1087,8 +1151,7 @@ def advance_rollback_checkpoint(
     trust: WindowsUpdateTrustContext,
 ) -> WindowsUpdateCheckpoint:
     document = _plan_document(plan, trust=trust)
-    if type(checkpoint) is not WindowsUpdateCheckpoint:
-        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    checkpoint = _validated_update_checkpoint(checkpoint)
     if checkpoint.plan_sha256 != plan.plan_sha256:
         raise WindowsUpdateError("checkpoint belongs to a different update plan")
     if not checkpoint.rollback_started:
@@ -1127,8 +1190,7 @@ def advance_rollback_checkpoint(
 def serialize_update_checkpoint(checkpoint: WindowsUpdateCheckpoint) -> str:
     """Serialize progress canonically without persisting or executing it."""
 
-    if type(checkpoint) is not WindowsUpdateCheckpoint:
-        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    checkpoint = _validated_update_checkpoint(checkpoint)
     body = {
         "schema_version": 1,
         "plan_sha256": checkpoint.plan_sha256,
@@ -1245,8 +1307,7 @@ def assess_windows_update_restart(
     """
 
     document = _plan_document(plan, trust=trust)
-    if type(checkpoint) is not WindowsUpdateCheckpoint:
-        raise TypeError("checkpoint must be exact WindowsUpdateCheckpoint")
+    checkpoint = _validated_update_checkpoint(checkpoint)
     if checkpoint.plan_sha256 != plan.plan_sha256:
         raise WindowsUpdateError("checkpoint belongs to a different update plan")
     expected_update = _step_sequence(document, rollback=False)

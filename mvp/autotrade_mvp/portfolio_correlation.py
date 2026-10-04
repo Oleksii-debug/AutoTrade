@@ -169,6 +169,8 @@ class CorrelationConcentrationAssessment:
 def _canonical_allocation_exposures(allocation: AllocationResult) -> dict[str, Decimal]:
     if type(allocation) is not AllocationResult:
         raise TypeError("allocation must be exact AllocationResult")
+    if type(allocation.status) is not str or allocation.status != "ALLOCATED":
+        raise ValueError("correlation guard requires an allocated portfolio")
     if type(allocation.targets) is not tuple:
         raise TypeError("allocation targets must be an exact tuple")
     exposures: dict[str, Decimal] = {}
@@ -178,7 +180,26 @@ def _canonical_allocation_exposures(allocation: AllocationResult) -> dict[str, D
         symbol = _text(target.symbol, name="allocation target symbol")
         if symbol in exposures:
             raise ValueError("allocation target symbols must be unique")
-        exposures[symbol] = _decimal(target.notional, name=f"allocation notional {symbol}")
+        quantity = _decimal(target.quantity, name=f"allocation quantity {symbol}")
+        notional = _decimal(target.notional, name=f"allocation notional {symbol}")
+        if (
+            (quantity == 0) != (notional == 0)
+            or (quantity > 0 and notional < 0)
+            or (quantity < 0 and notional > 0)
+        ):
+            raise ValueError("allocation quantity and notional direction disagree")
+        exposures[symbol] = notional
+    gross = Decimal("0")
+    signed_net = Decimal("0")
+    for notional in exposures.values():
+        gross = exact_add(gross, exact_abs(notional))
+        signed_net = exact_add(signed_net, notional)
+    if (
+        _decimal(allocation.gross_notional, name="allocation gross_notional") != gross
+        or _decimal(allocation.net_notional, name="allocation net_notional")
+        != exact_abs(signed_net)
+    ):
+        raise ValueError("allocation aggregate notionals disagree with targets")
     return exposures
 
 

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -19,7 +20,7 @@ def _allocation(**notionals: str) -> AllocationResult:
     targets = tuple(
         AllocationTarget(
             symbol=symbol,
-            quantity=Decimal("1"),
+            quantity=Decimal("-1") if Decimal(notional) < 0 else Decimal("1"),
             notional=Decimal(notional),
             estimated_cost=Decimal("0"),
         )
@@ -289,3 +290,25 @@ def test_single_exposure_still_respects_component_cap():
         decision_time=NOW,
     )
     assert assessment.status == "FAIL"
+
+
+def test_mutated_allocation_status_and_totals_cannot_pass_guard():
+    valid = _allocation(A="40", B="-20")
+    for changed, message in (
+        (replace(valid, status="REJECTED"), "allocated portfolio"),
+        (replace(valid, gross_notional=Decimal("1")), "aggregate notionals"),
+        (replace(valid, net_notional=Decimal("1")), "aggregate notionals"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            require_correlation_safe_allocation(
+                changed, (_e("A", "B", "0.2"),), _policy(), decision_time=NOW,
+            )
+
+
+def test_forged_target_direction_cannot_change_correlation_clustering():
+    valid = _allocation(A="60", B="-50")
+    forged = replace(valid, targets=(valid.targets[0], replace(valid.targets[1], quantity=Decimal("1"))))
+    with pytest.raises(ValueError, match="direction disagree"):
+        require_correlation_safe_allocation(
+            forged, (_e("A", "B", "-0.95"),), _policy(cap="100"), decision_time=NOW,
+        )

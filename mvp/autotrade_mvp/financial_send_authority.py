@@ -10,7 +10,9 @@ dispatch guard *inside* trusted composition.
 
 Provider qualification remains an upstream authority.  A qualification digest
 is retained in FinancialRequestBindingMaterial but this module does not upgrade
-or manufacture qualification evidence.
+or manufacture qualification evidence.  When the issuer is bound to one sealed
+SelectedProviderRoute, the exact current provider C/Q authority is composed into
+the same final financial guard immediately before the existing dispatcher send.
 """
 
 from __future__ import annotations
@@ -19,10 +21,17 @@ from typing import Any, Callable, Mapping
 
 from .authority import AuthorityService
 from .dispatch import DispatchOutcome
+from .durable_capabilities import DurableCapabilityRegistry
+from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .financial_request_binding import FinancialRequestBindingMaterial
 from .persistence import JournalStore, payload_digest
 from .production_bybit import ProductionBybitOrderSender
 from .production_financial_host import FinancialProductionHostRuntime
+from .provider_route_dispatch import compose_selected_provider_route_authority
+from .provider_route_financial_binding import (
+    require_financial_binding_matches_selected_route,
+)
+from .provider_selection import SelectedProviderRoute
 
 
 class FinancialSendAuthorityError(PermissionError):
@@ -362,6 +371,13 @@ class FinancialSendAuthorityIssuer:
         "__capability_issuer_function",
         "__capability_issuer_code",
         "__capability_property_authorities",
+        "__selected_route",
+        "__capability_registry",
+        "__qualification_registry",
+        "__route_authority_function",
+        "__route_authority_code",
+        "__financial_route_binding_function",
+        "__financial_route_binding_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -372,6 +388,9 @@ class FinancialSendAuthorityIssuer:
         service: AuthorityService,
         runtime: FinancialProductionHostRuntime,
         *,
+        selected_route: SelectedProviderRoute | None = None,
+        capability_registry: DurableCapabilityRegistry | None = None,
+        qualification_registry: DurableProviderQualificationRegistry | None = None,
         _factory_token: object = None,
     ) -> None:
         if _factory_token is not _ISSUER_FACTORY_TOKEN:
@@ -390,8 +409,45 @@ class FinancialSendAuthorityIssuer:
         if runtime.store_identity != journal.store_identity:
             raise FinancialSendAuthorityError("production journal generation is inconsistent")
         dispatcher = runtime.financial_dispatcher
+
+        route_parts = (selected_route, capability_registry, qualification_registry)
+        route_bound = any(part is not None for part in route_parts)
+        if route_bound and not all(part is not None for part in route_parts):
+            raise FinancialSendAuthorityError(
+                "provider route authority requires selected_route plus durable C/Q registries"
+            )
+        if route_bound:
+            if type(selected_route) is not SelectedProviderRoute:
+                raise TypeError("selected_route must be exact SelectedProviderRoute")
+            if type(capability_registry) is not DurableCapabilityRegistry:
+                raise TypeError(
+                    "capability_registry must be exact DurableCapabilityRegistry"
+                )
+            if type(qualification_registry) is not DurableProviderQualificationRegistry:
+                raise TypeError(
+                    "qualification_registry must be exact DurableProviderQualificationRegistry"
+                )
+            if (
+                capability_registry.store is not journal
+                or qualification_registry.store is not journal
+            ):
+                raise FinancialSendAuthorityError(
+                    "financial and provider-route authorities must share one exact JournalStore"
+                )
+            if selected_route.candidate.account_id != dispatcher.account_id:
+                raise FinancialSendAuthorityError(
+                    "selected provider route account differs from production financial host"
+                )
+            provider_scope = selected_route.qualification.scope.provider_scope
+            if provider_scope.runtime_environment != dispatcher.environment:
+                raise FinancialSendAuthorityError(
+                    "selected provider route environment differs from production financial host"
+                )
+
         dispatch_guard_function = AuthorityService.dispatch_guard
         historical_function = AuthorityService.historical_admission
+        route_authority_function = compose_selected_provider_route_authority
+        financial_route_binding_function = require_financial_binding_matches_selected_route
         capability_issuer_function = FinancialSendAuthority.__dict__.get("_require_issuer")
         capability_issuer_code = getattr(capability_issuer_function, "__code__", None)
         if not callable(capability_issuer_function) or capability_issuer_code is None:
@@ -415,6 +471,13 @@ class FinancialSendAuthorityIssuer:
         self.__capability_issuer_function = capability_issuer_function
         self.__capability_issuer_code = capability_issuer_code
         self.__capability_property_authorities = capability_property_authorities
+        self.__selected_route = selected_route
+        self.__capability_registry = capability_registry
+        self.__qualification_registry = qualification_registry
+        self.__route_authority_function = route_authority_function
+        self.__route_authority_code = route_authority_function.__code__
+        self.__financial_route_binding_function = financial_route_binding_function
+        self.__financial_route_binding_code = financial_route_binding_function.__code__
 
     def _require_capability_executable_authority(self) -> None:
         issuer_function = self.__capability_issuer_function
@@ -463,12 +526,65 @@ class FinancialSendAuthorityIssuer:
             raise FinancialSendAuthorityError("AuthorityService historical authority changed")
         if self.__historical_function.__code__ is not self.__historical_code:
             raise FinancialSendAuthorityError("AuthorityService historical code changed")
+        if compose_selected_provider_route_authority is not self.__route_authority_function:
+            raise FinancialSendAuthorityError("provider route authority composer changed")
+        if self.__route_authority_function.__code__ is not self.__route_authority_code:
+            raise FinancialSendAuthorityError("provider route authority composer code changed")
+        if (
+            require_financial_binding_matches_selected_route
+            is not self.__financial_route_binding_function
+        ):
+            raise FinancialSendAuthorityError("financial/provider route binding authority changed")
+        if (
+            self.__financial_route_binding_function.__code__
+            is not self.__financial_route_binding_code
+        ):
+            raise FinancialSendAuthorityError(
+                "financial/provider route binding authority code changed"
+            )
+        selected_route = self.__selected_route
+        if selected_route is None:
+            if (
+                self.__capability_registry is not None
+                or self.__qualification_registry is not None
+            ):
+                raise FinancialSendAuthorityError("provider route authority binding changed")
+        else:
+            if type(selected_route) is not SelectedProviderRoute:
+                raise FinancialSendAuthorityError("selected provider route authority changed")
+            if type(self.__capability_registry) is not DurableCapabilityRegistry:
+                raise FinancialSendAuthorityError("provider capability authority changed")
+            if type(self.__qualification_registry) is not DurableProviderQualificationRegistry:
+                raise FinancialSendAuthorityError("provider qualification authority changed")
+            if (
+                self.__capability_registry.store is not self.__journal
+                or self.__qualification_registry.store is not self.__journal
+            ):
+                raise FinancialSendAuthorityError(
+                    "provider route authority journal changed"
+                )
+            if selected_route.candidate.account_id != self.__dispatcher.account_id:
+                raise FinancialSendAuthorityError(
+                    "selected provider route account changed"
+                )
+            if (
+                selected_route.qualification.scope.provider_scope.runtime_environment
+                != self.__dispatcher.environment
+            ):
+                raise FinancialSendAuthorityError(
+                    "selected provider route environment changed"
+                )
         self._require_capability_executable_authority()
 
     @property
     def runtime(self) -> FinancialProductionHostRuntime:
         self._require_current()
         return self.__runtime
+
+    @property
+    def provider_route_bound(self) -> bool:
+        self._require_current()
+        return self.__selected_route is not None
 
     def issue(
         self,
@@ -544,7 +660,7 @@ class FinancialSendAuthorityIssuer:
         str,
         str,
     ]:
-        """Re-derive guard plus immutable capability facts from pinned accessors."""
+        """Re-derive one financial + exact-current provider C/Q send guard."""
 
         binding, admission_id, intent_id, intent_hash, action = self._capability_material(
             authority
@@ -571,7 +687,24 @@ class FinancialSendAuthorityIssuer:
             action=action,
             capability_snapshot_id=binding.capability_snapshot_id,
         )
-        return guard, binding, intent_id, intent_hash
+
+        selected_route = self.__selected_route
+        if selected_route is None:
+            raise FinancialSendAuthorityError(
+                "financial send requires selected provider route authority"
+            )
+        financial_route_binding = self.__financial_route_binding_function
+        financial_route_binding(binding, selected_route)
+        route_authority = self.__route_authority_function(
+            store=self.__journal,
+            environment=binding.runtime_environment,
+            account_id=binding.account_id,
+            route=selected_route,
+            capability_registry=self.__capability_registry,
+            qualification_registry=self.__qualification_registry,
+            authority_check=guard,
+        )
+        return route_authority, binding, intent_id, intent_hash
 
     def _dispatch_guard_for(
         self,
@@ -586,12 +719,19 @@ class FinancialSendAuthorityIssuer:
 def build_financial_send_authority_issuer(
     service: AuthorityService,
     runtime: FinancialProductionHostRuntime,
+    *,
+    selected_route: SelectedProviderRoute | None = None,
+    capability_registry: DurableCapabilityRegistry | None = None,
+    qualification_registry: DurableProviderQualificationRegistry | None = None,
 ) -> FinancialSendAuthorityIssuer:
-    """Bind one AuthorityService generation to one current production host."""
+    """Bind one financial host generation and, when supplied, one sealed C/Q route."""
 
     return FinancialSendAuthorityIssuer(
         service,
         runtime,
+        selected_route=selected_route,
+        capability_registry=capability_registry,
+        qualification_registry=qualification_registry,
         _factory_token=_ISSUER_FACTORY_TOKEN,
     )
 

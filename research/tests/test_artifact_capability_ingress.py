@@ -69,6 +69,61 @@ class ArtifactCapabilityIngressTests(unittest.TestCase):
                     object.__setattr__(publication_store, attribute, original)
         self.assertEqual(touched, [])
 
+    def _finalizer_attributes(self) -> tuple[str, ...]:
+        return (
+            "_namespace_root_finalizer",
+            "_retained_manifests_finalizer",
+            "_retained_objects_finalizer",
+            "_retained_staging_finalizer",
+        )
+
+    def test_reader_issuance_fails_after_publication_capability_is_finalized(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            publication_store = ArtifactStore(root)
+            finalizer = object.__getattribute__(
+                publication_store,
+                "_retained_objects_finalizer",
+            )
+            self.assertTrue(finalizer.alive)
+            finalizer()
+            self.assertFalse(finalizer.alive)
+
+            with self.assertRaises(ArtifactIntegrityError):
+                trusted_authenticated_reader(
+                    root,
+                    publication_store=publication_store,
+                )
+
+    def test_issued_reader_survives_publication_store_capability_finalization(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            publication_store = ArtifactStore(root)
+            artifact_id = "00000000-0000-0000-0000-000000000001"
+            expected = b"reader owns duplicated generation capabilities"
+            publication_store.publish_bytes(
+                artifact_id=artifact_id,
+                data=expected,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=[],
+                metadata={"purpose": "capability-lifetime-regression"},
+            )
+            reader = trusted_authenticated_reader(
+                root,
+                publication_store=publication_store,
+            )
+
+            for attribute in self._finalizer_attributes():
+                finalizer = object.__getattribute__(publication_store, attribute)
+                self.assertTrue(finalizer.alive, attribute)
+                finalizer()
+                self.assertFalse(finalizer.alive, attribute)
+
+            manifest, payload = reader(artifact_id)
+            self.assertEqual(payload, expected)
+            self.assertEqual(manifest["artifact_id"], artifact_id)
+
     def test_publication_store_rejects_negative_exact_capability(self):
         name, attribute = self._capability_attributes()[0]
         with TemporaryDirectory() as directory:

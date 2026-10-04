@@ -763,6 +763,29 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 composition_path=bad_runtime,
             )
 
+        invalid_minimum_windows = {
+            **document,
+            "runtime": {
+                **document["runtime"],
+                "minimum_windows_version": "Windows 11",
+            },
+        }
+        bad_minimum_windows = self.root / "composition-invalid-minimum-windows.json"
+        bad_minimum_windows.write_text(
+            json.dumps(invalid_minimum_windows),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BundleError, "major.minor.build"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "invalid-minimum-windows.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_minimum_windows,
+            )
+
         uppercase_digest = {
             **document,
             "dependency_lock_sha256": document["dependency_lock_sha256"].upper(),

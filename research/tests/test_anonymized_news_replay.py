@@ -57,6 +57,8 @@ def revision(
     source_sequence=1,
     source_id="Reuters",
     syndication_sha256=SYNDICATION,
+    content_sha256=CONTENT,
+    language="en",
     identities=None,
     summary_template="{company} reported quarterly earnings 17% above expectations",
     claims=None,
@@ -83,9 +85,9 @@ def revision(
         source_event_at=source_event_at,
         source_priority=10,
         source_sequence=source_sequence,
-        language="en",
+        language=language,
         rights_id="rights-news-test",
-        content_sha256=CONTENT,
+        content_sha256=content_sha256,
         trust_features_sha256=TRUST,
         syndication_sha256=syndication_sha256,
         evidence_sha256=(EVIDENCE,),
@@ -368,6 +370,7 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
             information_id="story-b",
             source_sequence=2,
             syndication_sha256="sha256:" + ("8" * 64),
+            content_sha256="sha256:" + ("8" * 64),
             published_at="2024-03-12T10:01:00Z",
             available_at="2024-03-12T10:01:05Z",
             ingested_at="2024-03-12T10:01:07Z",
@@ -467,12 +470,30 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
             source_sequence=2,
             source_id="Independent Source",
             syndication_sha256="sha256:" + ("7" * 64),
+            content_sha256="sha256:" + ("7" * 64),
             published_at="2024-03-12T10:01:00Z",
             available_at="2024-03-12T10:01:05Z",
             ingested_at="2024-03-12T10:01:07Z",
         )
         bundle = self.bundle(revision(), independent)
         self.assertEqual(len(bundle.dataset.events), 2)
+
+    def test_unsupported_template_language_fails_closed(self):
+        with self.assertRaisesRegex(NewsReplayError, "unsupported template language"):
+            revision(language="sk")
+
+    def test_exact_content_duplicate_cannot_bypass_syndication_identity(self):
+        duplicate = revision(
+            information_id="story-exact-copy",
+            source_sequence=2,
+            source_id="Independent Label",
+            syndication_sha256="sha256:" + ("6" * 64),
+            published_at="2024-03-12T10:01:00Z",
+            available_at="2024-03-12T10:01:05Z",
+            ingested_at="2024-03-12T10:01:07Z",
+        )
+        with self.assertRaisesRegex(NewsReplayError, "exact-content duplicate"):
+            self.bundle(revision(), duplicate)
 
     def test_bundle_detaches_dataset_and_profile_inputs(self):
         source = self.bundle(revision())

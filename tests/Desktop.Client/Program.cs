@@ -36,7 +36,8 @@ internal static class Program
         string version = "0",
         string hostFreshness = "CURRENT",
         string? freshnessAsOf = null,
-        string? eventCursor = null)
+        string? eventCursor = null,
+        string hostId = "host-local-1")
     {
         string serverTime = NowUtc();
         return new
@@ -44,7 +45,7 @@ internal static class Program
             state_version = version,
             event_cursor = eventCursor ?? version,
             server_time = serverTime,
-            host_id = "host-local-1",
+            host_id = hostId,
             account_id = "paper-account-1",
             environment = "PAPER",
             permission_summary = new
@@ -1058,8 +1059,11 @@ internal static class Program
                 StringComparison.Ordinal),
             "durable recovery record did not persist the canonical public session reference");
         Check.True(
-            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
-            "durable recovery record was not upgraded to the bearer-free v2 schema");
+            pendingStore.Payload!.Contains("\"schema_version\":\"3\"", StringComparison.Ordinal)
+                && pendingStore.Payload.Contains(
+                    "\"host_id\":\"host-local-1\"",
+                    StringComparison.Ordinal),
+            "new durable recovery record did not bind the canonical bearer-free host-identity schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(
             new HttpClient(handler),
@@ -1305,6 +1309,90 @@ internal static class Program
             "missing exact operation cleared the durable unresolved command");
     }
 
+    static async Task RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest()
+    {
+        const string originalToken = "session-token-restart-host-original";
+        const string replacementToken = "session-token-restart-host-replacement";
+        MutableSessionProvider sessions = new(PairedSession(originalToken));
+        MemoryPendingCommandStore pendingStore = new();
+        int stateReads = 0;
+        int posts = 0;
+        int operationReads = 0;
+
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && path == "/api/v1/state")
+            {
+                stateReads++;
+                string token =
+                    stateReads == 1 ? originalToken : replacementToken;
+                AssertAuth(request, token);
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        stateReads == 1 ? "31" : "32",
+                        hostId: stateReads == 1
+                            ? "host-local-1"
+                            : "foreign-host"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && path == "/api/v1/commands")
+            {
+                AssertAuth(request, originalToken);
+                posts++;
+                await request.Content!.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException(
+                    "response lost before host-continuity recovery");
+            }
+
+            if (request.Method == HttpMethod.Get
+                && path.StartsWith(
+                    "/api/v1/operations/",
+                    StringComparison.Ordinal))
+            {
+                operationReads++;
+                throw new InvalidOperationException(
+                    "foreign host must be rejected before operation lookup");
+            }
+
+            throw new InvalidOperationException(
+                "host-continuity recovery issued an unexpected request "
+                + request.Method + " " + path);
+        });
+
+        AuthenticatedEmergencyHostClient firstProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => firstProcess.BlockNewExposureAsync(CancellationToken.None),
+            "first response loss must retain the unresolved command");
+
+        sessions.Session = PairedSession(replacementToken);
+        AuthenticatedEmergencyHostClient restartedProcess = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions,
+            pendingStore);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => restartedProcess.BlockNewExposureAsync(CancellationToken.None),
+            "replacement session on a foreign host must not recover the pending command");
+
+        Check.True(
+            posts == 1,
+            "foreign-host recovery resent or retargeted the unresolved command");
+        Check.True(
+            stateReads == 2 && operationReads == 0,
+            "foreign-host recovery did not fail before deterministic operation lookup");
+        Check.True(
+            pendingStore.Payload is not null,
+            "foreign-host recovery cleared the unresolved command");
+    }
+
     static async Task RestartedCommandCannotRetargetSessionTest()
     {
         const string originalToken = "session-token-restart-original";
@@ -1372,14 +1460,11 @@ internal static class Program
                 }),
         };
         int transportCalls = 0;
-        DelegateHandler handler = new((request, _, _) =>
+        DelegateHandler handler = new((_, _, _) =>
         {
             transportCalls++;
-            Check.True(
-                request.Method == HttpMethod.Get,
-                "legacy unresolved command attempted a write under a replacement session");
             throw new InvalidOperationException(
-                "legacy recovery could not prove the current authenticated host scope");
+                "legacy unresolved command without host identity must fail before transport");
         });
 
         AuthenticatedEmergencyHostClient client = new(
@@ -1407,8 +1492,8 @@ internal static class Program
             () => client.BlockNewExposureAsync(CancellationToken.None),
             "migrated unresolved command must not retarget to a replacement session");
         Check.True(
-            transportCalls == 1,
-            "migrated unresolved command did not stay bounded to one read-only recovery attempt");
+            transportCalls == 0,
+            "legacy unresolved command without durable host identity reached transport");
     }
 
     static void CorruptPersistedCommandFailsClosedTest()
@@ -1841,6 +1926,7 @@ internal static class Program
         await UncertainCommandSurvivesDesktopRestartTest();
         await RestartedCommandRecoversAcceptedOperationAfterSessionRotationWithoutResendTest();
         await RestartedCommandRemainsUnresolvedWhenExactOperationIsAbsentAfterSessionRotationTest();
+        await RestartedCommandRejectsDifferentHostAfterSessionRotationWithoutResendTest();
         await RestartedCommandCannotRetargetSessionTest();
         await LegacyBearerRecoveryRecordMigratesFailClosedTest();
         CorruptPersistedCommandFailsClosedTest();

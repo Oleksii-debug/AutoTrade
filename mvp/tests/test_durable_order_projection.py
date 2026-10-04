@@ -187,6 +187,34 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 1,
             )
 
+    def test_retained_journal_reader_code_retarget_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            reader = durable_order_projection_module._CANONICAL_JOURNAL_LOAD_EVENTS
+            original_code = reader.__code__
+
+            def forged_reader(self, aggregate_type, aggregate_id):
+                del self, aggregate_type, aggregate_id
+                raise AssertionError("forged retained journal reader executed")
+
+            try:
+                reader.__code__ = forged_reader.__code__
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "JournalStore authority changed",
+                ):
+                    book.create_order(
+                        event_key="journal-code-retarget",
+                        client_order_id="journal-code-retarget",
+                        instrument="ABC",
+                        side="BUY",
+                        requested_quantity="1",
+                        committed_at=T0,
+                    )
+            finally:
+                reader.__code__ = original_code
+
     def test_journal_module_binding_replacement_is_not_authority(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

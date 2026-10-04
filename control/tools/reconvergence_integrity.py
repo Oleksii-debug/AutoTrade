@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import subprocess
 from typing import Iterable, Sequence
@@ -68,6 +69,69 @@ class IntegrityAssessment:
     protected_violations: tuple[str, ...]
     scope_violations: tuple[str, ...]
     reasons: tuple[str, ...]
+
+
+_GIT_OBJECT_HEX = frozenset("0123456789abcdef")
+
+
+def _exact_git_object_id(value: str, *, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) not in {40, 64}
+        or value != value.lower()
+        or any(character not in _GIT_OBJECT_HEX for character in value)
+    ):
+        raise ValueError(f"{field} must be an exact lowercase Git object id")
+    return value
+
+
+def reconvergence_evidence(
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+) -> dict[str, object]:
+    """Machine-readable exact-revision evidence from the trusted-base guard."""
+
+    if type(assessment) is not IntegrityAssessment:
+        raise TypeError("assessment must be IntegrityAssessment")
+    base_sha = _exact_git_object_id(base_sha, field="base_sha")
+    head_sha = _exact_git_object_id(head_sha, field="head_sha")
+    return {
+        "schema_version": "1.0.0",
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "result": "PASS" if assessment.allowed else "FAIL",
+        "base_is_ancestor": assessment.base_is_ancestor,
+        "base_path_count": assessment.base_path_count,
+        "deletion_count": assessment.deletion_count,
+        "deletion_fraction": assessment.deletion_fraction,
+        "protected_deletions": list(assessment.protected_deletions),
+        "protected_violations": list(assessment.protected_violations),
+        "scope_violations": list(assessment.scope_violations),
+        "reasons": list(assessment.reasons),
+        "contains_secrets": False,
+    }
+
+
+def write_reconvergence_evidence(
+    output: Path,
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+) -> None:
+    evidence = reconvergence_evidence(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        assessment=assessment,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
@@ -202,6 +266,17 @@ def _git_lines(
     return tuple(completed.stdout.splitlines())
 
 
+def _git_commit_id(
+    revision: str,
+    *,
+    cwd: str | Path | None = None,
+) -> str:
+    lines = _git_lines("rev-parse", "--verify", f"{revision}^{{commit}}", cwd=cwd)
+    if len(lines) != 1:
+        raise ValueError("Git revision did not resolve to exactly one commit")
+    return _exact_git_object_id(lines[0], field="resolved revision")
+
+
 def _git_is_ancestor(
     base: str,
     head: str,
@@ -275,6 +350,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-deletions", type=int, default=50)
     parser.add_argument("--max-deleted-fraction", type=float, default=0.35)
     parser.add_argument(
+        "--evidence-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional machine-readable evidence path. The trusted-base guard "
+            "writes exact resolved base/head identities and PASS/FAIL before exit."
+        ),
+    )
+    parser.add_argument(
         "--allowed-scope",
         action="append",
         default=None,
@@ -287,13 +371,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
 
+    base_sha = _git_commit_id(args.base)
+    head_sha = _git_commit_id(args.head)
     assessment = assess_git_revisions(
-        args.base,
-        args.head,
+        base_sha,
+        head_sha,
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=allowed_scopes,
     )
+    if args.evidence_output is not None:
+        write_reconvergence_evidence(
+            args.evidence_output,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            assessment=assessment,
+        )
     print(
         "Reconvergence tree guard: "
         f"base_is_ancestor={str(assessment.base_is_ancestor).lower()} "

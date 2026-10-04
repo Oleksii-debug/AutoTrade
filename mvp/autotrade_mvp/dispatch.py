@@ -781,7 +781,7 @@ class GuardedDispatcher:
         )
         return self._outcome_from_terminal(self._events(attempt_id)[-1], client_order_id)
 
-    def dispatch(
+    def _dispatch_impl(
         self,
         *,
         attempt_id: str,
@@ -797,12 +797,15 @@ class GuardedDispatcher:
         final_barrier_clock: Callable[[], str] | None = None,
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
+        _final_send_authority: tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]],
     ) -> DispatchOutcome:
-        # Capture the installed final-send authority callables before any caller
-        # callback can execute. Those seams cannot redirect the irreversible cut.
-        journal_current_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE
-        journal_commit_command = _CANONICAL_JOURNAL_COMMIT_COMMAND
-        sender_authority_window_factory = _CANONICAL_SENDER_AUTHORITY_WINDOW
+        # The public dispatch wrapper binds this exact installed tuple into a
+        # closure at module construction. Module-private names are not authority.
+        (
+            journal_current_sequence,
+            journal_commit_command,
+            sender_authority_window_factory,
+        ) = _final_send_authority
 
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -1261,3 +1264,57 @@ class GuardedDispatcher:
             outcome_response,
             "sent_confirmed",
         )
+
+
+def _bind_guarded_dispatch(implementation, authority):
+    """Install the irreversible dispatch boundary with non-overridable authority."""
+
+    def dispatch(
+        self,
+        *,
+        attempt_id: str,
+        intent_id: str,
+        intent_hash: str,
+        provider: str,
+        request: Mapping[str, Any],
+        now: str,
+        authority_check: AuthorityCheck,
+        transport_send: TransportSend,
+        client_id_max_length: int = 32,
+        client_id_format: str = "TOKEN",
+        final_barrier_clock: Callable[[], str] | None = None,
+        sender_check: SenderCheck | None = None,
+        submission_scope: Mapping[str, Any] | None = None,
+    ) -> DispatchOutcome:
+        return implementation(
+            self,
+            attempt_id=attempt_id,
+            intent_id=intent_id,
+            intent_hash=intent_hash,
+            provider=provider,
+            request=request,
+            now=now,
+            authority_check=authority_check,
+            transport_send=transport_send,
+            client_id_max_length=client_id_max_length,
+            client_id_format=client_id_format,
+            final_barrier_clock=final_barrier_clock,
+            sender_check=sender_check,
+            submission_scope=submission_scope,
+            _final_send_authority=authority,
+        )
+
+    dispatch.__name__ = "dispatch"
+    dispatch.__qualname__ = "GuardedDispatcher.dispatch"
+    dispatch.__doc__ = implementation.__doc__
+    return dispatch
+
+
+GuardedDispatcher.dispatch = _bind_guarded_dispatch(
+    GuardedDispatcher._dispatch_impl,
+    (
+        _CANONICAL_JOURNAL_CURRENT_SEQUENCE,
+        _CANONICAL_JOURNAL_COMMIT_COMMAND,
+        _CANONICAL_SENDER_AUTHORITY_WINDOW,
+    ),
+)

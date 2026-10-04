@@ -97,8 +97,6 @@ def _exact_ratio_product(
             / denominator_fraction
         )
         return terminating_decimal(result)
-    except ValueError:
-        raise
     except (ExactDecimalError, ZeroDivisionError) as error:
         raise ValueError(
             f"{name} is not representable within the exact decimal resource envelope"
@@ -143,7 +141,10 @@ class EquityState:
         )
         if recalled > borrowed:
             raise ValueError("recalled_quantity cannot exceed borrowed_quantity")
-        if quantity < 0 and borrowed != -quantity:
+        if quantity < 0 and borrowed != _exact_absolute(
+            quantity,
+            name="short quantity",
+        ):
             raise ValueError(
                 "cash-equity short quantity must be fully matched by borrowed_quantity"
             )

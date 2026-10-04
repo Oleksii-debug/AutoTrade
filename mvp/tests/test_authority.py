@@ -470,9 +470,7 @@ class AuthorityTests(unittest.TestCase):
         variants = (
             (
                 "quantity",
-                public_risk_intent().replace(quantity=Decimal("2"))
-                if hasattr(public_risk_intent(), "replace")
-                else RiskIntent.create(
+                RiskIntent.create(
                     symbol="ABC",
                     side="BUY",
                     quantity="2",

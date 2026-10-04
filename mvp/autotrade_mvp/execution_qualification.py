@@ -9,7 +9,7 @@ replay evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from hashlib import sha256
 from typing import Literal
 from uuid import UUID
@@ -146,10 +146,20 @@ def validate_execution_qualification(
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
 
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
-    if not isinstance(qualification, ExecutionModelQualification):
-        raise TypeError("qualification must be ExecutionModelQualification")
+    if type(model) is not ExecutionModel:
+        raise TypeError("model must be exact ExecutionModel")
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
+    if type(qualification) is not ExecutionModelQualification:
+        raise TypeError("qualification must be exact ExecutionModelQualification")
+    qualification_values = {}
+    for field in fields(ExecutionModelQualification):
+        value = getattr(qualification, field.name)
+        if value is not None and type(value) is not str:
+            raise TypeError(
+                f"qualification.{field.name} must be exact str"
+            )
+        qualification_values[field.name] = value
+    qualification = ExecutionModelQualification(**qualification_values)
     if type(artifact_store) is not ArtifactStore:
         raise TypeError("artifact_store must be the canonical ArtifactStore")
 

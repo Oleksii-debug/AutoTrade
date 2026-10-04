@@ -203,9 +203,12 @@ class ProductionTradingHostTests(unittest.TestCase):
             dispatcher = runtime.dispatcher
             controller = runtime.recovery
             inner_dispatcher = object.__getattribute__(dispatcher, "_dispatcher")
+            lifecycle_condition = object.__getattribute__(
+                dispatcher,
+                "_lifecycle_condition",
+            )
             entered = Event()
             release_dispatch = Event()
-            close_entered = Event()
             close_finished = Event()
             outcomes = []
             errors = []
@@ -221,14 +224,6 @@ class ProductionTradingHostTests(unittest.TestCase):
                     {"status": "accepted"},
                     "sent_confirmed",
                 )
-
-            original_finalizer = host._terminal_finalizer
-
-            def observed_finalizer():
-                close_entered.set()
-                original_finalizer()
-
-            host._terminal_finalizer = observed_finalizer
 
             def run_dispatch():
                 try:
@@ -262,8 +257,14 @@ class ProductionTradingHostTests(unittest.TestCase):
 
                 close_thread = Thread(target=run_close, name="production-host-close")
                 close_thread.start()
-                self.assertTrue(close_entered.wait(5))
-                self.assertFalse(close_finished.wait(0.05))
+                with lifecycle_condition:
+                    self.assertTrue(
+                        lifecycle_condition.wait_for(
+                            lambda: object.__getattribute__(dispatcher, "_revoking"),
+                            timeout=5,
+                        )
+                    )
+                self.assertFalse(close_finished.is_set())
                 self.assertFalse(host._instance_fence.released)
                 self.assertIsNotNone(controller.owner)
 
@@ -293,6 +294,45 @@ class ProductionTradingHostTests(unittest.TestCase):
                     authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=Mock(),
                 )
+
+    def test_active_dispatch_cannot_revoke_its_own_dispatcher(self):
+        with TemporaryDirectory() as directory:
+            runtime, host, _store = self._build_with_fake_host(Path(directory))
+            dispatcher = runtime.dispatcher
+            controller = runtime.recovery
+            inner_dispatcher = object.__getattribute__(dispatcher, "_dispatcher")
+
+            def active_dispatch(**kwargs):
+                del kwargs
+                with self.assertRaisesRegex(RuntimeError, "active dispatch"):
+                    dispatcher.stop_and_drain()
+                self.assertIsNotNone(controller.owner)
+                self.assertFalse(host._instance_fence.released)
+                return DispatchOutcome(
+                    "SENT",
+                    "client-order",
+                    {"status": "accepted"},
+                    "sent_confirmed",
+                )
+
+            with patch.object(inner_dispatcher, "dispatch", side_effect=active_dispatch):
+                outcome = dispatcher.dispatch(
+                    attempt_id="self-revoke",
+                    intent_id="intent-self-revoke",
+                    intent_hash="hash-self-revoke",
+                    provider="SIMULATED",
+                    request={},
+                    now="2026-10-04T03:01:45Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=Mock(),
+                )
+
+            self.assertEqual(outcome.status, "SENT")
+            self.assertIsNotNone(controller.owner)
+            self.assertFalse(host._instance_fence.released)
+            runtime.close()
+            self.assertIsNone(controller.owner)
+            self.assertTrue(host._instance_fence.released)
 
     def test_close_revokes_dispatcher_before_later_host_cleanup_failure(self):
         with TemporaryDirectory() as directory:

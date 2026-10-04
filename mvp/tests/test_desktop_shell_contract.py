@@ -20,7 +20,10 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        packages = project.findall(".//PackageReference")
+        self.assertEqual([(p.get("Include"), p.get("Version")) for p in packages],
+            [("Microsoft.Web.WebView2", "1.0.4191.47")])
+        self.assertIn("<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>", text)
         self.assertEqual(project.tag, "Project")
 
     def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
@@ -76,11 +79,11 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("private static void Main(string[] args)", app_text)
         self.assertLess(
             app_text.index("private static void Main(string[] args)"),
-            app_text.index("protected override void OnStartup"),
+            app_text.index("protected override async void OnStartup"),
         )
         main_body = app_text.split(
             "private static void Main(string[] args)", 1
-        )[1].split("protected override void OnStartup", 1)[0]
+        )[1].split("protected override async void OnStartup", 1)[0]
         self.assertIn("App app = new();", main_body)
         self.assertIn("app.InitializeComponent();", main_body)
         self.assertIn("app.Run();", main_body)

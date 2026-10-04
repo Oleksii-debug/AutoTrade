@@ -64,6 +64,13 @@ def resolve_simulation_action(journal, action, payload):
     if len(events) != 1:
         raise ValueError('simulation receipt history differs')
     event = events[0]
+    expected_id = str(uuid5(NAMESPACE_URL, 'autotrade:simulation-receipt:' + payload['command_id']))
+    if (event['event_id'] != expected_id or event['event_type'] != 'SimulationOperatorCompleted'
+        or event['environment'] != payload['environment']
+        or type(event['aggregate_version']) is not int or event['aggregate_version'] != 1
+        or event['payload_hash'] != payload_digest(event['payload'])
+        or set(event['payload']) != {'action', 'command_payload_hash', 'result'}):
+        raise ValueError('simulation receipt envelope differs')
     expected = {'action': action, 'command_payload_hash': payload_digest(payload)}
     if any(event['payload'].get(k) != v for k, v in expected.items()):
         raise ValueError('simulation receipt conflicts with command')
@@ -94,7 +101,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import os
         import sys
         import json
-        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
+        command = [sys.executable, '-B', '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         completed = subprocess.run(command, capture_output=True, timeout=300)

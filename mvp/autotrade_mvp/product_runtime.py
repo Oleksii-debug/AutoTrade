@@ -109,7 +109,15 @@ def cookie_principal(headers, origin):
     return HostPrincipal('local-owner', token, public_session_reference(token))
 
 
-def build_product(data_dir, *, port=8765):
+def build_product(data_dir, *, port=0):
+    if port == 0:
+        import socket
+        # Reserve a candidate ephemeral port. The real listener still performs
+        # exclusive bind before publishing its one-use pairing URL; a race fails
+        # startup rather than pairing with another process.
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
     data = Path(data_dir).resolve()
     state = data / 'state'
     state.mkdir(parents=True, exist_ok=True)
@@ -151,6 +159,7 @@ def build_product(data_dir, *, port=8765):
                 'restore_trading_gate': 'RECONCILIATION_REQUIRED' if (data / 'RESTORE_RECONCILIATION_REQUIRED.json').exists() else 'NOT_RESTORED'},
             'strategy': {'strategy': 'moving-average-2-3-long-only-target-1',
                 'decisions': [{k: v for k, v in e.items() if k != 'provider_state'} for e in completed[-100:]],
+                'agent_decisions': [e['payload'] for e in store.load_events_by_aggregate_type('simulation_agent_decision')[-100:]],
                 'economic_edge_status': 'INCONCLUSIVE'},
             'jobs': [{'kind': 'provider-free-research', 'result': e['payload']} for e in research] + [{'kind': 'provider-free-lifecycle', 'result': e['payload']} for e in receipts[-20:]],
             'reason_codes': ['SIMULATION_ONLY', 'ECONOMIC_EDGE_UNPROVEN']}
@@ -180,10 +189,15 @@ def restore_product_backup(backup_dir, data_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='AutoTrade provider-free application')
     parser.add_argument('--data-dir', default=str(Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'AutoTrade-ZERO'))
-    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--port', type=int, default=0)
     parser.add_argument('--no-browser', action='store_true')
+    parser.add_argument('--desktop-child', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--parent-pid', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--restore-backup', help='Verify and restore a backup into a NEW data directory; real trading stays gated')
     args = parser.parse_args(argv)
+    if args.parent_pid is not None:
+        from .product_worker import start_parent_watchdog
+        start_parent_watchdog(args.parent_pid)
     if args.restore_backup:
         restore_product_backup(args.restore_backup, args.data_dir)
     runtime, launch_url = build_product(args.data_dir, port=args.port)
@@ -192,6 +206,14 @@ def main(argv=None):
     signal.signal(signal.SIGINT, stop)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, stop)
+    if args.desktop_child:
+        def desktop_control():
+            for line in sys.stdin:
+                if line.strip() == 'STOP':
+                    stop()
+                    return
+            stop()
+        Thread(target=desktop_control, daemon=True).start()
     print('AutoTrade ZERO: ' + launch_url, flush=True)
     if not args.no_browser:
         webbrowser.open(launch_url)

@@ -36,7 +36,9 @@ public sealed class WebExperienceSecurityPolicy
     {
         if (!IsSameHostOrigin(target)
             || !string.IsNullOrEmpty(target.Query)
-            || !string.IsNullOrEmpty(target.Fragment))
+            || (!string.IsNullOrEmpty(target.Fragment)
+                && target.Fragment is not ("#main" or "#overview" or "#accounts" or "#opportunities"
+                    or "#portfolio" or "#risk" or "#research" or "#learning" or "#models" or "#history" or "#settings")))
         {
             return false;
         }

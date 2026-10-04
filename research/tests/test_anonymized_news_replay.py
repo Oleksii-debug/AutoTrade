@@ -5,6 +5,7 @@ from autotrade_research.evaluation.replay.blinding import BlindedCausalFeeder
 from autotrade_research.evaluation.replay.news import (
     NewsClaim,
     NewsIdentity,
+    NewsReplayBundle,
     NewsReplayError,
     NewsRevision,
     build_news_replay_bundle,
@@ -472,6 +473,48 @@ class Section18AnonymizedNewsReplayTests(unittest.TestCase):
         )
         bundle = self.bundle(revision(), independent)
         self.assertEqual(len(bundle.dataset.events), 2)
+
+    def test_bundle_detaches_dataset_and_profile_inputs(self):
+        source = self.bundle(revision())
+        detached = NewsReplayBundle(
+            dataset=source.dataset,
+            blinding_profile=source.blinding_profile,
+            source_records_sha256=source.source_records_sha256,
+            contamination_notes_sha256=source.contamination_notes_sha256,
+        )
+        before_digest = detached.digest
+        before_dataset = detached.dataset.dataset_sha256
+        before_profile = detached.blinding_profile.digest
+
+        object.__setattr__(
+            source.dataset,
+            "manifest_sha256",
+            "sha256:" + ("9" * 64),
+        )
+        object.__setattr__(
+            source.blinding_profile,
+            "price_scale_mode",
+            "TAMPERED",
+        )
+
+        self.assertEqual(detached.digest, before_digest)
+        self.assertEqual(detached.dataset.dataset_sha256, before_dataset)
+        self.assertEqual(detached.blinding_profile.digest, before_profile)
+
+    def test_bundle_rejects_dataset_content_that_no_longer_matches_digest(self):
+        source = self.bundle(revision())
+        object.__setattr__(
+            source.dataset,
+            "dataset_sha256",
+            "sha256:" + ("9" * 64),
+        )
+        with self.assertRaisesRegex(NewsReplayError, "committed digest"):
+            NewsReplayBundle(
+                dataset=source.dataset,
+                blinding_profile=source.blinding_profile,
+                source_records_sha256=source.source_records_sha256,
+                contamination_notes_sha256=source.contamination_notes_sha256,
+            )
 
     def test_binary_float_and_noncanonical_decimal_are_not_admitted(self):
         with self.assertRaisesRegex(NewsReplayError, "canonical decimal"):

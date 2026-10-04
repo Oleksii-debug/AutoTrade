@@ -133,6 +133,8 @@ def _module_source_root(component) -> Path:
 def _simulation_build_identity() -> str:
     """Bind restart to the exact executable source packages, not only inputs."""
 
+    from research.autotrade_research.strategies.deterministic import ReturnThresholdBaseline
+    from research.autotrade_research.agents.dag import aggregate_specialists
     document = {
         "mvp_source_tree": _python_source_tree_digest(Path(__file__).resolve().parent),
         "shared_numeric_source_tree": _python_source_tree_digest(
@@ -141,6 +143,8 @@ def _simulation_build_identity() -> str:
         "research_artifact_source_tree": _python_source_tree_digest(
             _module_source_root(ArtifactStore)
         ),
+        "research_strategy_source_tree": _python_source_tree_digest(_module_source_root(ReturnThresholdBaseline)),
+        "research_agent_source_tree": _python_source_tree_digest(_module_source_root(aggregate_specialists)),
     }
     return payload_digest(document)
 
@@ -2425,8 +2429,13 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         drawdown = round_fraction_to_quantum(as_fraction(exact_subtract(peak, equity)) / as_fraction(peak),
                                              Decimal("0.000000000000000001"), mode="CEILING")
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], Decimal("1"))
-        target_quantity = Decimal("1") if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
-        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
+        proposal_side = proposal.side
+        if protocol.get("execution_profile") == "PARTIAL_THEN_FULL_V1":
+            from .product_agent import decide
+            proposal_side = decide(store, protocol, episode=episode, strategy_side=proposal.side,
+                position=position, timestamp=timestamp)
+        target_quantity = Decimal("1") if proposal_side == "BUY" else Decimal("0") if proposal_side == "SELL" else position
+        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal_side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
         if emergency:
             decision = "NO_TRADE"

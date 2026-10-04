@@ -48,6 +48,8 @@ _RESERVED_SCOPE_KEYS = frozenset(
         "provider_route_protocol_version",
         "provider_route_entity_policy_id",
         "provider_route_entity_id",
+        "provider_route_product_family",
+        "provider_route_semantics_digest",
     }
 )
 
@@ -182,6 +184,10 @@ def _bound_submission_scope(
             "provider_route_protocol_version": candidate.protocol_version,
             "provider_route_entity_policy_id": candidate.entity_policy_id,
             "provider_route_entity_id": candidate.entity_id,
+            "provider_route_product_family": candidate.product_family,
+            "provider_route_semantics_digest": (
+                route.qualification.identity.route_semantics_digest
+            ),
         }
     )
     return result

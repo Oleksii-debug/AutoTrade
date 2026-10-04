@@ -220,6 +220,14 @@ class ProviderRouteDispatchTests(unittest.TestCase):
                 scope["provider_route_decision_journal_sequence_cut"],
                 route.decision_journal_sequence_cut,
             )
+            self.assertEqual(
+                scope["provider_route_product_family"],
+                route.candidate.product_family,
+            )
+            self.assertEqual(
+                scope["provider_route_semantics_digest"],
+                route.qualification.identity.route_semantics_digest,
+            )
 
     def test_q1_superseded_by_q2_between_checks_produces_zero_wire(self):
         with TemporaryDirectory() as directory:

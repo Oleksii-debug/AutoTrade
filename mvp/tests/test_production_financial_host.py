@@ -110,7 +110,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["owner_id"], "host-a")
 
-    def test_close_drains_provider_leases_then_stops_recovery_then_host(self) -> None:
+    def test_close_drains_commands_then_provider_then_recovery_then_host(self) -> None:
         with TemporaryDirectory() as root:
             config = self._config(root)
             host = self._host(config)
@@ -128,6 +128,9 @@ class ProductionFinancialHostTests(unittest.TestCase):
             order: list[str] = []
             original_drain = runtime.provider_secret_resolver.stop_and_drain
             original_stop = runtime.recovery_controller.stop
+            host._admission_gate.stop_and_drain = Mock(  # type: ignore[method-assign]
+                side_effect=lambda: order.append("commands")
+            )
 
             def drain_provider() -> None:
                 order.append("provider")
@@ -143,10 +146,39 @@ class ProductionFinancialHostTests(unittest.TestCase):
 
             runtime.close()
 
-            self.assertEqual(order, ["provider", "recovery", "host"])
+            self.assertEqual(order, ["commands", "provider", "recovery", "host"])
             self.assertFalse(runtime.provider_secret_resolver.accepting)
             self.assertEqual(runtime.recovery_controller.state, HostState.STOPPED)
             self.assertIsNone(runtime.recovery_controller.owner)
+            host.close.assert_called_once_with()
+
+    def test_command_drain_runs_while_provider_authority_is_still_open(self) -> None:
+        with TemporaryDirectory() as root:
+            config = self._config(root)
+            host = self._host(config)
+            with patch(
+                "mvp.autotrade_mvp.production_financial_host.build_production_host",
+                return_value=host,
+            ):
+                runtime = build_production_financial_host(
+                    config,
+                    security_boundary=Mock(),
+                    principal_resolver=Mock(),
+                    snapshot_provider=Mock(),
+                )
+
+            observed: list[bool] = []
+
+            def drain_commands() -> None:
+                observed.append(runtime.provider_secret_resolver.accepting)
+
+            host._admission_gate.stop_and_drain = Mock(  # type: ignore[method-assign]
+                side_effect=drain_commands
+            )
+            runtime.close()
+
+            self.assertEqual(observed, [True])
+            self.assertFalse(runtime.provider_secret_resolver.accepting)
             host.close.assert_called_once_with()
 
     def test_active_provider_lease_blocks_fence_teardown_until_lease_exits(self) -> None:

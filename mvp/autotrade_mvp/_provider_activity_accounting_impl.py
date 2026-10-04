@@ -4373,7 +4373,7 @@ def commit_provider_fill_bust_with_economic_reversal(
             if reservation_book is not None:
                 reservation_book.refresh()
             raise AccountingConflict(
-                "OMS bust/economic/resevation durable command authority is invalid"
+                "OMS bust/economic/reservation durable command authority is invalid"
             ) from error
         if authority is None:
             raise AccountingConflict(

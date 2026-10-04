@@ -66,7 +66,9 @@ def _point(value: str) -> datetime:
 
 
 def _journal_cut(store: object) -> int:
-    cut = store.whole_store_state_cut()
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    cut = JournalStore.whole_store_state_cut(store)
     if type(cut) is not dict:
         raise ProviderRouteDispatchError("whole-store barrier cut is non-canonical")
     sequence = cut.get("journal_sequence")
@@ -249,6 +251,48 @@ def compose_selected_provider_route_authority(
     expected_qualification_id = route.qualification_id
     current_scope = _current_scope(route)
 
+    journal_cut_function = _journal_cut
+    journal_cut_code = journal_cut_function.__code__
+    journal_store_type = JournalStore
+    whole_store_cut_function = journal_store_type.whole_store_state_cut
+    whole_store_cut_code = whole_store_cut_function.__code__
+    capability_registry_type = DurableCapabilityRegistry
+    capability_reader = capability_registry_type.require_verified
+    capability_reader_code = capability_reader.__code__
+    qualification_registry_type = DurableProviderQualificationRegistry
+    qualification_reader = qualification_registry_type.require_exact_current
+    qualification_reader_code = qualification_reader.__code__
+
+    def has_class_owned_instance_shadow(value: object) -> bool:
+        try:
+            state = object.__getattribute__(value, "__dict__")
+        except AttributeError:
+            return False
+        if type(state) is not dict:
+            return True
+        class_owned_names: set[str] = set()
+        for base in type(value).__mro__:
+            class_owned_names.update(base.__dict__)
+        return bool(class_owned_names.intersection(state))
+
+    def executable_authority_current() -> bool:
+        return (
+            _journal_cut is journal_cut_function
+            and journal_cut_function.__code__ is journal_cut_code
+            and JournalStore is journal_store_type
+            and journal_store_type.whole_store_state_cut is whole_store_cut_function
+            and whole_store_cut_function.__code__ is whole_store_cut_code
+            and DurableCapabilityRegistry is capability_registry_type
+            and capability_registry_type.require_verified is capability_reader
+            and capability_reader.__code__ is capability_reader_code
+            and DurableProviderQualificationRegistry is qualification_registry_type
+            and qualification_registry_type.require_exact_current is qualification_reader
+            and qualification_reader.__code__ is qualification_reader_code
+            and not has_class_owned_instance_shadow(store)
+            and not has_class_owned_instance_shadow(capability_registry)
+            and not has_class_owned_instance_shadow(qualification_registry)
+        )
+
     def combined_authority_check(intent_hash_value: str, at_text: str) -> tuple[bool, str]:
         upstream = authority_check(intent_hash_value, at_text)
         if type(upstream) is not tuple or len(upstream) != 2:
@@ -260,10 +304,13 @@ def compose_selected_provider_route_authority(
             return False, "upstream_authority_invalid_reason"
         if not allowed:
             return False, reason.strip()
+        if not executable_authority_current():
+            return False, "provider_route_executable_authority_changed"
         point = _point(at_text)
-        cut = _journal_cut(store)
+        cut = journal_cut_function(store)
         try:
-            capability = capability_registry.require_verified(
+            capability = capability_reader(
+                capability_registry,
                 provider_id=candidate.provider_id,
                 account_id=candidate.account_id,
                 entity_id=candidate.entity_id,
@@ -278,7 +325,8 @@ def compose_selected_provider_route_authority(
         if capability.snapshot_id != expected_capability_id:
             return False, "provider_capability_not_exact_current"
         try:
-            current = qualification_registry.require_exact_current(
+            current = qualification_reader(
+                qualification_registry,
                 scope=current_scope,
                 at=point,
                 expected_qualification_id=expected_qualification_id,
@@ -291,7 +339,9 @@ def compose_selected_provider_route_authority(
             or current.journal_sequence_cut != cut
         ):
             return False, "provider_qualification_not_exact_current"
-        if _journal_cut(store) != cut:
+        if not executable_authority_current():
+            return False, "provider_route_executable_authority_changed"
+        if journal_cut_function(store) != cut:
             return False, "provider_route_authority_changed_during_barrier"
         return True, reason.strip()
 

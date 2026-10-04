@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -92,6 +93,39 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             self.assertEqual(result["status"], "PAUSED")
             self.assertEqual(result["new_outbound_requests"], 0)
             self.assertEqual(store.whole_store_state_cut(), before)
+
+    def test_preseeded_runtime_authority_key_cannot_mint_initial_session_authority(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / ".autonomous-runtime-authority.key"
+            key_path.write_bytes(b"caller-selected-key-material!!!"[:32].ljust(32, b"x"))
+            if os.name != "nt":
+                os.chmod(key_path, 0o600)
+            with self.assertRaisesRegex(
+                ValueError,
+                "pre-exists an unowned session",
+            ):
+                run(directory, stop_after_episodes=1)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_product_key_fingerprint_is_bound_into_durable_start_protocol(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=2)
+            key = (Path(directory) / ".autonomous-runtime-authority.key").read_bytes()
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            events = store.load_events(
+                "canonical_autonomous_simulation",
+                "wp12-runtime-checkpoint",
+            )
+            protocol = events[0]["payload"]["protocol"]
+            self.assertEqual(
+                protocol["runtime_authority_key_sha256"],
+                sha256(key).hexdigest(),
+            )
+            self.assertEqual(
+                events[0]["payload"]["protocol_digest"],
+                payload_digest(protocol),
+            )
 
     def test_runtime_authority_key_is_product_generated_and_replacement_invalidates_resume(self):
         with TemporaryDirectory() as directory:

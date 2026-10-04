@@ -200,6 +200,15 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             required_operational_cases=tuple(
                 reversed(frozen.required_operational_cases)
             ),
+            required_regimes=tuple(reversed(frozen.required_regimes)),
+            minimum_independent_decisions_per_regime=(
+                frozen.minimum_independent_decisions_per_regime
+            ),
+            required_simulation_limitations=tuple(
+                reversed(frozen.required_simulation_limitations)
+            ),
+            reporting_currency=frozen.reporting_currency,
+            maximum_drawdown=frozen.maximum_drawdown,
         )
         self.assertEqual(reordered_hash, frozen.protocol_hash)
 
@@ -278,6 +287,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             decision_deadline_at="2026-09-24T20:05:02Z",
             outcome_horizon_end_at="2026-09-24T20:30:00Z",
             decision_latency_ms=1200,
+            regime="TREND",
+            independence_key="wave-1",
         )
         result = assess_forward_paper(
             self.protocol(),

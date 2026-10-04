@@ -2484,6 +2484,7 @@ class AuthorityService:
                         "max_age_seconds"
                     ),
                     evidence_artifact_store=self.evidence_artifact_store,
+                    _historical_risk_event_id=risk_event["event_id"],
                 )
             )
         except (KeyError, TypeError, ValueError) as error:

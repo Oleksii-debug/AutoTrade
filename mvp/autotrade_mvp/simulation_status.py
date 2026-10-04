@@ -569,6 +569,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
             "ending_position": canonical_decimal_text(position),
             "trade_count": len(status["fills"]), "reconciled": True,
             "valuation_status": "CASH_ONLY" if valued else "MARK_UNAVAILABLE",
+            "max_drawdown": "0" if valued else None,
+            "drawdown_status": "CASH_ONLY" if valued else "MARK_UNAVAILABLE",
             "economic_edge_claim": "UNPROVEN_SIMULATION_ONLY",
             "journal_sequence": str(cut),
         }
@@ -611,17 +613,55 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         raise ValueError("autonomous source/build identity differs")
     completed = []
     active = None
+    observed_fill = None
     for event in loops[1:]:
         payload = event["payload"]
         if payload.get("protocol_digest") != first["payload"]["protocol_digest"]:
             raise ValueError("autonomous episode protocol identity differs")
         if event["event_type"] == "AutonomousEpisodeStarted" and active is None and payload["episode"] == len(completed) + 1:
             active = payload
+            observed_fill = None
+        elif (
+            event["event_type"] == "AutonomousEpisodeFillObserved"
+            and active is not None
+            and observed_fill is None
+            and payload["episode"] == active["episode"]
+        ):
+            # Keep history scanning linear. Full provider-image reconstruction
+            # is needed only for the one currently recoverable active episode,
+            # not for every already-completed retained observation.
+            if (
+                set(payload)
+                != {"episode", "protocol_digest", "provider_state", "fill"}
+                or type(payload.get("provider_state")) is not dict
+                or type(payload.get("fill")) is not dict
+            ):
+                raise ValueError(
+                    "autonomous retained fill observation is malformed"
+                )
+            observed_fill = payload
         elif event["event_type"] == "AutonomousEpisodeCompleted" and active is not None and payload["episode"] == active["episode"]:
             completed.append(payload)
             active = None
+            observed_fill = None
         else:
             raise ValueError("autonomous episode chronology conflicts")
+    if active is not None and observed_fill is not None:
+        retained = SimulatedProvider.from_state(
+            observed_fill["provider_state"]
+        )
+        if observed_fill["fill"] not in retained.activity_fills():
+            raise ValueError(
+                "autonomous retained fill observation conflicts with provider state"
+            )
+    recovery_disposition = None
+    if active is not None:
+        if observed_fill is not None:
+            recovery_disposition = "RETAINED_FILL_RECOVERY"
+        elif active.get("decision") in {"HOLD", "NO_TRADE"}:
+            recovery_disposition = "ZERO_WIRE_COMPLETION"
+        else:
+            recovery_disposition = "RECONCILIATION_REQUIRED"
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
     cash, position = economic.cash("USD"), economic.position(INSTRUMENT)
     reservations = DurableReservationBook(store, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -634,6 +674,8 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
         "cash": canonical_decimal_text(cash), "position": canonical_decimal_text(position),
         "initial_cash": protocol["initial_cash"], "symbol": INSTRUMENT, "journal_sequence": cut,
         "replay_verified": active is None, "evidence_count": len(completed),
+        "retained_fill_observed": bool(active is not None and observed_fill is not None),
+        "recovery_disposition": recovery_disposition,
         "active_reservations": [{"state": item.state, "remaining": {k: canonical_decimal_text(v) for k,v in item.remaining.items()}}
                                 for item in reservations.active()],
         "history": [{k: event[k] for k in ("event_id", "event_type", "aggregate_type", "journal_sequence")}

@@ -24,7 +24,10 @@
   ]);
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
-    REVOKE_AUTHORITY: new Set(["OWNER"])
+    REVOKE_AUTHORITY: new Set(["OWNER"]),
+    START_SIMULATION: new Set(["OWNER", "OPERATOR"]),
+    RECOVER_SIMULATION: new Set(["OWNER", "OPERATOR"]),
+    BACKUP_SIMULATION: new Set(["OWNER"])
   });
 
   const TABLE_TOOLS = Object.freeze([
@@ -1215,6 +1218,14 @@
     byId("refresh-state").addEventListener("click", refreshStateFromUser);
     setCommandAvailability(false);
     try {
+      const pairingCode = new URLSearchParams(window.location.hash.slice(1)).get("pair");
+      if (pairingCode !== null) {
+        window.history.replaceState(null, "", window.location.pathname);
+        await jsonFetch(HOST_API.route("pairLocalSession"), {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({pairing_code: pairingCode})
+        });
+      }
       await refreshSnapshot();
     } catch {
       state.snapshotReady = false;

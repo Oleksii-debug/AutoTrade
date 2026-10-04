@@ -9,6 +9,29 @@ security:
   - AutoTradeSession: []
     AutoTradeActor: []
 paths:
+  /api/v1/session:
+    post:
+      operationId: pairLocalSession
+      security: []
+      description: Exchange one process-issued single-use local pairing code for an HttpOnly SameSite session. Available only in the provider-free launcher.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pairing_code]
+              properties:
+                pairing_code:
+                  type: string
+                  minLength: 32
+                  maxLength: 128
+      responses:
+        "200":
+          description: Local owner paired; credential is cookie-only
+        "403":
+          description: Pairing rejected
   /api/v1/state:
     get:
       operationId: getState
@@ -66,7 +89,7 @@ paths:
           name: after
           required: false
           schema:
-            type: string
+            $ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence
       responses:
         "200":
           description: Resumable projection event stream; a detected cursor gap requires /api/v1/state resnapshot

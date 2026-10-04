@@ -17,6 +17,12 @@ from research.autotrade_research.artifacts.durable_publish import (
     atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,
 )
+from autotrade_foundation.windows_namespace import (
+    retain_windows_directory_namespace,
+    retain_windows_relative_directory_namespace,
+    retain_windows_regular_file,
+    windows_handle_information,
+)
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
@@ -323,6 +329,214 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
         return data
 
 
+def _windows_descriptor_identity(
+    descriptor: int,
+    *,
+    subject: str,
+) -> tuple[int, int, int]:
+    """Return one canonical Windows file identity for an already-open descriptor.
+
+    CPython/CRT stat device and inode fields are not a cross-descriptor
+    authority on Windows. Convert each descriptor back to its native HANDLE
+    and reuse the foundation GetFileInformationByHandle authority instead.
+    """
+
+    if sys.platform != "win32":
+        raise BundleError("Windows descriptor identity is Windows-only")
+    try:
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(descriptor)
+        information = windows_handle_information(handle, subject=subject)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(f"{subject} identity cannot be verified") from error
+
+    if information.number_of_links > 1:
+        raise BundleError("hardlinked staged files are forbidden")
+    if information.number_of_links != 1:
+        raise BundleError("staged file changed during collection")
+    return (
+        information.volume_serial,
+        information.file_index_high,
+        information.file_index_low,
+    )
+
+
+def _read_retained_windows_regular_file(
+    authority,
+    *,
+    target_name: str,
+    path: Path,
+) -> bytes:
+    """Read one staged Windows file through one retained native identity.
+
+    A pathname descriptor establishes the admitted generation. The canonical
+    retained relative NT open is then acquired while the admission descriptor
+    is still held. Cross-descriptor identity is compared through the shared
+    GetFileInformationByHandle authority; CRT fstat metadata is used only for
+    bounded mutation checks. Once the retained descriptor exists its
+    no-WRITE/no-DELETE sharing fence keeps that exact generation stable through
+    the byte read.
+    """
+
+    try:
+        try:
+            admission_stream = path.open("rb")
+        except OSError as error:
+            raise BundleError(
+                f"staged Windows file authority cannot be admitted: {path}"
+            ) from error
+        with admission_stream:
+            admitted = os.fstat(admission_stream.fileno())
+            if not stat.S_ISREG(admitted.st_mode):
+                raise BundleError(f"staged entry must remain a regular file: {path}")
+            admitted_identity = _windows_descriptor_identity(
+                admission_stream.fileno(),
+                subject="Windows bundle admitted staged file",
+            )
+
+            with retain_windows_regular_file(
+                authority,
+                target_name=target_name,
+                subject="Windows bundle staged file",
+            ) as descriptor:
+                before = os.fstat(descriptor)
+                if not stat.S_ISREG(before.st_mode):
+                    raise BundleError(
+                        f"staged entry must remain a regular file: {path}"
+                    )
+                retained_identity = _windows_descriptor_identity(
+                    descriptor,
+                    subject="Windows bundle retained staged file",
+                )
+                if admitted_identity != retained_identity:
+                    raise BundleError(f"staged file changed during collection: {path}")
+                if (
+                    admitted.st_size != before.st_size
+                    or admitted.st_mtime_ns != before.st_mtime_ns
+                    or admitted.st_ctime_ns != before.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
+
+                chunks = bytearray()
+                while True:
+                    chunk = os.read(descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                after = os.fstat(descriptor)
+
+                admitted_after = os.fstat(admission_stream.fileno())
+                if (
+                    admitted_after.st_size != admitted.st_size
+                    or admitted_after.st_mtime_ns != admitted.st_mtime_ns
+                    or admitted_after.st_ctime_ns != admitted.st_ctime_ns
+                ):
+                    raise BundleError(f"staged file changed during collection: {path}")
+    except BundleError:
+        raise
+    except RuntimeError as error:
+        if "must not have hard-link aliases" in str(error):
+            raise BundleError(
+                f"hardlinked staged files are forbidden: {path}"
+            ) from error
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+    except (OSError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"staged Windows file authority cannot be retained: {path}"
+        ) from error
+
+    if (
+        before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or before.st_ctime_ns != after.st_ctime_ns
+        or len(chunks) != after.st_size
+    ):
+        raise BundleError(f"staged file changed while being read: {path}")
+    return bytes(chunks)
+
+
+def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
+    """Snapshot staging while retaining each traversed Windows namespace generation."""
+
+    snapshots: list[tuple[Path, bytes]] = []
+
+    def visit(authority, directory: Path) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            _reject_windows_reparse(path, observed)
+
+            if stat.S_ISDIR(observed.st_mode):
+                try:
+                    with retain_windows_relative_directory_namespace(
+                        authority,
+                        (entry.name,),
+                        create=False,
+                    ) as child_authority:
+                        visit(child_authority, path)
+                except BundleError:
+                    raise
+                except (OSError, RuntimeError, TypeError, ValueError) as error:
+                    raise BundleError(
+                        f"staged Windows directory authority cannot be retained: {path}"
+                    ) from error
+                continue
+
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            if observed.st_nlink > 1:
+                raise BundleError(f"hardlinked staged files are forbidden: {path}")
+            if observed.st_nlink != 1:
+                raise BundleError(f"staged file changed during collection: {path}")
+
+            # Entry metadata admits only type/reparse/link shape. Exact
+            # generation identity is established by two descriptors in the
+            # same CRT/fstat domain, with the second descriptor held by the
+            # canonical retained no-WRITE/no-DELETE Windows authority.
+            snapshots.append(
+                (
+                    path,
+                    _read_retained_windows_regular_file(
+                        authority,
+                        target_name=entry.name,
+                        path=path,
+                    ),
+                )
+            )
+
+    try:
+        with retain_windows_directory_namespace(
+            staging,
+            create=False,
+        ) as staging_authority:
+            visit(staging_authority, staging)
+    except BundleError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise BundleError(
+            f"Windows staging namespace authority cannot be retained: {staging}"
+        ) from error
+
+    return sorted(snapshots, key=lambda item: item[0].as_posix())
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     staging = staging.absolute()
     _assert_windows_path_chain_is_not_reparse(staging)
@@ -336,11 +550,26 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
-    for path in _walk_staging(staging):
-        _assert_staging_components_are_not_reparse(
-            path,
-            staging=staging,
-        )
+    if sys.platform == "win32":
+        snapshots = _walk_staging_windows_retained(staging)
+    else:
+        snapshots = []
+        for path in _walk_staging(staging):
+            _assert_staging_components_are_not_reparse(
+                path,
+                staging=staging,
+            )
+            snapshots.append(
+                (
+                    path,
+                    _read_staged_regular_file(
+                        path,
+                        staging_resolved=staging_resolved,
+                    ),
+                )
+            )
+
+    for path, data in snapshots:
         relative = _safe_relative(path, staging)
         windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
@@ -352,10 +581,6 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        data = _read_staged_regular_file(
-            path,
-            staging_resolved=staging_resolved,
-        )
         _reject_sensitive_content(relative, data)
         collected.append((relative, path, data))
     if not collected:

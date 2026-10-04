@@ -194,8 +194,11 @@ class RecoveryIssuedDispatcherTests(unittest.TestCase):
             self.assertEqual(first.status, "UNKNOWN")
             self.assertEqual(first_wire, ["wire"])
             # GuardedDispatcher owns durable send chronology; the production
-            # facade must rehydrate this fact before the next final barrier.
-            self.assertIs(recovery.state, HostState.READY)
+            # facade must immediately reflect the durable ambiguity into
+            # recovery readiness, before any later order is attempted.
+            self.assertIs(recovery.state, HostState.DEGRADED)
+            self.assertFalse(recovery.provider_reconciled)
+            self.assertIn("attempt-unknown-1", recovery.unresolved_attempts)
 
             second_wire = []
 

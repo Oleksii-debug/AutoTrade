@@ -2,6 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp import provider_route_dispatch
+from mvp.autotrade_mvp.provider_route_dispatch import ProviderRouteDispatchError
 from mvp.tests.test_provider_route_dispatch import ProviderRouteDispatchTests
 from mvp.tests.test_provider_selection import NOW
 
@@ -42,6 +43,75 @@ class ProviderRouteTransitiveAuthorityTests(unittest.TestCase):
             )
         if calls:
             raise AssertionError(f"retargeted executable was invoked: {calls!r}")
+
+    def test_composer_rejects_bound_route_helper_retarget_before_composition(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            original = provider_route_dispatch._require_bound_route_authority
+            calls = []
+
+            def forged(**_kwargs):
+                calls.append("forged")
+                raise AssertionError("forged route-binding authority executed")
+
+            provider_route_dispatch._require_bound_route_authority = forged
+            try:
+                with self.assertRaisesRegex(
+                    ProviderRouteDispatchError,
+                    "executable authority changed",
+                ):
+                    self._compose(journal, capabilities, qualifications, route)
+            finally:
+                provider_route_dispatch._require_bound_route_authority = original
+            self.assertEqual(calls, [])
+
+    def test_composer_rejects_current_scope_helper_retarget_before_composition(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            original = provider_route_dispatch._current_scope
+            calls = []
+
+            def forged(_route):
+                calls.append("forged")
+                raise AssertionError("forged current-scope authority executed")
+
+            provider_route_dispatch._current_scope = forged
+            try:
+                with self.assertRaisesRegex(
+                    ProviderRouteDispatchError,
+                    "executable authority changed",
+                ):
+                    self._compose(journal, capabilities, qualifications, route)
+            finally:
+                provider_route_dispatch._current_scope = original
+            self.assertEqual(calls, [])
+
+    def test_composer_rejects_time_parser_retarget_before_composition(self):
+        with TemporaryDirectory() as directory:
+            journal, capabilities, qualifications, route, _dispatcher, _q1, _harness = (
+                self._fixture(directory)
+            )
+            original = provider_route_dispatch._point
+            calls = []
+
+            def forged(_value):
+                calls.append("forged")
+                raise AssertionError("forged barrier time parser executed")
+
+            provider_route_dispatch._point = forged
+            try:
+                with self.assertRaisesRegex(
+                    ProviderRouteDispatchError,
+                    "executable authority changed",
+                ):
+                    self._compose(journal, capabilities, qualifications, route)
+            finally:
+                provider_route_dispatch._point = original
+            self.assertEqual(calls, [])
 
     def test_composed_c_q_barrier_cannot_retarget_time_parser_after_composition(self):
         with TemporaryDirectory() as directory:

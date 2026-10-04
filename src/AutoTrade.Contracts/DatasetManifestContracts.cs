@@ -2,10 +2,24 @@ using System.Text.Json;
 
 namespace AutoTrade.Contracts;
 
+/// <summary>
+/// Semantic validation authority for the canonical DatasetManifest contract.
+/// </summary>
 public static class DatasetManifestContracts
 {
+    /// <summary>
+    /// Stable identifier for the DatasetManifest content/source-evidence validator.
+    /// </summary>
     public const string SemanticValidatorId = "dataset-manifest-content-authority-v1";
 
+    /// <summary>
+    /// Validate that every declared content hash is covered by source evidence.
+    /// </summary>
+    /// <param name="value">The DatasetManifest JSON value to validate.</param>
+    /// <returns>
+    /// <see langword="true"/> when the semantic evidence relation is valid;
+    /// otherwise <see langword="false"/>.
+    /// </returns>
     public static bool IsSemanticallyValid(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Object)

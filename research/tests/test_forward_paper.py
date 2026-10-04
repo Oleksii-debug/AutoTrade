@@ -932,5 +932,91 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         )
 
 
+    def test_authority_ingress_rejects_polymorphic_scalars_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("caller text callback must not execute")
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                callbacks.append("lt")
+                raise AssertionError("caller integer callback must not execute")
+
+        with self.assertRaisesRegex(ForwardPaperError, "campaign_id is required"):
+            self.protocol(campaign_id=HostileText("paper-campaign-1"))
+        with self.assertRaisesRegex(ForwardPaperError, "must be an integer"):
+            self.protocol(minimum_predictions=HostileInt(2))
+        self.assertEqual(callbacks, [])
+
+    def test_authority_ingress_rejects_polymorphic_containers_before_iteration(self):
+        callbacks = []
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("caller sequence callback must not execute")
+
+        class HostileDict(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("caller mapping callback must not execute")
+
+        with self.assertRaisesRegex(ForwardPaperError, "plain list or tuple"):
+            self.protocol(required_regimes=HostileList(["TREND", "RANGE"]))
+        with self.assertRaisesRegex(TypeError, "plain mapping"):
+            self.evidence(costs_by_currency=HostileDict({"USD": "12.34"}))
+        with self.assertRaisesRegex(ForwardPaperError, "plain list or tuple"):
+            self.evidence(predictions=HostileList(self.predictions()))
+        self.assertEqual(callbacks, [])
+
+    def test_assessment_readmits_frozen_protocol_after_post_init_mutation(self):
+        protocol = self.protocol()
+        object.__setattr__(protocol, "minimum_predictions", 999)
+        with self.assertRaisesRegex(
+            ForwardPaperError,
+            "protocol_hash does not match canonical frozen protocol content",
+        ):
+            assess_forward_paper(protocol, self.evidence())
+
+    def test_assessment_readmits_mutated_economics_before_scoring(self):
+        rows = list(self.economics())
+        object.__setattr__(rows[0], "net_pnl", Decimal("999"))
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=tuple(rows)),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("invalid_paper_economics_record", result.reasons)
+        self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
+
+    def test_assessment_rejects_record_subclasses_as_evidence_authority(self):
+        class DerivedPrediction(SealedPrediction):
+            pass
+
+        original = self.predictions()[0]
+        derived = DerivedPrediction(
+            prediction_id=original.prediction_id,
+            provider_capability=original.provider_capability,
+            input_hash=original.input_hash,
+            proposal_hash=original.proposal_hash,
+            information_cutoff_at=original.information_cutoff_at,
+            sealed_at=original.sealed_at,
+            decision_deadline_at=original.decision_deadline_at,
+            outcome_horizon_end_at=original.outcome_horizon_end_at,
+            decision_latency_ms=original.decision_latency_ms,
+            regime=original.regime,
+            dependence_unit_id=original.dependence_unit_id,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(predictions=(derived, self.predictions()[1])),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("invalid_prediction_record", result.reasons)
+
+
 if __name__ == "__main__":
     unittest.main()

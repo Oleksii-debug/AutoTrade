@@ -1018,5 +1018,36 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertIn("invalid_prediction_record", result.reasons)
 
 
+    def test_mutated_operational_observation_is_admitted_before_coverage_reads(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("caller equality callback must not execute")
+
+            def __hash__(self):
+                callbacks.append("hash")
+                raise AssertionError("caller hash callback must not execute")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("caller text callback must not execute")
+
+        observations = list(self.operational())
+        object.__setattr__(
+            observations[0],
+            "provider_capability",
+            HostileText("KRAKEN:SPOT:LIMIT"),
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(operational_observations=tuple(observations)),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("invalid_operational_observation", result.reasons)
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

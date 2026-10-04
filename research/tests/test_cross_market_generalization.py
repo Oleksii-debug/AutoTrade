@@ -143,6 +143,7 @@ def evidence(
     return MarketRegimeEvidence.create(
         asset_class=asset_class,
         regime=regime,
+        exact_build_sha=BUILD,
         population=manifest(
             episode_id=f"{asset_class}-{regime}",
             episode_digest_char=digest_char,
@@ -258,6 +259,15 @@ class CrossMarketGeneralizationTests(unittest.TestCase):
         self.assertIn(
             "unregistered evidence cell: crypto::sideways",
             result.reasons,
+        )
+
+    def test_evidence_build_mismatch_fails(self):
+        rows = list(complete_evidence())
+        object.__setattr__(rows[0], "exact_build_sha", "b" * 40)
+        result = assess_cross_market_generalization(protocol(), rows)
+        self.assertEqual(result.status, "FAIL")
+        self.assertTrue(
+            any("exact build mismatch" in reason for reason in result.reasons)
         )
 
     def test_candidate_population_mismatch_fails(self):

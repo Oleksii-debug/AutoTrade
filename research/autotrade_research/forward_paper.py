@@ -656,6 +656,8 @@ class OperationalObservation:
 class PaperDecisionEconomics:
     prediction_id: str
     currency: str
+    sequence: int
+    realized_at: str
     gross_pnl: Decimal
     fees: Decimal
     spread_cost: Decimal
@@ -668,6 +670,8 @@ class PaperDecisionEconomics:
     def __post_init__(self) -> None:
         prediction_id = _text(self.prediction_id, name="prediction_id")
         currency = _text(self.currency, name="currency").upper()
+        sequence = _positive_int(self.sequence, name="sequence")
+        _instant(self.realized_at, name="realized_at")
         gross = _decimal(self.gross_pnl, name="gross_pnl")
         fees = _decimal(self.fees, name="fees", nonnegative=True)
         spread = _decimal(self.spread_cost, name="spread_cost", nonnegative=True)
@@ -695,6 +699,7 @@ class PaperDecisionEconomics:
             )
         object.__setattr__(self, "prediction_id", prediction_id)
         object.__setattr__(self, "currency", currency)
+        object.__setattr__(self, "sequence", sequence)
         object.__setattr__(self, "gross_pnl", gross)
         object.__setattr__(self, "fees", fees)
         object.__setattr__(self, "spread_cost", spread)
@@ -710,6 +715,8 @@ class PaperDecisionEconomics:
         *,
         prediction_id: str,
         currency: str,
+        sequence: int,
+        realized_at: str,
         gross_pnl: object,
         fees: object,
         spread_cost: object,
@@ -722,6 +729,8 @@ class PaperDecisionEconomics:
         return cls(
             prediction_id=prediction_id,
             currency=currency,
+            sequence=_positive_int(sequence, name="sequence"),
+            realized_at=realized_at,
             gross_pnl=_decimal(gross_pnl, name="gross_pnl"),
             fees=_decimal(fees, name="fees", nonnegative=True),
             spread_cost=_decimal(spread_cost, name="spread_cost", nonnegative=True),
@@ -1009,6 +1018,7 @@ def assess_forward_paper(
             operational_failures.append("unreconciled_operational_case")
 
     economics_by_prediction: dict[str, PaperDecisionEconomics] = {}
+    economics_by_sequence: dict[int, PaperDecisionEconomics] = {}
     for item in evidence.paper_economics:
         if not isinstance(item, PaperDecisionEconomics):
             invalid.append("invalid_paper_economics_record")
@@ -1019,9 +1029,45 @@ def assess_forward_paper(
         if item.prediction_id not in prediction_by_id:
             invalid.append("paper_economics_without_sealed_prediction")
             continue
+        if item.sequence in economics_by_sequence:
+            invalid.append("duplicate_paper_economics_sequence")
+            continue
         economics_by_prediction[item.prediction_id] = item
+        economics_by_sequence[item.sequence] = item
         if item.currency != protocol.reporting_currency:
             invalid.append("paper_economics_currency_mismatch")
+        realized = _instant(item.realized_at, name="realized_at")
+        if realized < campaign_start or realized > observed_until:
+            invalid.append("paper_economics_outside_observed_window")
+        outcome = outcomes_by_prediction.get(item.prediction_id)
+        if (
+            outcome is not None
+            and realized
+            < _instant(outcome.outcome_available_at, name="outcome_available_at")
+        ):
+            invalid.append("paper_economics_before_outcome_available")
+
+    ordered_economics = [
+        economics_by_sequence[key] for key in sorted(economics_by_sequence)
+    ]
+    if ordered_economics and sorted(economics_by_sequence) != list(
+        range(1, len(ordered_economics) + 1)
+    ):
+        invalid.append("paper_economics_sequence_gap")
+    previous: PaperDecisionEconomics | None = None
+    for item in ordered_economics:
+        if previous is None:
+            if Fraction(item.peak_equity_before) != Fraction(item.equity_before):
+                invalid.append("paper_equity_opening_peak_mismatch")
+        else:
+            if Fraction(item.equity_before) != Fraction(previous.equity_after):
+                invalid.append("paper_equity_chain_break")
+            expected_peak = max(
+                Fraction(previous.peak_equity_before),
+                Fraction(previous.equity_after),
+            )
+            if Fraction(item.peak_equity_before) != expected_peak:
+                invalid.append("paper_peak_equity_chain_break")
         if (
             protocol.maximum_drawdown is not None
             and max(
@@ -1031,6 +1077,7 @@ def assess_forward_paper(
             > Fraction(protocol.maximum_drawdown)
         ):
             operational_failures.append("maximum_drawdown_exceeded")
+        previous = item
 
     for prediction_id in prediction_by_id:
         if prediction_id not in economics_by_prediction:

@@ -247,22 +247,8 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             def quota_gate(*_args):
                 transport_holder["transport"].policy = replacement
 
-            intent_id, sender, request = self._sender_and_request(
-                runtime,
-                wire,
-                quota_gate=quota_gate,
-            )
-            transport = sender._ProductionBybitOrderSender__transport
-            transport_holder["transport"] = transport
             canonical_policy = BYBIT_V5_ENDPOINT_POLICIES["TESTNET"]
-            client_order_id = stable_client_order_id(
-                "BYBIT",
-                intent_id,
-                environment="PAPER",
-                account_id="account-1",
-                max_length=36,
-                client_id_format="TOKEN",
-            )
+            transport = None
 
             @contextmanager
             def fake_lease(_self, _token, **_kwargs):
@@ -271,6 +257,21 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_lease = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                )
+                transport = sender._ProductionBybitOrderSender__transport
+                transport_holder["transport"] = transport
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
                 with self.assertRaisesRegex(
                     PermissionError,
                     "transport policy authority changed before signing",
@@ -282,7 +283,8 @@ class ProductionBybitBarrierTests(unittest.TestCase):
                     )
             finally:
                 SecurityBoundary.lease_for_execution = original_lease
-                transport.policy = canonical_policy
+                if transport is not None:
+                    transport.policy = canonical_policy
 
             self.assertEqual(wire.requests, [])
 
@@ -300,22 +302,7 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             def quota_gate(*_args):
                 transport_holder["transport"].recv_window_ms = 6000
 
-            intent_id, sender, request = self._sender_and_request(
-                runtime,
-                wire,
-                quota_gate=quota_gate,
-                recv_window_ms=5000,
-            )
-            transport = sender._ProductionBybitOrderSender__transport
-            transport_holder["transport"] = transport
-            client_order_id = stable_client_order_id(
-                "BYBIT",
-                intent_id,
-                environment="PAPER",
-                account_id="account-1",
-                max_length=36,
-                client_id_format="TOKEN",
-            )
+            transport = None
 
             @contextmanager
             def fake_lease(_self, _token, **_kwargs):
@@ -324,6 +311,22 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_lease = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    quota_gate=quota_gate,
+                    recv_window_ms=5000,
+                )
+                transport = sender._ProductionBybitOrderSender__transport
+                transport_holder["transport"] = transport
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
                 with self.assertRaisesRegex(
                     PermissionError,
                     "receive-window authority changed before signing",
@@ -335,7 +338,8 @@ class ProductionBybitBarrierTests(unittest.TestCase):
                     )
             finally:
                 SecurityBoundary.lease_for_execution = original_lease
-                transport.recv_window_ms = 5000
+                if transport is not None:
+                    transport.recv_window_ms = 5000
 
             self.assertEqual(wire.requests, [])
 
@@ -349,19 +353,6 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             runtime, _boundary = self._runtime(root)
             wire = _RecordingWire()
             _HostileTimestamp.comparison_calls = 0
-            intent_id, sender, request = self._sender_and_request(
-                runtime,
-                wire,
-                clock_millis=lambda: _HostileTimestamp(1_700_000_000_000),
-            )
-            client_order_id = stable_client_order_id(
-                "BYBIT",
-                intent_id,
-                environment="PAPER",
-                account_id="account-1",
-                max_length=36,
-                client_id_format="TOKEN",
-            )
 
             @contextmanager
             def fake_lease(_self, _token, **_kwargs):
@@ -370,6 +361,19 @@ class ProductionBybitBarrierTests(unittest.TestCase):
             original_lease = SecurityBoundary.lease_for_execution
             SecurityBoundary.lease_for_execution = fake_lease
             try:
+                intent_id, sender, request = self._sender_and_request(
+                    runtime,
+                    wire,
+                    clock_millis=lambda: _HostileTimestamp(1_700_000_000_000),
+                )
+                client_order_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="account-1",
+                    max_length=36,
+                    client_id_format="TOKEN",
+                )
                 with self.assertRaisesRegex(
                     ValueError,
                     "clock_millis must return an exact non-negative integer",

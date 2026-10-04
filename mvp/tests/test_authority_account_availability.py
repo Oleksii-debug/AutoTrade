@@ -1,10 +1,15 @@
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 from tempfile import TemporaryDirectory
+import gc
 import unittest
+import weakref
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.authority as authority_module
+from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
@@ -12,7 +17,11 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+)
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -22,6 +31,7 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -180,6 +190,35 @@ def _checkpoint(
     )
 
 
+def _capital_authorities(store, directory, *, amount="50"):
+    economic = DurableProviderEconomicBook(
+        store,
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+    )
+    economic.append(
+        book_external_cash_flow(
+            transaction_id="capital-opening-cash",
+            cause_event_id="capital-opening-cash-event",
+            currency="USD",
+            amount=amount,
+        ),
+        committed_at="2026-09-24T17:59:00Z",
+    )
+    artifact_root = Path(directory) / "settlement-evidence"
+    artifacts = ArtifactStore(artifact_root)
+    settlement = DurableSettlementBook(
+        store,
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root,
+        evidence_artifact_store=artifacts,
+    )
+    return settlement, economic
+
+
 def _dispatch(authority, record, *, now=NOW):
     return authority.dispatch_allowed(
         record.admission_id,
@@ -238,6 +277,335 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_capital_binding_releases_retained_books_when_service_dies(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(store, directory)
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority_ref = weakref.ref(authority)
+            settlement_ref = weakref.ref(settlement)
+            economic_ref = weakref.ref(economic)
+
+            del authority
+            del settlement
+            del economic
+            gc.collect()
+
+            self.assertIsNone(authority_ref())
+            self.assertIsNone(settlement_ref())
+            self.assertIsNone(economic_ref())
+
+    def test_configured_settlement_capital_clamps_provider_cash(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("40"),
+            )
+            risk_event = store.load_events(
+                "risk_decision",
+                admitted.risk_decision_id,
+            )[0]
+            capital = risk_event["payload"][
+                "reservation_availability_evidence"
+            ]["settlement_capital_adjustment"]
+            self.assertEqual(
+                capital["resources"]["CASH:USD"],
+                {
+                    "provider_available": "1000",
+                    "local_available": "50",
+                    "effective_available": "50",
+                },
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "does not match expected journal cut",
+            ):
+                authority_module._canonical_settlement_capital_adjustment(
+                    deepcopy(capital),
+                    provider_available={"CASH:USD": "1000"},
+                    required_resources=("CASH:USD",),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    risk_journal_sequence=risk_event["journal_sequence"],
+                    expected_journal_sequence=capital["journal_sequence"] + 1,
+                )
+            reservation_event = [
+                event
+                for event in store.load_events(
+                    "reservation_book",
+                    reservations.scope_id,
+                )
+                if event["payload"].get("operation") == "RESERVE"
+            ][0]
+            self.assertEqual(
+                reservation_event["payload"]["request"]["available"]["CASH:USD"],
+                "50",
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+    def test_admission_rejects_capital_change_after_projection_before_commit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            original_resolve = authority_module._resolve_authority_service_capital
+
+            def resolve_then_withdraw(*args, **kwargs):
+                capital_cut = original_resolve(*args, **kwargs)
+                economic.append(
+                    book_external_cash_flow(
+                        transaction_id="capital-interleaving-withdrawal",
+                        cause_event_id="capital-interleaving-withdrawal-event",
+                        currency="USD",
+                        amount="-30",
+                    ),
+                    committed_at="2026-09-24T18:00:30Z",
+                )
+                return capital_cut
+
+            with patch.object(
+                authority_module,
+                "_resolve_authority_service_capital",
+                side_effect=resolve_then_withdraw,
+            ):
+                with self.assertRaisesRegex(
+                    AuthorityConflict,
+                    "settlement capital cut changed before financial commit",
+                ):
+                    _admit(
+                        authority,
+                        reservations,
+                        checkpoint,
+                        reservation_requirements={"CASH:USD": "40"},
+                    )
+
+            self.assertEqual(economic.cash("USD"), Decimal("20"))
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+    def test_dispatch_rechecks_current_local_settlement_capital(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="capital-withdrawal",
+                    cause_event_id="capital-withdrawal-event",
+                    currency="USD",
+                    amount="-20",
+                ),
+                committed_at="2026-09-24T18:01:10Z",
+            )
+            self.assertEqual(
+                _dispatch(authority, admitted),
+                (False, "financial_evidence_invalid"),
+            )
+
+    def test_dispatch_rejects_reconciliation_advance_during_local_capital_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            settlement, economic = _capital_authorities(
+                store,
+                directory,
+                amount="50",
+            )
+            authority = AuthorityService(
+                store,
+                settlement_book=settlement,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            original_resolve = authority_module._resolve_authority_service_capital
+            injected = False
+
+            def resolve_after_provider_read(*args, **kwargs):
+                nonlocal injected
+                if not injected:
+                    injected = True
+                    _checkpoint(
+                        store,
+                        available_cash="0",
+                        observed_at="2026-09-24T18:00:40Z",
+                        reconciliation_id="availability-authority-newer",
+                        snapshot_id="availability-snapshot-newer",
+                    )
+                return original_resolve(*args, **kwargs)
+
+            with patch.object(
+                authority_module,
+                "_resolve_authority_service_capital",
+                side_effect=resolve_after_provider_read,
+            ):
+                self.assertEqual(
+                    _dispatch(authority, admitted),
+                    (False, "financial_evidence_invalid"),
+                )
+            self.assertTrue(injected)
+
+    def test_dispatch_rejects_reconciliation_advance_after_provider_read_without_capital(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "40"},
+            )
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            original_load = authority_module.load_account_resource_availability_evidence
+            injected = False
+
+            def load_then_advance(*args, **kwargs):
+                nonlocal injected
+                evidence = original_load(*args, **kwargs)
+                if not injected:
+                    injected = True
+                    _checkpoint(
+                        store,
+                        cash="0",
+                        available_cash="0",
+                        observed_at="2026-09-24T18:00:40Z",
+                        reconciliation_id="availability-dispatch-race-newer",
+                        snapshot_id="availability-dispatch-race-newer",
+                    )
+                return evidence
+
+            with patch.object(
+                authority_module,
+                "load_account_resource_availability_evidence",
+                side_effect=load_then_advance,
+            ):
+                self.assertEqual(
+                    _dispatch(authority, admitted),
+                    (False, "financial_evidence_invalid"),
+                )
+            self.assertTrue(injected)
+
+    def test_bybit_provider_domain_capital_fails_closed_until_economic_book_is_exact(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifact_root = Path(directory) / "settlement-evidence"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+            economic = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "requires provider_environment",
+            ):
+                AuthorityService(
+                    store,
+                    settlement_book=settlement,
+                    economic_book=economic,
+                )
+
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

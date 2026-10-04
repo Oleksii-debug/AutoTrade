@@ -1,7 +1,7 @@
 """Product entrypoint checks for the canonical network-free simulation session."""
 
 from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
-from datetime import datetime
+from datetime import date, datetime
 import json
 import subprocess
 import sys
@@ -13,6 +13,7 @@ from unittest.mock import patch
 import mvp.autotrade_mvp.simulation_session as simulation_module
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import MovingAverageStrategy, _money
@@ -197,6 +198,38 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(str(book.cash("USD")), first["cash"])
             self.assertEqual(str(book.position(INSTRUMENT)), first["position"])
             self.assertIsNotNone(reopened.get_event(first["reconciliation_event_id"]))
+
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlements = DurableSettlementBook(
+                reopened,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                evidence_artifact_root=Path(directory) / "artifacts",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(len(settlements.obligations), 1)
+            obligation = settlements.obligations[0]
+            self.assertLess(obligation.amount, Decimal("0"))
+            self.assertEqual(obligation.cause_event_id, first["fill_id"])
+            self.assertIsNotNone(obligation.source_transaction_id)
+            self.assertIsNotNone(obligation.rule_binding)
+            self.assertTrue(
+                any(
+                    ref.startswith("artifact:")
+                    for ref in obligation.rule_binding.evidence_refs
+                )
+            )
+            self.assertEqual(settlements.settled_obligation_evidence, {})
+            projected = settlements.project(book)
+            self.assertEqual(projected.available_to_spend("USD"), Decimal(first["cash"]))
+            settlement_events = reopened.load_events_by_aggregate_type("settlement_book")
+            self.assertEqual(
+                [event["event_type"] for event in settlement_events],
+                ["SettlementObligationsRegistered"],
+            )
+
             sessions = reopened.load_events("canonical_simulation_session", "single-episode")
             self.assertEqual(
                 [event["event_type"] for event in sessions],
@@ -212,8 +245,57 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 reopened.load_events("canonical_simulation_session", "single-episode"),
                 sessions,
             )
+            self.assertEqual(
+                reopened.load_events_by_aggregate_type("settlement_book"),
+                settlement_events,
+            )
             with self.assertRaisesRegex(ValueError, "another simulation input"):
                 run_canonical_simulation(HOLD, directory, episode_id="buy")
+
+    def test_completed_buy_rejects_missing_settlement_rule_artifact_on_restart(self):
+        with TemporaryDirectory() as directory:
+            first = run_canonical_simulation(
+                BUY, directory, episode_id="missing-settlement-rule", now=NOW
+            )
+            self.assertEqual(
+                first["status"], "FILL_RECONCILED_ORDER_UNCONFIRMED"
+            )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=ENVIRONMENT,
+                evidence_artifact_root=Path(directory) / "artifacts",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(len(settlements.obligations), 1)
+            artifact_ref = next(
+                ref
+                for ref in settlements.obligations[0].rule_binding.evidence_refs
+                if ref.startswith("artifact:")
+            )
+            artifact_id = artifact_ref.removeprefix("artifact:").split("@", 1)[0]
+            artifacts._manifest_path(artifact_id).unlink()
+            before_submissions = store.load_events_by_aggregate_type(
+                "submission_attempt"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "artifact verification failed",
+            ):
+                run_canonical_simulation(
+                    BUY, directory, episode_id="missing-settlement-rule"
+                )
+
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"),
+                before_submissions,
+            )
 
     def test_hold_has_no_submission_or_financial_fill_and_resumes(self):
         with TemporaryDirectory() as directory:
@@ -284,8 +366,39 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 self.assertEqual(result[key], completed["payload"][key])
             self.assertEqual(
                 started["payload"]["protocol_version"],
-                "canonical-simulation@3",
+                "canonical-simulation@4",
             )
+
+    def test_simulation_rule_rejects_provider_date_outside_frozen_same_day_policy(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            with self.assertRaisesRegex(
+                ValueError,
+                "same-day settlement policy conflicts with provider fill",
+            ):
+                simulation_module._simulation_settlement_rule(
+                    artifacts,
+                    trade_date=date(2026, 9, 30),
+                    settlement_date=date(2026, 10, 1),
+                )
+            self.assertEqual(list(artifacts.manifests.glob("*.json")), [])
+
+    def test_changed_settlement_configuration_cannot_reinterpret_completed_state(self):
+        with TemporaryDirectory() as directory:
+            run_canonical_simulation(
+                HOLD, directory, episode_id="settlement-config", now=NOW
+            )
+            with patch.object(
+                simulation_module,
+                "_SIMULATION_SETTLEMENT_EVIDENCE_DELAY_SECONDS",
+                4,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "incompatible simulation protocol/configuration"
+                ):
+                    run_canonical_simulation(
+                        HOLD, directory, episode_id="settlement-config"
+                    )
 
     def test_changed_fee_configuration_cannot_reinterpret_completed_state(self):
         with TemporaryDirectory() as directory:

@@ -611,6 +611,39 @@ class Section17BlindedReplayTests(unittest.TestCase):
         self.assertEqual(feeder.view().events, ())
         self.assertLess(feeder.view().simulation_time_us, 0)
 
+    def test_late_correction_cannot_retroactively_move_feeder_anchor(self):
+        source = dataset(
+            event(
+                "first",
+                event_time="2024-03-12T10:00:00Z",
+                available_at="2024-03-12T10:00:00Z",
+                sequence=1,
+            ),
+            event(
+                "late-correction",
+                instrument="ETH-USD",
+                provider="Coinbase",
+                event_time="2024-03-12T09:00:00Z",
+                available_at="2024-03-12T11:00:00Z",
+                sequence=2,
+            ),
+        )
+        feeder = BlindedCausalFeeder(
+            dataset=source,
+            start_time="2024-03-12T10:00:00Z",
+            experiment_id="late-correction-anchor",
+            shuffle_key_sha256=SHUFFLE,
+            profile=profile(),
+            training_cutoff_uncertainty="unknown",
+        )
+
+        self.assertEqual(feeder.simulation_time_us, 0)
+        first = feeder.view().events[0]
+        self.assertEqual(first.event_time_us, 0)
+        correction = feeder.advance_to("2024-03-12T11:00:00Z")[0]
+        self.assertLess(correction.event_time_us, 0)
+        self.assertEqual(correction.available_at_us, 3_600_000_000)
+
     def test_causal_blinded_feeder_never_publishes_future_event(self):
         source = dataset(
             event("one", available_at="2024-03-12T10:00:00Z", sequence=1),

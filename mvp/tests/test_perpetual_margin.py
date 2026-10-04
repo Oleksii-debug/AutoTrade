@@ -1,5 +1,12 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
+from fractions import Fraction
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
@@ -20,8 +27,15 @@ from mvp.autotrade_mvp.perpetual_margin import (
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
-def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
-    return MarginTier(
+def tier(
+    upper="10000",
+    rate="0.005",
+    adjustment="0",
+    convention="ADD",
+    *,
+    cls=MarginTier,
+):
+    return cls(
         notional_upper_bound=Decimal(upper),
         maintenance_rate=Decimal(rate),
         maintenance_adjustment=Decimal(adjustment),
@@ -82,7 +96,7 @@ def capability(**overrides):
     )
 
 
-def evidence(**overrides):
+def evidence(*, cls=PerpetualMarginEvidence, **overrides):
     values = dict(
         provider_id="TEST_PROVIDER",
         account_id="account-A",
@@ -107,7 +121,7 @@ def evidence(**overrides):
         margin_tiers=(tier(), tier("50000", "0.01", "10", "ADD")),
     )
     values.update(overrides)
-    return PerpetualMarginEvidence(**values)
+    return cls(**values)
 
 
 class EvidenceArtifactStore:
@@ -232,7 +246,7 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         )
 
 
-def stress(**overrides):
+def stress(*, cls=PerpetualStress, **overrides):
     values = dict(
         price_loss_fraction=Decimal("0.05"),
         collateral_fx_loss_fraction=Decimal("0"),
@@ -242,7 +256,7 @@ def stress(**overrides):
         notional_increase_fraction=Decimal("0"),
     )
     values.update(overrides)
-    return PerpetualStress(**values)
+    return cls(**values)
 
 
 def evaluate(**overrides):
@@ -273,6 +287,23 @@ def evaluate(**overrides):
             **values,
             artifact_store=artifact_store,
         )
+
+
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def as_tuple(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def normalize(self, *args, **kwargs):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def __lt__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
+
+    def __le__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
 
 
 class PerpetualMarginTests(unittest.TestCase):
@@ -526,6 +557,70 @@ class PerpetualMarginTests(unittest.TestCase):
         ):
             evaluate(evidence=trusted, artifact_store=fake_store)
 
+    def test_margin_evidence_payloads_ignore_ambient_decimal_context(self):
+        trusted = evidence(
+            mark_price=Decimal("1234567890123456789012345678.1"),
+            index_price=Decimal("1234567890123456789012345678.2"),
+            collateral_fx_to_settlement=Decimal("0.9999999999999999999999999999"),
+            margin_tiers=(
+                MarginTier(
+                    notional_upper_bound=Decimal(
+                        "1234567890123456789012345678.3"
+                    ),
+                    maintenance_rate=Decimal(
+                        "0.1234567890123456789012345678"
+                    ),
+                    maintenance_adjustment=Decimal(
+                        "0.000000000000000000123456789"
+                    ),
+                ),
+            ),
+        )
+
+        with localcontext() as context:
+            context.prec = 6
+            low_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+        with localcontext() as context:
+            context.prec = 80
+            high_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(
+            low_precision[1]["mark_price"],
+            "1234567890123456789012345678.1",
+        )
+        self.assertEqual(
+            low_precision[0]["tiers"][0]["maintenance_rate"],
+            "0.1234567890123456789012345678",
+        )
+
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("10000")
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound=hostile,
+                maintenance_rate=Decimal("0.005"),
+            )
+
+    def test_margin_numeric_ingress_uses_shared_resource_envelope(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound="1e1000000",
+                maintenance_rate="0.005",
+            )
+
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):
             evaluate(collateral_amount=1000.0)
@@ -622,6 +717,150 @@ class PerpetualMarginTests(unittest.TestCase):
                 collateral_amount=Decimal("10000"),
                 stress=stress(notional_increase_fraction=Decimal("0.10")),
             )
+
+    def test_margin_arithmetic_and_divergence_are_exact_across_decimal_contexts(self):
+        exact_evidence = evidence(
+            mark_price=Decimal("4"),
+            index_price=Decimal("3"),
+            margin_tiers=(
+                tier(
+                    "2000000000000000000000000000",
+                    "0.0000000000000000000000000001",
+                    "0.0000000000000000000000000001",
+                ),
+            ),
+        )
+        exact_stress = stress(
+            price_loss_fraction=Decimal("0"),
+            collateral_fx_loss_fraction=Decimal("0"),
+            exit_cost_fraction=Decimal("0"),
+            additional_funding_loss=Decimal("0"),
+            unavailable_exit_extra_loss=Decimal("0"),
+            notional_increase_fraction=Decimal("0"),
+        )
+        common = dict(
+            evidence=exact_evidence,
+            signed_notional_settlement=Decimal(
+                "1000000000000000000000000000.1"
+            ),
+            collateral_amount=Decimal(
+                "1000000000000000000000000000.2"
+            ),
+            unrealized_pnl_settlement=Decimal(
+                "0.0000000000000000000000000003"
+            ),
+            collateral_haircut_fraction=Decimal(
+                "0.0000000000000000000000000001"
+            ),
+            stress=exact_stress,
+        )
+
+        allowed = []
+        blocked = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    allowed.append(
+                        evaluate(
+                            **common,
+                            maximum_mark_index_divergence_bps=Decimal(
+                                "3333.3334"
+                            ),
+                        )
+                    )
+                    blocked.append(
+                        evaluate(
+                            **common,
+                            maximum_mark_index_divergence_bps=Decimal(
+                                "3333.3333"
+                            ),
+                        )
+                    )
+
+        self.assertTrue(all(result == allowed[0] for result in allowed))
+        self.assertTrue(all(result == blocked[0] for result in blocked))
+        self.assertEqual(allowed[0].verdict, "ALLOW_NEW_RISK")
+        self.assertEqual(blocked[0].verdict, "BLOCK_NEW_RISK")
+        self.assertIn("MARK_INDEX_DIVERGENCE", blocked[0].reasons)
+        self.assertEqual(
+            allowed[0].mark_index_divergence_bps,
+            Fraction(10000, 3),
+        )
+        self.assertEqual(
+            allowed[0].maintenance_requirement,
+            Decimal("0.10000000000000000000000000011"),
+        )
+
+    def test_margin_authority_rejects_polymorphic_domain_objects_before_virtual_dispatch(self):
+        class ForgedEvidence(PerpetualMarginEvidence):
+            verification_called = False
+
+            def verify_immutable_artifacts(self, store):
+                type(self).verification_called = True
+                return None
+
+        class ForgedStress(PerpetualStress):
+            pass
+
+        class ForgedTier(MarginTier):
+            maintenance_called = False
+
+            def maintenance_requirement(self, notional):
+                type(self).maintenance_called = True
+                return Decimal("0")
+
+        forged_evidence = evidence(cls=ForgedEvidence)
+        with self.assertRaisesRegex(TypeError, "exact PerpetualMarginEvidence"):
+            evaluate(evidence=forged_evidence)
+        self.assertFalse(ForgedEvidence.verification_called)
+
+        forged_stress = stress(cls=ForgedStress)
+        with self.assertRaisesRegex(TypeError, "exact PerpetualStress"):
+            evaluate(stress=forged_stress)
+
+        with self.assertRaisesRegex(TypeError, "exact MarginTier"):
+            evidence(margin_tiers=(tier(cls=ForgedTier),))
+        self.assertFalse(ForgedTier.maintenance_called)
+
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            evidence(margin_tiers=[tier()])
+
+    def test_margin_text_identity_rejects_string_subclass_before_strip_dispatch(self):
+        class HostileText(str):
+            strip_called = False
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_called = True
+                raise AssertionError("string subclass strip must not run")
+
+        with self.assertRaisesRegex(PerpetualMarginError, "provider_id is required"):
+            evidence(provider_id=HostileText("TEST_PROVIDER"))
+        self.assertFalse(HostileText.strip_called)
+
+    def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
+        class ForgedArtifactStore(ArtifactStore):
+            load_called = False
+
+            def load_manifest(self, artifact_id):
+                type(self).load_called = True
+                raise AssertionError("subclass method must not run")
+
+            def read_bytes(self, artifact_id):
+                raise AssertionError("subclass method must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            publish_margin_artifacts(canonical, trusted)
+            forged = ForgedArtifactStore(directory)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "canonical ArtifactStore",
+            ):
+                evaluate(evidence=trusted, artifact_store=forged)
+            self.assertFalse(ForgedArtifactStore.load_called)
 
 if __name__ == "__main__":
     unittest.main()

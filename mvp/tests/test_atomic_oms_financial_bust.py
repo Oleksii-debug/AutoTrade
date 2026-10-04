@@ -20,7 +20,10 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     commit_provider_fill_with_reservation_consumption,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
-from mvp.autotrade_mvp.reservations import ReservationConflict
+from mvp.autotrade_mvp.reservations import (
+    POST_BUST_HOLD_STATE,
+    ReservationConflict,
+)
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
@@ -213,54 +216,90 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 Decimal("20"),
             )
 
-    def test_late_bust_after_terminal_reservation_fails_closed_without_partial_effects(self):
+    def test_late_bust_after_terminal_filled_reconstitutes_hold_atomically(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
             orders, economics, reservations = books(store)
             projected, provider = seed(orders, economics, reservations)
 
-            # Historical fixture only: represent a reservation that was already
-            # durably resolved FILLED before the provider later invalidated the
-            # execution.  Production terminalization still requires its own
-            # evidence authority; this test must not manufacture one.
-            terminal = reservations._commit(
-                command_id="fixture-filled-terminal",
-                idempotency_key="fixture-filled-terminal",
-                operation="MARK_TERMINAL",
-                request={
-                    "reservation_id": "reservation-1",
-                    "outcome": "FILLED",
-                    "resolution_evidence": "fixture-provider-filled",
-                },
-            )
-            self.assertEqual(terminal.state, "FILLED")
-            self.assertEqual(terminal.consumed["CASH:USD"], Decimal("100"))
-            self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+            # Historical fixture only. Current production terminal release has
+            # stricter evidence verification; this bounded override lets the
+            # regression represent an already-durable legacy FILLED cut without
+            # weakening production DurableReservationBook verification.
+            original_verify = DurableReservationBook._verify_resolution_evidence
 
-            with self.assertRaisesRegex(
-                ReservationConflict,
-                "Cannot restore consumption on a terminal reservation",
-            ):
-                atomic_bust(
-                    orders,
-                    economics,
-                    reservations,
-                    projected,
-                    provider,
+            def accept_legacy_filled_fixture(selected_book, **kwargs):
+                if kwargs.get("resolution_evidence") == "fixture-provider-filled":
+                    return "fixture-provider-filled"
+                return original_verify(selected_book, **kwargs)
+
+            DurableReservationBook._verify_resolution_evidence = (
+                accept_legacy_filled_fixture
+            )
+            try:
+                terminal = reservations._commit(
+                    command_id="fixture-filled-terminal",
+                    idempotency_key="fixture-filled-terminal",
+                    operation="MARK_TERMINAL",
+                    request={
+                        "reservation_id": "reservation-1",
+                        "outcome": "FILLED",
+                        "resolution_evidence": "fixture-provider-filled",
+                    },
+                )
+                self.assertEqual(terminal.state, "FILLED")
+                self.assertEqual(
+                    terminal.consumed["CASH:USD"], Decimal("100")
+                )
+                self.assertEqual(
+                    terminal.remaining["CASH:USD"], Decimal("0")
                 )
 
-            reopened = JournalStore(path)
-            ro, re, rr = books(reopened)
-            order = ro.order("order-1").snapshot()
-            self.assertEqual(order.filled_quantity, Decimal("1"))
-            self.assertEqual(order.fill_count, 1)
-            self.assertEqual(re.position("ABC"), Decimal("1"))
-            self.assertEqual(len(re.transactions), 1)
-            reservation = rr.get("reservation-1")
-            self.assertEqual(reservation.state, "FILLED")
-            self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
-            self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
+                self.assertTrue(
+                    atomic_bust(
+                        orders,
+                        economics,
+                        reservations,
+                        projected,
+                        provider,
+                    )
+                )
+
+                reopened = JournalStore(path)
+                ro, re, rr = books(reopened)
+                order = ro.order("order-1").snapshot()
+                self.assertEqual(order.filled_quantity, Decimal("0"))
+                self.assertEqual(order.fill_count, 0)
+                self.assertEqual(order.observation_count, 2)
+                self.assertEqual(re.position("ABC"), Decimal("0"))
+                self.assertEqual(len(re.transactions), 2)
+                reservation = rr.get("reservation-1")
+                self.assertEqual(reservation.state, POST_BUST_HOLD_STATE)
+                self.assertIsNone(reservation.resolution_evidence)
+                self.assertEqual(
+                    reservation.consumed["CASH:USD"], Decimal("0")
+                )
+                # Terminalization had released the unused 20 buffer as well as
+                # the 100 fill usage. The bust must restore the full original
+                # worst-case hold, not merely add the busted usage to zero.
+                self.assertEqual(
+                    reservation.remaining["CASH:USD"], Decimal("120")
+                )
+                self.assertEqual(
+                    rr.total_reserved("CASH:USD"), Decimal("120")
+                )
+
+                self.assertFalse(
+                    atomic_bust(ro, re, rr, projected, provider)
+                )
+                retry = rr.get("reservation-1")
+                self.assertEqual(retry, reservation)
+                self.assertEqual(
+                    rr.total_reserved("CASH:USD"), Decimal("120")
+                )
+            finally:
+                DurableReservationBook._verify_resolution_evidence = original_verify
 
     def test_provider_fill_facade_rejects_polymorphic_evidence_before_field_access(self):
         class HostileProjectedFill(ProjectedFillEvidence):

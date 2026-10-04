@@ -123,6 +123,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             PaperDecisionEconomics.create(
                 prediction_id="pred-1",
                 currency="USD",
+                sequence=1,
+                realized_at="2026-09-24T20:31:00Z",
                 gross_pnl="5.00",
                 fees="0.25",
                 spread_cost="0.25",
@@ -135,6 +137,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             PaperDecisionEconomics.create(
                 prediction_id="pred-2",
                 currency="USD",
+                sequence=2,
+                realized_at="2026-09-24T20:41:00Z",
                 gross_pnl="-1.00",
                 fees="0.25",
                 spread_cost="0.25",
@@ -546,6 +550,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             PaperDecisionEconomics.create(
                 prediction_id="pred-1",
                 currency="USD",
+                sequence=1,
+                realized_at="2026-09-24T20:31:00Z",
                 gross_pnl="5",
                 fees=0.25,
                 spread_cost="0.25",
@@ -559,6 +565,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             PaperDecisionEconomics.create(
                 prediction_id="pred-1",
                 currency="USD",
+                sequence=1,
+                realized_at="2026-09-24T20:31:00Z",
                 gross_pnl="5",
                 fees="0.25",
                 spread_cost="0.25",
@@ -575,6 +583,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         rows[0] = PaperDecisionEconomics.create(
             prediction_id=first.prediction_id,
             currency="EUR",
+            sequence=first.sequence,
+            realized_at=first.realized_at,
             gross_pnl=first.gross_pnl,
             fees=first.fees,
             spread_cost=first.spread_cost,
@@ -607,6 +617,8 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         rows[1] = PaperDecisionEconomics.create(
             prediction_id="pred-2",
             currency="USD",
+            sequence=2,
+            realized_at="2026-09-24T20:41:00Z",
             gross_pnl="-59",
             fees="0.25",
             spread_cost="0.25",
@@ -624,6 +636,78 @@ class ForwardPaperQualificationTests(unittest.TestCase):
         self.assertEqual(result.operational_status, "FAIL")
         self.assertIn("maximum_drawdown_exceeded", result.reasons)
         self.assertEqual(result.economic_edge_status, "NOT_ESTABLISHED")
+
+
+    def test_paper_equity_curve_must_be_one_continuous_campaign(self):
+        rows = list(self.economics())
+        rows[1] = PaperDecisionEconomics.create(
+            prediction_id="pred-2",
+            currency="USD",
+            sequence=2,
+            realized_at="2026-09-24T20:41:00Z",
+            gross_pnl="-1",
+            fees="0.25",
+            spread_cost="0.25",
+            slippage_cost="0.50",
+            net_pnl="-2",
+            equity_before="103",
+            equity_after="101",
+            peak_equity_before="104",
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_equity_chain_break", result.reasons)
+
+    def test_paper_economics_sequence_cannot_hide_missing_steps(self):
+        rows = list(self.economics())
+        second = rows[1]
+        rows[1] = PaperDecisionEconomics.create(
+            prediction_id=second.prediction_id,
+            currency=second.currency,
+            sequence=3,
+            realized_at=second.realized_at,
+            gross_pnl=second.gross_pnl,
+            fees=second.fees,
+            spread_cost=second.spread_cost,
+            slippage_cost=second.slippage_cost,
+            net_pnl=second.net_pnl,
+            equity_before=second.equity_before,
+            equity_after=second.equity_after,
+            peak_equity_before=second.peak_equity_before,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_economics_sequence_gap", result.reasons)
+
+    def test_paper_economics_cannot_precede_outcome_availability(self):
+        rows = list(self.economics())
+        first = rows[0]
+        rows[0] = PaperDecisionEconomics.create(
+            prediction_id=first.prediction_id,
+            currency=first.currency,
+            sequence=first.sequence,
+            realized_at="2026-09-24T20:29:59Z",
+            gross_pnl=first.gross_pnl,
+            fees=first.fees,
+            spread_cost=first.spread_cost,
+            slippage_cost=first.slippage_cost,
+            net_pnl=first.net_pnl,
+            equity_before=first.equity_before,
+            equity_after=first.equity_after,
+            peak_equity_before=first.peak_equity_before,
+        )
+        result = assess_forward_paper(
+            self.protocol(),
+            self.evidence(paper_economics=rows),
+        )
+        self.assertEqual(result.evidence_status, "INVALID")
+        self.assertIn("paper_economics_before_outcome_available", result.reasons)
 
 
 if __name__ == "__main__":

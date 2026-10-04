@@ -8,8 +8,8 @@ historical quantitative RiskPolicy episode and exact reservation requirements.
 The policy content is not copied into a second authority format.  Durable state
 retains the existing ``ResolvedRiskPolicy.evidence_payload`` and restart
 re-resolves that exact historical cut through ``DurableRiskPolicyRegistry``.
-Before an operator confirmation is treated as current, ``require_current`` also
-proves that the same activation episode remains selected.
+Before publication and before operator confirmation, the same activation episode
+must also still be current.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
-import json
 
 from .pending_intents import DurablePendingIntentRegistry, PendingIntentError
 from .persistence import (
@@ -116,10 +115,6 @@ def _utc(value: object, *, name: str) -> datetime:
     return datetime.astimezone(value, timezone.utc)
 
 
-def _utc_text(value: object, *, name: str) -> str:
-    return _utc(value, name=name).isoformat().replace("+00:00", "Z")
-
-
 def _parse_utc_text(value: object, *, name: str) -> datetime:
     text = _text(value, name=name)
     if not text.endswith("Z"):
@@ -144,8 +139,6 @@ def _strict_dict(value: object, *, name: str, keys: frozenset[str]) -> dict[str,
 
 def _canonical_requirements(value: object) -> tuple[tuple[str, Decimal], ...]:
     try:
-        # Convert either a server mapping or an already-normalized tuple through
-        # the canonical payload and parser so there is one financial identity.
         payload = reservation_requirements_payload(value)
         requirements = normalize_reservation_requirements(payload)
     except (TypeError, ValueError) as error:
@@ -210,6 +203,47 @@ def _resolved_policy_at(
             "historical risk policy evidence differs from durable envelope"
         )
     return resolved
+
+
+def _same_policy_episode(left: ResolvedRiskPolicy, right: ResolvedRiskPolicy) -> bool:
+    try:
+        admitted_left = _CANONICAL_REQUIRE_RESOLVED_POLICY(left)
+        admitted_right = _CANONICAL_REQUIRE_RESOLVED_POLICY(right)
+    except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
+        raise PendingConfirmationEnvelopeError(
+            "risk policy episode is not registry-issued"
+        ) from error
+    return (
+        admitted_left.identity == admitted_right.identity
+        and admitted_left.registration_event_id == admitted_right.registration_event_id
+        and admitted_left.registration_journal_sequence
+        == admitted_right.registration_journal_sequence
+        and admitted_left.activation_event_id == admitted_right.activation_event_id
+        and admitted_left.activation_journal_sequence
+        == admitted_right.activation_journal_sequence
+        and admitted_left.journal_store_identity_digest
+        == admitted_right.journal_store_identity_digest
+    )
+
+
+def _current_policy_for_episode(
+    store: JournalStore,
+    historical: ResolvedRiskPolicy,
+) -> ResolvedRiskPolicy:
+    scope = historical.identity.scope
+    registry = DurableRiskPolicyRegistry(store)
+    try:
+        current = _CANONICAL_RISK_POLICY_RESOLVE_CURRENT(registry, scope)
+        _CANONICAL_REQUIRE_RESOLVED_POLICY(current)
+    except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
+        raise PendingConfirmationEnvelopeError(
+            "current risk policy authority is unavailable"
+        ) from error
+    if not _same_policy_episode(current, historical):
+        raise PendingConfirmationEnvelopeError(
+            "risk policy episode is not current"
+        )
+    return current
 
 
 def _event_id(pending_intent_id: str, pending_intent_hash: str) -> str:
@@ -347,10 +381,7 @@ class DurablePendingConfirmationEnvelopeRegistry:
             raise PendingConfirmationEnvelopeError(
                 "risk envelope requires registry-issued ResolvedRiskPolicy"
             ) from error
-        if (
-            resolved.journal_store_identity_digest
-            != self._journal_store_identity_digest
-        ):
+        if resolved.journal_store_identity_digest != self._journal_store_identity_digest:
             raise PendingConfirmationEnvelopeError(
                 "risk policy belongs to another JournalStore generation"
             )
@@ -359,6 +390,8 @@ class DurablePendingConfirmationEnvelopeRegistry:
             raise PendingConfirmationEnvelopeError(
                 "risk policy scope differs from pending financial intent"
             )
+        _current_policy_for_episode(self.store, resolved)
+
         requirements = _canonical_requirements(reservation_requirements)
         prepared_text = point.isoformat().replace("+00:00", "Z")
         risk_evidence = resolved.evidence_payload
@@ -455,17 +488,12 @@ class DurablePendingConfirmationEnvelopeRegistry:
             name="risk policy evidence",
             keys=_RISK_EVIDENCE_KEYS,
         )
-        if (
-            risk_evidence.get("journal_store_identity_digest")
-            != self._journal_store_identity_digest
-        ):
+        if risk_evidence.get("journal_store_identity_digest") != self._journal_store_identity_digest:
             raise PendingConfirmationEnvelopeError(
                 "durable risk policy belongs to another JournalStore generation"
             )
         historical = _resolved_policy_at(self.store, risk_evidence)
-        requirements = _canonical_requirements(
-            payload.get("reservation_requirements")
-        )
+        requirements = _canonical_requirements(payload.get("reservation_requirements"))
         if reservation_requirements_payload(requirements) != payload.get(
             "reservation_requirements"
         ):
@@ -488,26 +516,6 @@ class DurablePendingConfirmationEnvelopeRegistry:
         pending_intent_id: str,
     ) -> tuple[PendingConfirmationEnvelope, ResolvedRiskPolicy]:
         envelope = self.load(pending_intent_id)
-        historical = _CANONICAL_REQUIRE_RESOLVED_POLICY(
-            envelope.resolved_risk_policy
-        )
-        scope = historical.identity.scope
-        registry = DurableRiskPolicyRegistry(self.store)
-        try:
-            current = _CANONICAL_RISK_POLICY_RESOLVE_CURRENT(registry, scope)
-            _CANONICAL_REQUIRE_RESOLVED_POLICY(current)
-        except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
-            raise PendingConfirmationEnvelopeError(
-                "current risk policy authority is unavailable"
-            ) from error
-        if (
-            current.identity != historical.identity
-            or current.registration_event_id != historical.registration_event_id
-            or current.activation_event_id != historical.activation_event_id
-            or current.journal_store_identity_digest
-            != historical.journal_store_identity_digest
-        ):
-            raise PendingConfirmationEnvelopeError(
-                "pending risk envelope is stale against current RiskPolicy authority"
-            )
+        historical = _CANONICAL_REQUIRE_RESOLVED_POLICY(envelope.resolved_risk_policy)
+        current = _current_policy_for_episode(self.store, historical)
         return envelope, current

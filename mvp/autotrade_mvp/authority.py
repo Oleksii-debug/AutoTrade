@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import threading
@@ -23,7 +23,12 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
-from .exact_decimal import exact_add, exact_subtract, exact_abs
+from .exact_decimal import (
+    exact_add,
+    exact_subtract,
+    exact_abs,
+    parse_bounded_exact_decimal,
+)
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .persistence import (
     JournalStore,
@@ -62,21 +67,35 @@ from .risk_policy_authority import (
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    normalized = value.strip()
+    if not normalized:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    return normalized
+
+
+def _exact_collection_snapshot(values, *, name: str) -> tuple[object, ...]:
+    """Detach one exact built-in collection before authority-bearing iteration."""
+
+    if type(values) is tuple:
+        return values
+    if type(values) is list:
+        return tuple(list.copy(values))
+    if type(values) is set:
+        return tuple(set.copy(values))
+    if type(values) is frozenset:
+        return tuple(values)
+    raise TypeError(f"{name} must be an exact built-in collection")
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -103,19 +122,15 @@ class InstrumentVersionIdentity:
             canonical_id = str(UUID(raw_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise ValueError("instrument_id must be a UUID") from error
-        if (
-            not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 1
-        ):
+        if type(self.version) is not int or self.version < 1:
             raise ValueError("instrument_version must be a positive integer")
         object.__setattr__(self, "instrument_id", canonical_id)
 
 
 def _instrument_identity(value, *, name: str = "instrument") -> InstrumentVersionIdentity:
-    if isinstance(value, InstrumentVersionIdentity):
+    if type(value) is InstrumentVersionIdentity:
         return value
-    if isinstance(value, (tuple, list)) and len(value) == 2:
+    if type(value) in {tuple, list} and len(value) == 2:
         return InstrumentVersionIdentity(value[0], value[1])
     raise TypeError(
         f"{name} must be InstrumentVersionIdentity or an (instrument_id, version) pair"
@@ -141,25 +156,20 @@ class AuthorityPolicy:
         # instantiate dataclasses directly, so validation cannot live only in
         # create(); otherwise truthy non-booleans such as "false" could bypass
         # the confirmation requirement through policy.autonomous.
-        if not isinstance(self.autonomous, bool) or not isinstance(
-            self.protection_only, bool
-        ):
+        if type(self.autonomous) is not bool or type(self.protection_only) is not bool:
             raise TypeError("autonomous and protection_only must be booleans")
-        if (
-            not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 1
-        ):
+        if type(self.version) is not int or self.version < 1:
             raise ValueError("authority policy version must be a positive integer")
-        if isinstance(self.environments, (str, bytes)):
-            raise TypeError("environments must be a collection")
-        if isinstance(self.instruments, (str, bytes)):
-            raise TypeError("instruments must be a collection")
-        if isinstance(self.actions, (str, bytes)):
-            raise TypeError("actions must be a collection")
+        environment_values = _exact_collection_snapshot(
+            self.environments, name="environments"
+        )
+        instrument_values = _exact_collection_snapshot(
+            self.instruments, name="instruments"
+        )
+        action_values = _exact_collection_snapshot(self.actions, name="actions")
 
         normalized_environments = frozenset(
-            _text(item, name="environment").upper() for item in self.environments
+            _text(item, name="environment").upper() for item in environment_values
         )
         if (
             not normalized_environments
@@ -167,10 +177,10 @@ class AuthorityPolicy:
         ):
             raise ValueError("environments must contain supported values")
         normalized_instruments = frozenset(
-            _instrument_identity(item) for item in self.instruments
+            _instrument_identity(item) for item in instrument_values
         )
         normalized_actions = frozenset(
-            _text(item, name="action").upper() for item in self.actions
+            _text(item, name="action").upper() for item in action_values
         )
         if not normalized_instruments or not normalized_actions:
             raise ValueError("instruments and actions must be non-empty")
@@ -210,16 +220,23 @@ class AuthorityPolicy:
         protection_only: bool = False,
         version: int = 1,
     ) -> "AuthorityPolicy":
+        environment_values = _exact_collection_snapshot(
+            environments, name="environments"
+        )
+        instrument_values = _exact_collection_snapshot(
+            instruments, name="instruments"
+        )
+        action_values = _exact_collection_snapshot(actions, name="actions")
         normalized_environments = frozenset(
-            _text(item, name="environment").upper() for item in environments
+            _text(item, name="environment").upper() for item in environment_values
         )
         if not normalized_environments or not normalized_environments <= {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environments must contain supported values")
         normalized_instruments = frozenset(
-            _instrument_identity(item) for item in instruments
+            _instrument_identity(item) for item in instrument_values
         )
         normalized_actions = frozenset(
-            _text(item, name="action").upper() for item in actions
+            _text(item, name="action").upper() for item in action_values
         )
         if not normalized_instruments or not normalized_actions:
             raise ValueError("instruments and actions must be non-empty")
@@ -230,7 +247,7 @@ class AuthorityPolicy:
         expires_at_instant = _instant(expires_at, name="expires_at")
         if valid_from_instant >= expires_at_instant:
             raise ValueError("valid_from must precede expires_at")
-        if not isinstance(autonomous, bool) or not isinstance(protection_only, bool):
+        if type(autonomous) is not bool or type(protection_only) is not bool:
             raise TypeError("autonomous and protection_only must be booleans")
         return cls(
             policy_id=_text(policy_id, name="policy_id"),
@@ -340,19 +357,11 @@ class AdmissionRecord:
         if notional < 0:
             raise ValueError("admission notional must be non-negative")
         object.__setattr__(self, "notional", notional)
-        if not isinstance(self.risk_reducing, bool):
+        if type(self.risk_reducing) is not bool:
             raise TypeError("admission risk_reducing must be boolean")
-        if (
-            not isinstance(self.state_version, int)
-            or isinstance(self.state_version, bool)
-            or self.state_version < 0
-        ):
+        if type(self.state_version) is not int or self.state_version < 0:
             raise ValueError("admission state_version is invalid")
-        if (
-            not isinstance(self.authority_epoch, int)
-            or isinstance(self.authority_epoch, bool)
-            or self.authority_epoch < 0
-        ):
+        if type(self.authority_epoch) is not int or self.authority_epoch < 0:
             raise ValueError("admission authority_epoch is invalid")
         outcome = _text(self.outcome, name="outcome").upper()
         if outcome not in {"ADMITTED", "REJECTED"}:
@@ -405,9 +414,7 @@ class AdmissionRecord:
             if self.risk_valid_until is not None:
                 _instant(self.risk_valid_until, name="risk_valid_until")
             if self.policy_version is not None and (
-                not isinstance(self.policy_version, int)
-                or isinstance(self.policy_version, bool)
-                or self.policy_version < 1
+                type(self.policy_version) is not int or self.policy_version < 1
             ):
                 raise ValueError("admission policy_version must be positive")
 

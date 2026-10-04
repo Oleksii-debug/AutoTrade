@@ -14,7 +14,7 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4
 
-from autotrade_research.data.vintages import (
+from ..data.vintages import (
     HistoricalDataError,
     HistoricalVintageRegistry,
 )

@@ -800,12 +800,13 @@ class CorporateActionBook:
             raise ValueError(
                 "successor_instrument_version must be a canonical positive integer"
             )
-        successor_version = int(raw_version)
         current = self.instrument_version
-        if successor_version != current.version + 1:
+        expected_successor_version = current.version + 1
+        if raw_version != str(expected_successor_version):
             raise ValueError(
                 "symbol change successor must be the next instrument version"
             )
+        successor_version = expected_successor_version
         matches = tuple(
             item
             for item in self.registry.versions(current.instrument_id)

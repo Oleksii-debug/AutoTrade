@@ -593,17 +593,28 @@ class ClaimStore:
 
         effective_per_source: list[InformationClaim] = []
         for chain in chains.values():
+            # source_revision is opaque provenance text, not an ordering
+            # authority. If the latest causally visible source publications tie
+            # on published_at but disagree on value, availability/ingest order
+            # cannot manufacture a winner between revisions.
+            latest_published_at = max(item.published_at for item in chain)
+            latest_publications = [
+                item
+                for item in chain
+                if item.published_at == latest_published_at
+            ]
+            if len({item.value for item in latest_publications}) > 1:
+                raise ValueError(
+                    "source revisions with equal publication time have ambiguous ordering"
+                )
             latest = max(
-                chain,
+                latest_publications,
                 key=lambda item: (
-                    # Once revisions are causally visible at the cutoff, source
-                    # publication order is the supersession authority. A delayed
-                    # ingest of an older revision must not roll back a newer
-                    # already-visible source fact.
-                    item.published_at,
+                    # All candidates here assert the same semantic value. These
+                    # fields select deterministic provenance only; they do not
+                    # decide between competing source facts.
                     item.available_at,
                     item.ingested_at,
-                    item.source_revision,
                     item.claim_id,
                 ),
             )

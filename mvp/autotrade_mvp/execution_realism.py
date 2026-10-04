@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN
 from hashlib import sha256
 import json
 from typing import Literal
+
+from .exact_decimal import parse_bounded_exact_decimal
 
 
 class ExecutionRealismError(ValueError):
@@ -21,15 +23,10 @@ class ExecutionRealismError(ValueError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
+        return parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
         raise ExecutionRealismError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ExecutionRealismError(f"{name} must be a finite decimal")
-    return result
 
 
 def _non_negative(value, *, name: str) -> Decimal:
@@ -47,7 +44,7 @@ def _positive(value, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ExecutionRealismError(f"{name} is required")
     return value.strip()
 
@@ -105,11 +102,7 @@ class ExecutionModel:
     scenario_cost_multiplier: Decimal
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.latency_ms, bool)
-            or not isinstance(self.latency_ms, int)
-            or self.latency_ms < 0
-        ):
+        if type(self.latency_ms) is not int or self.latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(self.data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:

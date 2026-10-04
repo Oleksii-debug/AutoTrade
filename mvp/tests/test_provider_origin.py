@@ -544,6 +544,10 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 parser_identity="BYBIT_ORDER_V5_JSON_V1",
                 transport_identity="direct",
                 network_policy_identity="sha256:" + "e" * 64,
+                transport_execution_receipt_ref=(
+                    "provider-read-execution:sha256:" + "1" * 64
+                ),
+                terminal_authority_journal_sequence_cut=2,
                 http_status=200,
                 observed_at="2026-10-04T08:00:00Z",
                 response_sha256="sha256:" + "f" * 64,

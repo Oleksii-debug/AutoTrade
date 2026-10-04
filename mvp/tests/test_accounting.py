@@ -31,6 +31,12 @@ class AccountingFoundationTests(unittest.TestCase):
         inner = object.__getattribute__(scoped, "__dict__")["_book"]
         scoped_ref = weakref.ref(scoped)
         inner_ref = weakref.ref(inner)
+        self.assertTrue(
+            all(ref.__callback__ is None for ref in weakref.getweakrefs(scoped))
+        )
+        self.assertTrue(
+            all(ref.__callback__ is None for ref in weakref.getweakrefs(inner))
+        )
 
         del scoped
         del inner

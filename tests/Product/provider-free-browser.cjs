@@ -74,13 +74,32 @@ async function command(page, action, index) {
   assert.equal(await page.evaluate(() => document.activeElement.id), "submit-command", action);
   const before = await page.locator("#operations-body tr[data-operation-id]").count();
   await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.activeElement?.id === "command-result");
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "command-result",
+    action + " command feedback focus");
   await page.waitForFunction(count => document.querySelectorAll("#operations-body tr[data-operation-id]").length > count
     && document.querySelector("#operations-body").lastElementChild?.children[1]?.textContent === "SUCCEEDED", before);
-  await tabTo(page, "refresh-state");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "refresh-state",
+    action + " refresh reverse focus");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled
     && !document.querySelector("#submit-command").disabled
     && document.querySelector("#freshness").textContent.includes("host=CURRENT"));
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "submit-command",
+    action + " submit reverse focus");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement.id),
+    "host-action",
+    action + " action reverse focus");
   if (action === "RECOVER_SIMULATION" || action === "START_SIMULATION")
     await page.waitForFunction(() => document.querySelector("#portfolio-body").textContent.includes("895.696"));
 }

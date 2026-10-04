@@ -96,6 +96,18 @@ class ScientificRegistryTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_backing_path_cannot_be_reassigned_after_construction(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ScientificRegistry(root / "first.sqlite3")
+            original = store.path
+
+            with self.assertRaises(AttributeError):
+                store.path = root / "second.sqlite3"
+
+            self.assertEqual(store.path, original)
+            self.assertFalse((root / "second.sqlite3").exists())
+
     def test_protocol_is_immutable_after_registration(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

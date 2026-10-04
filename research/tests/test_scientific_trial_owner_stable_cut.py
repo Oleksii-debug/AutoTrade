@@ -34,12 +34,14 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
 
             canonical_trial_snapshot = ScientificRegistry.trial_completeness_evidence
             original_path = first.path
-            caller_was_moved = False
+            caller_mutation_was_rejected = False
 
             def move_caller_then_read(authority, protocol_id: str):
-                nonlocal caller_was_moved
-                first.path = second.path
-                caller_was_moved = True
+                nonlocal caller_mutation_was_rejected
+                with self.assertRaises(AttributeError):
+                    first.path = second.path
+                caller_mutation_was_rejected = True
+                self.assertEqual(first.path, original_path)
                 self.assertEqual(authority.path, original_path)
                 return canonical_trial_snapshot(authority, protocol_id)
 
@@ -54,7 +56,7 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
                     evidence=evidence(trials_attempted=1, trial_log_complete=True),
                 )
 
-            self.assertTrue(caller_was_moved)
+            self.assertTrue(caller_mutation_was_rejected)
             self.assertEqual(owner.binding.protocol_id, registered.protocol_id)
             self.assertEqual(owner.trial_evidence.recorded_trials, 1)
             self.assertTrue(owner.authoritative)

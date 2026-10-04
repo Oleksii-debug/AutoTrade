@@ -65,7 +65,7 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
             "ScientificRegistry path must be a frozen absolute pathlib path"
         )
     authority = object.__new__(ScientificRegistry)
-    object.__setattr__(authority, "path", path)
+    object.__setattr__(authority, "_path", path)
     return authority
 
 

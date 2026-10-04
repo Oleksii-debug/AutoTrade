@@ -323,9 +323,15 @@ class ScientificRegistry:
         # Freeze caller-relative/CWD-sensitive authority at construction.  Every
         # later SQLite connection must target the same lexical backing path even
         # if another component changes the process working directory.
-        self.path = candidate.resolve(strict=False)
+        self._path = candidate.resolve(strict=False)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
+
+    @property
+    def path(self) -> Path:
+        """Frozen backing path selected at construction."""
+
+        return self._path
 
     @contextmanager
     def _connect(self):

@@ -2766,7 +2766,7 @@ class KrakenSpotHttpTransport:
         ) as credential_plaintext:
             provider_api_key = None
             try:
-                provider_api_key = kraken_credential_parse(
+                provider_api_key = KrakenSpotCredential.parse(
                     credential_plaintext
                 ).api_key
                 nonce_domain = self.nonce_allocator.for_provider_api_key(
@@ -2999,7 +2999,7 @@ class KrakenSpotAuthenticatedReadTransport:
                 provider_api_key = None
                 with nonce_domain.serialized_send():
                     nonce = nonce_domain.allocate()
-                    signed = kraken_read_sign(
+                    signed = KrakenSpotAuthenticatedReadSigner.sign(
                         policy=self.policy,
                         query_binding=query_binding,
                         credential_plaintext=credential_plaintext,
@@ -4039,7 +4039,7 @@ class BybitV5AuthenticatedReadTransport:
             provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
-                signed = bybit_read_sign(
+                signed = BybitV5AuthenticatedReadSigner.sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -4638,7 +4638,7 @@ class BinanceSpotAuthenticatedReadTransport:
             purpose="READ",
         ) as credential_plaintext:
             try:
-                signed = binance_read_sign(
+                signed = BinanceSpotAuthenticatedReadSigner.sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -4984,7 +4984,7 @@ def _install_authenticated_read_execution_receipt_authority():
             purpose="READ",
         ) as credential_plaintext:
             try:
-                signed = BinanceSpotAuthenticatedReadSigner.sign(
+                signed = binance_read_sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -5060,7 +5060,7 @@ def _install_authenticated_read_execution_receipt_authority():
             provider_environment=self.provider_environment,
         ) as credential_plaintext:
             try:
-                signed = BybitV5AuthenticatedReadSigner.sign(
+                signed = bybit_read_sign(
                     policy=self.policy,
                     query_binding=query_binding,
                     credential_plaintext=credential_plaintext,
@@ -5134,7 +5134,7 @@ def _install_authenticated_read_execution_receipt_authority():
         ) as credential_plaintext:
             provider_api_key = None
             try:
-                provider_api_key = KrakenSpotCredential.parse(
+                provider_api_key = kraken_credential_parse(
                     credential_plaintext
                 ).api_key
                 nonce_domain = self.nonce_allocator.for_provider_api_key(
@@ -5143,7 +5143,7 @@ def _install_authenticated_read_execution_receipt_authority():
                 provider_api_key = None
                 with nonce_domain.serialized_send():
                     nonce = nonce_domain.allocate()
-                    signed = KrakenSpotAuthenticatedReadSigner.sign(
+                    signed = kraken_read_sign(
                         policy=self.policy,
                         query_binding=query_binding,
                         credential_plaintext=credential_plaintext,

@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.product_runtime import (
     _launch_message,
+    _owned_desktop_session_sink,
     build_product,
     restore_product_backup,
     source_revision,
@@ -101,6 +102,40 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_owned_desktop_child_uses_direct_ephemeral_session_handoff(self):
+        from mvp.autotrade_mvp import product_runtime
+
+        class Runtime:
+            def __init__(self):
+                self.closed = 0
+            def serve_forever(self):
+                return
+            def close(self):
+                self.closed += 1
+
+        runtime = Runtime()
+        with patch.object(product_runtime, 'build_product',
+                return_value=(runtime, 'http://127.0.0.1:8765/#pair=test-secret')) as builder, \
+             patch.object(product_runtime.signal, 'signal'), \
+             patch.object(product_runtime, 'Thread'):
+            self.assertEqual(product_runtime.main([
+                '--data-dir', 'unused-owned-child-state',
+                '--port', '8765',
+                '--no-browser',
+                '--desktop-child',
+            ]), 0)
+        self.assertIs(builder.call_args.kwargs['desktop_session_sink'], _owned_desktop_session_sink)
+        self.assertGreaterEqual(runtime.closed, 1)
+
+    def test_owned_desktop_session_sink_does_not_write_credential_manager(self):
+        with patch('mvp.autotrade_mvp.product_runtime.persist_desktop_owner_session') as persist:
+            self.assertIsNone(_owned_desktop_session_sink(
+                origin='http://127.0.0.1:8765',
+                actor='local-owner',
+                token='ephemeral-owned-session',
+            ))
+        persist.assert_not_called()
+
     def test_host_backpressure_rejects_before_admission_and_keeps_retry_identity(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory)

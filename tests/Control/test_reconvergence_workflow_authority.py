@@ -52,6 +52,25 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                     (f"{path} (unauthorized trust-root modification)",),
                 )
 
+    def test_existing_unlisted_workflow_lifecycle_stays_protected(self):
+        path = ".github/workflows/future-qualified-check.yaml"
+        for change in (
+            Change(status="D", path=path),
+            Change(
+                status="R100",
+                previous_path=path,
+                path="retired/future-qualified-check.yaml",
+            ),
+            Change(status="T", path=path),
+        ):
+            with self.subTest(status=change.status):
+                result = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[change],
+                )
+                self.assertFalse(result.allowed)
+                self.assertTrue(result.protected_violations)
+
     def test_untrusted_modification_of_integration_harness_roots_fails_closed(self):
         expected = {
             "Directory.Build.props",

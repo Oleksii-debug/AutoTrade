@@ -88,9 +88,11 @@ def _nonnegative_int(value: object, *, name: str) -> int:
 
 
 def _utc_text(value: object, *, name: str) -> str:
-    if type(value) is not datetime or value.tzinfo is None:
+    # Exact datetime alone is insufficient: its tzinfo can still be a
+    # caller-controlled subclass whose callbacks run during astimezone().
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountAcquisitionError(
-            f"{name} must be an exact timezone-aware datetime"
+            f"{name} must be exact datetime with datetime.timezone"
         )
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 

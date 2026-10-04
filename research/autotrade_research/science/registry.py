@@ -523,15 +523,21 @@ class ScientificRegistry:
                     "PRAGMA table_info(protocol_locked_holdouts)"
                 )
             }
-            if "binding_hash" not in locked_holdout_columns:
-                # Historical rows from an earlier implementation have no
-                # cryptographic binding across dataset id/version/digest and
-                # chronology.  Preserve them for evidence, but leave NULL so
-                # authority reads fail closed rather than backfilling trust.
-                con.execute(
-                    "ALTER TABLE protocol_locked_holdouts "
-                    "ADD COLUMN binding_hash TEXT"
-                )
+            # The stacked parent briefly shipped a generic protocol -> holdout
+            # binding table without WP-10 dataset coordinates.  Upgrade that
+            # shape without manufacturing missing authority: legacy rows keep
+            # NULL dataset/binding fields and therefore fail closed on reads.
+            for column, declaration in (
+                ("dataset_id", "TEXT"),
+                ("dataset_version", "INTEGER"),
+                ("dataset_digest", "TEXT"),
+                ("binding_hash", "TEXT"),
+            ):
+                if column not in locked_holdout_columns:
+                    con.execute(
+                        "ALTER TABLE protocol_locked_holdouts "
+                        f"ADD COLUMN {column} {declaration}"
+                    )
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
         if not isinstance(payload, dict):
@@ -793,14 +799,22 @@ class ScientificRegistry:
                 )
 
             # Only the first binding is time-sensitive.  Once the exact binding
-            # exists, an idempotent restart may re-resolve it after trials; a
-            # legacy protocol with outcomes but no prior binding may not mint one.
-            if con.execute(
-                "SELECT 1 FROM trials WHERE protocol_id=? LIMIT 1",
-                (protocol,),
-            ).fetchone() is not None:
+            # exists, an idempotent restart may re-resolve it.  A legacy
+            # protocol may not choose its physical holdout after observing any
+            # trial, evaluation, or protocol-scoped holdout access.
+            prior_activity = sum(
+                int(
+                    con.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE protocol_id=?",
+                        (protocol,),
+                    ).fetchone()[0]
+                )
+                for table in ("trials", "evaluations", "holdout_access")
+            )
+            if prior_activity != 0:
                 raise ProtocolViolation(
-                    "locked holdout must be preregistered before the first trial"
+                    "locked holdout must be preregistered before the first "
+                    "trial or holdout access"
                 )
 
             holdout_row = con.execute(
@@ -964,15 +978,30 @@ class ScientificRegistry:
         protocol = _id(protocol_id)
         holdout = _text(holdout_id, "holdout_id")
         why = _text(purpose, "purpose")
+        supplied_identity_hash, _ = _holdout_identity(holdout_identity)
         access_id = _id()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM protocols WHERE protocol_id=?", (protocol,)).fetchone() is None:
+            protocol_row = con.execute(
+                "SELECT * FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if protocol_row is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(protocol_row)
+            locked_holdout = self._registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
+            if supplied_identity_hash != locked_holdout.holdout_identity_hash:
+                raise ProtocolViolation(
+                    "holdout access identity must match preregistered physical holdout"
+                )
             identity_hash = self._bind_holdout_identity(
                 con,
                 holdout_id=holdout,
-                holdout_identity=holdout_identity,
+                holdout_identity=locked_holdout.identity(),
             )
             con.execute(
                 "INSERT INTO holdout_access("

@@ -4375,16 +4375,20 @@ def commit_provider_fill_bust_with_economic_reversal(
         except ValueError as error:
             economic_book.refresh()
             order_book.refresh()
+            if reservation_book is not None:
+                reservation_book.refresh()
             raise AccountingConflict(
-                "OMS bust/economic reversal durable command authority is invalid"
+                "OMS bust/economic/resevation durable command authority is invalid"
             ) from error
         if authority is None:
             raise AccountingConflict(
-                "OMS bust and economic reversal exist without one atomic/recovery command authority"
+                "OMS bust and financial effects exist without one atomic/recovery command authority"
             )
         validate_command_authority(authority)
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         return False
 
     if economic_plan.envelope is None:
@@ -4395,11 +4399,18 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise AccountingConflict(
             "fresh fill bust is missing its durable OMS event"
         )
+    if reservation_plan is not None and reservation_plan.envelope is None:
+        raise AccountingConflict(
+            "fresh fill bust is missing its durable reservation restoration event"
+        )
 
     events: list[tuple[dict[str, Any], str | None]] = []
     if not order_plan.already_committed:
         assert order_plan.envelope is not None
         events.append((order_plan.envelope, order_plan.outbox_topic))
+    if reservation_plan is not None:
+        assert reservation_plan.envelope is not None
+        events.append((reservation_plan.envelope, None))
     events.append((economic_plan.envelope, "autotrade.economic.events"))
 
     try:
@@ -4414,6 +4425,9 @@ def commit_provider_fill_bust_with_economic_reversal(
             state_version=max(
                 order_plan.aggregate_version,
                 economic_plan.aggregate_version,
+                0
+                if reservation_plan is None
+                else reservation_plan.aggregate_version,
             ),
             expected_journal_sequence=evidence_journal_sequence,
             events=events,
@@ -4421,10 +4435,14 @@ def commit_provider_fill_bust_with_economic_reversal(
     except Exception:
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         raise
 
     economic_book.refresh()
     order_book.refresh()
+    if reservation_book is not None:
+        reservation_book.refresh()
     recorded = order_book.order(
         projected_fill.client_order_id
     ).snapshot()
@@ -4436,6 +4454,14 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise AccountingConflict(
             "atomic fill bust economic reversal did not replay"
         )
+    if reservation_plan is not None:
+        assert reservation_book is not None
+        assert rid is not None
+        restored = reservation_book.get(rid)
+        if restored != reservation_plan.snapshot:
+            raise AccountingConflict(
+                "atomic fill bust reservation restoration did not replay"
+            )
     return inserted
 
 def commit_provider_fill_with_reservation_consumption(

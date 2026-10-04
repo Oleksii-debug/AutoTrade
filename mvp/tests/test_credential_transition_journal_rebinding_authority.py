@@ -63,7 +63,7 @@ class CredentialTransitionJournalRebindingAuthorityTests(unittest.TestCase):
             new_secret_value=value,
         )
 
-    def test_public_receipt_verifier_rebind_cannot_authorize_stale_anchor(self) -> None:
+    def _stale_anchor_fixture(self):
         second, receipt_one = self._rotate(self.vault, self.first, "test-value-v2")
         record_current_trade_credential_transition_anchor(
             self.store,
@@ -71,6 +71,31 @@ class CredentialTransitionJournalRebindingAuthorityTests(unittest.TestCase):
             receipt_one,
         )
         _third, _receipt_two = self._rotate(self.vault, second, "test-value-v3")
+        return receipt_one
+
+    def _rollback_fixture(self):
+        second, receipt_one = self._rotate(self.vault, self.first, "test-value-v2")
+        record_current_trade_credential_transition_anchor(
+            self.store,
+            self.vault,
+            receipt_one,
+        )
+        rolled_back_bytes = self.vault_path.read_bytes()
+        _third, receipt_two = self._rotate(self.vault, second, "test-value-v3")
+        record_current_trade_credential_transition_anchor(
+            self.store,
+            self.vault,
+            receipt_two,
+        )
+        self.vault_path.write_bytes(rolled_back_bytes)
+        rolled_back = ProtectedCredentialVault(
+            self.vault_path,
+            protector=DeterministicProtector(),
+        )
+        return rolled_back, receipt_one
+
+    def test_public_receipt_verifier_rebind_cannot_authorize_stale_anchor(self) -> None:
+        receipt_one = self._stale_anchor_fixture()
         calls = []
 
         def rebound_verifier(vault, receipt):
@@ -95,27 +120,34 @@ class CredentialTransitionJournalRebindingAuthorityTests(unittest.TestCase):
             "anchor authority must not dispatch through a rebound public receipt verifier",
         )
 
+    def test_private_canonical_verifier_rebind_before_call_is_never_executed(self) -> None:
+        receipt_one = self._stale_anchor_fixture()
+        calls = []
+
+        def rebound_verifier(vault, receipt):
+            calls.append(receipt.receipt_id)
+            return receipt
+
+        with patch.object(
+            journal_module,
+            "_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT",
+            new=rebound_verifier,
+        ):
+            with self.assertRaises(CredentialTransitionReceiptError):
+                require_current_trade_credential_transition_anchor(
+                    self.store,
+                    self.vault,
+                    receipt_one,
+                )
+
+        self.assertEqual(
+            calls,
+            [],
+            "module-private canonical names must not remain pre-call authority",
+        )
+
     def test_public_load_events_rebind_cannot_hide_newer_durable_anchor(self) -> None:
-        second, receipt_one = self._rotate(self.vault, self.first, "test-value-v2")
-        record_current_trade_credential_transition_anchor(
-            self.store,
-            self.vault,
-            receipt_one,
-        )
-        rolled_back_bytes = self.vault_path.read_bytes()
-
-        _third, receipt_two = self._rotate(self.vault, second, "test-value-v3")
-        record_current_trade_credential_transition_anchor(
-            self.store,
-            self.vault,
-            receipt_two,
-        )
-
-        self.vault_path.write_bytes(rolled_back_bytes)
-        rolled_back = ProtectedCredentialVault(
-            self.vault_path,
-            protector=DeterministicProtector(),
-        )
+        rolled_back, receipt_one = self._rollback_fixture()
         installed_load_events = JournalStore.load_events
         calls = []
 
@@ -141,6 +173,39 @@ class CredentialTransitionJournalRebindingAuthorityTests(unittest.TestCase):
             calls,
             [],
             "durable anchor lineage must not dispatch through rebound JournalStore.load_events",
+        )
+
+    def test_private_canonical_load_rebind_before_call_is_never_executed(self) -> None:
+        rolled_back, receipt_one = self._rollback_fixture()
+        installed_load_events = JournalStore.load_events
+        calls = []
+
+        def rebound_load_events(store, aggregate_type, aggregate_id):
+            calls.append((aggregate_type, aggregate_id))
+            events = installed_load_events(store, aggregate_type, aggregate_id)
+            if aggregate_type == "credential_transition_anchor":
+                return events[:1]
+            return events
+
+        with patch.object(
+            journal_module,
+            "_CANONICAL_JOURNAL_LOAD_EVENTS",
+            new=rebound_load_events,
+        ):
+            with self.assertRaisesRegex(
+                CredentialTransitionAnchorError,
+                "not the next durable receipt sequence",
+            ):
+                record_current_trade_credential_transition_anchor(
+                    self.store,
+                    rolled_back,
+                    receipt_one,
+                )
+
+        self.assertEqual(
+            calls,
+            [],
+            "module-private canonical JournalStore names must not remain pre-call authority",
         )
 
 

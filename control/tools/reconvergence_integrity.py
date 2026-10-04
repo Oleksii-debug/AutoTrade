@@ -257,7 +257,7 @@ def assess_reconvergence(
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
         if (
-            kind in {"M", "A"}
+            kind in {"M", "A", "R", "C"}
             and change.path in protected_sentinels
             and change.path not in exact_trust_root_authorizations
         ):

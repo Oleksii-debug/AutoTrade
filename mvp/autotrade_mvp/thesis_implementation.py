@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Sequence
+from uuid import UUID
 
 from .exact_decimal import ExactDecimalError, exact_sum, parse_bounded_exact_decimal
 
@@ -82,6 +83,40 @@ def _asset_classes(values: object) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _instrument_version_ref(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("instrument_version must be exact text")
+    if not value or value != value.strip():
+        raise ThesisImplementationError(
+            "instrument_version must be canonical instrument_id@version"
+        )
+    parts = value.split("@")
+    if len(parts) != 2:
+        raise ThesisImplementationError(
+            "instrument_version must be canonical instrument_id@version"
+        )
+    instrument_id, version_text = parts
+    try:
+        canonical_id = str(UUID(instrument_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ThesisImplementationError(
+            "instrument_version must be canonical instrument_id@version"
+        ) from error
+    if canonical_id != instrument_id:
+        raise ThesisImplementationError(
+            "instrument_version must be canonical instrument_id@version"
+        )
+    if (
+        not version_text.isdigit()
+        or version_text == "0"
+        or version_text != str(int(version_text))
+    ):
+        raise ThesisImplementationError(
+            "instrument_version must be canonical instrument_id@version"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class MarketThesis:
     """A provider-neutral desired market exposure, not a trading command."""
@@ -140,6 +175,8 @@ class ImplementationPolicy:
                 non_negative=True,
             )
             object.__setattr__(self, field_name, value)
+        if self.max_leverage_ratio <= 0:
+            raise ThesisImplementationError("max_leverage_ratio must be positive")
         if self.max_liquidation_risk > 1:
             raise ThesisImplementationError(
                 "max_liquidation_risk must be between zero and one"
@@ -187,15 +224,19 @@ class ImplementationCandidate:
         for field_name in (
             "candidate_id",
             "thesis_id",
-            "instrument_version",
             "provider_id",
             "asset_class",
             "route_id",
         ):
             value = _text(getattr(self, field_name), name=field_name)
-            if field_name in {"provider_id", "asset_class"}:
+            if field_name == "asset_class":
                 value = value.upper()
             object.__setattr__(self, field_name, value)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_version_ref(self.instrument_version),
+        )
         direction = _text(
             self.exposure_direction,
             name="exposure_direction",
@@ -228,6 +269,8 @@ class ImplementationCandidate:
                     non_negative=True,
                 ),
             )
+        if self.leverage_ratio <= 0:
+            raise ThesisImplementationError("leverage_ratio must be positive")
         if self.liquidation_risk > 1:
             raise ThesisImplementationError(
                 "liquidation_risk must be between zero and one"
@@ -267,6 +310,10 @@ class ImplementationDecision:
                 "selected_candidate_id",
                 _text(self.selected_candidate_id, name="selected_candidate_id"),
             )
+        if type(self.feasible_candidate_ids) is not tuple:
+            raise TypeError("feasible_candidate_ids must be an exact tuple")
+        if type(self.pareto_frontier_ids) is not tuple:
+            raise TypeError("pareto_frontier_ids must be an exact tuple")
         feasible = tuple(
             _text(item, name="feasible_candidate_id")
             for item in self.feasible_candidate_ids
@@ -275,6 +322,14 @@ class ImplementationDecision:
             _text(item, name="pareto_frontier_id")
             for item in self.pareto_frontier_ids
         )
+        if len(set(feasible)) != len(feasible):
+            raise ThesisImplementationError("feasible_candidate_ids must be unique")
+        if len(set(frontier)) != len(frontier):
+            raise ThesisImplementationError("pareto_frontier_ids must be unique")
+        if not set(frontier).issubset(feasible):
+            raise ThesisImplementationError(
+                "pareto_frontier_ids must be a subset of feasible_candidate_ids"
+            )
         object.__setattr__(self, "feasible_candidate_ids", feasible)
         object.__setattr__(self, "pareto_frontier_ids", frontier)
         if type(self.rejected_reasons) is not dict:
@@ -284,7 +339,35 @@ class ImplementationDecision:
             cid = _text(candidate_id, name="rejected_candidate_id")
             if type(reasons) is not tuple:
                 raise TypeError("rejection reasons must be exact tuples")
-            detached[cid] = tuple(_text(reason, name="rejection_reason") for reason in reasons)
+            normalized_reasons = tuple(
+                _text(reason, name="rejection_reason") for reason in reasons
+            )
+            if not normalized_reasons:
+                raise ThesisImplementationError(
+                    "rejected candidates require at least one reason"
+                )
+            if len(set(normalized_reasons)) != len(normalized_reasons):
+                raise ThesisImplementationError("rejection reasons must be unique")
+            detached[cid] = normalized_reasons
+        if set(detached).intersection(feasible):
+            raise ThesisImplementationError(
+                "a candidate cannot be both feasible and rejected"
+            )
+        selected = self.selected_candidate_id
+        if status == "SELECTED":
+            if selected is None or frontier != (selected,) or selected not in feasible:
+                raise ThesisImplementationError(
+                    "SELECTED requires one selected feasible Pareto candidate"
+                )
+        elif status == "AMBIGUOUS":
+            if selected is not None or len(frontier) < 2:
+                raise ThesisImplementationError(
+                    "AMBIGUOUS requires at least two Pareto candidates and no selection"
+                )
+        elif selected is not None or feasible or frontier:
+            raise ThesisImplementationError(
+                "NO_TRADE cannot contain selected, feasible, or Pareto candidates"
+            )
         object.__setattr__(self, "rejected_reasons", MappingProxyType(detached))
 
 
@@ -361,7 +444,7 @@ def _rejection_reasons(
         reasons.append("ASSET_CLASS_NOT_PERMITTED")
     if (
         candidate.tradable_until is not None
-        and candidate.tradable_until < thesis.horizon_end
+        and candidate.tradable_until <= thesis.horizon_end
     ):
         reasons.append("HORIZON_NOT_COVERED")
     required_capacity = max(

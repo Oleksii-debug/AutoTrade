@@ -278,7 +278,9 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
                 "prepare_batch_mutation",
                 race,
             ):
-                with self.assertRaises(Exception):
+                with self.assertRaisesRegex(
+                    ValueError, "journal sequence changed"
+                ):
                     run(directory, PRICES[:3])
 
             store = JournalStore(

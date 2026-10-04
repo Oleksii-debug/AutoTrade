@@ -3836,6 +3836,7 @@ def commit_provider_fill_bust_with_economic_reversal(
     reservation_cut_digest: str | None = None
     initial_fill_binding_event_id: str | None = None
     initial_fill_binding_request_digest: str | None = None
+    initial_source_transaction_id: str | None = None
     rid: str | None = None
 
     if reservation_book is None:
@@ -3969,6 +3970,7 @@ def commit_provider_fill_bust_with_economic_reversal(
             binding_request.get("transaction_id"),
             name="initial transaction_id",
         )
+        initial_source_transaction_id = source_transaction_id
         source_transactions = tuple(
             transaction
             for transaction in economic_book.transactions
@@ -4057,6 +4059,13 @@ def commit_provider_fill_bust_with_economic_reversal(
         raise AccountingConflict(
             "fill bust compensation is not bound to one reversed economic source"
         )
+    if (
+        initial_source_transaction_id is not None
+        and reversal.reverses_transaction_id != initial_source_transaction_id
+    ):
+        raise AccountingConflict(
+            "fill bust reversal does not target the reservation-bound source transaction"
+        )
     settled_source_obligations = _settled_obligation_ids_for_economic_source(
         economic_book,
         reversal.reverses_transaction_id,
@@ -4079,6 +4088,30 @@ def commit_provider_fill_bust_with_economic_reversal(
         committed_at=when,
         evidence_refs=order_evidence_refs,
     )
+    if reservation_book is not None:
+        assert rid is not None
+        assert reservation_usage is not None
+        assert reservation_cut_digest is not None
+        reservation_plan = reservation_book.prepare_restore_consumption_mutation(
+            event_key=_scoped_identity(
+                "atomic-fill-bust-reservation-event",
+                economic_book.provider_id,
+                economic_book.account_id,
+                economic_book.environment,
+                cid,
+            ),
+            idempotency_key=_scoped_identity(
+                "atomic-fill-bust-reservation",
+                economic_book.provider_id,
+                economic_book.account_id,
+                economic_book.environment,
+                idem,
+            ),
+            reservation_id=rid,
+            usage=reservation_usage,
+            committed_at=when,
+            expected_snapshot_digest=reservation_cut_digest,
+        )
 
     if not order_plan.already_committed:
         if len(active_before) != 1:
@@ -4101,9 +4134,32 @@ def commit_provider_fill_bust_with_economic_reversal(
     if economic_plan.already_committed and not order_plan.already_committed:
         economic_book.refresh()
         order_book.refresh()
+        if reservation_book is not None:
+            reservation_book.refresh()
         raise AccountingConflict(
             "economic fill reversal is committed without the matching OMS bust"
         )
+    if reservation_plan is not None:
+        if reservation_plan.already_committed and not (
+            economic_plan.already_committed and order_plan.already_committed
+        ):
+            economic_book.refresh()
+            order_book.refresh()
+            reservation_book.refresh()
+            raise AccountingConflict(
+                "reservation restoration is committed without the matching OMS/economic bust"
+            )
+        if (
+            economic_plan.already_committed
+            and order_plan.already_committed
+            and not reservation_plan.already_committed
+        ):
+            economic_book.refresh()
+            order_book.refresh()
+            reservation_book.refresh()
+            raise AccountingConflict(
+                "committed OMS/economic bust is missing reservation restoration"
+            )
 
     request = {
         "schema_version": "1.0.0",

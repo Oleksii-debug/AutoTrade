@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from mvp.autotrade_mvp.performance_qualification import RuntimeBudgetSpec
@@ -236,6 +237,42 @@ class RuntimeLoadEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence.recovered_event_ids, ())
             self.assertEqual(evidence.missing_event_ids, ("old-financial",))
             self.assertEqual(evidence.end_journal_sequence, start)
+
+    def test_writer_after_frozen_terminal_cut_cannot_expand_evidence_horizon(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            declared = _expected("financial-declared", 1, aggregate_id="declared")
+            late = _expected("financial-late", 1, aggregate_id="late")
+            start = store.current_journal_sequence()
+            _append(store, declared)
+
+            original_reader = JournalStore.load_events_after_journal_sequence
+
+            def append_after_cut(selected_store, after_sequence, *, limit=10_000):
+                # The collector has already frozen cut_end=1 before entering this
+                # reader.  A concurrent writer extends the live journal to 2.
+                _append(store, late)
+                return original_reader(
+                    selected_store,
+                    after_sequence,
+                    limit=limit,
+                )
+
+            with patch.object(
+                JournalStore,
+                "load_events_after_journal_sequence",
+                new=append_after_cut,
+            ):
+                evidence = collect_journal_conservation_evidence(
+                    store,
+                    scenario_id="journal-load",
+                    start_journal_sequence=start,
+                    expected_events=(declared,),
+                )
+
+            self.assertEqual(evidence.recovered_event_ids, ("financial-declared",))
+            self.assertEqual(evidence.end_journal_sequence, start + 1)
+            self.assertEqual(store.current_journal_sequence(), start + 2)
 
     def test_incomplete_bounded_journal_tail_fails_instead_of_counting_partial(self):
         with tempfile.TemporaryDirectory() as root:

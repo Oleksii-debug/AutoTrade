@@ -8,11 +8,19 @@ reconciliation decisions, or trading readiness.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
 from types import MappingProxyType
 from typing import Mapping, Sequence
+
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
 
 
 class KrakenSpotStreamError(ValueError):
@@ -231,12 +239,16 @@ def _decode_exact_json(response_bytes: object) -> Mapping[str, object]:
         decoded = json.loads(
             text,
             object_pairs_hook=_json_object,
-            parse_float=Decimal,
-            parse_int=int,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=_reject_json_constant,
         )
     except KrakenSpotStreamError:
         raise
+    except ExactDecimalError as error:
+        raise KrakenSpotStreamError(
+            "Kraken stream numeric token exceeds the exact resource envelope"
+        ) from error
     except (json.JSONDecodeError, ValueError, TypeError) as error:
         raise KrakenSpotStreamError(
             "Kraken stream frame is invalid JSON"
@@ -404,15 +416,74 @@ def parse_executions_subscription_ack(
     )
 
 
+def _bounded_decimal(
+    value: object,
+    *,
+    name: str,
+    positive: bool = False,
+) -> Decimal:
+    try:
+        admitted = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise KrakenSpotStreamError(
+            f"{name} must be a bounded exact decimal"
+        ) from error
+    if positive and admitted <= Decimal("0"):
+        raise KrakenSpotStreamError(f"{name} must be positive")
+    return admitted
+
+
+def _rfc3339_text(value: object, *, name: str) -> str:
+    text = _canonical_text(value, name=name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, OverflowError) as error:
+        raise KrakenSpotStreamError(
+            f"{name} must be an RFC3339 timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise KrakenSpotStreamError(
+            f"{name} must include an explicit timezone"
+        )
+    return text
+
+
+@dataclass(frozen=True)
+class KrakenSpotExecutionFee:
+    """One exact fee component carried by a Kraken trade execution."""
+
+    asset: str
+    quantity: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "asset",
+            _canonical_text(self.asset, name="fee.asset"),
+        )
+        object.__setattr__(
+            self,
+            "quantity",
+            _bounded_decimal(self.quantity, name="fee.qty"),
+        )
+
+
 @dataclass(frozen=True)
 class KrakenSpotExecutionReport:
-    """Minimal identity/status projection from one exact executions report."""
+    """Exact order/status report with complete economics for trade events."""
 
     order_id: str
     exec_type: str
     order_status: str | None
     client_order_id: str | None = None
     exec_id: str | None = None
+    symbol: str | None = None
+    side: str | None = None
+    last_qty: Decimal | None = None
+    last_price: Decimal | None = None
+    fees: tuple[KrakenSpotExecutionFee, ...] = ()
+    event_time: str | None = None
+    trade_id: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -436,7 +507,7 @@ class KrakenSpotExecutionReport:
                 )
             object.__setattr__(self, "order_status", status)
 
-        for field_name in ("client_order_id", "exec_id"):
+        for field_name in ("client_order_id", "exec_id", "symbol"):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(
@@ -444,6 +515,82 @@ class KrakenSpotExecutionReport:
                     field_name,
                     _canonical_text(value, name=field_name),
                 )
+
+        side = self.side
+        if side is not None:
+            side = _canonical_text(side, name="side")
+            if side not in {"buy", "sell"}:
+                raise KrakenSpotStreamError(
+                    "Kraken execution report side must be buy or sell"
+                )
+            object.__setattr__(self, "side", side)
+
+        for field_name in ("last_qty", "last_price"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _bounded_decimal(
+                        value,
+                        name=field_name,
+                        positive=True,
+                    ),
+                )
+
+        if type(self.fees) is not tuple:
+            raise TypeError("fees must be an exact tuple")
+        if any(type(value) is not KrakenSpotExecutionFee for value in self.fees):
+            raise TypeError(
+                "fees must contain KrakenSpotExecutionFee"
+            )
+
+        if self.event_time is not None:
+            object.__setattr__(
+                self,
+                "event_time",
+                _rfc3339_text(self.event_time, name="timestamp"),
+            )
+
+        if self.trade_id is not None:
+            if (
+                isinstance(self.trade_id, bool)
+                or not isinstance(self.trade_id, int)
+                or self.trade_id < 0
+            ):
+                raise KrakenSpotStreamError(
+                    "trade_id must be a non-negative integer"
+                )
+
+        if exec_type == "trade":
+            missing: list[str] = []
+            for field_name in (
+                "exec_id",
+                "symbol",
+                "side",
+                "last_qty",
+                "last_price",
+                "event_time",
+            ):
+                if getattr(self, field_name) is None:
+                    missing.append(field_name)
+            if not self.fees:
+                missing.append("fees")
+            if missing:
+                raise KrakenSpotStreamError(
+                    "Kraken trade report lacks complete fill economics: "
+                    + ", ".join(missing)
+                )
+        elif (
+            self.exec_id is not None
+            or self.last_qty is not None
+            or self.last_price is not None
+            or self.fees
+            or self.trade_id is not None
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken non-trade report contains trade-only economics"
+            )
 
 
 @dataclass(frozen=True)
@@ -577,6 +724,33 @@ def parse_execution_frame(
             raise KrakenSpotStreamError(
                 f"Kraken executions data[{index}] lacks exec_type"
             )
+        raw_fees = raw_report.get("fees")
+        fees: tuple[KrakenSpotExecutionFee, ...] = ()
+        if raw_fees is not None:
+            if type(raw_fees) is not list:
+                raise KrakenSpotStreamError(
+                    f"Kraken executions data[{index}].fees must be an array"
+                )
+            parsed_fees: list[KrakenSpotExecutionFee] = []
+            for fee_index, raw_fee in enumerate(raw_fees):
+                if not isinstance(raw_fee, Mapping):
+                    raise KrakenSpotStreamError(
+                        f"Kraken executions data[{index}].fees[{fee_index}] "
+                        "must be an object"
+                    )
+                if "asset" not in raw_fee or "qty" not in raw_fee:
+                    raise KrakenSpotStreamError(
+                        f"Kraken executions data[{index}].fees[{fee_index}] "
+                        "lacks asset or qty"
+                    )
+                parsed_fees.append(
+                    KrakenSpotExecutionFee(
+                        asset=raw_fee.get("asset"),
+                        quantity=raw_fee.get("qty"),
+                    )
+                )
+            fees = tuple(parsed_fees)
+
         reports.append(
             KrakenSpotExecutionReport(
                 order_id=order_id,
@@ -584,6 +758,13 @@ def parse_execution_frame(
                 order_status=raw_report.get("order_status"),
                 client_order_id=raw_report.get("cl_ord_id"),
                 exec_id=raw_report.get("exec_id"),
+                symbol=raw_report.get("symbol"),
+                side=raw_report.get("side"),
+                last_qty=raw_report.get("last_qty"),
+                last_price=raw_report.get("last_price"),
+                fees=fees,
+                event_time=raw_report.get("timestamp"),
+                trade_id=raw_report.get("trade_id"),
             )
         )
 

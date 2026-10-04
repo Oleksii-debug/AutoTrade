@@ -372,9 +372,9 @@ class StrategyToolPolicy:
         )
         if type(self.registered_strategies) is not tuple:
             raise TypeError("registered_strategies must be an exact tuple")
-        if len(self.registered_strategies) < 2:
+        if not self.registered_strategies:
             raise StrategyToolWeightingError(
-                "strategy-tool policy requires at least two strategies"
+                "strategy-tool policy requires at least one strategy"
             )
 
         strategies = tuple(
@@ -427,11 +427,10 @@ class StrategyToolPolicy:
                     and cell.regime in item.supported_regimes
                 )
             ]
-            families = {item.family for item in eligible}
-            if len(families) < 2:
+            if not eligible:
                 raise StrategyToolWeightingError(
-                    f"{cell.key} requires at least two distinct "
-                    "registered strategy families"
+                    f"{cell.key} requires at least one registered strategy "
+                    "for its regime and horizon"
                 )
             protocols = {
                 item.evaluation_protocol_sha256

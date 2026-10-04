@@ -216,6 +216,7 @@ def assess_reconvergence(
     base_set = frozenset(normalized_base)
 
     validated_changes = tuple(_validated_change(change) for change in changes)
+    mutating_sources: dict[str, str] = {}
     for change in validated_changes:
         kind = change.status[:1]
         source = change.previous_path if kind in {"R", "C"} else change.path
@@ -224,9 +225,41 @@ def assess_reconvergence(
                 f"{change.status} change source is absent from the base tree: "
                 f"{source}"
             )
+        if kind in {"M", "D", "T", "R"}:
+            if source is None:
+                raise ValueError("mutating change source path identity is missing")
+            previous_status = mutating_sources.get(source)
+            if previous_status is not None:
+                raise ValueError(
+                    "base path has multiple mutating Git changes: "
+                    f"{source} ({previous_status}, {change.status})"
+                )
+            mutating_sources[source] = change.status
         if kind == "A" and change.path in base_set:
             raise ValueError(
                 f"added path already exists in the base tree: {change.path}"
+            )
+
+    removed_base_paths = {
+        change.previous_path if change.status[:1] == "R" else change.path
+        for change in validated_changes
+        if change.status[:1] in {"D", "R"}
+    }
+    incoming_destinations: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind not in {"A", "R", "C"}:
+            continue
+        if change.path in incoming_destinations:
+            raise ValueError(
+                "multiple Git changes target the same candidate path: "
+                + change.path
+            )
+        incoming_destinations.add(change.path)
+        if change.path in base_set and change.path not in removed_base_paths:
+            raise ValueError(
+                "candidate destination already exists in base tree without "
+                f"removal: {change.path}"
             )
 
     candidate_paths = set(base_set)

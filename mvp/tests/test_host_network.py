@@ -1058,6 +1058,20 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_command_expected_state_version_rejects_noncanonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version):
+                command = self.command(expected_state_version=version)
+                response = self.app.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers=self.headers(json_body=True),
+                    body=json.dumps(command).encode("utf-8"),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(self.app.store.state_version, 0)
+
     def test_event_cursor_rejects_noncanonical_query_aliases(self):
         targets = (
             "/api/v1/events?after=01",

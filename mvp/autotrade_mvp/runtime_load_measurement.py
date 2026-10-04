@@ -441,6 +441,10 @@ def measure_declared_financial_operation(
                     kwdefault_items is not None
                     and (
                         type(function.__kwdefaults__) is not dict
+                        or any(
+                            type(key) is not str
+                            for key in function.__kwdefaults__
+                        )
                         or tuple(sorted(function.__kwdefaults__)) != tuple(
                             key for key, _expected in kwdefault_items
                         )

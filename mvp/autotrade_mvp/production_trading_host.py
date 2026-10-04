@@ -41,36 +41,6 @@ class DurableTakeoverInputs:
     provider_id: str
 
 
-class _RecoveryBeforeFenceRelease:
-    """Revoke local sender authority immediately before process-fence release.
-
-    ``ProductionHostRuntime`` owns all teardown paths, including failures raised
-    from its serve worker.  Wrapping the already-acquired fence therefore keeps
-    recovery revocation inside that canonical teardown rather than relying on a
-    caller-side ``finally`` that would run only after the fence had been released.
-    """
-
-    __slots__ = ("_fence", "_controller")
-
-    def __init__(self, fence, controller: RecoveryController) -> None:
-        self._fence = fence
-        self._controller = controller
-
-    @property
-    def path(self):
-        return self._fence.path
-
-    @property
-    def released(self) -> bool:
-        return self._fence.released
-
-    def release(self) -> None:
-        # stop() is intentionally first.  A retained RecoveryBoundDispatcher
-        # reference then fails validate_sender() before the process fence opens.
-        self._controller.stop()
-        self._fence.release()
-
-
 def _stage_durable_source_for_immediate_takeover(
     controller: RecoveryController,
     source: OwnerFence,
@@ -265,11 +235,9 @@ def build_production_trading_host(
             prepared_lease_seconds=prepared_lease_seconds,
         )
 
-        # The host owns terminal teardown; keep revocation inside that path.
-        host._instance_fence = _RecoveryBeforeFenceRelease(  # type: ignore[attr-defined]
-            host._instance_fence,  # type: ignore[attr-defined]
-            controller,
-        )
+        # The canonical host owns terminal teardown. Revoke sender authority
+        # after command drain/join but before listener close or fence release.
+        host.bind_terminal_finalizer(controller.stop)
         return ProductionTradingHostRuntime(
             host,
             recovery=controller,

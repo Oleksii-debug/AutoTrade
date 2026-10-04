@@ -53,9 +53,17 @@ class _Host:
         self.closed = False
         self.shutdown_requested = False
         self.serving = False
+        self._terminal_finalizer = None
+
+    def bind_terminal_finalizer(self, finalizer) -> None:
+        if self._terminal_finalizer is not None:
+            raise RuntimeError("terminal finalizer is already bound")
+        self._terminal_finalizer = finalizer
 
     def close(self) -> None:
         if not self.closed:
+            if self._terminal_finalizer is not None:
+                self._terminal_finalizer()
             self._instance_fence.release()
             self.closed = True
             self.shutdown_requested = True

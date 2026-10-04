@@ -38,10 +38,18 @@ class _Host:
         self.closed = False
         self.shutdown_requested = False
         self.serving = False
+        self._terminal_finalizer = None
+
+    def bind_terminal_finalizer(self, finalizer) -> None:
+        if self._terminal_finalizer is not None:
+            raise RuntimeError("terminal finalizer is already bound")
+        self._terminal_finalizer = finalizer
 
     def close(self) -> None:
         if self.closed:
             return
+        if self._terminal_finalizer is not None:
+            self._terminal_finalizer()
         self._instance_fence.release()
         self.closed = True
         self.shutdown_requested = True
@@ -174,6 +182,41 @@ class ProductionTradingHostTests(unittest.TestCase):
             )
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(wire_calls, [])
+
+
+    def test_close_revokes_dispatcher_before_later_host_cleanup_failure(self):
+        with TemporaryDirectory() as directory:
+            runtime, host, _store = self._build_with_fake_host(Path(directory))
+            retained_dispatcher = runtime.dispatcher
+            controller = runtime.recovery
+            original_finalizer = host._terminal_finalizer
+            self.assertIsNotNone(original_finalizer)
+
+            def fail_after_finalizer():
+                original_finalizer()
+                raise RuntimeError("listener close failed")
+
+            host.close = fail_after_finalizer
+
+            with self.assertRaisesRegex(RuntimeError, "listener close failed"):
+                runtime.close()
+
+            self.assertIsNone(controller.owner)
+            self.assertEqual(controller.state, HostState.STOPPED)
+            outcome = retained_dispatcher.dispatch(
+                attempt_id="after-failed-close",
+                intent_id="intent-failed-close",
+                intent_hash="sha256:" + "5" * 64,
+                provider="SIMULATED",
+                request={},
+                now="2026-10-04T03:02:00Z",
+                authority_check=lambda _hash, _at: (True, "allowed"),
+                transport_send=lambda *_args, **_kwargs: self.fail(
+                    "revoked dispatcher reached transport"
+                ),
+            )
+            self.assertEqual(outcome.status, "BLOCKED")
+
 
     def test_existing_durable_owner_without_takeover_fails_and_releases_host_fence(self):
         with TemporaryDirectory() as directory:

@@ -366,6 +366,7 @@ class ProductionHostRuntime:
         self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
+        self._terminal_finalizer: Callable[[], None] | None = None
 
     @property
     def closed(self) -> bool:
@@ -381,6 +382,25 @@ class ProductionHostRuntime:
     def serving(self) -> bool:
         with self._lifecycle_condition:
             return self._serve_state == "SERVING"
+
+    def bind_terminal_finalizer(self, finalizer: Callable[[], None]) -> None:
+        """Bind one authority finalizer that must succeed before fence release.
+
+        Authority composition is constructed only after this host owns the
+        process-lifetime instance fence. The finalizer is installed before
+        serving begins and cannot be replaced later by a caller.
+        """
+
+        if not callable(finalizer):
+            raise TypeError("terminal finalizer must be callable")
+        with self._lifecycle_condition:
+            if self._serve_state != "IDLE":
+                raise RuntimeError(
+                    "terminal finalizer must be bound before serving or shutdown"
+                )
+            if self._terminal_finalizer is not None:
+                raise RuntimeError("terminal finalizer is already bound")
+            self._terminal_finalizer = finalizer
 
     def _raise_terminal_failure(self) -> None:
         assert self._terminal_error is not None
@@ -458,6 +478,10 @@ class ProductionHostRuntime:
                 worker.join()
             with self._lifecycle_condition:
                 terminal_cause = self._serve_error
+            stage = "terminal authority finalizer"
+            finalizer = self._terminal_finalizer
+            if finalizer is not None:
+                finalizer()
             stage = "listener close"
             self.server.server_close()
             stage = "instance fence release"

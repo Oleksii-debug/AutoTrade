@@ -197,16 +197,24 @@ class ProductionTradingHostTests(unittest.TestCase):
                     )
             inner_dispatch.assert_not_called()
 
-    def test_close_drains_active_retained_dispatch_before_process_fence_release(self):
+    def test_close_drains_active_duplicate_dispatcher_before_process_fence_release(self):
         with TemporaryDirectory() as directory:
-            runtime, host, _store = self._build_with_fake_host(Path(directory))
-            dispatcher = runtime.dispatcher
+            runtime, host, store = self._build_with_fake_host(Path(directory))
+            canonical_dispatcher = runtime.dispatcher
             controller = runtime.recovery
-            inner_dispatcher = object.__getattribute__(dispatcher, "_dispatcher")
-            lifecycle_condition = object.__getattribute__(
-                dispatcher,
-                "_lifecycle_condition",
+            dispatcher = RecoveryBoundDispatcher(
+                controller,
+                store,
+                environment="PAPER",
+                account_id="acct",
             )
+            canonical_lifecycle = object.__getattribute__(
+                canonical_dispatcher,
+                "_lifecycle",
+            )
+            lifecycle = object.__getattribute__(dispatcher, "_lifecycle")
+            self.assertIs(lifecycle, canonical_lifecycle)
+            inner_dispatcher = object.__getattribute__(dispatcher, "_dispatcher")
             entered = Event()
             release_dispatch = Event()
             close_finished = Event()
@@ -257,10 +265,10 @@ class ProductionTradingHostTests(unittest.TestCase):
 
                 close_thread = Thread(target=run_close, name="production-host-close")
                 close_thread.start()
-                with lifecycle_condition:
+                with lifecycle.condition:
                     self.assertTrue(
-                        lifecycle_condition.wait_for(
-                            lambda: object.__getattribute__(dispatcher, "_revoking"),
+                        lifecycle.condition.wait_for(
+                            lambda: lifecycle.revoking,
                             timeout=5,
                         )
                     )
@@ -280,20 +288,21 @@ class ProductionTradingHostTests(unittest.TestCase):
             self.assertTrue(host._instance_fence.released)
             self.assertIsNone(controller.owner)
             self.assertEqual(controller.state, HostState.STOPPED)
-            with self.assertRaisesRegex(
-                RecoveryDispatchBindingError,
-                "permanently revoked",
-            ):
-                dispatcher.dispatch(
-                    attempt_id="active-close-after",
-                    intent_id="intent-active-close-after",
-                    intent_hash="hash-active-close-after",
-                    provider="SIMULATED",
-                    request={},
-                    now="2026-10-04T03:01:31Z",
-                    authority_check=lambda _hash, _now: (True, "allowed"),
-                    transport_send=Mock(),
-                )
+            for revoked_dispatcher in (canonical_dispatcher, dispatcher):
+                with self.assertRaisesRegex(
+                    RecoveryDispatchBindingError,
+                    "permanently revoked",
+                ):
+                    revoked_dispatcher.dispatch(
+                        attempt_id="active-close-after",
+                        intent_id="intent-active-close-after",
+                        intent_hash="hash-active-close-after",
+                        provider="SIMULATED",
+                        request={},
+                        now="2026-10-04T03:01:31Z",
+                        authority_check=lambda _hash, _now: (True, "allowed"),
+                        transport_send=Mock(),
+                    )
 
     def test_active_dispatch_cannot_revoke_its_own_dispatcher(self):
         with TemporaryDirectory() as directory:

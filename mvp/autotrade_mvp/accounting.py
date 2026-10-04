@@ -547,7 +547,16 @@ def _scoped_economic_owner_operations():
             current = owners.get(id(value))
             if current is not None and current[0]() is value:
                 raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (weakref.ref(value), environment, account_id, book)
+            owner_key = id(value)
+
+            def release_owner(reference, *, owner_key=owner_key):
+                with lock:
+                    current = owners.get(owner_key)
+                    if current is not None and current[0] is reference:
+                        owners.pop(owner_key, None)
+
+            reference = weakref.ref(value, release_owner)
+            owners[owner_key] = (reference, environment, account_id, book)
 
     def require(value):
         if type(value) is not ScopedEconomicBook:

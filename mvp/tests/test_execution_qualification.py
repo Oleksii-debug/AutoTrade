@@ -295,6 +295,26 @@ class ExecutionQualificationTests(unittest.TestCase):
                 )
             )
 
+    def test_qualified_projection_must_match_canonical_instrument_price_tick(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "price_projection_authority",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    instrument=instrument(price_tick="0.05"),
+                )
+            )
+
+    def test_qualification_requires_exact_canonical_instrument_type(self):
+        exec_model = model()
+        with self.assertRaisesRegex(TypeError, "instrument must be exact InstrumentVersion"):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model, instrument=object())
+            )
+
     def test_instrument_specific_qualification_cannot_cross_instrument(self):
         exec_model = model()
         with self.assertRaisesRegex(
@@ -383,7 +403,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     observation=observation(),
                     model=exec_model,
                     qualification=qualification(exec_model),
-            instrument=instrument(),
+                    instrument=instrument(),
                     asset_class="EQUITY",
                     protocol_sha256=PROTOCOL,
                     artifact_store=self.store,

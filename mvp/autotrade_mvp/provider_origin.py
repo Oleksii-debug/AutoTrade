@@ -419,7 +419,7 @@ def _wire_execution_event(
         "event_type": _WIRE_EXECUTION_EVENT,
         "aggregate_type": _WIRE_EXECUTION_AGGREGATE_TYPE,
         "aggregate_id": attempt_id,
-        "aggregate_version": "1",
+        "aggregate_version": 1,
         "payload": payload,
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at,

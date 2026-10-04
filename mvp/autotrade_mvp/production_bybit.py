@@ -642,11 +642,19 @@ class ProductionBybitOrderSender:
 
         if final_barrier_clock is None:
             clock_utc = self.__clock_utc
+            clock_utc_code = self.__clock_utc_code
 
             def trusted_final_barrier_clock() -> str:
                 if self.__transport.clock_utc is not clock_utc:
                     raise PermissionError(
                         "Bybit capability clock authority changed after composition"
+                    )
+                if (
+                    clock_utc_code is not None
+                    and getattr(clock_utc, "__code__", None) is not clock_utc_code
+                ):
+                    raise PermissionError(
+                        "Bybit capability clock authority code changed"
                     )
                 point = clock_utc()
                 if (

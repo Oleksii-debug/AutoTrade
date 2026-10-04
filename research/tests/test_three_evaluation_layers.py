@@ -484,6 +484,85 @@ class ThreeEvaluationLayerTests(unittest.TestCase):
                 assessment=assessment,
             )
 
+    def test_mutated_forward_protocol_is_revalidated_before_use(self):
+        protocol, evidence, assessment = forward_fixture()
+        object.__setattr__(protocol, "exact_build_sha", "b" * 40)
+        with self.assertRaises(ValueError):
+            EvaluationLayerReceipt.from_forward_paper(
+                candidate_id="candidate-1",
+                candidate_selected_at=SELECTED,
+                protocol=protocol,
+                evidence=evidence,
+                assessment=assessment,
+            )
+
+    def test_mutated_nested_prediction_is_revalidated_before_use(self):
+        protocol, evidence, assessment = forward_fixture()
+        object.__setattr__(evidence.predictions[0], "input_hash", "not-a-hash")
+        with self.assertRaises(ValueError):
+            EvaluationLayerReceipt.from_forward_paper(
+                candidate_id="candidate-1",
+                candidate_selected_at=SELECTED,
+                protocol=protocol,
+                evidence=evidence,
+                assessment=assessment,
+            )
+
+    def test_forward_prediction_subclass_is_rejected_before_assessment(self):
+        class DerivedPrediction(SealedPrediction):
+            pass
+
+        protocol, evidence, assessment = forward_fixture()
+        original = evidence.predictions[0]
+        derived = DerivedPrediction(
+            prediction_id=original.prediction_id,
+            provider_capability=original.provider_capability,
+            input_hash=original.input_hash,
+            proposal_hash=original.proposal_hash,
+            information_cutoff_at=original.information_cutoff_at,
+            sealed_at=original.sealed_at,
+            decision_deadline_at=original.decision_deadline_at,
+            outcome_horizon_end_at=original.outcome_horizon_end_at,
+            decision_latency_ms=original.decision_latency_ms,
+        )
+        object.__setattr__(evidence, "predictions", (derived,))
+        with self.assertRaisesRegex(TypeError, "exact SealedPrediction"):
+            EvaluationLayerReceipt.from_forward_paper(
+                candidate_id="candidate-1",
+                candidate_selected_at=SELECTED,
+                protocol=protocol,
+                evidence=evidence,
+                assessment=assessment,
+            )
+
+    def test_hostile_layer_text_is_rejected_before_membership_dispatch(self):
+        callbacks = []
+
+        class HostileLayer(str):
+            def __hash__(self):
+                callbacks.append("hash")
+                return super().__hash__()
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                return super().__eq__(other)
+
+        with self.assertRaisesRegex(
+            EvaluationLayersError,
+            "layer must be non-empty exact text",
+        ):
+            EvaluationLayerReceipt.from_historical_gate(
+                layer=HostileLayer(BLINDED_MARKET_REPLAY),
+                candidate_id="candidate-1",
+                exact_build_sha=BUILD,
+                candidate_selected_at=SELECTED,
+                protocol_sha256=h("2"),
+                evidence_sha256=h("1"),
+                decision=gate("PASS", "market"),
+                model_training_cutoff_uncertainty="unknown",
+            )
+        self.assertEqual(callbacks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

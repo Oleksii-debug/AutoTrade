@@ -95,6 +95,19 @@ class ProviderAccountCutIdentityTests(unittest.TestCase):
                 ):
                     account_cut(qualification_identity_digest=invalid)
 
+    def test_acquisition_mode_must_already_be_canonical(self):
+        for invalid in (
+            "serialized_acquisition_generation",
+            "provider_native_generation",
+            "Serialized_Acquisition_Generation",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ProviderAccountCutError,
+                    "exact canonical acquisition model",
+                ):
+                    account_cut(acquisition_mode=invalid)
+
     def test_provider_native_generation_requires_exact_token(self):
         with self.assertRaisesRegex(
             ProviderAccountCutError,

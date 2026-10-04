@@ -204,12 +204,7 @@ class SemanticWebSurfaceTests(unittest.TestCase):
                 raise AssertionError("hostile mapping key equality")
 
         snapshot_key = HostileKey("state_version")
-        snapshot = {
-            snapshot_key: "7",
-            "state_version": "8",
-        }
-        # Remove the ordinary key without probing the hostile target afterward.
-        del snapshot["state_version"]
+        snapshot = {snapshot_key: "7"}
         touched.clear()
         html = render_semantic_page(snapshot, status_text="Running")
         self.assertEqual(touched, [])

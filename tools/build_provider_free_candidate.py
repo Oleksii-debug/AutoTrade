@@ -1,0 +1,140 @@
+"""Composition adapter for the existing source-staging and Windows-bundle TCB.
+
+This creates an unsigned diagnostics candidate, never a qualified release. Source
+bytes come from one exact Git object; developer caches and state cannot enter it.
+"""
+import argparse
+from hashlib import sha256
+import json
+from pathlib import Path, PurePosixPath
+import stat
+import subprocess
+import zipfile
+
+from tools.stage_windows_foundation import _SourceControlledComponent, _stage_source_controlled_components
+from tools.build_windows_bundle import build_bundle, _collect, _windows_path_key
+from research.autotrade_research.artifacts.durable_publish import atomic_write_bytes, atomic_write_json
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE_PREFIXES = ('mvp/autotrade_mvp/', 'research/autotrade_research/',
+                   'autotrade_numeric/', 'autotrade_foundation/')
+STATIC = ('web/src/index.html', 'web/src/app.js', 'web/src/host-api-routes.js', 'web/src/styles.css',
+          'contracts/openapi/host-api.yaml', 'src/AutoTrade.Desktop/packages.lock.json',
+          'packaging/windows/provider-free-inputs.json', 'provenance/release-dependency-manifest.json')
+
+
+def stage_source(source_root, source_sha, destination, composition_path):
+    if len(source_sha) != 40 or any(c not in '0123456789abcdef' for c in source_sha):
+        raise ValueError('exact lowercase Git source SHA required')
+    paths = subprocess.check_output(['git', '-C', str(source_root), 'ls-tree', '-r', '--name-only', source_sha], text=True).splitlines()
+    selected = sorted(p for p in paths if (p.startswith(SOURCE_PREFIXES) and p.endswith('.py'))
+        or (p.startswith('contracts/jsonschema/') and p.endswith('.json')) or p in STATIC)
+    if not set(STATIC).issubset(selected) or 'mvp/autotrade_mvp/product_runtime.py' not in selected:
+        raise ValueError('committed product composition is incomplete')
+    destination.mkdir(parents=True, exist_ok=False)
+    atomic_write_json(composition_path, {'source_sha': source_sha, 'components': []})
+    descriptors = tuple(_SourceControlledComponent('zero-' + sha256(p.encode()).hexdigest()[:32],
+        'runtime-source', p) for p in selected)
+    _stage_source_controlled_components(staging=destination, composition_path=composition_path,
+        source_root=source_root, descriptors=descriptors, expected_source_sha=source_sha)
+    atomic_write_bytes(destination / 'SOURCE_REVISION', (source_sha + '\n').encode())
+    return selected
+
+
+def extract_pinned(archive_path, destination, expected_digest):
+    archive_bytes = archive_path.read_bytes()
+    if sha256(archive_bytes).hexdigest() != expected_digest:
+        raise ValueError('external runtime archive differs from frozen input')
+    destination.mkdir(parents=True, exist_ok=False)
+    with zipfile.ZipFile(archive_path) as archive:
+        seen = set()
+        for entry in archive.infolist():
+            relative = PurePosixPath(entry.filename)
+            if (relative.is_absolute() or '..' in relative.parts or '\\' in entry.filename
+                or ':' in entry.filename or relative.as_posix() != entry.filename.rstrip('/')
+                or stat.S_ISLNK(entry.external_attr >> 16)):
+                raise ValueError('external archive contains unsafe paths')
+            key = _windows_path_key(relative.as_posix())
+            if key in seen:
+                raise ValueError('external archive contains colliding paths')
+            seen.add(key)
+            target = destination.joinpath(*relative.parts)
+            if entry.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_bytes(target, archive.read(entry))
+
+
+def build_candidate(*, source_root, source_sha, desktop, python_archive, webview_archive, work, output):
+    if work.exists():
+        raise ValueError('candidate work directory must be new')
+    work.mkdir(parents=True)
+    payload = work / 'payload'; payload.mkdir()
+    stage_source(source_root, source_sha, payload / 'product', work / 'source-composition.json')
+    inputs = json.loads((payload / 'product/packaging/windows/provider-free-inputs.json').read_text())
+    if not (desktop / 'AutoTrade.Desktop.exe').is_file():
+        raise ValueError('self-contained win-x64 Desktop publish is missing')
+    evidence = json.loads((desktop / 'desktop-build-evidence.json').read_text())
+    if (evidence.get('source_sha') != source_sha or evidence.get('checked_out_sha') != source_sha
+        or evidence.get('result') != 'PASS'):
+        raise ValueError('Desktop publish evidence differs from the exact product source')
+    # Reuse the canonical bundle collector's namespace/sensitive-file checks.
+    for relative, _, content in _collect(desktop):
+        target = payload / relative; target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(target, content)
+    extract_pinned(python_archive, payload / 'runtime/python', inputs['python']['sha256'])
+    extract_pinned(webview_archive, payload / 'notices/webview2-sdk-package', inputs['webview2_sdk']['sha256'])
+    for required in ('python.exe', 'python312.dll', 'python312.zip', 'python312._pth', 'LICENSE.txt'):
+        if not (payload / 'runtime/python' / required).is_file():
+            raise ValueError('embedded Python input is incomplete: ' + required)
+    # Embedded isolated Python ignores PYTHONPATH. Admit only frozen product
+    # packages and the standard-library archive; never developer site-packages.
+    atomic_write_bytes(payload / 'runtime/python/python312._pth',
+        b'python312.zip\n.\n../../product\n../../product/research\n')
+    dependencies = {'source_sha': source_sha, 'inputs': inputs,
+        'nuget_lock': json.loads((payload / 'product/src/AutoTrade.Desktop/packages.lock.json').read_text()),
+        'qualification': 'UNQUALIFIED', 'real_order_submission': 'UNAVAILABLE'}
+    atomic_write_json(payload / 'dependency-lock.json', dependencies)
+    inventory = [{'path': p, 'sha256': 'sha256:' + sha256(b).hexdigest()} for p, _, b in _collect(payload)]
+    atomic_write_json(payload / 'sbom.json', {'source_sha': source_sha, 'files': inventory,
+        'rights_review': 'PENDING', 'advisory_review': 'PENDING'})
+    files = _collect(payload)
+    components = [{'component_id': 'candidate-' + sha256(p.encode()).hexdigest()[:32],
+        'kind': 'dependency-lock' if p == 'dependency-lock.json' else 'sbom' if p == 'sbom.json' else 'product-file',
+        'path': p, 'version': source_sha, 'sha256': 'sha256:' + sha256(b).hexdigest()} for p, _, b in files]
+    by_path = {c['path']: c['sha256'] for c in components}
+    from mvp.autotrade_mvp.persistence import JournalStore
+    composition = {'schema_version': '1.0.0', 'product': 'AutoTrade', 'source_sha': source_sha,
+        'dependency_lock_sha256': by_path['dependency-lock.json'], 'sbom_sha256': by_path['sbom.json'],
+        'schema_compatibility': {'minimum': str(JournalStore.SCHEMA_VERSION), 'maximum': str(JournalStore.SCHEMA_VERSION)},
+        'runtime': {'architecture': 'x64', 'runtime_identifier': 'win-x64', 'minimum_windows_version': 'Windows 11'},
+        'components': components}
+    composition_path = work / 'windows-composition.json'
+    atomic_write_json(composition_path, composition)
+    result = build_bundle(staging=payload, output=output, version='0.1.0-zero-candidate', source_sha=source_sha,
+        mode='diagnostics', provenance_path=payload / 'product/provenance/release-dependency-manifest.json',
+        composition_path=composition_path)
+    # Inventory lives beside the executable for installed preflight; the bundle
+    # contains the same authoritative manifest outside payload. It is not signed.
+    atomic_write_json(work / 'candidate-result.json', {'source_sha': source_sha, 'package_sha256': result['sha256'],
+        'file_count': len(files), 'release_eligible': False, 'nvda_verified': False})
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source-sha', required=True)
+    parser.add_argument('--desktop-publish', type=Path, required=True)
+    parser.add_argument('--python-archive', type=Path, required=True)
+    parser.add_argument('--webview-archive', type=Path, required=True)
+    parser.add_argument('--work', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    result = build_candidate(source_root=ROOT, source_sha=args.source_sha, desktop=args.desktop_publish,
+        python_archive=args.python_archive, webview_archive=args.webview_archive, work=args.work, output=args.output)
+    print(json.dumps({'source_sha': args.source_sha, 'package_sha256': result['sha256'], 'release_eligible': False}))
+
+
+if __name__ == '__main__':
+    main()

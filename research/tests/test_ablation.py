@@ -2566,5 +2566,58 @@ class AblationTests(unittest.TestCase):
                 self.assertEqual(calls, [], label)
 
 
+    def test_bound_store_state_key_subclass_fails_before_hash_callback(self):
+        calls: list[str] = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                calls.append("hash")
+                return str.__hash__(self)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="state-key-preflight",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            hostile_key = HostileKey("protocol_registration")
+            science.__dict__[hostile_key] = lambda *_args, **_kwargs: None
+            calls.clear()
+
+            result = evaluate_qualified_incremental_value(
+                "agent",
+                [
+                    pair(
+                        "state-key-a",
+                        "2",
+                        population_unit="state-key-unit-a",
+                    ),
+                    pair(
+                        "state-key-b",
+                        "2",
+                        population_unit="state-key-unit-b",
+                    ),
+                ],
+                authority=authority,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+            self.assertEqual(
+                result.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
+            self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

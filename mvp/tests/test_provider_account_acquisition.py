@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -467,6 +467,43 @@ class DurableProviderAccountAcquisitionAuthorityTests(unittest.TestCase):
                 "does not use serialized",
             ):
                 authority.require_account_cut_acquisition(native)
+
+    def test_hostile_tzinfo_is_rejected_before_callback_or_write(self):
+        touched = []
+
+        class HostileTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def dst(self, _dt):
+                touched.append("dst")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def tzname(self, _dt):
+                touched.append("tzname")
+                raise AssertionError("hostile tzinfo callback executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            authority = DurableProviderAccountAcquisitionAuthority(store)
+            hostile_time = datetime(
+                2026, 10, 4, 1, 0, tzinfo=HostileTimezone()
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountAcquisitionError,
+                "exact datetime with datetime.timezone",
+            ):
+                authority.issue_serialized(
+                    provider_scope=scope(),
+                    account_id="account-1",
+                    acquisition_request_id="read-cycle-1",
+                    committed_at=hostile_time,
+                )
+
+            self.assertEqual(touched, [])
+            self.assertEqual(store.current_journal_sequence(), 0)
 
     def test_noncanonical_request_and_boolean_generation_fail_closed(self):
         with self.assertRaises(ProviderAccountAcquisitionError):

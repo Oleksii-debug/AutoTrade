@@ -10,6 +10,7 @@ import unittest
 from uuid import UUID
 from weakref import ref as weakref_ref
 
+import autotrade_research.evaluation.ablation as ablation_module
 from autotrade_research.evaluation.ablation import (
     AblationOutcome,
     AblationPair,
@@ -1600,15 +1601,31 @@ class AblationTests(unittest.TestCase):
                 self.assertEqual(tampered.required_lower_bound, Decimal("0"), field)
                 self.assertEqual(tampered.uncertainty_multiplier, Decimal("0"), field)
 
-            result = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=999,
-                required_lower_bound=Decimal("-999"),
-                uncertainty_multiplier=Decimal("0"),
+            self.assertFalse(
+                hasattr(
+                    ablation_module,
+                    "_issued_ablation_authority_policy_binding",
+                )
             )
+            ablation_module._issued_ablation_authority_policy_binding = (
+                lambda _authority: (
+                    attacker_science,
+                    attacker_registration.protocol_id,
+                    attacker_registration.protocol_hash,
+                )
+            )
+            try:
+                result = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=authority,
+                    outcome_refs=refs,
+                    minimum_pairs=999,
+                    required_lower_bound=Decimal("-999"),
+                    uncertainty_multiplier=Decimal("0"),
+                )
+            finally:
+                del ablation_module._issued_ablation_authority_policy_binding
             self.assertEqual(result.status, "INCONCLUSIVE")
             self.assertEqual(
                 result.reason,

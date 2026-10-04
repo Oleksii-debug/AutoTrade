@@ -1541,81 +1541,86 @@ del _make_ablation_qualification_authority_init
 del _make_ablation_authority_policy_binding
 
 
-def _registered_policy_context(
-    authority: object,
-) -> tuple[ScientificRegistry, str, str]:
-    """Resolve the exact registry/protocol binding from independent lifetime state.
+def _make_registered_policy_context(resolve_policy_binding):
+    """Capture the read side of the lifetime binding outside module globals."""
 
-    The public instance remains useful for the later outcome/population resolver,
-    but it is not the issuance authority for preregistered scientific policy.
-    Post-construction rebinding therefore fails closed instead of selecting a
-    different protocol or registry.
-    """
+    def _registered_policy_context(
+        authority: object,
+    ) -> tuple[ScientificRegistry, str, str]:
+        """Resolve the exact registry/protocol binding from independent lifetime state."""
 
-    scientific_registry, protocol_id, protocol_hash = (
-        _issued_ablation_authority_policy_binding(authority)
-    )
-    try:
-        current_registry = object.__getattribute__(
-            authority,
-            "scientific_registry",
+        scientific_registry, protocol_id, protocol_hash = (
+            resolve_policy_binding(authority)
         )
-        current_protocol_id = object.__getattribute__(
-            authority,
-            "protocol_id",
-        )
-        current_protocol_hash = object.__getattribute__(
-            authority,
-            "protocol_hash",
-        )
-    except AttributeError as error:
-        raise ProtocolViolation(
-            "ablation qualification authority state is unavailable"
-        ) from error
+        try:
+            current_registry = object.__getattribute__(
+                authority,
+                "scientific_registry",
+            )
+            current_protocol_id = object.__getattribute__(
+                authority,
+                "protocol_id",
+            )
+            current_protocol_hash = object.__getattribute__(
+                authority,
+                "protocol_hash",
+            )
+        except AttributeError as error:
+            raise ProtocolViolation(
+                "ablation qualification authority state is unavailable"
+            ) from error
 
-    if current_registry is not scientific_registry:
-        raise ProtocolViolation(
-            "ablation qualification authority registry binding changed after issuance"
-        )
-    if (
-        type(current_protocol_id) is not str
-        or current_protocol_id != protocol_id
-    ):
-        raise ProtocolViolation(
-            "ablation qualification authority protocol_id binding changed after issuance"
-        )
-    if (
-        type(current_protocol_hash) is not str
-        or current_protocol_hash != protocol_hash
-    ):
-        raise ProtocolViolation(
-            "ablation qualification authority protocol_hash binding changed after issuance"
-        )
+        if current_registry is not scientific_registry:
+            raise ProtocolViolation(
+                "ablation qualification authority registry binding changed after issuance"
+            )
+        if (
+            type(current_protocol_id) is not str
+            or current_protocol_id != protocol_id
+        ):
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_id binding changed after issuance"
+            )
+        if (
+            type(current_protocol_hash) is not str
+            or current_protocol_hash != protocol_hash
+        ):
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_hash binding changed after issuance"
+            )
 
-    if type(scientific_registry) is not ScientificRegistry:
-        raise ProtocolViolation(
-            "ablation qualification authority registry is not canonical"
-        )
-    if (
-        type(protocol_id) is not str
-        or not protocol_id
-        or protocol_id != protocol_id.strip()
-    ):
-        raise ProtocolViolation(
-            "ablation qualification authority protocol_id is not canonical"
-        )
-    if type(protocol_hash) is not str:
-        raise ProtocolViolation(
-            "ablation qualification authority protocol_hash is not canonical"
-        )
-    try:
-        exact_hash = _digest(protocol_hash, "protocol_hash")
-    except ValueError as error:
-        raise ProtocolViolation(
-            "ablation qualification authority protocol_hash is not canonical"
-        ) from error
-    return scientific_registry, protocol_id, exact_hash
+        if type(scientific_registry) is not ScientificRegistry:
+            raise ProtocolViolation(
+                "ablation qualification authority registry is not canonical"
+            )
+        if (
+            type(protocol_id) is not str
+            or not protocol_id
+            or protocol_id != protocol_id.strip()
+        ):
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_id is not canonical"
+            )
+        if type(protocol_hash) is not str:
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_hash is not canonical"
+            )
+        try:
+            exact_hash = _digest(protocol_hash, "protocol_hash")
+        except ValueError as error:
+            raise ProtocolViolation(
+                "ablation qualification authority protocol_hash is not canonical"
+            ) from error
+        return scientific_registry, protocol_id, exact_hash
 
+    return _registered_policy_context
+
+
+_registered_policy_context = _make_registered_policy_context(
+    _issued_ablation_authority_policy_binding
+)
+del _issued_ablation_authority_policy_binding
+del _make_registered_policy_context
 
 def _registered_decision_policy(authority: object):
     registry, protocol_id, protocol_hash = _registered_policy_context(authority)

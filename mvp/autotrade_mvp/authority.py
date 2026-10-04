@@ -3402,6 +3402,15 @@ class AuthorityService:
         if durable_risk_intent is not None:
             request["risk_intent"] = durable_risk_intent
             request["financial_idempotency_key"] = durable_idempotency_key
+        if record.confirmation_id is not None:
+            confirmation = self._confirmations.get(record.confirmation_id)
+            if (
+                confirmation is not None
+                and confirmation.financial_binding_hash is not None
+            ):
+                request["financial_confirmation_binding_hash"] = (
+                    confirmation.financial_binding_hash
+                )
         if authoritative_snapshot is not None:
             request["authoritative_risk_snapshot"] = dict(authoritative_snapshot)
         if journal_sequence_cut is not None:

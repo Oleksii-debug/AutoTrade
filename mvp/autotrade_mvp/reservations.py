@@ -260,22 +260,30 @@ class ReservationBook:
         reservation_id: str,
         usage: Mapping[str, Decimal | str | int],
     ) -> ReservationSnapshot:
-        """Return reversed fill usage to held capacity without releasing it.
+        """Apply a fill reversal without inventing or releasing capacity.
 
         For an unresolved reservation this is the exact inverse of ``consume``.
         A provider bust may also invalidate a previously terminal FILLED cut.
         In that case the prior terminal result is not relabelled WORKING or
         UNKNOWN: the reservation enters a dedicated post-bust hold state and
-        reconstitutes every resource to ``original - still_consumed``. This is
-        important because terminalization released both consumed fill capacity
-        and any unused safety buffer. The durable caller binds this projection
-        to the matching OMS bust and economic reversal in one JournalStore
-        command; this projection alone never releases capital.
+        reconstitutes every resource to ``original - still_consumed``.
+
+        A late bust after provider-confirmed CANCELED is different: the order
+        remainder is already terminal and carries no live execution risk. The
+        reversal therefore reduces historical consumed exposure but keeps the
+        reservation released (remaining stays zero and CANCELED is preserved).
+        The durable caller binds either projection to the matching OMS bust and
+        economic reversal in one JournalStore command.
         """
 
         current = self._get_record(reservation_id)
         terminal_filled_bust = current.state == "FILLED"
-        if current.state not in HELD_STATES and not terminal_filled_bust:
+        terminal_cancelled_bust = current.state == "CANCELED"
+        if (
+            current.state not in HELD_STATES
+            and not terminal_filled_bust
+            and not terminal_cancelled_bust
+        ):
             raise ReservationConflict(
                 "Cannot restore consumption on a terminal reservation"
             )
@@ -291,7 +299,11 @@ class ReservationBook:
                 )
             try:
                 next_consumed = exact_subtract(consumed[resource], amount)
-                next_remaining = exact_add(remaining[resource], amount)
+                next_remaining = (
+                    remaining[resource]
+                    if terminal_cancelled_bust
+                    else exact_add(remaining[resource], amount)
+                )
             except ExactDecimalError as error:
                 raise ReservationConflict(
                     "reservation restoration exceeds exact decimal authority"

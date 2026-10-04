@@ -567,5 +567,220 @@ class AutonomousObservedFillRecoveryTests(unittest.TestCase):
             )
 
 
+    def test_zero_wire_writer_race_before_checkpoint_cannot_adopt_newer_cut(self):
+        original_event = session._loop_event
+
+        def crash_after_started(store, run_id, kind, key, payload, now):
+            value = original_event(
+                store, run_id, kind, key, payload, now
+            )
+            if (
+                kind == "AutonomousEpisodeStarted"
+                and payload["episode"] == 4
+            ):
+                self.assertIn(
+                    payload["decision"], {"HOLD", "NO_TRADE"}
+                )
+                raise RuntimeError("zero-wire proof-cut crash")
+            return value
+
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                session, "_loop_event", crash_after_started
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "zero-wire proof-cut crash"
+                ):
+                    run(directory)
+
+            store = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            position_before = economics.position(session.INSTRUMENT)
+            transaction_count_before = len(economics.transactions)
+            original_record = session.record_reconciliation_checkpoint
+            injected = False
+
+            def race(*args, **kwargs):
+                nonlocal injected
+                if (
+                    not injected
+                    and str(kwargs.get("reconciliation_id", "")).endswith(
+                        ":4:after"
+                    )
+                ):
+                    injected = True
+                    economics.append(
+                        book_external_cash_flow(
+                            transaction_id="zero-wire-pre-checkpoint-race",
+                            cause_event_id="zero-wire-pre-checkpoint-race",
+                            currency="USD",
+                            amount="1",
+                        )
+                    )
+                return original_record(*args, **kwargs)
+
+            with patch.object(
+                session,
+                "record_reconciliation_checkpoint",
+                race,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed",
+                ):
+                    run(directory, stop_after_episodes=4)
+
+            refreshed = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            self.assertEqual(
+                refreshed.position(session.INSTRUMENT),
+                position_before,
+            )
+            self.assertEqual(
+                len(refreshed.transactions),
+                transaction_count_before + 1,
+            )
+            completed_four = [
+                event
+                for event in store.load_events_by_aggregate_type(
+                    "canonical_autonomous_simulation"
+                )
+                if (
+                    event["event_type"] == "AutonomousEpisodeCompleted"
+                    and event["payload"]["episode"] == 4
+                )
+            ]
+            self.assertEqual(completed_four, [])
+
+    def test_zero_wire_writer_race_after_checkpoint_blocks_completion(self):
+        original_event = session._loop_event
+
+        def crash_after_started(store, run_id, kind, key, payload, now):
+            value = original_event(
+                store, run_id, kind, key, payload, now
+            )
+            if (
+                kind == "AutonomousEpisodeStarted"
+                and payload["episode"] == 4
+            ):
+                self.assertIn(
+                    payload["decision"], {"HOLD", "NO_TRADE"}
+                )
+                raise RuntimeError("zero-wire completion-CAS crash")
+            return value
+
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                session, "_loop_event", crash_after_started
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "zero-wire completion-CAS crash"
+                ):
+                    run(directory)
+
+            store = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            )
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            position_before = economics.position(session.INSTRUMENT)
+            original_loop_event = session._loop_event
+            injected = False
+
+            def race_completion(
+                store_arg,
+                run_id,
+                kind,
+                key,
+                payload,
+                now,
+                **kwargs,
+            ):
+                nonlocal injected
+                if (
+                    not injected
+                    and kind == "AutonomousEpisodeCompleted"
+                    and payload["episode"] == 4
+                ):
+                    injected = True
+                    economics.append(
+                        book_external_cash_flow(
+                            transaction_id="zero-wire-pre-completion-race",
+                            cause_event_id="zero-wire-pre-completion-race",
+                            currency="USD",
+                            amount="1",
+                        )
+                    )
+                return original_loop_event(
+                    store_arg,
+                    run_id,
+                    kind,
+                    key,
+                    payload,
+                    now,
+                    **kwargs,
+                )
+
+            with patch.object(
+                session,
+                "_loop_event",
+                race_completion,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "journal sequence changed",
+                ):
+                    run(directory, stop_after_episodes=4)
+
+            refreshed = DurableProviderEconomicBook(
+                store,
+                provider_id=session.PROVIDER,
+                account_id=session.ACCOUNT,
+                environment=session.ENVIRONMENT,
+            )
+            self.assertEqual(
+                refreshed.position(session.INSTRUMENT),
+                position_before,
+            )
+            checkpoints = [
+                event
+                for event in store.load_events_by_aggregate_type(
+                    "account_reconciliation"
+                )
+                if event["aggregate_id"].endswith(
+                    ":4:after"
+                )
+                or event["payload"].get("observed_at")
+                == "2026-10-03T00:00:03Z"
+            ]
+            self.assertTrue(checkpoints)
+            completed_four = [
+                event
+                for event in store.load_events_by_aggregate_type(
+                    "canonical_autonomous_simulation"
+                )
+                if (
+                    event["event_type"] == "AutonomousEpisodeCompleted"
+                    and event["payload"]["episode"] == 4
+                )
+            ]
+            self.assertEqual(completed_four, [])
+
+
 if __name__ == "__main__":
     unittest.main()

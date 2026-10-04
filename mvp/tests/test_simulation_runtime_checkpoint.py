@@ -92,6 +92,35 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             self.assertEqual(result["new_outbound_requests"], 0)
             self.assertEqual(store.whole_store_state_cut(), before)
 
+    def test_runtime_authority_key_is_product_generated_and_replacement_invalidates_resume(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=3)
+            key_path = Path(directory) / ".autonomous-runtime-authority.key"
+            self.assertTrue(key_path.is_file())
+            original = key_path.read_bytes()
+            self.assertEqual(len(original), 32)
+
+            key_path.write_bytes(b"x" * 32)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            before = store.whole_store_state_cut()
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("rebound authority cannot send"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "does not match current authorities",
+                ):
+                    run(directory)
+            self.assertEqual(store.whole_store_state_cut(), before)
+
+    def test_runtime_checkpoint_module_exposes_no_reusable_signing_oracle(self):
+        from mvp.autotrade_mvp import simulation_runtime_checkpoint as checkpoint_module
+
+        self.assertFalse(hasattr(checkpoint_module, "_sign_material"))
+        self.assertFalse(hasattr(checkpoint_module, "_verify_material"))
+
     def test_tampered_checkpoint_fails_before_provider_restore_or_journal_mutation(self):
         with TemporaryDirectory() as directory:
             run(directory, stop_after_episodes=3)

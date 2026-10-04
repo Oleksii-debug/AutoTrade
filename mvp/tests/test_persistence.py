@@ -153,6 +153,105 @@ class JournalStoreTests(unittest.TestCase):
                 )
                 self.assertEqual(reopened.current_journal_sequence(), 3)
 
+    def test_record_command_returns_exact_frozen_durable_result(self):
+        class MutatingResult(dict):
+            def __init__(self):
+                super().__init__(status="ACCEPTED")
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    self["status"] = "MUTATED_AFTER_SERIALIZATION"
+                return items
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            result = MutatingResult()
+            saved, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-frozen-result",
+                idempotency_key="key-frozen-result",
+                request={"action": "A"},
+                result=result,
+                state_version=1,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(result["status"], "MUTATED_AFTER_SERIALIZATION")
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
+            replayed, inserted = store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-frozen-result-retry",
+                idempotency_key="key-frozen-result",
+                request={"action": "A"},
+                result={"status": "IGNORED"},
+                state_version=2,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(replayed, saved)
+
+    def test_commit_command_freezes_result_and_event_envelope_once(self):
+        class MutatingDict(dict):
+            def __init__(self, **values):
+                super().__init__(**values)
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    if "quantity" in self:
+                        self["quantity"] = "999"
+                    if "status" in self:
+                        self["status"] = "MUTATED_AFTER_SERIALIZATION"
+                return items
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            payload = MutatingDict(kind="fill", quantity="1")
+            command_event = {
+                "event_id": "evt-command-freeze",
+                "event_type": "ExecutionFillObserved",
+                "aggregate_type": "account",
+                "aggregate_id": "paper-1",
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest({"kind": "fill", "quantity": "1"}),
+                "committed_at": "2026-10-04T15:00:00+00:00",
+            }
+            result = MutatingDict(status="ACCEPTED")
+
+            saved, inserted, appended = store.commit_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-command-freeze",
+                idempotency_key="key-command-freeze",
+                request={"action": "ORDER.SUBMIT"},
+                result=result,
+                state_version=1,
+                events=[(command_event, "events")],
+            )
+            self.assertTrue(inserted)
+            self.assertEqual([item.event_id for item in appended], ["evt-command-freeze"])
+            self.assertEqual(result["status"], "MUTATED_AFTER_SERIALIZATION")
+            self.assertEqual(payload["quantity"], "999")
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+
+            reopened = JournalStore(path)
+            loaded = reopened.load_events("account", "paper-1")
+            self.assertEqual(loaded[0]["payload"], {"kind": "fill", "quantity": "1"})
+            pending = reopened.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(
+                pending[0]["payload"]["payload"],
+                {"kind": "fill", "quantity": "1"},
+            )
+
     def test_commit_command_rejects_stale_journal_cut_but_exact_replay_survives(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

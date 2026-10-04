@@ -1186,9 +1186,48 @@ internal static class Program
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
+    static void AutomaticHostRefreshKeepsRefreshButtonEnabledTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                InspectingStatusHostClient client = new();
+                window = (MainWindow)Activator.CreateInstance(
+                    typeof(MainWindow),
+                    flags,
+                    null,
+                    new object[] { client },
+                    null)!;
+                var button = (System.Windows.Controls.Button)window.FindName("RefreshStatusButton");
+                client.OnGetStatus = () => Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh disabled the focusable refresh button");
+                var refresh = typeof(MainWindow).GetMethod("RefreshHostStatusAsync", flags)!;
+                Task task = (Task)refresh.Invoke(window, new object[] { false, false })!;
+                task.GetAwaiter().GetResult();
+                Check.True(
+                    button.IsEnabled,
+                    "automatic host refresh left the focusable refresh button disabled");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
+        AutomaticHostRefreshKeepsRefreshButtonEnabledTest();
         CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
@@ -1209,6 +1248,29 @@ internal static class Program
         await SnapshotBearerEchoFailsClosedTest();
         Console.WriteLine("Desktop authenticated host-client contract tests passed.");
     }
+}
+
+internal sealed class InspectingStatusHostClient : IEmergencyHostClient
+{
+    public Action? OnGetStatus { get; set; }
+
+    public Task<EmergencyHostStatus> GetStatusAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OnGetStatus?.Invoke();
+        return Task.FromResult(
+            EmergencyHostStatus.Disconnected(
+                "Inspecting status client is intentionally disconnected."));
+    }
+
+    public Task<EmergencyCommandResult> BlockNewExposureAsync(
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
+
+    public Task<EmergencyOperationStatus> GetOperationAsync(
+        string operationId,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException();
 }
 
 internal static class Check

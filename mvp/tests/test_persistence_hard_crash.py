@@ -878,5 +878,151 @@ class HardCrashPersistenceTests(unittest.TestCase):
             self.assertEqual(reopened.current_journal_sequence(), 1)
 
 
+    def test_schema_upgrade_process_exit_before_commit_rolls_back_to_v7(self):
+        class V7JournalStore(JournalStore):
+            SCHEMA_VERSION = 7
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            legacy = V7JournalStore(path)
+            legacy.append_event(_event())
+            self.assertEqual(legacy.current_schema_version(), 7)
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                original_connect = JournalStore._connect
+
+                class CrashBeforeCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        os._exit(87)
+
+                @contextmanager
+                def crashing_connect(self):
+                    with original_connect(self) as connection:
+                        yield CrashBeforeCommit(connection)
+
+                JournalStore._connect = crashing_connect
+                JournalStore(path)
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 87)
+
+            import sqlite3
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                event_count = connection.execute(
+                    "SELECT COUNT(*) FROM events"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, list(range(1, 8)))
+            self.assertEqual(event_count, 1)
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.get_event("evt-hard-crash")["payload"]["quantity"], "1")
+
+    def test_schema_upgrade_process_exit_after_commit_preserves_complete_v9(self):
+        class V7JournalStore(JournalStore):
+            SCHEMA_VERSION = 7
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            legacy = V7JournalStore(path)
+            legacy.append_event(_event())
+            self.assertEqual(legacy.current_schema_version(), 7)
+
+            child = textwrap.dedent(
+                """
+                import os
+                from contextlib import contextmanager
+                import sys
+
+                from mvp.autotrade_mvp.persistence import JournalStore
+
+                path = sys.argv[1]
+                original_connect = JournalStore._connect
+
+                class CrashAfterCommit:
+                    def __init__(self, connection):
+                        self._connection = connection
+
+                    def __getattr__(self, name):
+                        return getattr(self._connection, name)
+
+                    def commit(self):
+                        self._connection.commit()
+                        os._exit(88)
+
+                @contextmanager
+                def crashing_connect(self):
+                    with original_connect(self) as connection:
+                        yield CrashAfterCommit(connection)
+
+                JournalStore._connect = crashing_connect
+                JournalStore(path)
+                raise SystemExit(91)
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(path)],
+                cwd=Path(__file__).resolve().parents[2],
+                env=os.environ.copy(),
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 88)
+
+            import sqlite3
+
+            connection = sqlite3.connect(path)
+            try:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                event_count = connection.execute(
+                    "SELECT COUNT(*) FROM events"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(versions, list(range(1, 10)))
+            self.assertEqual(event_count, 1)
+
+            reopened = JournalStore(path)
+            self.assertEqual(reopened.current_schema_version(), 9)
+            self.assertEqual(reopened.get_event("evt-hard-crash")["payload"]["quantity"], "1")
+
+
 if __name__ == "__main__":
     unittest.main()

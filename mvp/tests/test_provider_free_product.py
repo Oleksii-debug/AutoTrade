@@ -371,6 +371,14 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 client.close()
 
 
+    def test_browser_keeps_retryable_pairing_fragment_until_pairing_succeeds(self):
+        app = (ROOT / 'web' / 'src' / 'app.js').read_text(encoding='utf-8')
+        pairing = 'await jsonFetch(HOST_API.route("pairLocalSession"), {'
+        scrub = 'window.history.replaceState(null, "", window.location.pathname);'
+        self.assertIn(pairing, app)
+        self.assertIn(scrub, app)
+        self.assertLess(app.index(pairing), app.index(scrub))
+
     def test_pairing_exports_exact_browser_session_to_native_sink(self):
         with TemporaryDirectory() as directory:
             captured = []

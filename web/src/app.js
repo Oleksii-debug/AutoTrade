@@ -1220,11 +1220,14 @@
     try {
       const pairingCode = new URLSearchParams(window.location.hash.slice(1)).get("pair");
       if (pairingCode !== null) {
-        window.history.replaceState(null, "", window.location.pathname);
         await jsonFetch(HOST_API.route("pairLocalSession"), {
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({pairing_code: pairingCode})
         });
+        // Keep a retryable one-time code in the fragment until the host has
+        // actually confirmed pairing. The fragment is not sent in HTTP
+        // requests, and successful pairing removes it immediately.
+        window.history.replaceState(null, "", window.location.pathname);
       }
       await refreshSnapshot();
     } catch {

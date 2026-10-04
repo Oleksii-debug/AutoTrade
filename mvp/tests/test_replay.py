@@ -449,7 +449,7 @@ class CausalReplayTests(unittest.TestCase):
             attacker.capture = lambda: RuntimeStateSnapshot(
                 cut_id=checkpoint.runtime_cut_id,
                 replay=checkpoint.replay,
-                runtime_components=checkpoint.runtime_components,
+                runtime_components=dict(checkpoint.runtime_components),
                 authority_id=checkpoint.runtime_authority_id,
                 verifier_id=checkpoint.runtime_verifier_id,
                 authority_seal=checkpoint.runtime_authority_seal,
@@ -498,7 +498,7 @@ class CausalReplayTests(unittest.TestCase):
 
         forged = ForgedCheckpoint(
             replay=checkpoint.replay,
-            runtime_components=checkpoint.runtime_components,
+            runtime_components=dict(checkpoint.runtime_components),
             runtime_cut_id=checkpoint.runtime_cut_id,
             runtime_authority_id=checkpoint.runtime_authority_id,
             runtime_verifier_id=checkpoint.runtime_verifier_id,

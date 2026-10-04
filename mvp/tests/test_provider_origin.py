@@ -176,6 +176,57 @@ class ProviderOriginJournalTests(unittest.TestCase):
                     )
                 prepare_direct.assert_not_called()
 
+    def test_direct_origin_rejects_c_q_store_split_before_prepare_or_transport(self):
+        with TemporaryDirectory() as directory:
+            (
+                _fixture,
+                journal,
+                capabilities,
+                _qualifications,
+                route,
+                _q1,
+                harness,
+                binding,
+            ) = self._route_fixture(directory)
+            origin = self._origin(journal, directory)
+            foreign_store = JournalStore(Path(directory) / "foreign-q-journal.sqlite3")
+            foreign_evidence = Path(directory) / "foreign-q-evidence"
+            foreign_qualifications = harness.registry(
+                foreign_store,
+                evidence_store=ArtifactStore(foreign_evidence),
+                evidence_root=foreign_evidence,
+            )
+            transport = object.__new__(BybitV5AuthenticatedReadTransport)
+            transport.wire_client = object()
+
+            with patch.object(
+                origin,
+                "prepare_direct",
+                wraps=origin.prepare_direct,
+            ) as prepare_direct, patch.object(
+                BybitV5AuthenticatedReadTransport,
+                "__call__",
+                autospec=True,
+            ) as transport_call:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "C/Q authorities must share one JournalStore",
+                ):
+                    execute_direct_provider_origin_read(
+                        origin=origin,
+                        route=route,
+                        capability_registry=capabilities,
+                        qualification_registry=foreign_qualifications,
+                        query_binding=binding,
+                        transport=transport,
+                    )
+                prepare_direct.assert_not_called()
+                transport_call.assert_not_called()
+            self.assertEqual(
+                foreign_store.whole_store_state_cut()["journal_sequence"],
+                0,
+            )
+
     def test_direct_origin_rejects_cross_store_authority_before_prepare_or_transport(self):
         with TemporaryDirectory() as directory:
             (

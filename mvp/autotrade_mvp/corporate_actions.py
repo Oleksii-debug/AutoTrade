@@ -90,13 +90,11 @@ def _exact_ratio_product(
     name: str,
 ) -> Decimal:
     try:
-        denominator_fraction = as_fraction(denominator)
-        if denominator_fraction == 0:
-            raise ValueError(f"{name} denominator must be non-zero")
         result = bounded_fraction(
-            as_fraction(value)
-            * as_fraction(numerator)
-            / denominator_fraction
+            bounded_fraction(
+                as_fraction(value) * as_fraction(numerator)
+            )
+            / as_fraction(denominator)
         )
         return terminating_decimal(result)
     except (ExactDecimalError, ZeroDivisionError) as error:

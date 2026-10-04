@@ -647,6 +647,159 @@ class BoundedRealAuthorityUnforgeabilityTests(unittest.TestCase):
         self.assertIn("independent_evidence_trust_invalid", result.reason_codes)
         self.assertEqual(calls, [])
 
+    def test_mutated_envelope_is_resnapshotted_before_scope_comparison(self):
+        envelope = self._envelope()
+        observations = self._observations(envelope)
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile mutated envelope text must not run")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("hostile mutated envelope comparison must not run")
+
+        object.__setattr__(envelope, "account_id", HostileText("acct-1"))
+
+        with self.assertRaisesRegex(ValueError, "account_id is required"):
+            assess_bounded_real_qualification(
+                envelope=envelope,
+                prerequisite_evidence=(),
+                observations=observations,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_mutated_envelope_digest_fails_before_hostile_dispatch(self):
+        envelope = self._envelope()
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile mutated policy text must not run")
+
+        object.__setattr__(envelope, "policy_id", HostileText("policy-1"))
+
+        with self.assertRaisesRegex(ValueError, "policy_id is required"):
+            _ = envelope.envelope_digest
+
+        self.assertEqual(calls, [])
+
+    def test_mutated_observation_is_resnapshotted_before_boolean_use(self):
+        envelope = self._envelope()
+        observations = self._observations(envelope)
+        calls = []
+
+        class HostileBool:
+            def __bool__(self):
+                calls.append("bool")
+                raise AssertionError("hostile observation truthiness must not run")
+
+        object.__setattr__(
+            observations,
+            "observed_partial_fill",
+            HostileBool(),
+        )
+
+        with self.assertRaisesRegex(TypeError, "observed_partial_fill must be boolean"):
+            assess_bounded_real_qualification(
+                envelope=envelope,
+                prerequisite_evidence=(),
+                observations=observations,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_mutated_prerequisite_is_resnapshotted_before_dict_use(self):
+        envelope = self._envelope()
+        observations = self._observations(envelope)
+        ref = ImmutableEvidenceRef(
+            artifact_id="55555555-5555-4555-8555-555555555555",
+            sha256="sha256:" + "f" * 64,
+            evidence_kind="PREREQUISITE:RELEASE_CANDIDATE",
+            source_sha=envelope.source_sha,
+            envelope_id=envelope.envelope_id,
+            envelope_digest=envelope.envelope_digest,
+            provider_id=envelope.provider_id,
+            account_id=envelope.account_id,
+        )
+        evidence = QualificationEvidence(
+            evidence_id="evidence-1",
+            evidence_kind="RELEASE_CANDIDATE",
+            source_sha=envelope.source_sha,
+            envelope_id=envelope.envelope_id,
+            envelope_digest=envelope.envelope_digest,
+            passed=True,
+            evidence_ref=ref,
+        )
+        calls = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile evidence text must not run")
+
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("hostile evidence hashing must not run")
+
+        object.__setattr__(
+            evidence,
+            "evidence_id",
+            HostileText("evidence-1"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "evidence_id is required"):
+            assess_bounded_real_qualification(
+                envelope=envelope,
+                prerequisite_evidence=(evidence,),
+                observations=observations,
+            )
+
+        self.assertEqual(calls, [])
+
+    def test_mutated_evidence_ref_is_resnapshotted_before_reader_dispatch(self):
+        envelope = self._envelope()
+        calls = []
+        ref = ImmutableEvidenceRef(
+            artifact_id="66666666-6666-4666-8666-666666666666",
+            sha256="sha256:" + "a" * 64,
+            evidence_kind="ACTUAL_FILL",
+            source_sha=envelope.source_sha,
+            envelope_id=envelope.envelope_id,
+            envelope_digest=envelope.envelope_digest,
+            provider_id=envelope.provider_id,
+            account_id=envelope.account_id,
+        )
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile ref normalization must not run")
+
+            def __fspath__(self):
+                calls.append("fspath")
+                raise AssertionError("hostile ref path conversion must not run")
+
+        object.__setattr__(
+            ref,
+            "artifact_id",
+            HostileText("66666666-6666-4666-8666-666666666666"),
+        )
+
+        with TemporaryDirectory() as directory:
+            verifier = ArtifactStoreEvidenceVerifier(
+                ArtifactStore(directory),
+                evidence_root=directory,
+            )
+            with self.assertRaisesRegex(ValueError, "artifact_id must be a UUID"):
+                ArtifactStoreEvidenceVerifier.verify(verifier, ref)
+
+        self.assertEqual(calls, [])
+
     def test_verifier_subclass_is_rejected_before_verdict_dispatch(self):
         envelope = self._envelope()
         observations = self._observations(envelope)

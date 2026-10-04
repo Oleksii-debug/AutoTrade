@@ -1130,5 +1130,21 @@ class HostNetworkTests(unittest.TestCase):
         )
         self.assertEqual(canonical.status, 200)
 
+
+    def test_canonical_long_state_version_returns_conflict_not_parse_error(self):
+        command = self.command(expected_state_version="9" * 5000)
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=self.headers(json_body=True),
+            body=json.dumps(command).encode("utf-8"),
+        )
+        self.assertEqual(response.status, 409)
+        payload = self.body(response)
+        self.assertEqual(payload["status"], "CONFLICT")
+        self.assertEqual(payload["reason_codes"], ["stale_state_version"])
+        self.assertEqual(self.app.store.state_version, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

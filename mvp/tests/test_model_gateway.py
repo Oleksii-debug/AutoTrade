@@ -113,6 +113,102 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertEqual(HostileDatetime.truth_calls, 0)
         self.assertEqual(HostileDatetime.compare_calls, 0)
 
+    def test_route_reseals_exact_inputs_before_authority_decisions(self):
+        tampered_descriptor = model(
+            "tampered",
+            remote=False,
+            cost="0.5",
+        )
+        object.__setattr__(
+            tampered_descriptor,
+            "estimated_cost",
+            Decimal("-1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "estimated cost cannot be negative",
+        ):
+            route_model(
+                RoutingPolicy(
+                    RoutingMode.ALLOWLIST,
+                    allowed_model_ids=("tampered",),
+                    maximum_cost="1",
+                ),
+                request("tampered"),
+                [tampered_descriptor],
+                now_utc=NOW,
+            )
+
+        tampered_policy = RoutingPolicy(
+            RoutingMode.ALLOWLIST,
+            allowed_model_ids=("local",),
+            maximum_cost="1",
+        )
+        object.__setattr__(
+            tampered_policy,
+            "maximum_cost",
+            Decimal("-1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "maximum cost cannot be negative",
+        ):
+            route_model(
+                tampered_policy,
+                request("local"),
+                [model("local", remote=False, cost="0")],
+                now_utc=NOW,
+            )
+
+        tampered_request = request("local", budget="1")
+        object.__setattr__(
+            tampered_request,
+            "budget_remaining",
+            Decimal("-1"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "budget remaining cannot be negative",
+        ):
+            route_model(
+                RoutingPolicy(
+                    RoutingMode.ALLOWLIST,
+                    allowed_model_ids=("local",),
+                    maximum_cost="1",
+                ),
+                tampered_request,
+                [model("local", remote=False, cost="0")],
+                now_utc=NOW,
+            )
+
+    def test_cancelled_request_reseal_still_avoids_inventory_access(self):
+        class ExplodingInventory:
+            def __iter__(self):
+                raise AssertionError("cancelled request must not inspect model inventory")
+
+        policy = RoutingPolicy(
+            RoutingMode.ALLOWLIST,
+            allowed_model_ids=("remote",),
+            allow_remote=True,
+            maximum_cost="10",
+        )
+        req = ModelRequest(
+            request_id="cancelled-resealed",
+            allowed_model_ids=("remote",),
+            privacy_remote_allowed=True,
+            budget_remaining="10",
+            deadline_utc=NOW + timedelta(minutes=1),
+            cancelled=True,
+        )
+        decision = route_model(
+            policy,
+            req,
+            ExplodingInventory(),
+            now_utc=NOW,
+        )
+        self.assertEqual(RouteStatus.REJECTED, decision.status)
+        self.assertEqual("request_cancelled", decision.reason)
+
     def test_zero_mode_never_selects_model(self):
         decision = route_model(
             RoutingPolicy(RoutingMode.ZERO, maximum_cost=Decimal("100")),

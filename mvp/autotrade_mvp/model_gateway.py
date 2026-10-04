@@ -183,14 +183,27 @@ def _route_now(value: datetime | None) -> datetime:
     return value
 
 
+def _canonical_descriptor(descriptor: ModelDescriptor) -> ModelDescriptor:
+    if type(descriptor) is not ModelDescriptor:
+        raise TypeError("descriptor must be exact ModelDescriptor")
+    return ModelDescriptor(
+        model_id=descriptor.model_id,
+        provider_id=descriptor.provider_id,
+        revision=descriptor.revision,
+        remote=descriptor.remote,
+        estimated_cost=descriptor.estimated_cost,
+        latency_ms=descriptor.latency_ms,
+        quality_score=descriptor.quality_score,
+    )
+
+
 def _dedupe_descriptors(descriptors: Iterable[ModelDescriptor]) -> dict[str, ModelDescriptor]:
     result: dict[str, ModelDescriptor] = {}
     for descriptor in descriptors:
-        if type(descriptor) is not ModelDescriptor:
-            raise TypeError("descriptor must be exact ModelDescriptor")
-        if descriptor.model_id in result:
-            raise ValueError(f"duplicate model descriptor: {descriptor.model_id}")
-        result[descriptor.model_id] = descriptor
+        canonical = _canonical_descriptor(descriptor)
+        if canonical.model_id in result:
+            raise ValueError(f"duplicate model descriptor: {canonical.model_id}")
+        result[canonical.model_id] = canonical
     return result
 
 
@@ -205,6 +218,22 @@ def route_model(
 
     if type(policy) is not RoutingPolicy or type(request) is not ModelRequest:
         raise TypeError("routing requires exact RoutingPolicy and ModelRequest")
+    policy = RoutingPolicy(
+        mode=policy.mode,
+        allowed_model_ids=policy.allowed_model_ids,
+        fixed_model_id=policy.fixed_model_id,
+        allow_remote=policy.allow_remote,
+        maximum_cost=policy.maximum_cost,
+        maximum_latency_ms=policy.maximum_latency_ms,
+    )
+    request = ModelRequest(
+        request_id=request.request_id,
+        allowed_model_ids=request.allowed_model_ids,
+        privacy_remote_allowed=request.privacy_remote_allowed,
+        budget_remaining=request.budget_remaining,
+        deadline_utc=request.deadline_utc,
+        cancelled=request.cancelled,
+    )
     now = _route_now(now_utc)
     if request.cancelled:
         return RouteDecision(RouteStatus.REJECTED, None, None, None, Decimal("0"), "request_cancelled")

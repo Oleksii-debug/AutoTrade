@@ -40,7 +40,6 @@ _VERSION_RE = re.compile(
 )
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
-_SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class ProviderAccountReconciliationSemanticsError(ValueError):

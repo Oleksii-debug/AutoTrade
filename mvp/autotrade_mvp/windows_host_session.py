@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 _TARGET_PREFIX = "AutoTrade.HostSession:"
 _CREDENTIAL_TYPE_GENERIC = 1
-_CREDENTIAL_PERSIST_LOCAL_MACHINE = 2
+_CREDENTIAL_PERSIST_SESSION = 1
 _MAX_BLOB_BYTES = 8192
 
 
@@ -84,7 +84,7 @@ def _write_windows_generic_credential(*, target: str, actor: str, token: str) ->
         LastWritten=wintypes.FILETIME(),
         CredentialBlobSize=len(blob),
         CredentialBlob=ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)),
-        Persist=_CREDENTIAL_PERSIST_LOCAL_MACHINE,
+        Persist=_CREDENTIAL_PERSIST_SESSION,
         AttributeCount=0,
         Attributes=None,
         TargetAlias=None,

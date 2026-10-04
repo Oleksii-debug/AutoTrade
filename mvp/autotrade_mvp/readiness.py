@@ -61,6 +61,7 @@ class RuntimeSafetySignals:
     emergency_execution_path_qualified: bool
     protection_required_for_new_exposure: bool
     new_exposure_protection_path_qualified: bool
+    financial_authority_dispatch_composition_qualified: bool
     unknown_send_count: int
     reconciliation_lag_seconds: Decimal
     maximum_reconciliation_lag_seconds: Decimal
@@ -83,6 +84,7 @@ class RuntimeSafetySignals:
             "emergency_execution_path_qualified",
             "protection_required_for_new_exposure",
             "new_exposure_protection_path_qualified",
+            "financial_authority_dispatch_composition_qualified",
             "unresolved_external_uncertainty",
             "recovery_in_progress",
         ):
@@ -147,6 +149,8 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
         blockers.append("provider_reconciliation_incomplete")
     if not signals.market_data_fresh:
         blockers.append("market_data_stale")
+    if not signals.financial_authority_dispatch_composition_qualified:
+        blockers.append("financial_authority_dispatch_composition_unqualified")
     if signals.unknown_send_count:
         blockers.append("unknown_sends_present")
     if signals.unresolved_external_uncertainty:
@@ -195,6 +199,8 @@ def evaluate_readiness(signals: RuntimeSafetySignals) -> RuntimeReadiness:
         warnings.append("provider_native_protection_absent")
     if not signals.emergency_execution_path_qualified:
         warnings.append("emergency_execution_path_unqualified")
+    if not signals.financial_authority_dispatch_composition_qualified:
+        warnings.append("financial_authority_dispatch_composition_unqualified")
     if (
         signals.protection_required_for_new_exposure
         and not signals.new_exposure_protection_path_qualified

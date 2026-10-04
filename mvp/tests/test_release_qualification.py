@@ -80,6 +80,42 @@ class ReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.status, "FAIL")
         self.assertEqual(decision.checks["PROVIDER_QUALIFICATION"], "FAIL")
 
+    def test_provider_qualification_alone_cannot_substitute_for_financial_composition(self):
+        checks = tuple(
+            row
+            for row in all_checks()
+            if row.name != "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"
+        )
+        self.assertEqual(
+            next(row for row in checks if row.name == "PROVIDER_QUALIFICATION").status,
+            "PASS",
+        )
+        decision = evaluate_release(candidate(), checks)
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertEqual(
+            decision.checks["FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"],
+            "INCONCLUSIVE",
+        )
+        self.assertTrue(
+            any(
+                "FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION: evidence missing" in reason
+                for reason in decision.reasons
+            )
+        )
+
+    def test_failed_financial_authority_dispatch_composition_blocks_release(self):
+        decision = evaluate_release(
+            candidate(),
+            all_checks(
+                override={"FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION": "FAIL"}
+            ),
+        )
+        self.assertEqual(decision.status, "FAIL")
+        self.assertEqual(
+            decision.checks["FINANCIAL_AUTHORITY_DISPATCH_COMPOSITION"],
+            "FAIL",
+        )
+
     def test_unsigned_artifacts_cannot_pass_even_with_green_checks(self):
         decision = evaluate_release(candidate(signatures=False), all_checks())
         self.assertEqual(decision.status, "FAIL")
@@ -119,7 +155,6 @@ class ReleaseQualificationTests(unittest.TestCase):
                 evidence_ref="evidence:ci",
                 evidence_sha256="mutable-reference-only",
             )
-
 
     def test_malformed_hashes_and_unknown_checks_fail_closed(self):
         with self.assertRaisesRegex(ReleaseQualificationError, "canonical SHA-256"):

@@ -23,6 +23,7 @@ def healthy(**overrides):
         "emergency_execution_path_qualified": True,
         "protection_required_for_new_exposure": True,
         "new_exposure_protection_path_qualified": True,
+        "financial_authority_dispatch_composition_qualified": True,
         "unknown_send_count": 0,
         "reconciliation_lag_seconds": "1",
         "maximum_reconciliation_lag_seconds": "5",
@@ -66,6 +67,11 @@ class RuntimeReadinessTests(unittest.TestCase):
                 "sender_ownership_unproven",
             ),
             ("old_sender_fenced", False, "old_sender_not_fenced"),
+            (
+                "financial_authority_dispatch_composition_qualified",
+                False,
+                "financial_authority_dispatch_composition_unqualified",
+            ),
             ("unknown_send_count", 1, "unknown_sends_present"),
             (
                 "unresolved_external_uncertainty",
@@ -222,6 +228,23 @@ class RuntimeReadinessTests(unittest.TestCase):
             result.blockers,
         )
 
+    def test_unqualified_financial_composition_can_only_preserve_protection_path(self):
+        result = evaluate_readiness(
+            healthy(financial_authority_dispatch_composition_qualified=False)
+        )
+        self.assertFalse(result.ready)
+        self.assertFalse(result.ready_for_new_exposure)
+        self.assertEqual(result.mode, RuntimeMode.PROTECTION_ONLY)
+        self.assertTrue(result.protection_only_available)
+        self.assertIn(
+            "financial_authority_dispatch_composition_unqualified",
+            result.blockers,
+        )
+        self.assertIn(
+            "financial_authority_dispatch_composition_unqualified",
+            result.warnings,
+        )
+
     def test_boolean_and_count_fields_fail_closed_on_truthy_values(self):
         with self.assertRaisesRegex(ReadinessError, "boolean"):
             healthy(journal_writable=1)
@@ -229,6 +252,8 @@ class RuntimeReadinessTests(unittest.TestCase):
             healthy(protection_required_for_new_exposure=1)
         with self.assertRaisesRegex(ReadinessError, "boolean"):
             healthy(new_exposure_protection_path_qualified=1)
+        with self.assertRaisesRegex(ReadinessError, "boolean"):
+            healthy(financial_authority_dispatch_composition_qualified=1)
         with self.assertRaisesRegex(ReadinessError, "non-negative integer"):
             healthy(unknown_send_count=True)
         with self.assertRaisesRegex(ReadinessError, "non-negative integer"):

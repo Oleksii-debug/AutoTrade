@@ -25,6 +25,7 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
+from .provider_account_cut import ProviderAccountCutIdentity
 from .provider_domain import ProviderFinancialScope
 from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
 
@@ -610,6 +611,72 @@ class DurableProviderAccountAcquisitionAuthority:
                 "no serialized provider account acquisition exists for scope"
             )
         return state.acquisitions[-1]
+
+    def require_account_cut_acquisition(
+        self,
+        account_cut: ProviderAccountCutIdentity,
+    ) -> SerializedProviderAccountAcquisition:
+        """Bind a candidate account cut to the exact current serialized acquisition.
+
+        This verifies only the acquisition/currentness dimension. It deliberately
+        does not make the account cut accepted provider truth: provider-origin,
+        consistency, coverage, qualification and financial projection issuers
+        remain separate WP-20 prerequisites.
+        """
+
+        if type(account_cut) is not ProviderAccountCutIdentity:
+            raise ProviderAccountAcquisitionError(
+                "account_cut must be exact ProviderAccountCutIdentity"
+            )
+        # Reconstruct the frozen value so post-construction mutation cannot
+        # smuggle a non-canonical nested identity through this consumer fence.
+        canonical_cut = ProviderAccountCutIdentity(
+            provider_scope=account_cut.provider_scope,
+            account_id=account_cut.account_id,
+            acquisition_mode=account_cut.acquisition_mode,
+            acquisition_id=account_cut.acquisition_id,
+            acquisition_generation=account_cut.acquisition_generation,
+            acquisition_journal_sequence_cut=
+                account_cut.acquisition_journal_sequence_cut,
+            qualification_identity_digest=
+                account_cut.qualification_identity_digest,
+            consistency_method_id=account_cut.consistency_method_id,
+            consistency_method_version=
+                account_cut.consistency_method_version,
+            origin_binding_set_digest=account_cut.origin_binding_set_digest,
+            stream_binding_set_digest=account_cut.stream_binding_set_digest,
+            backfill_binding_set_digest=account_cut.backfill_binding_set_digest,
+            coverage_window_digest=account_cut.coverage_window_digest,
+            provider_native_generation_token=
+                account_cut.provider_native_generation_token,
+        )
+        if canonical_cut.acquisition_mode != _ACQUISITION_MODE:
+            raise ProviderAccountAcquisitionError(
+                "account cut does not use serialized acquisition authority"
+            )
+        current = self.resolve_current(
+            provider_scope=canonical_cut.provider_scope,
+            account_id=canonical_cut.account_id,
+        )
+        if canonical_cut.acquisition_id != current.acquisition_id:
+            raise ProviderAccountAcquisitionError(
+                "account cut acquisition_id is not current durable acquisition"
+            )
+        if (
+            canonical_cut.acquisition_generation
+            != current.acquisition_generation
+        ):
+            raise ProviderAccountAcquisitionError(
+                "account cut acquisition_generation is not current"
+            )
+        if (
+            canonical_cut.acquisition_journal_sequence_cut
+            != current.acquisition_journal_sequence_cut
+        ):
+            raise ProviderAccountAcquisitionError(
+                "account cut journal cut does not match current acquisition"
+            )
+        return current
 
     def require_current(
         self,

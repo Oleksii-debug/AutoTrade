@@ -315,7 +315,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
                 final_barrier_clock=lambda: "2026-10-04T05:06:00Z",
             )
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertEqual(outcome.reason, "provider_qualification_not_exact_current")
+            self.assertEqual(outcome.reason, "provider_capability_not_exact_current")
             self.assertEqual(wire, [])
             events = journal.load_events(
                 "submission_attempt",
@@ -349,7 +349,7 @@ class ProviderRouteDispatchTests(unittest.TestCase):
                 final_barrier_clock=lambda: "2026-10-04T05:07:00Z",
             )
             self.assertEqual(outcome.status, "BLOCKED")
-            self.assertEqual(outcome.reason, "provider_capability_not_exact_current")
+            self.assertEqual(outcome.reason, "provider_qualification_not_exact_current")
             self.assertEqual(wire, [])
             events = journal.load_events(
                 "submission_attempt",

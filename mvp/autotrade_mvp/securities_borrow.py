@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+from threading import RLock
 import weakref
 from typing import Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -631,31 +632,33 @@ def _build_borrow_projection_binding_accessors():
     """Retain one immutable borrow projection composition outside caller state."""
 
     bindings: dict[int, tuple[weakref.ReferenceType, _BorrowProjectionBinding]] = {}
+    lock = RLock()
 
-    def prune_dead() -> None:
-        dead = [
-            object_id
-            for object_id, (value_ref, _binding) in bindings.items()
-            if value_ref() is None
-        ]
-        for object_id in dead:
-            bindings.pop(object_id, None)
+    def discard_dead(
+        object_id: int,
+        value_ref: weakref.ReferenceType,
+    ) -> None:
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is not None and entry[0] is value_ref:
+                bindings.pop(object_id, None)
 
     def registered(value: object) -> _BorrowProjectionBinding | None:
-        entry = bindings.get(id(value))
-        if entry is None:
-            return None
-        value_ref, binding = entry
-        current = value_ref()
-        if current is value:
-            return binding
-        if current is None:
-            bindings.pop(id(value), None)
-            return None
-        raise BorrowRecallConflict("borrow projection binding identity collision")
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return None
+            value_ref, binding = entry
+            current = value_ref()
+            if current is value:
+                return binding
+            if current is None:
+                bindings.pop(object_id, None)
+                return None
+            raise BorrowRecallConflict("borrow projection binding identity collision")
 
     def is_registered(value: object) -> bool:
-        prune_dead()
         return registered(value) is not None
 
     def initialize(
@@ -673,7 +676,6 @@ def _build_borrow_projection_binding_accessors():
             raise TypeError(
                 "borrow recall projection must be exact DurableBorrowRecallProjection"
             )
-        prune_dead()
         if registered(value) is not None:
             raise BorrowRecallConflict(
                 "borrow projection authority is already established"
@@ -726,27 +728,41 @@ def _build_borrow_projection_binding_accessors():
         }.items():
             object.__setattr__(value, name, item)
 
-        bindings[id(value)] = (
-            weakref.ref(value),
-            _BorrowProjectionBinding(
-                store=store,
-                store_identity=store_identity,
-                evidence_artifact_store=evidence_artifact_store,
-                provider_id=normalized_provider,
-                account_id=normalized_account,
-                environment=normalized_environment,
-                instrument_id=normalized_instrument,
-                instrument_version=normalized_version,
-                resource_key=resource_key,
-                aggregate_id=aggregate_id,
+        object_id = id(value)
+        value_ref = weakref.ref(
+            value,
+            lambda dead_ref, object_id=object_id: discard_dead(
+                object_id,
+                dead_ref,
             ),
         )
+        binding = _BorrowProjectionBinding(
+            store=store,
+            store_identity=store_identity,
+            evidence_artifact_store=evidence_artifact_store,
+            provider_id=normalized_provider,
+            account_id=normalized_account,
+            environment=normalized_environment,
+            instrument_id=normalized_instrument,
+            instrument_version=normalized_version,
+            resource_key=resource_key,
+            aggregate_id=aggregate_id,
+        )
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is not None and entry[0]() is not value:
+                raise BorrowRecallConflict(
+                    "borrow projection binding identity collision"
+                )
+            bindings[object_id] = (value_ref, binding)
         try:
             DurableBorrowRecallProjection._reload(value)
         except Exception:
-            entry = bindings.get(id(value))
-            if entry is not None and entry[0]() is value:
-                bindings.pop(id(value), None)
+            object_id = id(value)
+            with lock:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
+                    bindings.pop(object_id, None)
             raise
 
     def require(value: object) -> _BorrowProjectionBinding:
@@ -754,7 +770,6 @@ def _build_borrow_projection_binding_accessors():
             raise TypeError(
                 "borrow recall projection must be exact DurableBorrowRecallProjection"
             )
-        prune_dead()
         binding = registered(value)
         if binding is None:
             raise BorrowRecallConflict(

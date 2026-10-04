@@ -991,6 +991,25 @@ def _mutable_source_inventory_identity(
     return tuple((relative.as_posix(), kind) for _, relative, kind in sources)
 
 
+def _snapshot_mutable_source_digests(
+    sources: Sequence[tuple[Path, Path, str]],
+) -> tuple[tuple[Path, str], ...]:
+    """Bind mutable source bytes before the SQLite snapshot begins."""
+
+    snapshots: list[tuple[Path, str]] = []
+    for source, _, _ in sources:
+        if source.is_symlink() or not source.is_file():
+            raise BackupError(f"Backup source is not a regular file: {source.name}")
+        before = _sha256_file(source)
+        if source.is_symlink() or not source.is_file():
+            raise BackupError(f"Backup source changed before journal snapshot: {source.name}")
+        after = _sha256_file(source)
+        if before != after:
+            raise BackupError(f"Backup source changed before journal snapshot: {source.name}")
+        snapshots.append((source, after))
+    return tuple(snapshots)
+
+
 def _assert_mutable_sources_unchanged(
     state: Path,
     artifacts: Path,
@@ -1121,11 +1140,15 @@ def create_backup(
 
     mutable_sources = _mutable_backup_sources(state, artifacts)
     source_inventory = _mutable_source_inventory_identity(mutable_sources)
+    # Byte identity is frozen before the SQLite backup begins. If any mutable
+    # non-database source advances while SQLite establishes/copies its snapshot,
+    # the later rechecks fail instead of combining a newer side file with an
+    # older journal cut.
+    source_rechecks = _snapshot_mutable_source_digests(mutable_sources)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
-    source_rechecks: list[tuple[Path, str]] = []
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
@@ -1144,7 +1167,6 @@ def create_backup(
         for source, relative, kind in mutable_sources:
             digest, size = _copy_stable_file(source, stage / relative)
             entries.append(_entry(relative.as_posix(), digest, size, kind))
-            source_rechecks.append((source, digest))
 
         _assert_mutable_sources_unchanged(
             state,

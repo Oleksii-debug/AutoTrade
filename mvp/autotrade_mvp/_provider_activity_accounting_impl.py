@@ -3839,9 +3839,25 @@ def commit_provider_fill_bust_with_economic_reversal(
     initial_source_transaction_id: str | None = None
     rid: str | None = None
 
+    binding_aggregate_id = _provider_fill_binding_aggregate_id(
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_execution_id=projected_fill.provider_execution_id,
+    )
+    binding_events = _economic_store_load_events(
+        economic_book,
+        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        binding_aggregate_id,
+    )
+
     if reservation_book is None:
         if reservation_id is not None:
             raise ValueError("reservation_id requires reservation_book")
+        if binding_events:
+            raise AccountingConflict(
+                "reservation-bound fill bust requires reservation authority"
+            )
     else:
         if type(reservation_book) is not DurableReservationBook:
             raise TypeError(
@@ -3868,17 +3884,6 @@ def commit_provider_fill_bust_with_economic_reversal(
             )
 
         rid = _text(reservation_id, name="reservation_id")
-        binding_aggregate_id = _provider_fill_binding_aggregate_id(
-            provider_id=economic_book.provider_id,
-            account_id=economic_book.account_id,
-            environment=economic_book.environment,
-            provider_execution_id=projected_fill.provider_execution_id,
-        )
-        binding_events = _economic_store_load_events(
-            economic_book,
-            _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
-            binding_aggregate_id,
-        )
         if len(binding_events) != 1:
             raise AccountingConflict(
                 "reservation-aware fill bust requires exactly one initial financial binding"

@@ -267,6 +267,24 @@ def restore_product_backup(backup_dir, data_dir):
     return root
 
 
+def _launch_message(launch_url, *, no_browser):
+    if type(launch_url) is not str or not launch_url:
+        raise ValueError('launch_url must be non-empty text')
+    public_url, separator, pairing_code = launch_url.partition('#pair=')
+    if separator != '#pair=' or not public_url or not pairing_code:
+        raise ValueError('launch_url must contain one-time pairing material')
+    if no_browser:
+        return (
+            'AutoTrade ZERO manual pairing URL (one-time local secret): '
+            + launch_url
+        )
+    return (
+        'AutoTrade ZERO started at '
+        + public_url
+        + '; opening the local browser for one-time pairing.'
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='AutoTrade provider-free application')
     parser.add_argument('--data-dir', default=str(Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'AutoTrade-ZERO'))
@@ -282,7 +300,7 @@ def main(argv=None):
     signal.signal(signal.SIGINT, stop)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, stop)
-    print('AutoTrade ZERO: ' + launch_url, flush=True)
+    print(_launch_message(launch_url, no_browser=args.no_browser), flush=True)
     if not args.no_browser:
         webbrowser.open(launch_url)
     try:

@@ -3292,6 +3292,8 @@ class KrakenSpotAuthenticatedReadTransport:
     def __call__(
         self,
         query_binding: AuthenticatedReadQueryBinding,
+        *,
+        terminal_authority_factory: Callable[[AuthenticatedReadQueryBinding], object] | None = None,
     ) -> ProviderResponseObservation:
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError(
@@ -3349,6 +3351,11 @@ class KrakenSpotAuthenticatedReadTransport:
 
                     # Resolve authority again immediately before the irreversible read.
                     self._require_current_capability(query_binding, rule)
+                    requires_direct_receipt = _prepare_terminal_authenticated_read_request(
+                        signed,
+                        query_binding,
+                        terminal_authority_factory,
+                    )
                     wire_response = self.wire_client.send(signed)
             finally:
                 provider_api_key = None
@@ -3368,11 +3375,11 @@ class KrakenSpotAuthenticatedReadTransport:
                     )
                 )
             observed_at = self.clock_utc()
-            return observe_authenticated_json_response(
+            return _observe_authenticated_read_wire_response(
                 query_binding=query_binding,
-                http_status=wire_response.http_status,
-                response_bytes=wire_response.body,
+                wire_response=wire_response,
                 observed_at=observed_at,
+                require_direct_receipt=requires_direct_receipt,
             )
 
 
@@ -4342,6 +4349,8 @@ class BybitV5AuthenticatedReadTransport:
     def __call__(
         self,
         query_binding: AuthenticatedReadQueryBinding,
+        *,
+        terminal_authority_factory: Callable[[AuthenticatedReadQueryBinding], object] | None = None,
     ) -> ProviderResponseObservation:
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError(
@@ -4391,6 +4400,11 @@ class BybitV5AuthenticatedReadTransport:
                 credential_plaintext = None
 
             self._require_current_capability(query_binding, rule)
+            requires_direct_receipt = _prepare_terminal_authenticated_read_request(
+                signed,
+                query_binding,
+                terminal_authority_factory,
+            )
             wire_response = self.wire_client.send(signed)
             if not isinstance(wire_response, AuthenticatedReadWireResponse):
                 raise ProviderTransportError(
@@ -4401,11 +4415,11 @@ class BybitV5AuthenticatedReadTransport:
                     "Bybit authenticated read returned unexpected HTTP status "
                     + str(wire_response.http_status)
                 )
-            return observe_authenticated_json_response(
+            return _observe_authenticated_read_wire_response(
                 query_binding=query_binding,
-                http_status=wire_response.http_status,
-                response_bytes=wire_response.body,
+                wire_response=wire_response,
                 observed_at=self.clock_utc(),
+                require_direct_receipt=requires_direct_receipt,
             )
 
 
@@ -4941,6 +4955,8 @@ class BinanceSpotAuthenticatedReadTransport:
     def __call__(
         self,
         query_binding: AuthenticatedReadQueryBinding,
+        *,
+        terminal_authority_factory: Callable[[AuthenticatedReadQueryBinding], object] | None = None,
     ) -> ProviderResponseObservation:
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError(
@@ -4992,6 +5008,11 @@ class BinanceSpotAuthenticatedReadTransport:
             # Secret access/signing may take time. Re-resolve authority at the
             # irreversible boundary so revocation/expiry cannot race the wire send.
             self._require_current_capability(query_binding, rule)
+            requires_direct_receipt = _prepare_terminal_authenticated_read_request(
+                signed,
+                query_binding,
+                terminal_authority_factory,
+            )
             wire_response = self.wire_client.send(signed)
             if not isinstance(wire_response, AuthenticatedReadWireResponse):
                 raise ProviderTransportError(
@@ -5005,9 +5026,9 @@ class BinanceSpotAuthenticatedReadTransport:
                     + ",".join(str(status) for status in sorted(rule.success_statuses))
                 )
             observed_at = self.clock_utc()
-            return observe_authenticated_json_response(
+            return _observe_authenticated_read_wire_response(
                 query_binding=query_binding,
-                http_status=wire_response.http_status,
-                response_bytes=wire_response.body,
+                wire_response=wire_response,
                 observed_at=observed_at,
+                require_direct_receipt=requires_direct_receipt,
             )

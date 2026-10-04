@@ -77,6 +77,33 @@ class JournalStoreTests(unittest.TestCase):
                 {"kind": "fill", "quantity": "1"},
             )
 
+    def test_command_scope_rejects_text_subclasses_without_callbacks(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("caller-controlled strip must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "actor must be non-empty text"):
+                store.record_command(
+                    actor=HostileText("alice"),
+                    environment="PAPER",
+                    command_id="cmd-hostile-text",
+                    idempotency_key="key-hostile-text",
+                    request={"action": "A"},
+                    result={"status": "REJECTED"},
+                    state_version=0,
+                )
+
+            self.assertEqual(HostileText.strip_calls, 0)
+            self.assertEqual(
+                store.whole_store_state_cut()["counts"]["command_dedupe"],
+                0,
+            )
+
     def test_event_and_outbox_commit_atomically_and_replay_idempotently(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

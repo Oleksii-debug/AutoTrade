@@ -179,6 +179,12 @@ class RuntimeStateSnapshot:
             raise ReplayError("runtime cut_id must be canonical text")
         if type(self.replay) is not ReplayCheckpoint:
             raise TypeError("runtime snapshot replay must be exact ReplayCheckpoint")
+        replay = ReplayCheckpoint(
+            dataset_digest=self.replay.dataset_digest,
+            cursor=self.replay.cursor,
+            clock=self.replay.clock,
+        )
+        object.__setattr__(self, "replay", replay)
         if type(self.authority_id) is not str or not self.authority_id.strip():
             raise ReplayError("runtime authority_id must be non-empty")
         if self.authority_id != self.authority_id.strip():
@@ -740,6 +746,11 @@ class CompositeReplayCheckpoint:
     def __post_init__(self) -> None:
         if type(self.replay) is not ReplayCheckpoint:
             raise TypeError("replay must be exact ReplayCheckpoint")
+        replay = ReplayCheckpoint(
+            dataset_digest=self.replay.dataset_digest,
+            cursor=self.replay.cursor,
+            clock=self.replay.clock,
+        )
         components = _component_bindings(self.runtime_components)
         if type(self.runtime_cut_id) is not str or not self.runtime_cut_id.strip():
             raise ReplayError("runtime_cut_id must be non-empty")
@@ -770,6 +781,7 @@ class CompositeReplayCheckpoint:
             raise TypeError("composite replay checkpoint schema_version must be exact text")
         if self.schema_version != "4.0.0":
             raise ReplayError("unsupported composite replay checkpoint schema")
+        object.__setattr__(self, "replay", replay)
         object.__setattr__(self, "runtime_components", components)
         object.__setattr__(self, "runtime_cut_id", cut_id)
         object.__setattr__(self, "runtime_authority_id", authority_id)

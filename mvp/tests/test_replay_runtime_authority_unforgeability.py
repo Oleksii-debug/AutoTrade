@@ -201,6 +201,64 @@ class RuntimeAuthorityUnforgeabilityTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
 
+    def test_runtime_snapshot_detaches_caller_owned_replay_value(self):
+        replay = self._checkpoint_value()
+        snapshot = RuntimeStateSnapshot(
+            cut_id="cut:detached-replay",
+            replay=replay,
+            runtime_components=_components(),
+            authority_id="runtime:detached-replay",
+            verifier_id="verifier:detached-replay",
+            authority_seal="a" * 64,
+        )
+
+        object.__setattr__(replay, "dataset_digest", "f" * 64)
+        object.__setattr__(replay, "cursor", 7)
+        object.__setattr__(replay, "clock", "2030-01-01T00:00:00Z")
+
+        self.assertIsNot(snapshot.replay, replay)
+        self.assertEqual(snapshot.replay.dataset_digest, "d" * 64)
+        self.assertEqual(snapshot.replay.cursor, 0)
+        self.assertEqual(snapshot.replay.clock, "2026-09-24T09:59:00Z")
+
+    def test_runtime_snapshot_revalidates_mutated_exact_replay(self):
+        replay = self._checkpoint_value()
+        object.__setattr__(replay, "cursor", -1)
+
+        with self.assertRaisesRegex(ReplayError, "cursor must be non-negative"):
+            RuntimeStateSnapshot(
+                cut_id="cut:invalid-replay",
+                replay=replay,
+                runtime_components=_components(),
+                authority_id="runtime:invalid-replay",
+                verifier_id="verifier:invalid-replay",
+                authority_seal="a" * 64,
+            )
+
+    def test_composite_checkpoint_detaches_caller_owned_replay_value(self):
+        replay = self._checkpoint_value()
+        checkpoint = CompositeReplayCheckpoint(
+            replay=replay,
+            runtime_components=_components(),
+            runtime_cut_id="cut:detached-composite",
+            runtime_authority_id="runtime:detached-composite",
+            runtime_verifier_id="verifier:detached-composite",
+            runtime_authority_seal="a" * 64,
+            build_sha="b" * 40,
+            protocol_ref="protocol:detached-composite",
+        )
+        fingerprint = checkpoint.fingerprint
+
+        object.__setattr__(replay, "dataset_digest", "f" * 64)
+        object.__setattr__(replay, "cursor", 9)
+        object.__setattr__(replay, "clock", "2030-01-01T00:00:00Z")
+
+        self.assertIsNot(checkpoint.replay, replay)
+        self.assertEqual(checkpoint.replay.dataset_digest, "d" * 64)
+        self.assertEqual(checkpoint.replay.cursor, 0)
+        self.assertEqual(checkpoint.replay.clock, "2026-09-24T09:59:00Z")
+        self.assertEqual(checkpoint.fingerprint, fingerprint)
+
     def test_composite_schema_version_rejects_text_subclass(self):
         hostile = _HostileText("4.0.0")
         with self.assertRaisesRegex(

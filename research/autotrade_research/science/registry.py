@@ -625,6 +625,11 @@ class ScientificRegistry:
         missing = sorted(REQUIRED_PROTOCOL_FIELDS - set(payload_keys))
         if missing:
             raise ProtocolViolation("missing required protocol fields: " + ", ".join(missing))
+        if "ablation_decision_policy" in payload:
+            # This policy is semantically bound to minimum_practical_effect.
+            # Validate both before the generic required-field emptiness pass can
+            # dispatch str/list/dict subclass methods on caller-owned values.
+            _validated_protocol_ablation_decision_policy(payload)
         empty = sorted(
             name
             for name in REQUIRED_PROTOCOL_FIELDS
@@ -638,8 +643,6 @@ class ScientificRegistry:
             raise ProtocolViolation("trial_budget must be a positive integer")
         _validate_causal_periods(payload)
         identifier = _id(protocol_id)
-        if "ablation_decision_policy" in payload:
-            _validated_protocol_ablation_decision_policy(payload)
         if "ablation_value_policy" in payload:
             # Admit this untrusted nested graph before canonical JSON/hash
             # traversal can invoke polymorphic container/scalar callbacks.

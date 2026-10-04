@@ -256,6 +256,34 @@ class AblationDecisionPolicyTests(unittest.TestCase):
                     )
                 self.assertEqual(calls, [])
 
+    def test_minimum_practical_effect_subclass_fails_before_callbacks(self):
+        calls: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                return super().strip(*args, **kwargs)
+
+            def __eq__(self, other):
+                calls.append("eq")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            payload = protocol_payload()
+            payload["minimum_practical_effect"] = HostileText("0")
+            payload["ablation_decision_policy"] = decision_policy()
+
+            calls.clear()
+            with self.assertRaises(ProtocolViolation):
+                registry.register_protocol(
+                    payload,
+                    protocol_id="88888888-8888-4888-8888-888888888888",
+                )
+            self.assertEqual(calls, [])
+
     def test_invalid_policy_does_not_poison_append_only_protocol_id(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")

@@ -9,12 +9,16 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_reservations import (
+    DurableReservationBook,
+    reservation_snapshot_digest,
+)
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationBook,
     ReservationConflict,
+    ReservationSnapshot,
 )
 
 
@@ -153,6 +157,21 @@ class ReservationFoundationTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
         self.assertEqual(book.get("r-terminal").state, "WORKING")
+
+    def test_reservation_snapshot_digest_rejects_subclass_before_field_reads(self):
+        touched = []
+
+        class HostileSnapshot(ReservationSnapshot):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(name)
+                    raise AssertionError("hostile reservation snapshot field read")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileSnapshot)
+        with self.assertRaisesRegex(TypeError, "exact ReservationSnapshot"):
+            reservation_snapshot_digest(hostile)
+        self.assertEqual(touched, [])
 
     def test_durable_reservation_scope_rejects_text_subclasses_before_callbacks(self):
         touched = []

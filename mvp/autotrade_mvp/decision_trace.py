@@ -69,9 +69,7 @@ _EMBEDDED_SECRET_PATTERNS = (
         r"""(?:["'])?\s*[:=]\s*"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
     ),
-    re.compile(
-        r"(?i)\b(https?://)[^/@\s]+@"
-    ),
+    re.compile(r"(?i)\b(https?://)[^/@\s]+@"),
     re.compile(
         r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
         r"""token|bearer[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|session|session[_-]?token|session[_-]?id|"""
@@ -231,12 +229,21 @@ class DecisionTraceStore:
 
     @staticmethod
     def _validate_input(trace: dict[str, Any]) -> None:
+        """Validate the durable row shape, including legacy evidence-unbound rows."""
+
         if not isinstance(trace, dict):
             raise ValueError("Decision trace must be an object")
         for field in REQUIRED_FIELDS:
             if field not in trace:
                 raise ValueError(f"Missing decision trace field: {field}")
-        for field in ("trace_id", "input_hash", "strategy_version", "decision", "decision_reason", "risk_outcome"):
+        for field in (
+            "trace_id",
+            "input_hash",
+            "strategy_version",
+            "decision",
+            "decision_reason",
+            "risk_outcome",
+        ):
             value = trace[field]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
@@ -249,19 +256,13 @@ class DecisionTraceStore:
             raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
 
         refs = trace["evidence_refs"]
-        if (
-            not isinstance(refs, list)
-            or not refs
-            or any(
-                not isinstance(item, str)
-                or not item.strip()
-                or item != item.strip()
-                for item in refs
-            )
+        if not isinstance(refs, list) or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or item != item.strip()
+            for item in refs
         ):
-            raise ValueError(
-                "evidence_refs must contain at least one canonical non-empty string"
-            )
+            raise ValueError("evidence_refs must contain canonical non-empty strings")
         if len(refs) != len(set(refs)):
             raise ValueError("evidence_refs must not contain duplicates")
 
@@ -291,11 +292,20 @@ class DecisionTraceStore:
         if attributes is not None and not isinstance(attributes, dict):
             raise ValueError("attributes must be an object")
 
+    @staticmethod
+    def _require_linked_evidence(trace: Mapping[str, Any]) -> None:
+        refs = trace.get("evidence_refs")
+        if not isinstance(refs, list) or not refs:
+            raise ValueError(
+                "evidence_refs must contain at least one canonical non-empty string"
+            )
+
     def append(self, trace: dict[str, Any]) -> bool:
         """Append a trace once; identical retry is a no-op, conflicting retry fails closed."""
 
         prepared = _redact(trace)
         self._validate_input(prepared)
+        self._require_linked_evidence(prepared)
         records = self._load()
         # Integrity verification must precede idempotency handling. Otherwise an
         # identical retry could silently succeed against a tampered hash chain.
@@ -348,8 +358,10 @@ class DecisionTraceStore:
         if record is None:
             raise KeyError(trace_id)
 
-        event_ids = record.get("event_ids", [])
         evidence_refs = record["evidence_refs"]
+        if not evidence_refs:
+            raise ValueError("trace evidence incomplete: no linked evidence")
+        event_ids = record.get("event_ids", [])
         missing_events = [item for item in event_ids if item not in events]
         missing_evidence = [item for item in evidence_refs if item not in evidence]
         if missing_events or missing_evidence:
@@ -380,11 +392,17 @@ class DecisionTraceStore:
         if record is None:
             raise KeyError(trace_id)
 
+        evidence_refs = record["evidence_refs"]
         if available_event_ids is None:
             evidence_status = "UNVERIFIED"
-            evidence_note = (
-                "Explanation is diagnostic only; linked evidence availability was not checked."
-            )
+            if evidence_refs:
+                evidence_note = (
+                    "Explanation is diagnostic only; linked evidence availability was not checked."
+                )
+            else:
+                evidence_note = (
+                    "Explanation is diagnostic only; this legacy trace has no linked evidence."
+                )
         else:
             self.reconstruct(
                 trace_id,
@@ -414,7 +432,7 @@ class DecisionTraceStore:
         lines.extend(f"- {item}" for item in event_ids) if event_ids else lines.append("- none")
 
         lines.append("Evidence:")
-        lines.extend(f"- {item}" for item in record["evidence_refs"])
+        lines.extend(f"- {item}" for item in evidence_refs) if evidence_refs else lines.append("- none")
 
         lines.append("Attributes:")
         attributes = record.get("attributes", {})
@@ -454,7 +472,6 @@ class DecisionTraceStore:
             except (KeyError, TypeError, ValueError):
                 return False
         return True
-
 
 
 class BoundedMetricBacklog:

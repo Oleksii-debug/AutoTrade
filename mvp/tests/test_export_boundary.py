@@ -243,7 +243,7 @@ class ExportBoundaryTests(unittest.TestCase):
             def __gt__(self, other):
                 raise AssertionError("integer comparison callback must not execute")
 
-        with self.assertRaisesRegex(ExportBoundaryError, "export_id is required"):
+        with self.assertRaisesRegex(ExportBoundaryError, "export_id must be exact text"):
             self.prepare({"safe": True}, export_id=HostileText(str(uuid4())))
         with self.assertRaisesRegex(ExportBoundaryError, "unsupported export value type"):
             self.prepare(HostileDict({"safe": True}))

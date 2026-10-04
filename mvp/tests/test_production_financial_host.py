@@ -57,6 +57,12 @@ class ProductionFinancialHostTests(unittest.TestCase):
             )
 
             wire_calls = []
+
+            def transport_send(_client_order_id, _request, final_guard):
+                final_guard()
+                wire_calls.append("wire")
+                return {"status": "accepted"}
+
             outcome = runtime.financial_dispatcher.dispatch(
                 attempt_id="attempt-fresh",
                 intent_id="intent-fresh",
@@ -65,7 +71,7 @@ class ProductionFinancialHostTests(unittest.TestCase):
                 request={"symbol": "BTCUSDT"},
                 now="2026-10-04T02:00:00Z",
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
-                transport_send=lambda *_args: wire_calls.append("wire"),
+                transport_send=transport_send,
                 sender_check=lambda *_args: None,
             )
 

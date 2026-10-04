@@ -1110,6 +1110,7 @@
   function renderHostEvent(event, cursor, stateVersion) {
     const body = byId("event-history-body");
     if (!body) return;
+    const bookmark = captureTableSelection(body);
     const kind = requiredText(
       event.kind ?? event.event_type,
       "event.kind");
@@ -1124,6 +1125,8 @@
     row.dataset.hostEventCursor = cursor.toString();
     row.dataset.filterableRow = "true";
     row.dataset.tableHostOrder = cursor.toString();
+    row.dataset.selectionKey = "event:" + cursor.toString();
+    row.dataset.selectionExact = "true";
     for (let index = 0; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
@@ -1142,6 +1145,8 @@
       });
     for (const expired of retained.slice(100)) expired.remove();
     reapplyTableFilter("event-history-body");
+    revealBookmarkedTablePage(body, bookmark);
+    restoreTableSelection(body, bookmark);
   }
 
   function resetEventHistoryForScope() {

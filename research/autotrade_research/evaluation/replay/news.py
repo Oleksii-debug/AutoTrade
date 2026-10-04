@@ -29,6 +29,7 @@ from .blinding import (
     _freeze,
     _label_prefix,
     _sort_key,
+    _snapshot_source_dataset,
     _text,
 )
 from .feeder import CausalDataset, CausalEvent
@@ -458,13 +459,9 @@ def anonymize_news_dataset(
     key_digest = _digest(shuffle_key_sha256, name="shuffle_key_sha256")
     key_commitment = "sha256:" + sha256(key_digest.encode("utf-8")).hexdigest()
 
-    # Reconstruct through canonical CausalDataset validation so any mutated
-    # graph/digest is rejected before producing a derived artifact.
-    snapshot = CausalDataset(
-        manifest_sha256=dataset.manifest_sha256,
-        events=dataset.events,
-        dataset_sha256=dataset.dataset_sha256,
-    )
+    # Reuse the hardened exact-type snapshot authority from blinded replay so
+    # mutated subclasses/callback-bearing graphs are rejected before traversal.
+    snapshot = _snapshot_source_dataset(dataset)
     if not snapshot.events:
         raise NewsReplayError("historical news replay requires at least one event")
 
@@ -481,7 +478,20 @@ def anonymize_news_dataset(
             raise NewsReplayError(f"duplicate news_id: {item.raw_news_id}")
         raw_ids.add(item.raw_news_id)
         parsed.append(item)
+        raw_identity_union.add(item.raw_news_id)
         raw_identity_union.update(identities)
+
+    global_alias_owner: dict[tuple[str, str], str] = {}
+    for item in parsed:
+        for entity in item.entities.values():
+            for raw_alias in (entity.canonical_id, *entity.aliases):
+                key = (entity.namespace, raw_alias.casefold())
+                previous = global_alias_owner.get(key)
+                if previous is not None and previous != entity.canonical_id:
+                    raise NewsReplayError(
+                        "one news identity/alias cannot name multiple canonical entities across events"
+                    )
+                global_alias_owner[key] = entity.canonical_id
 
     all_raw_identities = frozenset(raw_identity_union)
 

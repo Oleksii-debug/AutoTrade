@@ -651,6 +651,65 @@ class RiskExactArithmeticTests(unittest.TestCase):
             risk_decision_fingerprint(hostile)
         self.assertEqual(touched, [])
 
+    def test_fingerprint_rejects_noncanonical_complete_binding_values(self):
+        raw = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="0.1",
+                price="1",
+                expected_state_version=7,
+            ),
+            exact_context(),
+            policy(),
+        )
+        base_binding = {
+            **vars(raw),
+            "intent_hash": "intent",
+            "state_version": 7,
+            "policy_version": 1,
+            "reservation_version": 0,
+            "reservation_requirements": (("CASH:USD", Decimal("1")),),
+            "capability_snapshot_id": "capability",
+            "evaluated_at": "2026-10-03T20:00:00+00:00",
+            "valid_until": "2026-10-03T20:01:00+00:00",
+        }
+        invalid_cases = (
+            (
+                {"state_version": -1},
+                "state_version must be a non-negative integer",
+            ),
+            (
+                {"policy_version": 0},
+                "policy_version must be a positive integer",
+            ),
+            (
+                {"reservation_version": -1},
+                "reservation_version must be a non-negative integer",
+            ),
+            (
+                {"intent_hash": ""},
+                "intent_hash is required",
+            ),
+            (
+                {"capability_snapshot_id": ""},
+                "capability_snapshot_id is required",
+            ),
+            (
+                {
+                    "evaluated_at": "2026-10-03T20:01:00+00:00",
+                    "valid_until": "2026-10-03T20:01:00+00:00",
+                },
+                "evaluated_at must precede valid_until",
+            ),
+        )
+
+        for overrides, message in invalid_cases:
+            with self.subTest(overrides=overrides):
+                forged = type(raw)(**{**base_binding, **overrides})
+                with self.assertRaisesRegex(ValueError, message):
+                    risk_decision_fingerprint(forged)
+
     def test_input_fingerprint_binds_arithmetic_policy_identity(self):
         intent = RiskIntent.create(
             symbol="ABC",

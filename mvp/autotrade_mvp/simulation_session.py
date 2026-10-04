@@ -1464,8 +1464,21 @@ _LOOP_AGGREGATE = "canonical_autonomous_simulation"
 _LOOP_PROTOCOL = "provider-free-zero-loop-v4"
 
 
-def _loop_event(store, run_id, kind, key, payload, now):
-    cut = store.current_journal_sequence()
+def _loop_event(
+    store,
+    run_id,
+    kind,
+    key,
+    payload,
+    now,
+    *,
+    expected_journal_sequence=None,
+):
+    cut = (
+        store.current_journal_sequence()
+        if expected_journal_sequence is None
+        else expected_journal_sequence
+    )
     event = {
         "event_id": _uuid(kind, f"{run_id}:{key}"),
         "event_type": kind, "schema_version": "1.0.0",
@@ -1561,6 +1574,8 @@ def _autonomous_reconciliation(
     protocol: dict[str, object],
     timestamp: str,
     key: str,
+    *,
+    expected_journal_sequence: int | None = None,
 ):
     """Reconcile one retained simulator state against canonical economics."""
 
@@ -1651,6 +1666,7 @@ def _autonomous_reconciliation(
         observed_at=timestamp,
         host_id="local-simulation",
         owner_epoch="1",
+        expected_journal_sequence=expected_journal_sequence,
     )
     _deliver_event(
         store,
@@ -1704,6 +1720,7 @@ def _recover_autonomous_zero_wire_completion(
     ):
         raise ValueError("zero-wire autonomous financial cut is invalid")
 
+    proof_cut = store.current_journal_sequence()
     run_id = protocol["run_id"]
     key = f"{run_id}:{episode}"
     timestamp = (
@@ -1731,7 +1748,7 @@ def _recover_autonomous_zero_wire_completion(
         allowed_event_ids.add(existing_after["event_id"])
     post_cut = store.load_events_after_journal_sequence(
         financial_cut,
-        limit=max(store.current_journal_sequence() - financial_cut, 1),
+        limit=max(proof_cut - financial_cut, 1),
     )
     if (
         not post_cut
@@ -1826,6 +1843,10 @@ def _recover_autonomous_zero_wire_completion(
         raise ValueError(
             "zero-wire autonomous episode has submission attempt evidence"
         )
+    if store.current_journal_sequence() != proof_cut:
+        raise ValueError(
+            "zero-wire autonomous journal changed while validating recovery"
+        )
 
     checkpoint, _ = _autonomous_reconciliation(
         store,
@@ -1834,6 +1855,7 @@ def _recover_autonomous_zero_wire_completion(
         protocol,
         timestamp,
         f"{key}:after",
+        expected_journal_sequence=proof_cut,
     )
     price = parse_bounded_exact_decimal(protocol["prices"][episode - 1])
     equity = exact_add(
@@ -1869,6 +1891,7 @@ def _recover_autonomous_zero_wire_completion(
         str(episode),
         result,
         timestamp,
+        expected_journal_sequence=checkpoint["journal_sequence"],
     )
     for item in store.pending_outbox(limit=1000):
         store.mark_outbox_delivered(

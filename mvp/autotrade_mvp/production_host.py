@@ -639,6 +639,7 @@ def build_production_host(
         raise ValueError("TLS listener requires HTTPS public_origin")
 
     instance_fence = _InstanceFence.acquire(config.journal_path)
+    server: AuthenticatedHostServer | None = None
     try:
         journal = JournalStore(config.journal_path)
         application = AuthenticatedHostApplication(
@@ -662,14 +663,28 @@ def build_production_host(
         )
         server.daemon_threads = False
         server.block_on_close = True
-    except BaseException:
-        instance_fence.release()
+        return ProductionHostRuntime(
+            config=config,
+            journal=journal,
+            application=application,
+            server=server,
+            instance_fence=instance_fence,
+            admission_gate=admission_gate,
+        )
+    except BaseException as error:
+        cleanup_errors: list[tuple[str, BaseException]] = []
+        if server is not None:
+            try:
+                server.server_close()
+            except BaseException as cleanup_error:
+                cleanup_errors.append(("listener close", cleanup_error))
+        try:
+            instance_fence.release()
+        except BaseException as cleanup_error:
+            cleanup_errors.append(("instance fence release", cleanup_error))
+        for stage, cleanup_error in cleanup_errors:
+            error.add_note(
+                f"production host bootstrap cleanup failed during {stage}: "
+                f"{cleanup_error!r}"
+            )
         raise
-    return ProductionHostRuntime(
-        config=config,
-        journal=journal,
-        application=application,
-        server=server,
-        instance_fence=instance_fence,
-        admission_gate=admission_gate,
-    )

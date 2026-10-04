@@ -51,6 +51,7 @@ _PRICE_SCALE_MODE = "IDENTITY"
 
 _NAMESPACE_LABELS = {
     "INSTRUMENT": "Instrument",
+    "ASSET": "Asset",
     "PROVIDER": "Provider",
     "COMPANY": "Company",
     "COUNTRY": "Country",

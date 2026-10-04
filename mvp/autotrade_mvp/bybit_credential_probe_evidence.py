@@ -784,14 +784,47 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe response byte budget is invalid"
             )
+        opener_builder = build_opener
+        proxy_handler_type = ProxyHandler
+        redirect_handler_type = _NoProbeRedirectHandler
+        if opener_builder is not _DIRECT_BUILD_OPENER:
+            raise ProviderCoreError(
+                "Bybit credential probe direct opener authority is not canonical"
+            )
+        if proxy_handler_type is not _DIRECT_PROXY_HANDLER_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct proxy-handler authority is not canonical"
+            )
+        if redirect_handler_type is not _DIRECT_REDIRECT_HANDLER_TYPE:
+            raise ProviderCoreError(
+                "Bybit credential probe direct redirect-handler authority is not canonical"
+            )
         self.max_response_bytes = max_response_bytes
-        self._opener = build_opener(ProxyHandler({}), _NoProbeRedirectHandler())
+        self._opener = opener_builder(
+            proxy_handler_type({}),
+            redirect_handler_type(),
+        )
 
     def send(
         self,
         request: BybitCredentialProbeHttpRequest,
     ) -> BybitCredentialProbeRawHttpResponse:
-        if type(request) is not BybitCredentialProbeHttpRequest:
+        request_type = _DIRECT_HTTP_REQUEST_TYPE
+        request_factory = Request
+        raw_response_type = _DIRECT_RAW_HTTP_RESPONSE_TYPE
+        if BybitCredentialProbeHttpRequest is not request_type:
+            raise ProviderCoreError(
+                "Bybit credential probe HTTP request type authority is not canonical"
+            )
+        if Request is not _DIRECT_REQUEST_FACTORY:
+            raise ProviderCoreError(
+                "Bybit credential probe urllib request authority is not canonical"
+            )
+        if BybitCredentialProbeRawHttpResponse is not raw_response_type:
+            raise ProviderCoreError(
+                "Bybit credential probe raw response type authority is not canonical"
+            )
+        if type(request) is not request_type:
             raise TypeError(
                 "request must be exact BybitCredentialProbeHttpRequest"
             )
@@ -803,7 +836,7 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe response byte budget is invalid"
             )
-        outbound = Request(
+        outbound = request_factory(
             request.url,
             data=None,
             headers=dict(request.headers),
@@ -867,12 +900,19 @@ class BybitCredentialProbeUrllibClient:
             raise ProviderCoreError(
                 "Bybit credential probe HTTP response is invalid or oversized"
             ) from error
-        return BybitCredentialProbeRawHttpResponse(
+        return raw_response_type(
             http_status=final_status,
             body=bounded,
         )
 
 
+_DIRECT_BUILD_OPENER = build_opener
+_DIRECT_PROXY_HANDLER_TYPE = ProxyHandler
+_DIRECT_REDIRECT_HANDLER_TYPE = _NoProbeRedirectHandler
+_DIRECT_REQUEST_FACTORY = Request
+_DIRECT_HTTP_REQUEST_TYPE = BybitCredentialProbeHttpRequest
+_DIRECT_RAW_HTTP_RESPONSE_TYPE = BybitCredentialProbeRawHttpResponse
+_DIRECT_WIRE_RESPONSE_TYPE = BybitCredentialProbeWireResponse
 _DIRECT_PROVIDER_WIRE_CLIENT_TYPE = BybitCredentialProbeUrllibClient
 _DIRECT_PROVIDER_WIRE_CLIENT_INIT = BybitCredentialProbeUrllibClient.__init__
 _DIRECT_PROVIDER_WIRE_CLIENT_SEND = BybitCredentialProbeUrllibClient.send
@@ -897,6 +937,18 @@ def execute_bybit_credential_probe_wire_query(
         )
     direct_provider_transport = wire_client is None
     if direct_provider_transport:
+        if (
+            build_opener is not _DIRECT_BUILD_OPENER
+            or ProxyHandler is not _DIRECT_PROXY_HANDLER_TYPE
+            or _NoProbeRedirectHandler is not _DIRECT_REDIRECT_HANDLER_TYPE
+            or Request is not _DIRECT_REQUEST_FACTORY
+            or BybitCredentialProbeHttpRequest is not _DIRECT_HTTP_REQUEST_TYPE
+            or BybitCredentialProbeRawHttpResponse is not _DIRECT_RAW_HTTP_RESPONSE_TYPE
+            or BybitCredentialProbeWireResponse is not _DIRECT_WIRE_RESPONSE_TYPE
+        ):
+            raise ProviderCoreError(
+                "Bybit credential probe direct transport dependency authority is not canonical"
+            )
         if BybitCredentialProbeUrllibClient is not _DIRECT_PROVIDER_WIRE_CLIENT_TYPE:
             raise ProviderCoreError(
                 "Bybit credential probe direct transport type authority is not canonical"
@@ -918,7 +970,18 @@ def execute_bybit_credential_probe_wire_query(
         client = wire_client
     if not hasattr(client, "send"):
         raise TypeError("wire_client must implement send")
-    request = BybitCredentialProbeHttpRequest(
+    request_type = _DIRECT_HTTP_REQUEST_TYPE
+    raw_response_type = _DIRECT_RAW_HTTP_RESPONSE_TYPE
+    wire_response_type = _DIRECT_WIRE_RESPONSE_TYPE
+    if (
+        BybitCredentialProbeHttpRequest is not request_type
+        or BybitCredentialProbeRawHttpResponse is not raw_response_type
+        or BybitCredentialProbeWireResponse is not wire_response_type
+    ):
+        raise ProviderCoreError(
+            "Bybit credential probe wire type authority is not canonical"
+        )
+    request = request_type(
         url=source_uri,
         headers=headers,
         timeout_seconds=timeout_seconds,
@@ -928,7 +991,7 @@ def execute_bybit_credential_probe_wire_query(
         if direct_provider_transport
         else client.send(request)
     )
-    if type(raw_response) is not BybitCredentialProbeRawHttpResponse:
+    if type(raw_response) is not raw_response_type:
         raise TypeError(
             "Bybit credential probe wire client must return exact BybitCredentialProbeRawHttpResponse"
         )
@@ -945,7 +1008,7 @@ def execute_bybit_credential_probe_wire_query(
         raise ProviderCoreError(
             "successful Bybit credential probe requires direct production transport"
         )
-    return BybitCredentialProbeWireResponse(
+    return wire_response_type(
         http_status=raw_response.http_status,
         response=decoded,
         api_key_echo_confirmed=api_key_echo_confirmed,

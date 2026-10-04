@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping
 
 from .authority import AuthorityService
 from .capabilities import CapabilityRegistry
-from .dispatch import DispatchOutcome
+from .dispatch import DispatchOutcome, submission_attempt_aggregate_id
 from .durable_capabilities import DurableCapabilityRegistry
 from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .financial_request_binding import FinancialRequestBindingMaterial
@@ -89,6 +89,109 @@ def _exact_text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise FinancialSendAuthorityError(f"{name} must be exact non-empty text")
     return value
+
+
+def _require_durable_prepared_financial_request(
+    *,
+    journal: JournalStore,
+    load_events: Callable[..., Any],
+    aggregate_id_function: Callable[..., str],
+    binding: FinancialRequestBindingMaterial,
+    attempt_id: str,
+    intent_id: str,
+    intent_hash: str,
+    checked_intent_hash: str,
+    submission_scope: dict[str, Any],
+) -> None:
+    """Bind the sealed financial capability to the dispatcher's durable Prepared event."""
+
+    if type(journal) is not JournalStore:
+        raise FinancialSendAuthorityError("durable prepared journal authority is not exact")
+    if type(binding) is not FinancialRequestBindingMaterial:
+        raise FinancialSendAuthorityError("durable prepared financial binding is not exact")
+    canonical_attempt_id = _exact_text(attempt_id, name="attempt_id")
+    canonical_intent_id = _exact_text(intent_id, name="intent_id")
+    canonical_intent_hash = _exact_text(intent_hash, name="intent_hash")
+    if (
+        type(checked_intent_hash) is not str
+        or checked_intent_hash != canonical_intent_hash
+    ):
+        raise FinancialSendAuthorityError(
+            "dispatcher authority intent differs from sealed financial authority"
+        )
+    expected_scope = _detached_mapping_snapshot(
+        submission_scope,
+        name="selected_submission_scope",
+    )
+    if payload_digest(expected_scope) != binding.submission_scope_digest:
+        raise FinancialSendAuthorityError(
+            "selected provider route scope differs from sealed financial binding"
+        )
+
+    aggregate_id = aggregate_id_function(
+        environment=binding.runtime_environment,
+        account_id=binding.account_id,
+        attempt_id=canonical_attempt_id,
+    )
+    events = load_events(journal, "submission_attempt", aggregate_id)
+    if type(events) is not list or len(events) != 1:
+        raise FinancialSendAuthorityError(
+            "financial send requires one durable SubmissionPrepared event"
+        )
+    prepared = events[0]
+    if type(prepared) is not dict:
+        raise FinancialSendAuthorityError("durable SubmissionPrepared event is malformed")
+    if (
+        prepared.get("event_type") != "SubmissionPrepared"
+        or prepared.get("aggregate_id") != aggregate_id
+        or prepared.get("aggregate_version") != 1
+    ):
+        raise FinancialSendAuthorityError(
+            "durable submission state is not the exact Prepared authority"
+        )
+    payload = prepared.get("payload")
+    if type(payload) is not dict:
+        raise FinancialSendAuthorityError("durable SubmissionPrepared payload is malformed")
+
+    expected_projection = (
+        canonical_attempt_id,
+        canonical_intent_id,
+        canonical_intent_hash,
+        binding.provider_id,
+        binding.request_sha256,
+        binding.client_order_id,
+        binding.runtime_environment,
+        binding.account_id,
+        binding.submission_scope_digest,
+    )
+    durable_projection = (
+        payload.get("attempt_id"),
+        payload.get("intent_id"),
+        payload.get("intent_hash"),
+        payload.get("provider"),
+        payload.get("request_hash"),
+        payload.get("client_order_id"),
+        payload.get("environment"),
+        payload.get("account_id"),
+        payload.get("submission_scope_hash"),
+    )
+    if durable_projection != expected_projection:
+        raise FinancialSendAuthorityError(
+            "durable SubmissionPrepared scope differs from sealed financial authority"
+        )
+    durable_scope = payload.get("submission_scope")
+    if type(durable_scope) is not dict:
+        raise FinancialSendAuthorityError(
+            "durable SubmissionPrepared submission scope is malformed"
+        )
+    if durable_scope != expected_scope:
+        raise FinancialSendAuthorityError(
+            "durable SubmissionPrepared provider scope differs from selected route"
+        )
+    if payload_digest(durable_scope) != binding.submission_scope_digest:
+        raise FinancialSendAuthorityError(
+            "durable SubmissionPrepared scope digest differs from financial binding"
+        )
 
 
 def _risk_payload(
@@ -372,6 +475,12 @@ class FinancialSendAuthorityIssuer:
         "__dispatch_guard_code",
         "__historical_function",
         "__historical_code",
+        "__journal_load_events_function",
+        "__journal_load_events_code",
+        "__submission_attempt_id_function",
+        "__submission_attempt_id_code",
+        "__prepared_request_function",
+        "__prepared_request_code",
         "__capability_issuer_function",
         "__capability_issuer_code",
         "__capability_property_authorities",
@@ -452,9 +561,27 @@ class FinancialSendAuthorityIssuer:
 
         dispatch_guard_function = AuthorityService.dispatch_guard
         historical_function = AuthorityService.historical_admission
+        journal_load_events_function = JournalStore.load_events
+        submission_attempt_id_function = submission_attempt_aggregate_id
+        prepared_request_function = _require_durable_prepared_financial_request
         route_authority_function = compose_selected_provider_route_authority
         route_scope_function = bind_selected_provider_route_submission_scope
         financial_route_binding_function = require_financial_binding_matches_selected_route
+        journal_load_events_code = getattr(journal_load_events_function, "__code__", None)
+        submission_attempt_id_code = getattr(submission_attempt_id_function, "__code__", None)
+        prepared_request_code = getattr(prepared_request_function, "__code__", None)
+        if journal_load_events_code is None:
+            raise FinancialSendAuthorityError(
+                "JournalStore load-events executable authority is unavailable"
+            )
+        if submission_attempt_id_code is None:
+            raise FinancialSendAuthorityError(
+                "submission attempt identity executable authority is unavailable"
+            )
+        if prepared_request_code is None:
+            raise FinancialSendAuthorityError(
+                "durable Prepared financial authority executable is unavailable"
+            )
         capability_issuer_function = FinancialSendAuthority.__dict__.get("_require_issuer")
         capability_issuer_code = getattr(capability_issuer_function, "__code__", None)
         if not callable(capability_issuer_function) or capability_issuer_code is None:
@@ -475,6 +602,12 @@ class FinancialSendAuthorityIssuer:
         self.__dispatch_guard_code = dispatch_guard_function.__code__
         self.__historical_function = historical_function
         self.__historical_code = historical_function.__code__
+        self.__journal_load_events_function = journal_load_events_function
+        self.__journal_load_events_code = journal_load_events_code
+        self.__submission_attempt_id_function = submission_attempt_id_function
+        self.__submission_attempt_id_code = submission_attempt_id_code
+        self.__prepared_request_function = prepared_request_function
+        self.__prepared_request_code = prepared_request_code
         self.__capability_issuer_function = capability_issuer_function
         self.__capability_issuer_code = capability_issuer_code
         self.__capability_property_authorities = capability_property_authorities
@@ -535,6 +668,24 @@ class FinancialSendAuthorityIssuer:
             raise FinancialSendAuthorityError("AuthorityService historical authority changed")
         if self.__historical_function.__code__ is not self.__historical_code:
             raise FinancialSendAuthorityError("AuthorityService historical code changed")
+        if JournalStore.load_events is not self.__journal_load_events_function:
+            raise FinancialSendAuthorityError("JournalStore load-events authority changed")
+        if (
+            self.__journal_load_events_function.__code__
+            is not self.__journal_load_events_code
+        ):
+            raise FinancialSendAuthorityError("JournalStore load-events code changed")
+        if submission_attempt_aggregate_id is not self.__submission_attempt_id_function:
+            raise FinancialSendAuthorityError("submission attempt identity authority changed")
+        if (
+            self.__submission_attempt_id_function.__code__
+            is not self.__submission_attempt_id_code
+        ):
+            raise FinancialSendAuthorityError("submission attempt identity code changed")
+        if _require_durable_prepared_financial_request is not self.__prepared_request_function:
+            raise FinancialSendAuthorityError("durable Prepared financial authority changed")
+        if self.__prepared_request_function.__code__ is not self.__prepared_request_code:
+            raise FinancialSendAuthorityError("durable Prepared financial authority code changed")
         if compose_selected_provider_route_authority is not self.__route_authority_function:
             raise FinancialSendAuthorityError("provider route authority composer changed")
         if self.__route_authority_function.__code__ is not self.__route_authority_code:
@@ -669,6 +820,8 @@ class FinancialSendAuthorityIssuer:
     def _dispatch_material_for(
         self,
         authority: FinancialSendAuthority,
+        *,
+        attempt_id: str | None = None,
     ) -> tuple[
         Callable[[str, str], tuple[bool, str]],
         FinancialRequestBindingMaterial,
@@ -733,7 +886,38 @@ class FinancialSendAuthorityIssuer:
             qualification_registry=self.__qualification_registry,
             authority_check=guard,
         )
-        return route_authority, binding, intent_id, intent_hash
+        if attempt_id is None:
+            return route_authority, binding, intent_id, intent_hash
+
+        canonical_attempt_id = _exact_text(attempt_id, name="attempt_id")
+        route_scope_snapshot = _detached_mapping_snapshot(
+            route_scope,
+            name="selected_route_scope",
+        )
+        journal = self.__journal
+        load_events = self.__journal_load_events_function
+        aggregate_id_function = self.__submission_attempt_id_function
+        prepared_request_function = self.__prepared_request_function
+
+        def durable_prepared_route_authority(
+            checked_intent_hash: str,
+            at_text: str,
+        ) -> tuple[bool, str]:
+            self._require_current()
+            prepared_request_function(
+                journal=journal,
+                load_events=load_events,
+                aggregate_id_function=aggregate_id_function,
+                binding=binding,
+                attempt_id=canonical_attempt_id,
+                intent_id=intent_id,
+                intent_hash=intent_hash,
+                checked_intent_hash=checked_intent_hash,
+                submission_scope=route_scope_snapshot,
+            )
+            return route_authority(checked_intent_hash, at_text)
+
+        return durable_prepared_route_authority, binding, intent_id, intent_hash
 
     def _dispatch_guard_for(
         self,
@@ -929,7 +1113,7 @@ class FinanciallyBoundBybitOrderSender:
             authority_binding,
             authority_intent_id,
             authority_intent_hash,
-        ) = issuer._dispatch_material_for(authority)
+        ) = issuer._dispatch_material_for(authority, attempt_id=attempt_id)
         if issuer.runtime is not self.__runtime:
             raise FinancialSendAuthorityError("financial issuer production host changed")
         if authority_intent_id != intent_id or authority_intent_hash != intent_hash:

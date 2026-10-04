@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     commit_provider_fill_with_reservation_consumption,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
+from mvp.autotrade_mvp.reservations import ReservationConflict
 
 
 PROVIDER = "SIMULATED"
@@ -208,6 +209,55 @@ class AtomicOmsFinancialBustTests(unittest.TestCase):
                 reservation.remaining["CASH:USD"],
                 Decimal("20"),
             )
+
+    def test_late_bust_after_terminal_reservation_fails_closed_without_partial_effects(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            orders, economics, reservations = books(store)
+            projected, provider = seed(orders, economics, reservations)
+
+            # Historical fixture only: represent a reservation that was already
+            # durably resolved FILLED before the provider later invalidated the
+            # execution.  Production terminalization still requires its own
+            # evidence authority; this test must not manufacture one.
+            terminal = reservations._commit(
+                command_id="fixture-filled-terminal",
+                idempotency_key="fixture-filled-terminal",
+                operation="MARK_TERMINAL",
+                request={
+                    "reservation_id": "reservation-1",
+                    "outcome": "FILLED",
+                    "resolution_evidence": "fixture-provider-filled",
+                },
+            )
+            self.assertEqual(terminal.state, "FILLED")
+            self.assertEqual(terminal.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "Cannot restore consumption on a terminal reservation",
+            ):
+                atomic_bust(
+                    orders,
+                    economics,
+                    reservations,
+                    projected,
+                    provider,
+                )
+
+            reopened = JournalStore(path)
+            ro, re, rr = books(reopened)
+            order = ro.order("order-1").snapshot()
+            self.assertEqual(order.filled_quantity, Decimal("1"))
+            self.assertEqual(order.fill_count, 1)
+            self.assertEqual(re.position("ABC"), Decimal("1"))
+            self.assertEqual(len(re.transactions), 1)
+            reservation = rr.get("reservation-1")
+            self.assertEqual(reservation.state, "FILLED")
+            self.assertEqual(reservation.consumed["CASH:USD"], Decimal("100"))
+            self.assertEqual(reservation.remaining["CASH:USD"], Decimal("0"))
 
     def test_fill_bust_rejects_polymorphic_fill_evidence_before_field_access(self):
         class HostileProjectedFill(ProjectedFillEvidence):

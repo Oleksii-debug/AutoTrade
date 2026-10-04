@@ -27,6 +27,8 @@ from .blinding import (
     BlindingProfile,
     CalendarField,
     IdentityField,
+    _snapshot_blinding_profile,
+    _snapshot_source_dataset,
 )
 from .feeder import CausalDataset, CausalEvent
 
@@ -574,33 +576,13 @@ class NewsReplayBundle:
         if type(self.blinding_profile) is not BlindingProfile:
             raise TypeError("blinding_profile must be exact BlindingProfile")
 
-        source_dataset_sha256 = self.dataset.dataset_sha256
-        dataset_snapshot = CausalDataset.create(
-            manifest_sha256=self.dataset.manifest_sha256,
-            events=self.dataset.events,
-        )
-        if dataset_snapshot.dataset_sha256 != source_dataset_sha256:
+        try:
+            dataset_snapshot = _snapshot_source_dataset(self.dataset)
+        except ValueError as error:
             raise NewsReplayError(
                 "dataset content no longer matches its committed digest"
-            )
-
-        profile_snapshot = BlindingProfile(
-            identity_fields=tuple(
-                IdentityField(
-                    path=item.path,
-                    namespace=item.namespace,
-                    required=item.required,
-                    alias_paths=item.alias_paths,
-                )
-                for item in self.blinding_profile.identity_fields
-            ),
-            calendar_fields=tuple(
-                CalendarField(path=item.path, required=item.required)
-                for item in self.blinding_profile.calendar_fields
-            ),
-            strict_text_scan=self.blinding_profile.strict_text_scan,
-            price_scale_mode=self.blinding_profile.price_scale_mode,
-        )
+            ) from error
+        profile_snapshot = _snapshot_blinding_profile(self.blinding_profile)
         object.__setattr__(self, "dataset", dataset_snapshot)
         object.__setattr__(self, "blinding_profile", profile_snapshot)
         object.__setattr__(

@@ -1563,7 +1563,7 @@ class ProviderOriginJournal:
                 attempt_id=attempt,
                 qualified_query_digest=snapshot["qualified_query_digest"],
                 qualification_id=snapshot["qualification_id"],
-                http_status=http_status,
+                http_status=status,
                 response_sha256=response_digest,
                 observed_at=_exact_text(
                     retained_payload.get("observed_at"),

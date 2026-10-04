@@ -58,7 +58,10 @@ _TEST_INJECTED_ORIGIN_KIND = "TEST_INJECTED"
 _PROVIDER_ORIGIN_KIND = "PROVIDER_ORIGIN"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
-_ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
+_PROVIDER_ORIGIN_REF_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
+_TEST_INJECTED_REF_RE = re.compile(
+    r"^test-injected-provider-response:sha256:[0-9a-f]{64}$"
+)
 
 _EVENT_KEYS = frozenset(
     {
@@ -302,6 +305,7 @@ def _require_event(
 
 def _origin_ref(
     *,
+    origin_kind: str,
     attempt_id: str,
     qualified_query_digest: str,
     qualification_id: str,
@@ -321,7 +325,13 @@ def _origin_ref(
         "observed_at": observed_at,
         "journal_sequence": journal_sequence,
     }
-    return "provider-origin:sha256:" + sha256(
+    if origin_kind == _PROVIDER_ORIGIN_KIND:
+        prefix = "provider-origin:sha256:"
+    elif origin_kind == _TEST_INJECTED_ORIGIN_KIND:
+        prefix = "test-injected-provider-response:sha256:"
+    else:
+        raise ProviderOriginError("response origin classification is invalid")
+    return prefix + sha256(
         json.dumps(
             material,
             sort_keys=True,
@@ -405,8 +415,13 @@ class AuthenticatedReadResponseBinding:
         ):
             if _SHA256_RE.fullmatch(digest) is None:
                 raise ProviderOriginError("provider-origin digest is non-canonical")
-        if _ORIGIN_REF_RE.fullmatch(self.origin_ref) is None:
-            raise ProviderOriginError("origin_ref is non-canonical")
+        expected_ref_re = (
+            _PROVIDER_ORIGIN_REF_RE
+            if self.origin_kind == _PROVIDER_ORIGIN_KIND
+            else _TEST_INJECTED_REF_RE
+        )
+        if expected_ref_re.fullmatch(self.origin_ref) is None:
+            raise ProviderOriginError("origin_ref does not match response origin classification")
         if type(self.http_status) is not int or not 200 <= self.http_status <= 299:
             raise ProviderOriginError("provider-origin HTTP status must be exact 2xx")
         if type(self.response_bytes) is not bytes or not self.response_bytes:
@@ -813,6 +828,7 @@ class ProviderOriginJournal:
             raise ProviderOriginError("Observed journal sequence is invalid")
         base = snapshot["base_query"]
         origin_ref = _origin_ref(
+            origin_kind=origin_kind,
             attempt_id=attempt,
             qualified_query_digest=snapshot["qualified_query_digest"],
             qualification_id=snapshot["qualification_id"],

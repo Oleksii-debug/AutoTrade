@@ -378,6 +378,97 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
                     payload={"metric": "0.02"},
                 )
 
+    def test_trial_admission_requires_physical_holdout_preregistered_first(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            registry = ScientificRegistry(path)
+            registered = registry.register_protocol(protocol())
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "lacks preregistered physical locked holdout",
+            ):
+                registry.record_trial(
+                    registered.protocol_id,
+                    status="FAILED",
+                    payload={"reason": "must-not-start-search"},
+                )
+            self.assertEqual(
+                registry.completeness(registered.protocol_id)["recorded_trials"],
+                0,
+            )
+
+            first = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            again = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            self.assertEqual(first, again)
+
+            registry.record_trial(
+                registered.protocol_id,
+                status="FAILED",
+                payload={"reason": "registered-negative-result"},
+            )
+            reopened = ScientificRegistry(path)
+            self.assertEqual(
+                reopened.locked_holdout_registration(registered.protocol_id),
+                first,
+            )
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "before the first trial",
+            ):
+                preregister_holdout(
+                    reopened,
+                    registered.protocol_id,
+                    dataset_digit="b",
+                )
+
+    def test_fresh_dataset_cannot_replace_preregistered_holdout_after_search(self):
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(protocol())
+            frozen = preregister_holdout(
+                registry,
+                registered.protocol_id,
+                dataset_digit="a",
+            )
+            exhaust_trials(registry, registered.protocol_id)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "match preregistered physical holdout",
+            ):
+                registry.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="fresh-b-after-search",
+                    holdout_identity=holdout_identity("b"),
+                    result={"net_utility": "0.999"},
+                )
+            self.assertEqual(
+                registry.holdout_access_count(
+                    registered.protocol_id,
+                    "fresh-b-after-search",
+                ),
+                0,
+            )
+
+            accepted = registry.register_evaluation(
+                registered.protocol_id,
+                holdout_id="frozen-a",
+                holdout_identity=frozen.identity(),
+                result={"net_utility": "0.020"},
+            )
+            self.assertEqual(accepted["prior_access_count"], 0)
+            self.assertEqual(accepted["untouched"], 1)
+
     def test_repeated_holdout_use_cannot_remain_untouched(self):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
@@ -475,7 +566,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "match registered forward_period",
+                "match preregistered physical holdout",
             ):
                 registry.register_evaluation(
                     p.protocol_id,
@@ -487,7 +578,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             wrong_role = holdout_identity(role="VALIDATION")
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "role must be LOCKED_FORWARD",
+                "match preregistered physical holdout",
             ):
                 registry.register_evaluation(
                     p.protocol_id,
@@ -593,6 +684,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             path = Path(directory) / "science.sqlite3"
             first = ScientificRegistry(path)
             registered = first.register_protocol(protocol())
+            preregister_holdout(first, registered.protocol_id)
             first.record_trial(
                 registered.protocol_id,
                 status="FAILED",

@@ -826,6 +826,58 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
             finally:
                 client.close()
 
+    def test_paired_owner_session_idle_window_matches_cookie_lifetime(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            boundary = client.runtime.application._boundary
+            try:
+                token = client.cookie.split('=', 1)[1]
+                issued = boundary._sessions[token]
+                issued_at = issued.expires_at - 3600
+                self.assertEqual(issued.idle_timeout_seconds, 3600)
+                self.assertEqual(issued.idle_expires_at, issued.expires_at)
+
+                boundary._now = lambda: issued_at + 301
+                status, state, _ = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 200)
+                self.assertEqual(state['environment'], 'SIMULATION')
+
+                boundary._now = lambda: issued.expires_at
+                status, body, _ = client.request('GET', '/api/v1/state')
+                self.assertEqual(status, 403)
+                self.assertEqual(body, {'error': 'FORBIDDEN'})
+            finally:
+                client.close()
+
+    def test_duplicate_session_cookie_names_fail_closed_without_revoking_valid_session(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                connection = http.client.HTTPConnection(
+                    '127.0.0.1',
+                    client.port,
+                    timeout=30,
+                )
+                try:
+                    connection.request(
+                        'GET',
+                        '/api/v1/state',
+                        headers={
+                            'Origin': client.origin,
+                            'Cookie': client.cookie + '; AutoTradeSession=attacker-shadow',
+                        },
+                    )
+                    response = connection.getresponse()
+                    body = json.loads(response.read())
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(body, {'error': 'FORBIDDEN'})
+                finally:
+                    connection.close()
+
+                self.assertEqual(client.state()['environment'], 'SIMULATION')
+            finally:
+                client.close()
+
     def test_pairing_code_is_consumed_by_exactly_one_concurrent_claimant(self):
         with TemporaryDirectory() as directory:
             client = ProductClient(directory, auto_pair=False)

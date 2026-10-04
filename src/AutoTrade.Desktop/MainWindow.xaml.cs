@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using System.IO;
 using Microsoft.Web.WebView2.Core;
 
@@ -10,11 +11,25 @@ public partial class MainWindow : Window
 {
     private readonly IEmergencyHostClient _hostClient;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly DispatcherTimer _hostRefreshTimer = new()
+    {
+        Interval = TimeSpan.FromSeconds(10),
+    };
     private readonly OwnedProviderFreeRuntime? _ownedRuntime;
     private bool _closing;
     private bool _stopComplete;
+    private bool _hostRefreshInProgress;
+    private bool _announceHostRefreshCompletion;
+    private HostDisplayFreshness? _lastDisplayedFreshness;
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
+
+    private enum HostDisplayFreshness
+    {
+        Current,
+        Stale,
+        Disconnected,
+    }
 
     public MainWindow()
         : this(DesktopHostClientFactory.Create())
@@ -26,6 +41,7 @@ public partial class MainWindow : Window
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
         _ownedRuntime = ownedRuntime;
         InitializeComponent();
+        _hostRefreshTimer.Tick += HostRefreshTimer_Tick;
         Closing += MainWindow_Closing;
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
@@ -62,6 +78,10 @@ public partial class MainWindow : Window
     {
         await ConnectWebExperienceAsync();
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        if (!_lifetime.IsCancellationRequested)
+        {
+            _hostRefreshTimer.Start();
+        }
     }
 
     private async Task ConnectWebExperienceAsync()
@@ -124,7 +144,13 @@ public partial class MainWindow : Window
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
+        _hostRefreshTimer.Stop();
         _lifetime.Cancel();
+    }
+
+    private async void HostRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        await RefreshHostStatusAsync(announce: false, returnFocus: false);
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)
@@ -134,14 +160,37 @@ public partial class MainWindow : Window
 
     private async Task RefreshHostStatusAsync(bool announce, bool returnFocus)
     {
+        if (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (_hostRefreshInProgress)
+        {
+            if (announce)
+            {
+                _announceHostRefreshCompletion = true;
+                SetLiveRegionText(
+                    HostStatusAnnouncement,
+                    "Host status refresh is already in progress. The current request will update this status when it finishes.");
+            }
+            return;
+        }
+
+        _hostRefreshInProgress = true;
+        _announceHostRefreshCompletion = false;
+        bool manageRefreshButton = returnFocus;
         bool restoreKeyboardFocus =
-            returnFocus && RefreshStatusButton.IsKeyboardFocusWithin;
-        RefreshStatusButton.IsEnabled = false;
+            manageRefreshButton && RefreshStatusButton.IsKeyboardFocusWithin;
+        if (manageRefreshButton)
+        {
+            RefreshStatusButton.IsEnabled = false;
+        }
 
         try
         {
             EmergencyHostStatus status = await _hostClient.GetStatusAsync(_lifetime.Token);
-            ApplyHostStatus(status, announce);
+            ApplyHostStatus(status, announce || _announceHostRefreshCompletion);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -152,13 +201,18 @@ public partial class MainWindow : Window
             ApplyHostStatus(
                 EmergencyHostStatus.Disconnected(
                     "Host refresh failed. No new host evidence was accepted."),
-                announce);
+                announce || _announceHostRefreshCompletion);
         }
         finally
         {
-            System.Windows.IInputElement? focusedElement =
+            System.Windows.Input.IInputElement? focusedElement =
                 System.Windows.Input.Keyboard.FocusedElement;
-            RefreshStatusButton.IsEnabled = true;
+            if (manageRefreshButton)
+            {
+                RefreshStatusButton.IsEnabled = true;
+            }
+            _announceHostRefreshCompletion = false;
+            _hostRefreshInProgress = false;
             if (restoreKeyboardFocus && IsLoaded && (
                 focusedElement is null
                 || ReferenceEquals(focusedElement, RefreshStatusButton)
@@ -173,6 +227,14 @@ public partial class MainWindow : Window
     {
         status = (status ?? throw new InvalidOperationException(
             "Host status response was null.")).Validated();
+
+        HostDisplayFreshness freshness = !status.Connected
+            ? HostDisplayFreshness.Disconnected
+            : status.IsCurrent
+                ? HostDisplayFreshness.Current
+                : HostDisplayFreshness.Stale;
+        bool announceTransition = _lastDisplayedFreshness is { } previousFreshness
+            && previousFreshness != freshness;
 
         if (status.Connected)
         {
@@ -221,7 +283,9 @@ public partial class MainWindow : Window
                     $"{status.Message} Snapshot values are stale and are not current evidence.";
             }
 
-            if (announce)
+            _lastDisplayedFreshness = freshness;
+
+            if (announce || announceTransition)
             {
                 string prefix = status.IsCurrent
                     ? "Host status refreshed."
@@ -254,7 +318,9 @@ public partial class MainWindow : Window
             ConnectionStatus.Text = status.Message;
         }
 
-        if (announce)
+        _lastDisplayedFreshness = freshness;
+
+        if (announce || announceTransition)
         {
             SetLiveRegionText(
                 HostStatusAnnouncement,

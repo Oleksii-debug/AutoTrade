@@ -18,8 +18,11 @@ from mvp.autotrade_mvp.provider_route_reads import (
     ProviderRouteReadError,
     QualifiedProviderReadQueryBinding,
     QualifiedProviderResponseObservation,
+    TerminalQualifiedProviderReadAuthority,
+    issue_terminal_qualified_provider_read_authority,
     observe_qualified_provider_json_response,
     prepare_qualified_provider_read,
+    terminal_qualified_provider_read_authority_snapshot,
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
 from mvp.tests.provider_qualification_test_support import (
@@ -109,6 +112,113 @@ class ProviderRouteReadTests(unittest.TestCase):
             self.assertEqual(binding.accepted_success_statuses, (200,))
             self.assertEqual(binding.parser_identity, "BYBIT_ORDER_V5_JSON_V1")
             self.assertEqual(len(binding.query_digest), 71)
+
+    def test_terminal_authority_revalidates_exact_current_c_q_and_rule(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            authority = issue_terminal_qualified_provider_read_authority(
+                route,
+                capabilities,
+                qualifications,
+                binding,
+                at=NOW,
+            )
+            snapshot = terminal_qualified_provider_read_authority_snapshot(authority)
+            self.assertEqual(snapshot["qualified_query_digest"], binding.query_digest)
+            self.assertEqual(
+                snapshot["capability_snapshot_id"],
+                route.capability_snapshot_id,
+            )
+            self.assertEqual(snapshot["qualification_id"], q1.qualification_id)
+            self.assertGreaterEqual(
+                snapshot["journal_sequence_cut"],
+                binding.authority_journal_sequence_cut,
+            )
+            self.assertEqual(snapshot["verified_at"], NOW.isoformat().replace("+00:00", "Z"))
+
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "must come from exact current C/Q",
+            ):
+                TerminalQualifiedProviderReadAuthority(
+                    query_binding=binding,
+                    journal_sequence_cut=snapshot["journal_sequence_cut"],
+                    verified_at=snapshot["verified_at"],
+                )
+
+            forged = object.__new__(TerminalQualifiedProviderReadAuthority)
+            object.__setattr__(forged, "query_binding", binding)
+            object.__setattr__(
+                forged,
+                "journal_sequence_cut",
+                snapshot["journal_sequence_cut"],
+            )
+            object.__setattr__(forged, "verified_at", snapshot["verified_at"])
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "construction authority is unavailable",
+            ):
+                terminal_qualified_provider_read_authority_snapshot(forged)
+
+    def test_terminal_authority_rejects_q_superseded_after_prepare(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, q1, harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            q2, receipt2, protocol2 = successor_spot_q(
+                old_qualification_id=q1.qualification_id,
+                ordinal=51,
+            )
+            harness.register(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_accepted(
+                protocol_key=protocol2.key,
+                record=q2,
+                receipt=receipt2,
+            )
+            qualifications._append_supersession(
+                old_id=q1.qualification_id,
+                new_id=q2.qualification_id,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "qualification is not exact current",
+            ):
+                issue_terminal_qualified_provider_read_authority(
+                    route,
+                    capabilities,
+                    qualifications,
+                    binding,
+                    at=NOW + timedelta(seconds=2),
+                )
+
+    def test_terminal_authority_rejects_c_superseded_after_prepare(self):
+        with TemporaryDirectory() as directory:
+            _journal, capabilities, qualifications, route, _q1, _harness = self.setup_route(directory)
+            binding = self.prepare(route, capabilities, qualifications)
+            capabilities.add(
+                verified(
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    NOW + timedelta(seconds=1),
+                    provider_id="BYBIT",
+                    provider_environment="TESTNET",
+                )
+            )
+            with self.assertRaisesRegex(
+                ProviderRouteReadError,
+                "capability differs from selected C",
+            ):
+                issue_terminal_qualified_provider_read_authority(
+                    route,
+                    capabilities,
+                    qualifications,
+                    binding,
+                    at=NOW + timedelta(seconds=2),
+                )
 
     def test_qualified_read_and_response_constructors_are_sealed(self):
         with TemporaryDirectory() as directory:

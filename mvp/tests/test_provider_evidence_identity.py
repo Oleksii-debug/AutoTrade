@@ -84,6 +84,44 @@ class ProviderEvidenceIdentityTests(unittest.TestCase):
             _canonical_evidence_refs((hostile,))
         self.assertEqual(touched, [])
 
+    def test_evidence_mapping_rejects_hostile_keys_before_rehash(self):
+        touched: list[str] = []
+
+        class HostileKey:
+            def __hash__(self):
+                touched.append("hash")
+                return 1234567
+
+        hostile_key = HostileKey()
+        raw = evidence_ref(
+            ARTIFACT_A,
+            "https://provider.example/evidence/a",
+        )
+        raw[hostile_key] = "unexpected"
+        touched.clear()
+
+        with self.assertRaisesRegex(TypeError, "keys must be exact strings"):
+            _canonical_evidence_refs((raw,))
+        self.assertEqual(touched, [])
+
+    def test_evidence_text_subclass_is_rejected_before_strip_dispatch(self):
+        touched: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile evidence text normalization")
+
+        raw = evidence_ref(
+            ARTIFACT_A,
+            "https://provider.example/evidence/a",
+        )
+        raw["artifact_id"] = HostileText(ARTIFACT_A)
+
+        with self.assertRaisesRegex(ValueError, "artifact_id is required"):
+            _canonical_evidence_refs((raw,))
+        self.assertEqual(touched, [])
+
     def test_exact_list_and_dict_snapshot_remain_supported(self):
         refs = _canonical_evidence_refs(
             [evidence_ref(ARTIFACT_A, "https://provider.example/evidence/a")]

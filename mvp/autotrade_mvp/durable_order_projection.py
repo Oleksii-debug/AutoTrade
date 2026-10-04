@@ -48,7 +48,7 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -114,6 +114,10 @@ def _canonical_evidence_refs(
     for index, raw in enumerate(evidence_items):
         if type(raw) is not dict:
             raise TypeError(f"evidence_refs[{index}] must be an exact dict")
+        if any(type(key) is not str for key in raw):
+            raise TypeError(
+                f"evidence_refs[{index}] keys must be exact strings"
+            )
         item = dict.copy(raw)
         unknown = set(item) - allowed
         if unknown:

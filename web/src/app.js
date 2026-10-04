@@ -772,6 +772,11 @@
       error.retryable === true;
   }
 
+  function isCommandAuthRejection(error) {
+    return error !== null && typeof error === "object" &&
+      (error.status === 401 || error.status === 403);
+  }
+
   function reportSnapshotBusy() {
     invalidateSnapshotAuthority();
     const message =
@@ -1210,16 +1215,26 @@
             true);
         }
       }
-    } catch {
-      state.snapshotReady = false;
-      state.sessionIdentity = null;
-      state.accountId = null;
-      state.environment = null;
-      setCommandAvailability(false);
-      text(
-        "command-result",
-        "Command " + commandId +
-          " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+    } catch (error) {
+      if (!recovering && isCommandAuthRejection(error)) {
+        // Authentication/authorization is checked before store.submit() for a
+        // fresh command, so this request cannot have crossed durable acceptance.
+        // A retry is different: its prior attempt may already be durable, so
+        // never discard a recovering command merely because the current session
+        // can no longer authenticate it.
+        clearConfirmedCommand(payload);
+        invalidateSnapshotAuthority();
+        text(
+          "command-result",
+          "Command " + commandId +
+            " was not accepted because the authenticated host session was rejected before command acceptance. Its fresh command identity was discarded; re-establish a valid session and canonical snapshot before trying again.");
+      } else {
+        invalidateSnapshotAuthority();
+        text(
+          "command-result",
+          "Command " + commandId +
+            " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      }
       renderCommandValidationDetails([], "unavailable");
       byId("command-result").focus();
     } finally {

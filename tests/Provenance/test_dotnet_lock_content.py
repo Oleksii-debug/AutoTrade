@@ -80,6 +80,30 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             )
         )
 
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj --locked-mode '
+                    '-p:RestoreLockedMode=false'
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj -- --locked-mode'
+                )
+            )
+        )
+        self.assertTrue(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    'run: dotnet restore src/App/App.csproj '
+                    '-p:Other=x;RestoreLockedMode=true'
+                )
+            )
+        )
+
     def test_malformed_restore_command_fails_parsing(self):
         with self.assertRaisesRegex(ValueError, 'malformed dotnet restore command'):
             dotnet_restore_command_tokens(
@@ -745,6 +769,26 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             self.assertEqual(
                 dotnet_imported_package_reference_blockers(root),
                 ['DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:src/Build/Dependencies.props'],
+            )
+
+    def test_nested_props_import_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            imported = root / 'external' / 'Injected.targets'
+            imported.parent.mkdir(parents=True)
+            imported.write_text(
+                '<Project><ItemGroup><PackageReference Include="Injected.Package" '
+                'Version="9.9.9" /></ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><Import Project="external/Injected.targets" /></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                ['DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:Directory.Build.props'],
             )
 
     def test_malformed_root_props_fails_closed(self):

@@ -137,20 +137,42 @@ internal static class Program
         WebExperienceSecurityPolicy policy = new(HostOrigin);
 
         Uri trustedDocument = new(HostOrigin, "/index.html");
-        foreach (string path in new[]
+        foreach ((string Method, string Path) request in new[]
         {
-            "/api/v1/state",
-            "/api/v1/commands",
-            "/api/v1/events",
-            "/api/v1/events?after=7",
-            "/api/v1/operations/11111111-1111-1111-1111-111111111111",
+            ("GET", "/api/v1/state"),
+            ("POST", "/api/v1/commands"),
+            ("GET", "/api/v1/events"),
+            ("GET", "/api/v1/events?after=7"),
+            ("GET", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
         })
         {
             Check.True(
                 policy.AllowsSessionHeaderForwarding(
-                    new Uri(HostOrigin, path),
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
                     trustedDocument),
-                "canonical Host API request lost session-header eligibility: " + path);
+                "canonical Host API request lost session-header eligibility: "
+                    + request.Method + " " + request.Path);
+        }
+
+        foreach ((string Method, string Path) request in new[]
+        {
+            ("POST", "/api/v1/state"),
+            ("GET", "/api/v1/commands"),
+            ("POST", "/api/v1/events"),
+            ("POST", "/api/v1/events?after=7"),
+            ("POST", "/api/v1/operations/11111111-1111-1111-1111-111111111111"),
+            ("get", "/api/v1/state"),
+            ("", "/api/v1/state"),
+        })
+        {
+            Check.True(
+                !policy.AllowsSessionHeaderForwarding(
+                    request.Method,
+                    new Uri(HostOrigin, request.Path),
+                    trustedDocument),
+                "noncanonical HTTP method gained session-header forwarding authority: "
+                    + request.Method + " " + request.Path);
         }
 
         foreach (Uri target in new[]
@@ -178,7 +200,7 @@ internal static class Program
         })
         {
             Check.True(
-                !policy.AllowsSessionHeaderForwarding(target, trustedDocument),
+                !policy.AllowsSessionHeaderForwarding("GET", target, trustedDocument),
                 "credential forwarding escaped canonical Host API origin/path: " + target);
         }
 
@@ -193,6 +215,7 @@ internal static class Program
         {
             Check.True(
                 !policy.AllowsSessionHeaderForwarding(
+                    "GET",
                     new Uri(HostOrigin, "/api/v1/state"),
                     untrustedDocument),
                 "untrusted top-level document gained bearer forwarding authority: "
@@ -210,6 +233,9 @@ internal static class Program
         Check.True(
             !policy.AllowsDeveloperTools,
             "release-mode developer tools were admitted by the trust policy");
+        Check.True(
+            !policy.AllowsServiceWorkers,
+            "service workers acquired same-origin interception authority");
         Check.True(
             !policy.AllowsDownloads,
             "embedded downloads were admitted by the trust policy");

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
+    bounded_fraction,
     exact_multiply,
     is_exact_decimal_multiple,
     round_fraction_to_quantum,
@@ -39,6 +41,89 @@ def _oracle_exact_product(*values: Decimal, name: str) -> Decimal:
     except ExactDecimalError as error:
         raise ExecutionOracleError(
             f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _oracle_bounded_rational(value: Fraction, *, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise ExecutionOracleError(
+            f"{name} exceeds exact rational resource envelope"
+        ) from error
+
+
+def _oracle_market_price_bound(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    projection = model.price_projection
+    if projection is None:
+        raise ExecutionOracleError(
+            "MARKET execution requires authoritative price projection policy"
+        )
+    if projection.instrument_version != order.instrument_version:
+        raise ExecutionOracleError(
+            "price projection instrument_version must match order instrument_version"
+        )
+
+    available = as_fraction(observation.available_volume)
+    participation = (
+        _oracle_bounded_rational(
+            as_fraction(capacity) / available,
+            name="independent market participation",
+        )
+        if available > 0
+        else Fraction(0, 1)
+    )
+    maximum_participation = as_fraction(model.max_participation)
+    impact_fraction = (
+        _oracle_bounded_rational(
+            participation / maximum_participation,
+            name="independent market impact fraction",
+        )
+        if maximum_participation > 0
+        else Fraction(0, 1)
+    )
+    impact_fraction = min(impact_fraction, Fraction(1, 1))
+    impact_bps = _oracle_bounded_rational(
+        as_fraction(model.impact_bps_at_max_participation) * impact_fraction,
+        name="independent market impact bps",
+    )
+    total_bps = _oracle_bounded_rational(
+        _oracle_bounded_rational(
+            as_fraction(additional_spread_bps)
+            + as_fraction(model.slippage_bps)
+            + impact_bps,
+            name="independent market total bps before scenario",
+        )
+        * as_fraction(model.scenario_cost_multiplier),
+        name="independent market total bps",
+    )
+    price_delta = _oracle_bounded_rational(
+        as_fraction(base_price) * total_bps / Fraction(10000, 1),
+        name="independent market price delta",
+    )
+    unrounded = _oracle_bounded_rational(
+        as_fraction(base_price) + price_delta
+        if order.side == "BUY"
+        else as_fraction(base_price) - price_delta,
+        name="independent market projected price",
+    )
+    try:
+        return round_fraction_to_quantum(
+            unrounded,
+            projection.price_quantum,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            "market price projection exceeds exact arithmetic resource envelope"
         ) from error
 
 
@@ -250,6 +335,22 @@ def assert_conservative_execution(
             if order.side == "SELL" and result.fill_price > reference:
                 raise ExecutionOracleError(
                     "market sell result is more favorable than executable reference"
+                )
+            expected_market_price = _oracle_market_price_bound(
+                order=order,
+                observation=observation,
+                model=model,
+                capacity=independent_capacity,
+                base_price=reference,
+                additional_spread_bps=(
+                    model.bar_half_spread_bps
+                    if model.data_fidelity == "BAR"
+                    else Decimal("0")
+                ),
+            )
+            if result.fill_price != expected_market_price:
+                raise ExecutionOracleError(
+                    "market fill_price must equal independently projected adverse tick bound"
                 )
         else:
             if order.limit_price is None:

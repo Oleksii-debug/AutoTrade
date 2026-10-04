@@ -3042,7 +3042,7 @@ def _run_autonomous_locked(
                 orders.sync_submission_attempt(attempt_id=attempt_id)
                 if dispatched.status != "SENT":
                     reservations.mark_unknown(command_id=_uuid("loop-unknown", key), idempotency_key=_uuid("loop-unknown", key),
-                                              reservation_id=reservation_id, committed_at=timestamp)
+                                              reservation_id=reservation_id, simulation_time=timestamp)
                     return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO", "run_id": run_id,
                             "completed_episodes": len(completed), "unresolved_episode": episode,
                             "new_outbound_requests": provider.outbound_request_count - count_before, "resumed": bool(completed)}

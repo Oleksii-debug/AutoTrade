@@ -65,6 +65,8 @@ _TEST_ONLY_PROVIDER_ORIGIN_RECORD_TOKEN = object()
 _BINDING_TOKEN = object()
 _OBSERVATION_TOKEN = object()
 _AGGREGATE_TYPE = "qualified_authenticated_provider_read"
+_WIRE_EXECUTION_AGGREGATE_TYPE = "qualified_authenticated_provider_wire_execution"
+_WIRE_EXECUTION_EVENT = "AuthenticatedReadWireExecutionClaimed"
 _PREPARED_EVENT = "AuthenticatedReadPrepared"
 _RETAINED_EVENT = "AuthenticatedReadRetained"
 _OBSERVED_EVENT = "AuthenticatedReadObserved"
@@ -283,6 +285,165 @@ def _event(
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at,
     }
+
+
+def _direct_wire_execution_claim_payload(
+    *,
+    attempt_id: str,
+    qualified_query_digest: str,
+    qualification_id: str,
+    response_sha256: str,
+    observed_at: str,
+    wire_request_sha256: str,
+    wire_request_semantics_sha256: str,
+    terminal_authority_journal_sequence_cut: int,
+    terminal_authority_verified_at: str,
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt_id,
+        "qualified_query_digest": qualified_query_digest,
+        "qualification_id": qualification_id,
+        "response_sha256": response_sha256,
+        "observed_at": observed_at,
+        "wire_request_sha256": wire_request_sha256,
+        "wire_request_semantics_sha256": wire_request_semantics_sha256,
+        "terminal_authority_journal_sequence_cut": terminal_authority_journal_sequence_cut,
+        "terminal_authority_verified_at": terminal_authority_verified_at,
+    }
+
+
+def _wire_execution_event(
+    *,
+    wire_request_sha256: str,
+    payload: dict[str, object],
+    committed_at: str,
+) -> dict[str, object]:
+    return {
+        "event_id": "provider-wire-execution:" + wire_request_sha256.removeprefix("sha256:"),
+        "event_type": _WIRE_EXECUTION_EVENT,
+        "aggregate_type": _WIRE_EXECUTION_AGGREGATE_TYPE,
+        "aggregate_id": wire_request_sha256,
+        "aggregate_version": "1",
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "committed_at": committed_at,
+    }
+
+
+def _require_direct_wire_execution_claim(
+    store: JournalStore,
+    *,
+    attempt_id: str,
+    qualified_query_digest: str,
+    qualification_id: str,
+    response_sha256: str,
+    observed_at: str,
+    wire_request_sha256: str,
+    wire_request_semantics_sha256: str,
+    terminal_authority_journal_sequence_cut: int,
+    terminal_authority_verified_at: str,
+) -> None:
+    expected = _direct_wire_execution_claim_payload(
+        attempt_id=attempt_id,
+        qualified_query_digest=qualified_query_digest,
+        qualification_id=qualification_id,
+        response_sha256=response_sha256,
+        observed_at=observed_at,
+        wire_request_sha256=wire_request_sha256,
+        wire_request_semantics_sha256=wire_request_semantics_sha256,
+        terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
+        terminal_authority_verified_at=terminal_authority_verified_at,
+    )
+    events = JournalStore.load_events(
+        store,
+        _WIRE_EXECUTION_AGGREGATE_TYPE,
+        wire_request_sha256,
+    )
+    if len(events) != 1:
+        raise ProviderOriginError(
+            "direct wire execution claim is missing or ambiguous"
+        )
+    event = events[0]
+    if (
+        type(event) is not dict
+        or set(event) != _EVENT_KEYS
+        or event.get("event_id")
+        != "provider-wire-execution:" + wire_request_sha256.removeprefix("sha256:")
+        or event.get("event_type") != _WIRE_EXECUTION_EVENT
+        or event.get("aggregate_type") != _WIRE_EXECUTION_AGGREGATE_TYPE
+        or event.get("aggregate_id") != wire_request_sha256
+        or event.get("aggregate_version") != 1
+        or event.get("payload") != expected
+        or event.get("payload_hash") != payload_digest(expected)
+    ):
+        raise ProviderOriginError(
+            "direct wire execution is already claimed by another attempt or is corrupt"
+        )
+    _parse_utc_text(event.get("committed_at"), name="wire execution committed_at")
+    sequence = event.get("journal_sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise ProviderOriginError("direct wire execution claim sequence is invalid")
+
+
+def _claim_direct_wire_execution(
+    store: JournalStore,
+    *,
+    attempt_id: str,
+    qualified_query_digest: str,
+    qualification_id: str,
+    response_sha256: str,
+    observed_at: str,
+    wire_request_sha256: str,
+    wire_request_semantics_sha256: str,
+    terminal_authority_journal_sequence_cut: int,
+    terminal_authority_verified_at: str,
+) -> None:
+    expected = _direct_wire_execution_claim_payload(
+        attempt_id=attempt_id,
+        qualified_query_digest=qualified_query_digest,
+        qualification_id=qualification_id,
+        response_sha256=response_sha256,
+        observed_at=observed_at,
+        wire_request_sha256=wire_request_sha256,
+        wire_request_semantics_sha256=wire_request_semantics_sha256,
+        terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
+        terminal_authority_verified_at=terminal_authority_verified_at,
+    )
+    existing = JournalStore.load_events(
+        store,
+        _WIRE_EXECUTION_AGGREGATE_TYPE,
+        wire_request_sha256,
+    )
+    if not existing:
+        event = _wire_execution_event(
+            wire_request_sha256=wire_request_sha256,
+            payload=expected,
+            committed_at=observed_at,
+        )
+        try:
+            JournalStore.append_event(store, event)
+        except ValueError as error:
+            raced = JournalStore.load_events(
+                store,
+                _WIRE_EXECUTION_AGGREGATE_TYPE,
+                wire_request_sha256,
+            )
+            if not raced:
+                raise ProviderOriginError(
+                    "direct wire execution claim could not be committed"
+                ) from error
+    _require_direct_wire_execution_claim(
+        store,
+        attempt_id=attempt_id,
+        qualified_query_digest=qualified_query_digest,
+        qualification_id=qualification_id,
+        response_sha256=response_sha256,
+        observed_at=observed_at,
+        wire_request_sha256=wire_request_sha256,
+        wire_request_semantics_sha256=wire_request_semantics_sha256,
+        terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
+        terminal_authority_verified_at=terminal_authority_verified_at,
+    )
 
 
 def _require_event(
@@ -782,6 +943,19 @@ class ProviderOriginJournal:
             raise ProviderOriginError("provider response cannot precede durable prepare")
 
         response_digest = "sha256:" + sha256(raw).hexdigest()
+        if execution_class == _DIRECT_EXECUTION_CLASS:
+            _claim_direct_wire_execution(
+                store,
+                attempt_id=attempt,
+                qualified_query_digest=snapshot["qualified_query_digest"],
+                qualification_id=snapshot["qualification_id"],
+                response_sha256=response_digest,
+                observed_at=observed_text,
+                wire_request_sha256=wire_request_sha256,
+                wire_request_semantics_sha256=wire_request_semantics_sha256,
+                terminal_authority_journal_sequence_cut=terminal_cut,
+                terminal_authority_verified_at=terminal_verified_at,
+            )
         artifact_id = _response_artifact_id(
             attempt_id=attempt,
             qualified_query_digest=snapshot["qualified_query_digest"],
@@ -912,6 +1086,42 @@ class ProviderOriginJournal:
         )
         if retained_payload.get("prepared_event_id") != prepared.get("event_id"):
             raise ProviderOriginError("Retained event is not bound to exact Prepared event")
+        if retained_payload.get("execution_class") == _DIRECT_EXECUTION_CLASS:
+            _require_direct_wire_execution_claim(
+                self._require_store(),
+                attempt_id=attempt,
+                qualified_query_digest=_exact_text(
+                    retained_payload.get("qualified_query_digest"),
+                    name="qualified_query_digest",
+                ),
+                qualification_id=_exact_text(
+                    retained_payload.get("qualification_id"),
+                    name="qualification_id",
+                ),
+                response_sha256=_exact_text(
+                    retained_payload.get("response_sha256"),
+                    name="response_sha256",
+                ),
+                observed_at=_exact_text(
+                    retained_payload.get("observed_at"),
+                    name="observed_at",
+                ),
+                wire_request_sha256=_exact_text(
+                    retained_payload.get("wire_request_sha256"),
+                    name="wire_request_sha256",
+                ),
+                wire_request_semantics_sha256=_exact_text(
+                    retained_payload.get("wire_request_semantics_sha256"),
+                    name="wire_request_semantics_sha256",
+                ),
+                terminal_authority_journal_sequence_cut=retained_payload.get(
+                    "terminal_authority_journal_sequence_cut"
+                ),
+                terminal_authority_verified_at=_exact_text(
+                    retained_payload.get("terminal_authority_verified_at"),
+                    name="terminal_authority_verified_at",
+                ),
+            )
         observed_text = _exact_text(retained_payload.get("observed_at"), name="observed_at")
         JournalStore.append_event(
             self._require_store(),
@@ -1039,6 +1249,22 @@ class ProviderOriginJournal:
             terminal_verified_at,
             name="terminal_authority_verified_at",
         )
+        if execution_class == _DIRECT_EXECUTION_CLASS:
+            _require_direct_wire_execution_claim(
+                self._require_store(),
+                attempt_id=attempt,
+                qualified_query_digest=snapshot["qualified_query_digest"],
+                qualification_id=snapshot["qualification_id"],
+                response_sha256=response_digest,
+                observed_at=_exact_text(
+                    retained_payload.get("observed_at"),
+                    name="observed_at",
+                ),
+                wire_request_sha256=wire_request_sha256,
+                wire_request_semantics_sha256=wire_request_semantics_sha256,
+                terminal_authority_journal_sequence_cut=terminal_cut,
+                terminal_authority_verified_at=terminal_verified_at,
+            )
         expected_metadata = {
             "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
             "attempt_id": attempt,

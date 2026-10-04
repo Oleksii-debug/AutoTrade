@@ -361,13 +361,15 @@ def _read_retained_windows_regular_file(
     target_name: str,
     path: Path,
 ) -> bytes:
-    """Read one staged Windows file through one CRT identity domain.
+    """Read one staged Windows file through one retained native identity.
 
     A pathname descriptor establishes the admitted generation. The canonical
     retained relative NT open is then acquired while the admission descriptor
-    is still held; both identities are compared only through os.fstat.
-    Once the retained descriptor exists its no-WRITE/no-DELETE sharing fence
-    keeps that exact generation stable through the byte read.
+    is still held. Cross-descriptor identity is compared through the shared
+    GetFileInformationByHandle authority; CRT fstat metadata is used only for
+    bounded mutation checks. Once the retained descriptor exists its
+    no-WRITE/no-DELETE sharing fence keeps that exact generation stable through
+    the byte read.
     """
 
     try:

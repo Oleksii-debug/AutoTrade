@@ -76,6 +76,99 @@ def aggregate(
 
 class SpecialistDagTests(unittest.TestCase):
 
+
+    def test_outer_collection_subclasses_are_rejected_before_iteration(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("caller iterator must not execute")
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "specs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                HostileList([spec("a", "g1")]),
+                input_snapshot_id="cut-1",
+                available_inputs=(),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "available_inputs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                [spec("a", "g1")],
+                input_snapshot_id="cut-1",
+                available_inputs=HostileList(["price"]),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        specs = [spec("a", "g1")]
+        plan = full_plan(specs)
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "runs must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                HostileList([run("a", "0.5")]),
+                plan=plan,
+            )
+        self.assertEqual(calls, [])
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "blocking_critique_terms must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                [run("a", "0.5")],
+                plan=plan,
+                blocking_critique_terms=HostileList(["future leakage"]),
+            )
+        self.assertEqual(calls, [])
+
+    def test_generators_are_rejected_before_their_body_executes(self):
+        calls = []
+
+        def hostile_specs():
+            calls.append("specs")
+            yield spec("a", "g1")
+
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "specs must be an exact built-in list or tuple",
+        ):
+            plan_specialists(
+                hostile_specs(),
+                input_snapshot_id="cut-1",
+                available_inputs=(),
+                total_budget="1",
+            )
+        self.assertEqual(calls, [])
+
+        def hostile_runs():
+            calls.append("runs")
+            yield run("a", "0.5")
+
+        specs = [spec("a", "g1")]
+        with self.assertRaisesRegex(
+            SpecialistDagError,
+            "runs must be an exact built-in list or tuple",
+        ):
+            aggregate(
+                specs,
+                hostile_runs(),
+                plan=full_plan(specs),
+            )
+        self.assertEqual(calls, [])
+
     def test_time_ingress_rejects_custom_tzinfo_without_callbacks(self):
         calls = []
 

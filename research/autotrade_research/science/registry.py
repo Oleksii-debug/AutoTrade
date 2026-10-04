@@ -305,6 +305,27 @@ def _registered_trial_payload(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+def _locked_holdout_binding_hash(
+    *,
+    protocol_id: str,
+    dataset_id: str,
+    dataset_version: int,
+    dataset_digest: str,
+    holdout_identity_hash: str,
+    created_at: str,
+) -> str:
+    return _hash(
+        {
+            "protocol_id": protocol_id,
+            "dataset_id": dataset_id,
+            "dataset_version": dataset_version,
+            "dataset_digest": dataset_digest,
+            "holdout_identity_hash": holdout_identity_hash,
+            "created_at": created_at,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -420,7 +441,8 @@ class ScientificRegistry:
                     dataset_version INTEGER NOT NULL,
                     dataset_digest TEXT NOT NULL,
                     holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    binding_hash TEXT NOT NULL
                 );
 
                 CREATE TRIGGER IF NOT EXISTS protocols_no_update
@@ -494,6 +516,21 @@ class ScientificRegistry:
             if "holdout_identity_hash" not in evaluation_columns:
                 con.execute(
                     "ALTER TABLE evaluations ADD COLUMN holdout_identity_hash TEXT"
+                )
+            locked_holdout_columns = {
+                row["name"]
+                for row in con.execute(
+                    "PRAGMA table_info(protocol_locked_holdouts)"
+                )
+            }
+            if "binding_hash" not in locked_holdout_columns:
+                # Historical rows from an earlier implementation have no
+                # cryptographic binding across dataset id/version/digest and
+                # chronology.  Preserve them for evidence, but leave NULL so
+                # authority reads fail closed rather than backfilling trust.
+                con.execute(
+                    "ALTER TABLE protocol_locked_holdouts "
+                    "ADD COLUMN binding_hash TEXT"
                 )
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
@@ -586,6 +623,23 @@ class ScientificRegistry:
         ):
             raise ProtocolViolation(
                 "preregistered locked holdout digest identity is corrupt"
+            )
+        binding_hash = row["binding_hash"]
+        expected_binding_hash = _locked_holdout_binding_hash(
+            protocol_id=protocol_id,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            dataset_digest=dataset_digest,
+            holdout_identity_hash=identity_hash,
+            created_at=row["created_at"],
+        )
+        if (
+            not isinstance(binding_hash, str)
+            or _SHA256_RE.fullmatch(binding_hash) is None
+            or binding_hash != expected_binding_hash
+        ):
+            raise ProtocolViolation(
+                "preregistered locked holdout binding integrity mismatch"
             )
         identity_row = con.execute(
             "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
@@ -759,11 +813,19 @@ class ScientificRegistry:
                     protocol_id=protocol,
                     protocol_payload=protocol_payload,
                 )
+            binding_hash = _locked_holdout_binding_hash(
+                protocol_id=protocol,
+                dataset_id=canonical_dataset_id,
+                dataset_version=dataset_version,
+                dataset_digest=dataset_digest,
+                holdout_identity_hash=identity_hash,
+                created_at=created,
+            )
             con.execute(
                 "INSERT INTO protocol_locked_holdouts("
                 "protocol_id,dataset_id,dataset_version,dataset_digest,"
-                "holdout_identity_hash,created_at"
-                ") VALUES(?,?,?,?,?,?)",
+                "holdout_identity_hash,created_at,binding_hash"
+                ") VALUES(?,?,?,?,?,?,?)",
                 (
                     protocol,
                     canonical_dataset_id,
@@ -771,6 +833,7 @@ class ScientificRegistry:
                     dataset_digest,
                     identity_hash,
                     created,
+                    binding_hash,
                 ),
             )
             return self._registered_locked_holdout(

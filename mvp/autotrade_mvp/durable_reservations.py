@@ -817,6 +817,7 @@ class DurableReservationBook:
         idempotency_key: str,
         operation: str,
         request: dict[str, object],
+        committed_at: str | None = None,
     ) -> ReservationSnapshot:
         cid = _text(command_id, name="command_id")
         idem = _text(idempotency_key, name="idempotency_key")
@@ -888,7 +889,11 @@ class DurableReservationBook:
             "aggregate_version": str(next_version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "committed_at": _now(),
+            "committed_at": (
+                _now()
+                if committed_at is None
+                else _text(committed_at, name="committed_at")
+            ),
         }
 
         # commit_command is the single durable transaction: command dedupe and
@@ -1010,6 +1015,7 @@ class DurableReservationBook:
         command_id: str,
         idempotency_key: str,
         reservation_id: str,
+        committed_at: str | None = None,
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
@@ -1019,6 +1025,7 @@ class DurableReservationBook:
             idempotency_key=idempotency_key,
             operation="MARK_UNKNOWN",
             request=request,
+            committed_at=committed_at,
         )
 
     def _verify_zero_wire_blocked(

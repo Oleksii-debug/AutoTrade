@@ -27,6 +27,9 @@ from .dispatch import (
 # Retain the installed authenticated reader once so later mutation of the public
 # ArtifactStore class attribute cannot redirect provider-evidence authority.
 _CANONICAL_AUTHENTICATED_SNAPSHOT_READ = ArtifactStore.read_authenticated_snapshot
+_CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE = (
+    ArtifactStore.read_authenticated_snapshot.__code__
+)
 
 
 from .order_projection import (
@@ -289,6 +292,8 @@ class DurableOrderBookProjection:
         request: Mapping[str, object],
         evidence_refs: Sequence[Mapping[str, object]] | None,
         committed_at: str,
+        _expected_authenticated_snapshot_read=_CANONICAL_AUTHENTICATED_SNAPSHOT_READ,
+        _expected_authenticated_snapshot_read_code=_CANONICAL_AUTHENTICATED_SNAPSHOT_READ_CODE,
     ) -> tuple[dict[str, str], ...]:
         refs = _canonical_evidence_refs(evidence_refs)
         requires = self._requires_provider_evidence(operation, request)
@@ -317,6 +322,16 @@ class DurableOrderBookProjection:
             committed.replace("Z", "+00:00")
         )
         request_hash = payload_digest(dict(request))
+        if (
+            _CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+            is not _expected_authenticated_snapshot_read
+            or _expected_authenticated_snapshot_read.__code__
+            is not _expected_authenticated_snapshot_read_code
+        ):
+            raise OrderProjectionConflict(
+                "provider evidence authenticated snapshot reader authority changed"
+            )
+        authenticated_snapshot_read = _expected_authenticated_snapshot_read
         for ref in refs:
             observed_dt = datetime.fromisoformat(
                 ref["observed_at"].replace("Z", "+00:00")
@@ -326,7 +341,16 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest, artifact_bytes = _CANONICAL_AUTHENTICATED_SNAPSHOT_READ(
+                if (
+                    _CANONICAL_AUTHENTICATED_SNAPSHOT_READ
+                    is not authenticated_snapshot_read
+                    or authenticated_snapshot_read.__code__
+                    is not _expected_authenticated_snapshot_read_code
+                ):
+                    raise OrderProjectionConflict(
+                        "provider evidence authenticated snapshot reader authority changed"
+                    )
+                manifest, artifact_bytes = authenticated_snapshot_read(
                     self.evidence_artifact_store,
                     ref["artifact_id"],
                 )

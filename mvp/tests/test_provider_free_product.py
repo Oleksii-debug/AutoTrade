@@ -103,6 +103,68 @@ class ProductClient:
 
 
 class ProviderFreeProductAcceptance(unittest.TestCase):
+    def test_host_backpressure_rejects_before_admission_and_keeps_retry_identity(self):
+        with TemporaryDirectory() as directory:
+            client = ProductClient(directory)
+            try:
+                snapshot = client.state()
+                identity = str(uuid4())
+                command = {'command_id': identity, 'idempotency_key': identity,
+                    'expected_state_version': snapshot['state_version'], 'actor': 'local-owner',
+                    'session': snapshot['permission_summary']['session'], 'account_id': ACCOUNT,
+                    'environment': ENVIRONMENT, 'action': 'START_SIMULATION', 'payload': {}}
+                before = client.runtime.journal.current_journal_sequence()
+                slots = client.runtime.server._request_slots
+                acquired = 0
+                try:
+                    # Deterministically hold the real server's request capacity,
+                    # rather than depend on machine timing to force saturation.
+                    while slots.acquire(blocking=False): acquired += 1
+                    for _ in range(40):
+                        status, result, _ = client.request('POST', '/api/v1/commands', command)
+                        self.assertEqual(status, 503)
+                        self.assertEqual(result, {'error': 'HOST_OVERLOADED', 'accepted': False})
+                    self.assertEqual(client.runtime.journal.current_journal_sequence(), before)
+                finally:
+                    for _ in range(acquired): slots.release()
+                status, accepted, _ = client.request('POST', '/api/v1/commands', command)
+                self.assertEqual((status, accepted['status']), (200, 'ACCEPTED'))
+                operation_id = accepted['operation_id']
+                for _ in range(300):
+                    _, operation, _ = client.request('GET', '/api/v1/operations/' + operation_id)
+                    if operation['phase'] == 'SUCCEEDED': break
+                    time.sleep(.02)
+                self.assertEqual(operation['phase'], 'SUCCEEDED')
+                status, replay, _ = client.request('POST', '/api/v1/commands', command)
+                self.assertEqual(replay['operation_id'], operation_id)
+                self.assertEqual(len(client.state()['portfolio']['fills']), 6)
+                self.assertEqual(client.state()['portfolio']['status']['cash'], '895.696')
+            finally: client.close()
+
+    def test_historical_admission_replay_cannot_authorize_stale_current_cash(self):
+        from mvp.autotrade_mvp.reconciliation_journal import load_account_resource_availability_evidence
+        from mvp.autotrade_mvp.simulation_session import run_autonomous_simulation
+        with TemporaryDirectory() as directory:
+            run_autonomous_simulation(['100', '101', '103', '102', '100'], directory,
+                run_id='historical-cut', now='2026-10-04T00:00:00Z', partial_fills=True)
+            journal = JournalStore(Path(directory) / 'journal.sqlite3')
+            risk = journal.load_events_by_aggregate_type('risk_decision')[0]
+            evidence = risk['payload']['reservation_availability_evidence']
+            args = dict(checkpoint_event_id=evidence['checkpoint_event_id'], provider_id=PROVIDER,
+                account_id=ACCOUNT, environment=ENVIRONMENT, resources=['CASH:USD'],
+                now=risk['payload']['evaluated_at'], max_age_seconds='60')
+            with self.assertRaisesRegex(ValueError, 'predates settlement financial truth'):
+                load_account_resource_availability_evidence(journal, **args)
+            historical = load_account_resource_availability_evidence(journal, **args,
+                _historical_risk_event_id=risk['event_id'])
+            self.assertEqual(historical['availability'], evidence['availability'])
+            with self.assertRaisesRegex(ValueError, 'cannot authorize current'):
+                load_account_resource_availability_evidence(journal, **args,
+                    _historical_risk_event_id=risk['event_id'], require_latest_scope=True)
+            with self.assertRaisesRegex(ValueError, 'durable risk event'):
+                load_account_resource_availability_evidence(journal, **args,
+                    _historical_risk_event_id=evidence['checkpoint_event_id'])
+
     def test_whole_application_partial_fill_crash_restart_backup_restore_interface(self):
         with TemporaryDirectory() as directory:
             data = Path(directory) / 'product'
@@ -266,27 +328,15 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 command_id='block-command-1',
             )
             host_events = [
-                {
-                    'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {
-                        'action': 'BLOCK_NEW_EXPOSURE',
-                        'operation_id': 'block-operation-1',
-                    },
-                },
-                {
-                    'event_type': 'OPERATION_UPDATED',
-                    'payload': {
-                        'operation_id': 'block-operation-1',
-                        'phase': 'RUNNING',
-                    },
-                },
-                {
-                    'event_type': 'OPERATION_UPDATED',
-                    'payload': {
-                        'operation_id': 'block-operation-1',
-                        'phase': 'SUCCEEDED',
-                    },
-                },
+                {'event_type': 'COMMAND_ACCEPTED',
+                 'payload': {'action': 'BLOCK_NEW_EXPOSURE',
+                             'operation_id': 'block-operation-1'}},
+                {'event_type': 'OPERATION_UPDATED',
+                 'payload': {'operation_id': 'block-operation-1',
+                             'phase': 'RUNNING'}},
+                {'event_type': 'OPERATION_UPDATED',
+                 'payload': {'operation_id': 'block-operation-1',
+                             'phase': 'SUCCEEDED'}},
             ]
             original_load = store.load_events_by_aggregate_type
 
@@ -295,13 +345,8 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                     return list(host_events)
                 return original_load(aggregate_type)
 
-            with patch.object(
-                store,
-                'load_events_by_aggregate_type',
-                side_effect=load_events,
-            ):
+            with patch.object(store, 'load_events_by_aggregate_type', side_effect=load_events):
                 self.assertTrue(_host_emergency_pause_required(store))
-
                 authority.restore_new_exposure(
                     account_id=ACCOUNT,
                     environment=ENVIRONMENT,
@@ -314,33 +359,22 @@ session.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['sta
                 )
                 self.assertFalse(_host_emergency_pause_required(store))
 
-                # A later accepted block interrupts immediately, before the
-                # serialized Host executor can apply it to AuthorityService.
                 host_events.append({
                     'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {
-                        'action': 'BLOCK_NEW_EXPOSURE',
-                        'operation_id': 'block-operation-2',
-                    },
+                    'payload': {'action': 'BLOCK_NEW_EXPOSURE',
+                                'operation_id': 'block-operation-2'},
                 })
                 self.assertTrue(_host_emergency_pause_required(store))
                 host_events.append({
                     'event_type': 'OPERATION_UPDATED',
-                    'payload': {
-                        'operation_id': 'block-operation-2',
-                        'phase': 'FAILED',
-                    },
+                    'payload': {'operation_id': 'block-operation-2', 'phase': 'FAILED'},
                 })
                 self.assertFalse(_host_emergency_pause_required(store))
 
-                # REVOKE has no inverse restore transition. Keep it sticky so
-                # an autonomous episode cannot bypass it with a new policy id.
                 host_events.append({
                     'event_type': 'COMMAND_ACCEPTED',
-                    'payload': {
-                        'action': 'REVOKE_AUTHORITY',
-                        'operation_id': 'revoke-operation-1',
-                    },
+                    'payload': {'action': 'REVOKE_AUTHORITY',
+                                'operation_id': 'revoke-operation-1'},
                 })
                 self.assertTrue(_host_emergency_pause_required(store))
 

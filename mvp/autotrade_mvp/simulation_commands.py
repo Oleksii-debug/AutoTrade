@@ -103,12 +103,14 @@ def resolve_simulation_action(journal, action, payload):
         or event.get('event_type') != 'SimulationOperatorCompleted'
         or event.get('aggregate_type') != _RECEIPT_TYPE
         or event.get('aggregate_id') != payload['command_id']
+        or type(event.get('aggregate_version')) is not int
         or event.get('aggregate_version') != 1
         or event.get('host_id') != 'local-simulation'
         or event.get('owner_epoch') != '1'
         or event.get('environment') != 'SIMULATION'
         or event.get('correlation_id') != payload['command_id']
         or event.get('causation_id') is not None
+        or event.get('payload_hash') != payload_digest(event.get('payload'))
         or event.get('evidence_refs') != []
         or event.get('occurred_at') != event.get('observed_at')
         or event.get('observed_at') != event.get('committed_at')
@@ -212,7 +214,7 @@ def execute_simulation_action(journal, action, payload, accepted_at):
         import os
         import sys
         from .simulation_status import inspect_canonical_simulation
-        command = [sys.executable, '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
+        command = [sys.executable, '-B', '-m', 'mvp.autotrade_mvp.product_worker', '--state-dir', str(root), '--action', action, '--command-id', payload['command_id'], '--parent-pid', str(os.getpid())]
         if payload['stop_after_episodes'] is not None:
             command += ['--stop', str(payload['stop_after_episodes'])]
         try:

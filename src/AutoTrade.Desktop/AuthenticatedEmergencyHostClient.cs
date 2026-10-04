@@ -1059,7 +1059,7 @@ internal static class DesktopHostClientFactory
     public static IEmergencyHostClient Create()
     {
         string? uriText = Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI");
-        Uri uri;
+        Uri? uri;
         if (string.IsNullOrWhiteSpace(uriText))
         {
             // The runnable ZERO launcher binds this exact loopback origin by
@@ -1067,7 +1067,7 @@ internal static class DesktopHostClientFactory
             // requires the current user's paired Credential Manager token.
             uri = new Uri("http://127.0.0.1:8765/", UriKind.Absolute);
         }
-        else if (!Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out uri))
+        else if (!Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out uri) || uri is null)
         {
             return new DisconnectedEmergencyHostClient(
                 "Authenticated host URI configuration is invalid. "

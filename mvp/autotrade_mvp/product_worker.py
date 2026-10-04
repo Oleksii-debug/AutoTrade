@@ -14,6 +14,27 @@ from .simulation_commands import (
 from .simulation_session import ACCOUNT, ENVIRONMENT, run_autonomous_simulation
 
 
+def start_parent_watchdog(parent_pid):
+    def watch_parent():
+        import time
+        if os.name == 'nt':
+            import ctypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.OpenProcess.restype = ctypes.c_void_p
+            kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            handle = kernel.OpenProcess(0x00100000, False, parent_pid)
+            if not handle:
+                os._exit(73)
+            while kernel.WaitForSingleObject(handle, 100) == 258:
+                pass
+            os._exit(73)
+        while os.getppid() == parent_pid:
+            time.sleep(0.1)
+        os._exit(73)
+    Thread(target=watch_parent, daemon=True).start()
+
+
 _HOST_TERMINAL_PHASES = frozenset({'SUCCEEDED', 'FAILED', 'CANCELLED'})
 _HOST_OPERATION_PHASES = frozenset({
     'QUEUED', 'RUNNING', 'WAITING_EXTERNAL', 'UNKNOWN', *_HOST_TERMINAL_PHASES,
@@ -59,14 +80,9 @@ def _host_emergency_pause_required(store):
                 raise ValueError('Host block operation phase is invalid')
             block_phases[operation_id] = phase
 
-    # Executed block truth is owned by the financial authority service. This is
-    # deliberately checked after unresolved accepted commands so a Host BLOCK
-    # can interrupt the running worker before the serialized executor obtains
-    # its turn, while a later durable restore can clear only that exact block.
     if AuthorityService(store).is_new_exposure_blocked(ACCOUNT, ENVIRONMENT):
         return True
     return any(phase not in _HOST_TERMINAL_PHASES for phase in block_phases.values())
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -77,25 +93,7 @@ def main():
     parser.add_argument('--parent-pid', type=int)
     args = parser.parse_args()
     if args.parent_pid is not None:
-        parent_pid = args.parent_pid
-        def watch_parent():
-            import time
-            if os.name == 'nt':
-                import ctypes
-                kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-                kernel.OpenProcess.restype = ctypes.c_void_p
-                kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-                kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-                handle = kernel.OpenProcess(0x00100000, False, parent_pid)
-                if not handle:
-                    os._exit(73)
-                while kernel.WaitForSingleObject(handle, 100) == 258:
-                    pass
-                os._exit(73)
-            while os.getppid() == parent_pid:
-                time.sleep(0.1)
-            os._exit(73)
-        Thread(target=watch_parent, daemon=True).start()
+        start_parent_watchdog(args.parent_pid)
     root = Path(args.state_dir)
     store = JournalStore(root / 'journal.sqlite3')
     protocol = _protocol(store)

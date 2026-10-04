@@ -1,6 +1,7 @@
 <Window x:Class="AutoTrade.Desktop.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="AutoTrade"
         Width="760"
         Height="680"
@@ -156,11 +157,15 @@
         <GroupBox Header="Web experience"
                   AutomationProperties.Name="Web experience">
           <StackPanel Margin="12">
-            <TextBlock TextWrapping="Wrap"
-                       Text="The embedded web experience is not connected in this foundation build. This native surface remains truthful and keyboard-operable if the web layer is unavailable." />
-            <TextBlock Margin="0,8,0,0"
-                       TextWrapping="Wrap"
-                       Text="Use the host status above before relying on any command." />
+            <TextBlock x:Name="WebExperienceStatus" TextWrapping="Wrap"
+                       Text="The application web interface has not connected. Native status and emergency controls remain available."
+                       AutomationProperties.Name="Web interface status"
+                       AutomationProperties.LiveSetting="Polite" />
+            <Button x:Name="FocusWebButton" Content="_Focus application web interface"
+                    Click="FocusWeb_Click" Margin="0,8,0,8" IsEnabled="False"
+                    AutomationProperties.Name="Focus application web interface" />
+            <wv2:WebView2 x:Name="ProductWebView" Height="600" Visibility="Collapsed"
+                          AutomationProperties.Name="AutoTrade provider-free application" />
           </StackPanel>
         </GroupBox>
       </StackPanel>

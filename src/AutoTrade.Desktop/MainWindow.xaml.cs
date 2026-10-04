@@ -1,6 +1,8 @@
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.IO;
+using Microsoft.Web.WebView2.Core;
 
 namespace AutoTrade.Desktop;
 
@@ -8,6 +10,9 @@ public partial class MainWindow : Window
 {
     private readonly IEmergencyHostClient _hostClient;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly OwnedProviderFreeRuntime? _ownedRuntime;
+    private bool _closing;
+    private bool _stopComplete;
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
 
@@ -16,10 +21,12 @@ public partial class MainWindow : Window
     {
     }
 
-    internal MainWindow(IEmergencyHostClient hostClient)
+    internal MainWindow(IEmergencyHostClient hostClient, OwnedProviderFreeRuntime? ownedRuntime = null)
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
+        _ownedRuntime = ownedRuntime;
         InitializeComponent();
+        Closing += MainWindow_Closing;
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
 
@@ -39,7 +46,66 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        await ConnectWebExperienceAsync();
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+    }
+
+    private async Task ConnectWebExperienceAsync()
+    {
+        if (_ownedRuntime is null) return;
+        try
+        {
+            WebExperienceSecurityPolicy policy = new(_ownedRuntime.Origin);
+            CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(
+                userDataFolder: Path.Combine(_ownedRuntime.DataDirectory, "webview2"));
+            await ProductWebView.EnsureCoreWebView2Async(environment);
+            CoreWebView2 core = ProductWebView.CoreWebView2;
+            core.Settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;
+            core.Settings.AreDefaultContextMenusEnabled = false;
+            core.Settings.AreHostObjectsAllowed = false;
+            core.Settings.IsWebMessageEnabled = false;
+            core.NavigationStarting += (_, e) =>
+            {
+                e.Cancel = !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
+                    || !policy.AllowsTopLevelNavigation(target);
+            };
+            core.NewWindowRequested += (_, e) => e.Handled = true;
+            core.DownloadStarting += (_, e) => e.Cancel = true;
+            core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
+            core.ServerCertificateErrorDetected += (_, e) => e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+            CoreWebView2Cookie cookie = core.CookieManager.CreateCookie("AutoTradeSession",
+                _ownedRuntime.CookieToken, "127.0.0.1", "/api/v1");
+            cookie.IsHttpOnly = true;
+            cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
+            core.CookieManager.AddOrUpdateCookie(cookie);
+            core.Navigate(_ownedRuntime.Origin.AbsoluteUri);
+            ProductWebView.Visibility = Visibility.Visible;
+            FocusWebButton.IsEnabled = true;
+            SetLiveRegionText(WebExperienceStatus,
+                "Provider-free web interface connected. Use Tab or Focus application web interface to enter it. Real orders are unavailable.");
+        }
+        catch (Exception)
+        {
+            SetLiveRegionText(WebExperienceStatus,
+                "Web interface unavailable. Check the installed WebView2 Runtime. Native host status and emergency controls remain available.");
+        }
+    }
+
+    private void FocusWeb_Click(object sender, RoutedEventArgs e) => ProductWebView.Focus();
+
+    private async void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_ownedRuntime is null || _stopComplete) return;
+        e.Cancel = true;
+        if (_closing) return;
+        _closing = true;
+        FocusWebButton.IsEnabled = false;
+        SetLiveRegionText(WebExperienceStatus, "Stopping the local host and draining accepted work.");
+        try { await _ownedRuntime.DisposeAsync(); }
+        catch (Exception) { SetLiveRegionText(WebExperienceStatus, "Host stop failed. State requires recovery at the next launch."); }
+        ProductWebView.Dispose();
+        _stopComplete = true;
+        Close();
     }
 
     private void MainWindow_Closed(object? sender, EventArgs e)

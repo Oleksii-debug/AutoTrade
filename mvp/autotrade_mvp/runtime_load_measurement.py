@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter_ns
+from types import FunctionType
 from typing import Callable, Sequence, TypeVar
 
 from .performance_qualification import RuntimeBudgetDecision, RuntimeBudgetSpec
@@ -313,6 +314,9 @@ def measure_declared_financial_operation(
         raise error_type("payload digest authority is not canonical")
     canonical_json_namespace = canonical_json_for.__globals__
     json_module = canonical_json_namespace.get("json")
+    json_dumps = getattr(json_module, "dumps", None)
+    if type(json_dumps) is not FunctionType:
+        raise error_type("canonical JSON serializer authority is not canonical")
 
     plan_digest_namespace = plan_digest_getter.__globals__
     plan_payload_digest = plan_digest_namespace.get("payload_digest")
@@ -356,6 +360,12 @@ def measure_declared_financial_operation(
             "canonical_json.json",
         ),
         (
+            json_module.__dict__,
+            "dumps",
+            json_dumps,
+            "canonical_json.json.dumps",
+        ),
+        (
             plan_digest_namespace,
             "payload_digest",
             plan_payload_digest,
@@ -391,6 +401,7 @@ def measure_declared_financial_operation(
             ("_non_negative_int", non_negative_int),
             ("payload_digest", payload_digest_for),
             ("payload_digest.canonical_json", canonical_json_for),
+            ("canonical_json.json.dumps", json_dumps),
             ("DurableFinancialLatencySample.__init__", sample_init),
             ("ExpectedJournalEvent.payload", expected_payload_getter),
             ("DeclaredRuntimeEventPlan.digest", plan_digest_getter),

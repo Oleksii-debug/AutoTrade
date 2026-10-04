@@ -1597,17 +1597,6 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
                 "run_id": run_id, "completed_episodes": len(completed),
                 "unresolved_episode": active["episode"], "new_outbound_requests": 0,
                 "reason": "unfinished_episode_requires_reconciliation", "resumed": True}
-    if completed:
-        # Validate the last terminal common cut before recreating provider,
-        # economic, OMS, risk or valuation projections.  The checkpoint is
-        # evidence over existing owners; it is not a new financial authority.
-        from .simulation_runtime_checkpoint import verify_autonomous_runtime_checkpoint
-        verify_autonomous_runtime_checkpoint(
-            root,
-            store,
-            protocol=protocol,
-            completed=completed,
-        )
     state = completed[-1]["provider_state"] if completed else events[0]["payload"]["provider_state"]
     provider = SimulatedProvider.from_state(state)
     economic = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
@@ -1621,6 +1610,25 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
         resolution_artifact_store=artifacts, resolution_artifact_root=root / "artifacts")
     orders = DurableOrderBookProjection(store, provider_id=PROVIDER, account_id=ACCOUNT,
         environment=ENVIRONMENT, host_id="local-simulation", owner_epoch="1")
+    if completed:
+        # Preserve the owning authorities' more specific fail-closed diagnoses
+        # before applying the cross-authority common-cut gate.  These reads do
+        # not expose another market event or permit a send.
+        if any(
+            record.state == "UNKNOWN"
+            or any(value > 0 for value in record.remaining.values())
+            for record in reservations.active()
+        ):
+            raise ValueError("pending/UNKNOWN reservations block a new financial cut")
+        if any(order.state != "FILLED" for order in orders.snapshots):
+            raise ValueError("pending/UNKNOWN OMS obligations block a new financial cut")
+        from .simulation_runtime_checkpoint import verify_autonomous_runtime_checkpoint
+        verify_autonomous_runtime_checkpoint(
+            root,
+            store,
+            protocol=protocol,
+            completed=completed,
+        )
     scope = RiskPolicyScope(PROVIDER, ACCOUNT, ENVIRONMENT, ENVIRONMENT, "internal-simulator-v1", "CASH_EQUITY")
     registry = DurableRiskPolicyRegistry(store)
     policy = selected_policy

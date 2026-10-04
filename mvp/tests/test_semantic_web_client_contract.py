@@ -989,6 +989,22 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("applyTableFilter(tool, {announce: false})", reapply)
         self.assertNotIn("resetPage: true", reapply)
 
+    def test_refresh_reveals_same_page_for_still_matching_selected_evidence(self):
+        js = APP.read_text(encoding="utf-8")
+        preserve = js[js.index("function preserveTableSelection"):js.index("function appendProjectionRow")]
+        self.assertIn("revealBookmarkedTablePage(body, bookmark);", preserve)
+        reveal = js[js.index("function revealBookmarkedTablePage"):js.index("function restoreTableSelection")]
+        self.assertIn("const anchorRow = rowForSelectionEndpoint(body, bookmark.anchor);", reveal)
+        self.assertIn("const focusRow = rowForSelectionEndpoint(body, bookmark.focus);", reveal)
+        self.assertIn("const anchorIndex = matching.indexOf(anchorRow);", reveal)
+        self.assertIn("const focusIndex = matching.indexOf(focusRow);", reveal)
+        self.assertIn("if (anchorIndex < 0 || focusIndex < 0) return;", reveal)
+        self.assertIn("const anchorPage = Math.floor(anchorIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("const focusPage = Math.floor(focusIndex / TABLE_PAGE_SIZE);", reveal)
+        self.assertIn("if (anchorPage !== focusPage) return;", reveal)
+        self.assertIn("view.page = anchorPage;", reveal)
+        self.assertIn("applyTableFilter(tool, {announce: false});", reveal)
+
     def test_event_history_host_order_uses_exact_cursor_comparison(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("row.dataset.tableHostOrder = cursor.toString();", js)

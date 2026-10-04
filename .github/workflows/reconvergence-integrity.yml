@@ -22,6 +22,30 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify event base is still exact live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          AUTOTRADE_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          AUTOTRADE_EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t live_target < <(
+            git ls-remote --refs origin "refs/heads/${AUTOTRADE_EVENT_BASE_REF}"
+          )
+          test "${#live_target[@]}" -eq 1
+          live_target_sha="${live_target[0]%%      - name: Guard pull-request repository tree with trusted base code
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        run: >-
+          python -m control.tools.reconvergence_integrity
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+      - name: Run trusted guard regression tests
+        run: python -m unittest tests.Control.test_reconvergence_integrity -v
+\t'*}"
+          test "${live_target_sha}" = "${AUTOTRADE_EVENT_BASE_SHA}"
+
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash

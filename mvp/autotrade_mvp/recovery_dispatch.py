@@ -33,24 +33,49 @@ from .recovery import OwnerFence, RecoveryController
 
 _ISSUANCE_TOKEN = object()
 _CANONICAL_VALIDATE_SENDER = RecoveryController.validate_sender
+_CANONICAL_VALIDATE_SENDER_CODE = RecoveryController.validate_sender.__code__
+_CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT = _canonical_journal_authority_snapshot
+_CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE = _canonical_journal_authority_snapshot.__code__
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
 
+def _require_executable_authority() -> None:
+    if RecoveryController.validate_sender is not _CANONICAL_VALIDATE_SENDER:
+        raise PermissionError("recovery sender validator authority changed")
+    if _CANONICAL_VALIDATE_SENDER.__code__ is not _CANONICAL_VALIDATE_SENDER_CODE:
+        raise PermissionError("recovery sender validator code changed")
+    if (
+        _canonical_journal_authority_snapshot
+        is not _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
+    ):
+        raise PermissionError("journal snapshot authority changed")
+    if (
+        _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT.__code__
+        is not _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE
+    ):
+        raise PermissionError("journal snapshot authority code changed")
+
+
+def _trusted_journal_authority_snapshot(store: JournalStore):
+    _require_executable_authority()
+    return _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT(store)
+
+
 def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
-    normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
-    )
-    if normalized_environment not in _CANONICAL_ENVIRONMENTS:
+    if type(environment) is not str:
+        raise TypeError("environment must be exact text")
+    if environment not in _CANONICAL_ENVIRONMENTS:
         raise ValueError(
-            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            "environment must be canonical REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    if not isinstance(account_id, str) or not account_id.strip():
-        raise ValueError("account_id is required")
-    normalized_account = account_id.strip()
+    if type(account_id) is not str:
+        raise TypeError("account_id must be exact text")
+    if not account_id or account_id != account_id.strip():
+        raise ValueError("account_id must be canonical non-empty text")
     return (
-        normalized_environment,
-        normalized_account,
-        f"{normalized_environment}:{normalized_account}",
+        environment,
+        account_id,
+        f"{environment}:{account_id}",
     )
 
 
@@ -97,12 +122,17 @@ class RecoveryIssuedDispatcher:
             raise TypeError("store must be exact JournalStore")
         if type(owner) is not OwnerFence:
             raise TypeError("owner must be exact OwnerFence")
+        if type(owner.owner_id) is not str or not owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(owner.epoch) is not int or owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
+        _require_executable_authority()
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
         self.__recovery = recovery
         self.__store = store
-        self.__store_snapshot = _canonical_journal_authority_snapshot(store)
+        self.__store_snapshot = _trusted_journal_authority_snapshot(store)
         self.__sender_check = _CANONICAL_VALIDATE_SENDER.__get__(
             recovery, RecoveryController
         )
@@ -137,7 +167,29 @@ class RecoveryIssuedDispatcher:
             raise PermissionError("recovery controller authority changed")
         if type(self.__store) is not JournalStore:
             raise PermissionError("submission journal authority changed")
-        if _canonical_journal_authority_snapshot(self.__store) != self.__store_snapshot:
+        if type(self.__owner) is not OwnerFence:
+            raise PermissionError("recovery owner authority changed")
+        if type(self.__owner.owner_id) is not str or not self.__owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(self.__owner.epoch) is not int or self.__owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
+        if (
+            type(self.__environment) is not str
+            or self.__environment not in _CANONICAL_ENVIRONMENTS
+        ):
+            raise PermissionError("issued dispatcher environment authority changed")
+        if (
+            type(self.__account_id) is not str
+            or not self.__account_id
+            or self.__account_id != self.__account_id.strip()
+        ):
+            raise PermissionError("issued dispatcher account authority changed")
+        _require_executable_authority()
+        if self.__sender_check.__self__ is not self.__recovery:
+            raise PermissionError("bound recovery sender authority changed")
+        if self.__sender_check.__func__ is not _CANONICAL_VALIDATE_SENDER:
+            raise PermissionError("bound recovery sender validator changed")
+        if _trusted_journal_authority_snapshot(self.__store) != self.__store_snapshot:
             raise PermissionError("submission journal generation changed")
         if self.__dispatcher.store is not self.__store:
             raise PermissionError("guarded dispatcher journal authority changed")
@@ -214,13 +266,10 @@ def build_recovery_issued_dispatcher(
         raise TypeError("recovery must be exact RecoveryController")
     if type(store) is not JournalStore:
         raise TypeError("store must be exact JournalStore")
-    if (
-        not isinstance(prepared_lease_seconds, int)
-        or isinstance(prepared_lease_seconds, bool)
-        or prepared_lease_seconds < 1
-    ):
-        raise ValueError("prepared_lease_seconds must be a positive integer")
+    if type(prepared_lease_seconds) is not int or prepared_lease_seconds < 1:
+        raise ValueError("prepared_lease_seconds must be a positive exact integer")
 
+    _require_executable_authority()
     normalized_environment, normalized_account, expected_scope = _scope(
         environment, account_id
     )
@@ -229,19 +278,24 @@ def build_recovery_issued_dispatcher(
         raise PermissionError(
             "dispatcher JournalStore must be the exact recovery owner store"
         )
-    if recovery.owner_scope != expected_scope:
+    owner_scope = state.get("_owner_scope")
+    if type(owner_scope) is not str or owner_scope != expected_scope:
         raise PermissionError("dispatcher scope does not match recovery owner scope")
 
     owner = recovery.owner
     if type(owner) is not OwnerFence:
         raise PermissionError("recovery has no active durable owner")
+    if type(owner.owner_id) is not str or not owner.owner_id:
+        raise PermissionError("recovery owner identity is not canonical exact text")
+    if type(owner.epoch) is not int or owner.epoch < 1:
+        raise PermissionError("recovery owner epoch is not a positive exact integer")
     durable_chain = recovery.durable_owner_chain()
     if not durable_chain or durable_chain[-1] != owner:
         raise PermissionError("recovery owner is not the current durable owner")
 
     # Snapshot the exact backing generation before creating the inner dispatcher;
     # GuardedDispatcher snapshots and rechecks the same generation independently.
-    _canonical_journal_authority_snapshot(store)
+    _trusted_journal_authority_snapshot(store)
     return RecoveryIssuedDispatcher(
         recovery=recovery,
         store=store,

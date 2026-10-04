@@ -26,6 +26,30 @@ class TrustedChronologyTransitiveCallableAuthorityTests(unittest.TestCase):
         finally:
             helper.__code__ = original_code
 
+    def test_measurement_parser_kwdefault_mutation_does_not_execute_value_equality(self) -> None:
+        kwdefaults = json.loads.__kwdefaults__
+        self.assertIs(type(kwdefaults), dict)
+        original = kwdefaults["cls"]
+        equality_called = False
+
+        class HostileValue:
+            def __eq__(self, other):
+                nonlocal equality_called
+                equality_called = True
+                raise AssertionError("kwdefault equality callback executed")
+
+        try:
+            kwdefaults["cls"] = HostileValue()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"trusted chronology measurement parser module function defaults changed",
+            ):
+                chronology.parse_challenge_bound_measurement(b"", challenge=None)
+        finally:
+            kwdefaults["cls"] = original
+
+        self.assertFalse(equality_called)
+
     def test_signed_receipt_parser_rejects_same_object_base64_dependency_code_mutation(self) -> None:
         helper = base64._bytes_from_decode_data
         original_code = helper.__code__

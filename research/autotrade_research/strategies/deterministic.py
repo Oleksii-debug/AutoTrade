@@ -212,6 +212,30 @@ class StrategyDescriptor:
         return "sha256:" + sha256(payload).hexdigest()
 
 
+def _readmit_strategy_descriptor(value: StrategyDescriptor) -> StrategyDescriptor:
+    """Detach and revalidate the exact registered strategy descriptor."""
+
+    if type(value) is not StrategyDescriptor:
+        raise TypeError("descriptor must be canonical StrategyDescriptor")
+    return StrategyDescriptor(
+        strategy_id=value.strategy_id,
+        version=value.version,
+        family=value.family,
+        feature_schema=value.feature_schema,
+        market_requirements=value.market_requirements,
+        minimum_history=value.minimum_history,
+        horizon_seconds=value.horizon_seconds,
+        decision_schedule=value.decision_schedule,
+        proposal_semantics=value.proposal_semantics,
+        parameter_bounds=value.parameter_bounds,
+        resource_profile=value.resource_profile,
+        supported_regimes=value.supported_regimes,
+        source_license=value.source_license,
+        evaluation_protocol_sha256=value.evaluation_protocol_sha256,
+        artifact_sha256=value.artifact_sha256,
+    )
+
+
 @dataclass(frozen=True)
 class CausalObservation:
     event_id: str
@@ -1189,8 +1213,7 @@ class NoTradeBaseline:
     """Deterministic null baseline that can never propose financial exposure."""
 
     def __init__(self, *, descriptor: StrategyDescriptor):
-        if not isinstance(descriptor, StrategyDescriptor):
-            raise TypeError("descriptor must be StrategyDescriptor")
+        descriptor = _readmit_strategy_descriptor(descriptor)
         if descriptor.family != "NO_TRADE_CONTROL":
             raise ValueError("no-trade descriptor family must be NO_TRADE_CONTROL")
         self.descriptor = descriptor
@@ -1202,6 +1225,9 @@ class NoTradeBaseline:
         decision_time: datetime,
         evidence_event_ids: tuple[str, ...] = (),
     ) -> DeterministicProposal:
+        descriptor = _readmit_strategy_descriptor(self.descriptor)
+        if descriptor.family != "NO_TRADE_CONTROL":
+            raise ValueError("no-trade descriptor family must be NO_TRADE_CONTROL")
         name = _text(symbol, name="symbol")
         cutoff = _time(decision_time, name="decision_time")
         if type(evidence_event_ids) is not tuple:
@@ -1222,13 +1248,13 @@ class NoTradeBaseline:
             economic_edge_claim="UNPROVEN",
             reason="registered no-trade control baseline",
             information_cutoff=cutoff,
-            horizon_seconds=self.descriptor.horizon_seconds,
-            expiry=cutoff + timedelta(seconds=self.descriptor.horizon_seconds),
+            horizon_seconds=descriptor.horizon_seconds,
+            expiry=cutoff + timedelta(seconds=descriptor.horizon_seconds),
             strategy_version=(
-                f"{self.descriptor.strategy_id}@{self.descriptor.version}"
+                f"{descriptor.strategy_id}@{descriptor.version}"
             ),
-            strategy_fingerprint=self.descriptor.fingerprint,
-            strategy_configuration_fingerprint=self.descriptor.fingerprint,
+            strategy_fingerprint=descriptor.fingerprint,
+            strategy_configuration_fingerprint=descriptor.fingerprint,
         )
 
 
@@ -1279,10 +1305,11 @@ class ReturnThresholdBaseline:
 
     @property
     def configuration_fingerprint(self) -> str | None:
-        if self.descriptor is None:
+        descriptor = _validate_threshold_strategy_configuration(self)
+        if descriptor is None:
             return None
         body = {
-            "descriptor_fingerprint": self.descriptor.fingerprint,
+            "descriptor_fingerprint": descriptor.fingerprint,
             "parameters": {
                 "lookback": self.lookback,
                 "threshold": str(self.threshold),
@@ -1294,18 +1321,30 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
+        _validate_threshold_strategy_configuration(self)
+        if type(self._history) is not dict or type(self._observations_by_id) is not dict:
+            raise ValueError("strategy state containers are invalid")
         observation = _readmit_causal_observation(observation)
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
         existing = self._observations_by_id.get(observation.event_id)
         if existing is not None:
+            existing = _readmit_causal_observation(existing)
             if existing != observation:
                 raise ValueError("event_id already exists with different observation content")
             return False
         history = self._history.setdefault(observation.symbol, [])
-        if history and observation.available_at < history[-1].available_at:
-            raise ValueError("observations must be ingested in non-decreasing availability order")
+        if type(history) is not list:
+            raise ValueError("strategy symbol history must be a list")
+        if history:
+            last_retained = _readmit_causal_observation(history[-1])
+            if last_retained.symbol != observation.symbol:
+                raise ValueError("retained history symbol does not match history key")
+            if observation.available_at < last_retained.available_at:
+                raise ValueError(
+                    "observations must be ingested in non-decreasing availability order"
+                )
         history.append(observation)
         if len(history) > self.lookback:
             del history[:-self.lookback]
@@ -1313,12 +1352,14 @@ class ReturnThresholdBaseline:
         return True
 
     def propose(self, *, symbol: str, decision_time: datetime) -> DeterministicProposal:
+        descriptor = _validate_threshold_strategy_configuration(self)
+        state_history, _state_seen = _readmit_threshold_strategy_state(self)
         name = _text(symbol, name="symbol")
         cutoff = _time(decision_time, name="decision_time")
-        history = self._history.get(name, [])
+        history = state_history.get(name, ())
         eligible = [item for item in history if item.available_at <= cutoff]
         horizon_seconds = (
-            self.descriptor.horizon_seconds if self.descriptor is not None else None
+            descriptor.horizon_seconds if descriptor is not None else None
         )
         expiry = (
             cutoff + timedelta(seconds=horizon_seconds)
@@ -1326,12 +1367,12 @@ class ReturnThresholdBaseline:
             else None
         )
         strategy_version = (
-            f"{self.descriptor.strategy_id}@{self.descriptor.version}"
-            if self.descriptor is not None
+            f"{descriptor.strategy_id}@{descriptor.version}"
+            if descriptor is not None
             else None
         )
         strategy_fingerprint = (
-            self.descriptor.fingerprint if self.descriptor is not None else None
+            descriptor.fingerprint if descriptor is not None else None
         )
         strategy_configuration_fingerprint = self.configuration_fingerprint
         if len(eligible) < self.lookback:
@@ -1384,6 +1425,8 @@ class ReturnThresholdBaseline:
         )
 
     def snapshot(self) -> str:
+        descriptor = _validate_threshold_strategy_configuration(self)
+        state_history, state_seen = _readmit_threshold_strategy_state(self)
         payload = {
             "schema_version": 6,
             "strategy_family": _threshold_family_for_type(type(self)),
@@ -1392,13 +1435,13 @@ class ReturnThresholdBaseline:
             "proposal_quantity": str(self.proposal_quantity),
             "descriptor": (
                 None
-                if self.descriptor is None
-                else self.descriptor.canonical_document()
+                if descriptor is None
+                else descriptor.canonical_document()
             ),
             "descriptor_fingerprint": (
                 None
-                if self.descriptor is None
-                else self.descriptor.fingerprint
+                if descriptor is None
+                else descriptor.fingerprint
             ),
             "configuration_fingerprint": self.configuration_fingerprint,
             "seen_events": {
@@ -1407,7 +1450,7 @@ class ReturnThresholdBaseline:
                     "available_at": item.available_at.isoformat(),
                     "price": str(item.price),
                 }
-                for event_id, item in sorted(self._observations_by_id.items())
+                for event_id, item in sorted(state_seen.items())
             },
             "history": {
                 symbol: [
@@ -1418,7 +1461,7 @@ class ReturnThresholdBaseline:
                     }
                     for item in rows
                 ]
-                for symbol, rows in sorted(self._history.items())
+                for symbol, rows in sorted(state_history.items())
             },
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -1624,6 +1667,108 @@ def _threshold_family_for_type(strategy_type: type) -> str:
     )
 
 
+
+def _validate_threshold_strategy_configuration(
+    strategy: ReturnThresholdBaseline,
+) -> StrategyDescriptor | None:
+    _threshold_family_for_type(type(strategy))
+    if type(strategy.lookback) is not int or strategy.lookback < 2:
+        raise ValueError("strategy lookback must remain an integer >= 2")
+    if type(strategy.threshold) is not Decimal:
+        raise ValueError("strategy threshold must remain a canonical Decimal")
+    threshold = _decimal(strategy.threshold, name="strategy threshold")
+    if threshold < 0:
+        raise ValueError("strategy threshold must remain non-negative")
+    if type(strategy.proposal_quantity) is not Decimal:
+        raise ValueError(
+            "strategy proposal_quantity must remain a canonical Decimal"
+        )
+    quantity = _decimal(
+        strategy.proposal_quantity,
+        name="strategy proposal_quantity",
+    )
+    if quantity <= 0:
+        raise ValueError("strategy proposal_quantity must remain positive")
+
+    if strategy.descriptor is None:
+        return None
+    descriptor = _readmit_strategy_descriptor(strategy.descriptor)
+    expected_family = _threshold_family_for_type(type(strategy))
+    if descriptor.family != expected_family:
+        raise ValueError(
+            f"descriptor family must be {expected_family} "
+            "for this strategy implementation"
+        )
+    if descriptor.minimum_history != strategy.lookback:
+        raise ValueError("descriptor minimum_history must equal lookback")
+    bounds = {
+        name: (
+            _decimal(minimum, name=f"{name} minimum"),
+            _decimal(maximum, name=f"{name} maximum"),
+        )
+        for name, minimum, maximum in descriptor.parameter_bounds
+    }
+    for parameter, value in (
+        ("threshold", threshold),
+        ("proposal_quantity", quantity),
+    ):
+        if parameter not in bounds:
+            raise ValueError(f"descriptor lacks {parameter} parameter bounds")
+        minimum, maximum = bounds[parameter]
+        if value < minimum or value > maximum:
+            raise ValueError(f"{parameter} is outside descriptor bounds")
+    return descriptor
+
+
+def _readmit_threshold_strategy_state(
+    strategy: ReturnThresholdBaseline,
+) -> tuple[
+    dict[str, tuple[CausalObservation, ...]],
+    dict[str, CausalObservation],
+]:
+    if type(strategy._history) is not dict or type(strategy._observations_by_id) is not dict:
+        raise ValueError("strategy state containers are invalid")
+
+    seen: dict[str, CausalObservation] = {}
+    for event_id, raw_observation in strategy._observations_by_id.items():
+        canonical_event_id = _text(event_id, name="seen event_id")
+        observation = _readmit_causal_observation(raw_observation)
+        if canonical_event_id != event_id or observation.event_id != event_id:
+            raise ValueError("seen-event key does not match observation event_id")
+        seen[event_id] = observation
+
+    history: dict[str, tuple[CausalObservation, ...]] = {}
+    retained_ids: set[str] = set()
+    for symbol, raw_rows in strategy._history.items():
+        canonical_symbol = _text(symbol, name="history symbol")
+        if canonical_symbol != symbol:
+            raise ValueError("history symbol key is not canonical")
+        if type(raw_rows) is not list:
+            raise ValueError("strategy symbol history must be a list")
+        if len(raw_rows) > strategy.lookback:
+            raise ValueError("strategy retained history exceeds configured lookback")
+        rows: list[CausalObservation] = []
+        previous_time: datetime | None = None
+        for raw_observation in raw_rows:
+            observation = _readmit_causal_observation(raw_observation)
+            if observation.symbol != symbol:
+                raise ValueError("retained history symbol does not match history key")
+            if observation.event_id in retained_ids:
+                raise ValueError("retained history contains duplicate event_id")
+            retained_ids.add(observation.event_id)
+            seen_observation = seen.get(observation.event_id)
+            if seen_observation is None or seen_observation != observation:
+                raise ValueError(
+                    "retained history is not backed by identical seen-event state"
+                )
+            if previous_time is not None and observation.available_at < previous_time:
+                raise ValueError("retained history availability order is invalid")
+            previous_time = observation.available_at
+            rows.append(observation)
+        history[symbol] = tuple(rows)
+    return history, seen
+
+
 def _threshold_signal(
     strategy_type: type,
     window: list[CausalObservation],
@@ -1731,12 +1876,12 @@ def run_registered_baseline(
     """Run a registered strategy from pristine state and mint replay evidence."""
 
     _threshold_family_for_type(type(strategy))
-    if strategy.descriptor is None:
+    descriptor = _validate_threshold_strategy_configuration(strategy)
+    if descriptor is None:
         raise ValueError("registered runner requires a registered strategy descriptor")
-    if strategy._observations_by_id or any(strategy._history.values()):
+    history, seen = _readmit_threshold_strategy_state(strategy)
+    if seen or any(history.values()):
         raise ValueError("registered runner requires pristine strategy state")
-    if type(strategy.descriptor) is not StrategyDescriptor:
-        raise TypeError("registered runner descriptor must be canonical StrategyDescriptor")
     pristine_snapshot = strategy.snapshot()
     if type(observations) not in (list, tuple):
         raise TypeError("observations must be an exact built-in list or tuple")

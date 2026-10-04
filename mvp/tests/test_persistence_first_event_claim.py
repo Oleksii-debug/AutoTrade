@@ -36,6 +36,40 @@ def owner_event(event_id: str, aggregate_id: str) -> dict:
 
 
 class FirstEventClaimTests(unittest.TestCase):
+    def test_first_event_claim_freezes_mutating_nested_payload_once(self):
+        class MutatingPayload(dict):
+            def __init__(self):
+                super().__init__(schema_version="1.0.0", owner="session-1")
+                self._mutated = False
+
+            def items(self):
+                items = list(super().items())
+                if not self._mutated:
+                    self._mutated = True
+                    self["owner"] = "mutated-owner"
+                return items
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            payload = MutatingPayload()
+            event = owner_event("owner-freeze", "session-1")
+            event["payload"] = payload
+            event["payload_hash"] = payload_digest(
+                {"schema_version": "1.0.0", "owner": "session-1"}
+            )
+
+            result = JournalStore.claim_first_event(store, event)
+
+            self.assertTrue(result.inserted)
+            self.assertEqual(payload["owner"], "mutated-owner")
+            persisted = JournalStore(path).get_event("owner-freeze")
+            self.assertIsNotNone(persisted)
+            self.assertEqual(
+                persisted["payload"],
+                {"schema_version": "1.0.0", "owner": "session-1"},
+            )
+
     def test_empty_store_claim_is_exact_global_sequence_one(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

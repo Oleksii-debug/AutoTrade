@@ -439,7 +439,7 @@ class AuthorityTests(unittest.TestCase):
                 environment="SIMULATION",
                 account_id="paper-1",
             )
-            result = authority.admit(
+            kwargs = dict(
                 command_id="cmd-legacy-confirmation",
                 idempotency_key="idem-legacy-confirmation",
                 admission_id="admission-legacy-confirmation",
@@ -451,15 +451,34 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 notional="100",
-                reservation_book=reservations,
                 reservation_id="reservation-legacy-confirmation",
                 confirmation_id="legacy-confirmation",
                 **public_financial_kwargs(store),
+            )
+            result = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
             )
             self.assertEqual(result.outcome, "REJECTED")
             self.assertEqual(
                 result.reason,
                 "confirmation_financial_binding_missing",
+            )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+            authority_event_count = len(
+                store.load_events("authority_state", "canonical")
+            )
+            retry = authority.admit(
+                reservation_book=reservations,
+                **kwargs,
+            )
+            self.assertEqual(retry, result)
+            self.assertEqual(
+                len(store.load_events("authority_state", "canonical")),
+                authority_event_count,
             )
             self.assertEqual(
                 reservations.total_reserved("CASH:USD"),

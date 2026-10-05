@@ -414,6 +414,8 @@ class ProtectedCredentialVault:
         if not hasattr(protector, "protect") or not hasattr(protector, "unprotect"):
             raise TypeError("protector must implement protect and unprotect")
         self._protector = protector
+        self._protect = protector.protect
+        self._unprotect = protector.unprotect
         if sys.platform != "win32":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
@@ -619,7 +621,7 @@ class ProtectedCredentialVault:
                 purpose=normalized_purpose,
                 generation=generation,
             )
-            ciphertext = self._protector.protect(
+            ciphertext = self._protect(
                 secret_value.encode("utf-8"),
                 entropy=entropy,
             )
@@ -801,7 +803,7 @@ class ProtectedCredentialVault:
             generation=handle.generation,
         )
         try:
-            plaintext = self._protector.unprotect(
+            plaintext = self._unprotect(
                 b64decode(record["ciphertext"], validate=True),
                 entropy=entropy,
             )
@@ -871,7 +873,7 @@ class ProtectedCredentialVault:
                 generation=current.generation,
             )
             try:
-                plaintext = self._protector.unprotect(
+                plaintext = self._unprotect(
                     b64decode(record["ciphertext"], validate=True),
                     entropy=entropy,
                 )
@@ -949,7 +951,7 @@ class ProtectedCredentialVault:
                 generation=current.generation,
             )
             try:
-                raw = self._protector.unprotect(
+                raw = self._unprotect(
                     b64decode(record["ciphertext"], validate=True),
                     entropy=entropy,
                 )
@@ -1013,7 +1015,7 @@ class ProtectedCredentialVault:
             )
             record["handle"] = asdict(next_handle)
             record["ciphertext"] = b64encode(
-                self._protector.protect(
+                self._protect(
                     new_secret_value.encode("utf-8"),
                     entropy=entropy,
                 )

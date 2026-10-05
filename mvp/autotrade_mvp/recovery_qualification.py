@@ -26,9 +26,9 @@ from research.autotrade_research.artifacts.store import (
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
-    QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -490,9 +490,6 @@ def qualify_recovery_release(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
@@ -508,11 +505,6 @@ def qualify_recovery_release(
         qualification_receipt, SignedQualificationAttestation
     ):
         raise TypeError("qualification_receipt must be SignedQualificationAttestation")
-    if qualification_policy is not None and not isinstance(
-        qualification_policy, QualificationTrustPolicy
-    ):
-        raise TypeError("qualification_policy must be QualificationTrustPolicy")
-
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
     hard_failure = False
@@ -565,15 +557,8 @@ def qualify_recovery_release(
         inconclusive = True
 
     accepted: AcceptedQualificationAttestation | None = None
-    trust_inputs = (
-        evidence_store,
-        evidence_root,
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs[1:]):
+    trust_inputs = (evidence_store, evidence_root, qualification_receipt)
+    if all(value is None for value in trust_inputs):
         blockers.append("independent_evidence_trust_unavailable")
         inconclusive = True
     elif any(value is None for value in trust_inputs):
@@ -581,13 +566,10 @@ def qualify_recovery_release(
         inconclusive = True
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=policy.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
@@ -598,6 +580,9 @@ def qualify_recovery_release(
                 expected_release_artifact_id=policy.release_artifact_id,
                 expected_release_artifact_sha256=policy.release_artifact_sha256,
             )
+        except QualificationTrustUnavailable:
+            blockers.append("independent_evidence_trust_unavailable")
+            inconclusive = True
         except (QualificationTrustError, TypeError, ValueError):
             blockers.append("independent_evidence_trust_invalid")
             inconclusive = True

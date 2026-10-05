@@ -119,6 +119,7 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
             require_provider_account_absence_semantics_authority(
                 value,
                 qualification_registry=qualifications,
+                at=NOW,
             )
 
     def test_exact_rule_lookup_retains_endpoint_entitlement_and_retention_identity(self):
@@ -131,6 +132,7 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                 endpoint="/v5/execution/list",
                 data_entitlement="EXECUTIONS",
                 qualification_registry=qualifications,
+                at=NOW,
             )
             self.assertEqual(rule["query_scope_rule_id"], "BYBIT_SPOT_ACCOUNT_QUERY_V1")
             self.assertEqual(rule["pagination_rule_id"], "BYBIT_V5_CURSOR_V1")
@@ -186,6 +188,7 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                 require_provider_account_absence_semantics_authority(
                     value,
                     qualification_registry=qualifications,
+                    at=NOW,
                 )
 
     def test_cross_store_registry_cannot_reuse_absence_semantics(self):
@@ -201,6 +204,7 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                 require_provider_account_absence_semantics_authority(
                     value,
                     qualification_registry=second_registry,
+                    at=NOW,
                 )
 
     def test_expired_q_cannot_refresh_absence_semantics(self):
@@ -214,6 +218,36 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                     qualifications,
                     reconciliation,
                     at=datetime(2026, 10, 6, tzinfo=timezone.utc),
+                )
+
+    def test_issued_semantics_cannot_be_consumed_after_q_expiry(self):
+        with TemporaryDirectory() as directory:
+            qualifications, _record, reconciliation = self.authorities(directory)
+            value = self.resolve(qualifications, reconciliation)
+            with self.assertRaisesRegex(
+                ProviderAccountAbsenceSemanticsError,
+                "not exact current authority",
+            ):
+                require_provider_account_absence_rule(
+                    value,
+                    surface="EXECUTIONS",
+                    endpoint="/v5/execution/list",
+                    data_entitlement="EXECUTIONS",
+                    qualification_registry=qualifications,
+                    at=datetime(2026, 10, 6, tzinfo=timezone.utc),
+                )
+
+    def test_registry_bound_consumption_requires_explicit_time(self):
+        with TemporaryDirectory() as directory:
+            qualifications, _record, reconciliation = self.authorities(directory)
+            value = self.resolve(qualifications, reconciliation)
+            with self.assertRaisesRegex(
+                ProviderAccountAbsenceSemanticsError,
+                "exact consumption time",
+            ):
+                require_provider_account_absence_semantics_authority(
+                    value,
+                    qualification_registry=qualifications,
                 )
 
     def test_malformed_rule_inside_accepted_q_fails_closed(self):
@@ -266,6 +300,7 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                             endpoint=endpoint,
                             data_entitlement=entitlement,
                             qualification_registry=qualifications,
+                            at=NOW,
                         )
 
     def test_claim_helper_rejects_absolute_or_noncanonical_endpoint(self):

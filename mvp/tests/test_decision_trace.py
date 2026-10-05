@@ -253,6 +253,45 @@ class DecisionTraceStoreTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_reconstruction_rejects_executable_availability_before_callbacks(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("caller availability iterator must not execute")
+
+        class HostileIdentity(str):
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("caller identity hash must not execute")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("caller identity equality must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-availability"))
+
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=HostileList(),
+                    available_evidence_ids=["evidence-1"],
+                )
+
+            hostile_identity = HostileIdentity("evidence-1")
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact strings"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=[hostile_identity],
+                )
+
+        self.assertEqual(calls, [])
+
     def test_exact_reconstruction_binds_source_build_and_content_digest(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

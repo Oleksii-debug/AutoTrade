@@ -26,7 +26,8 @@ from .exact_decimal import (
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
-from .instruments import InstrumentVersion
+from .instruments import InstrumentVersion, _detached_instrument_version
+from .settlement_convention import SettlementConvention
 
 
 class FuturesError(ValueError):
@@ -776,13 +777,27 @@ def replay_inverse_variation_margin(
     return state
 
 
+def inverse_settlement_convention(contract: FuturesContract) -> SettlementConvention:
+    """Resolve terminal cash policy only from the exact canonical instrument version."""
+    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
+        raise FuturesError("inverse settlement requires an exact INVERSE futures contract")
+    if type(contract.canonical_instrument) is not InstrumentVersion:
+        raise FuturesError("inverse settlement requires canonical InstrumentVersion authority")
+    try:
+        version = _detached_instrument_version(contract.canonical_instrument)
+        canonical = FuturesContract.from_instrument_version(version)
+    except (TypeError, ValueError) as error:
+        raise FuturesError("inverse settlement convention is invalid") from error
+    if canonical != contract or type(version.settlement_convention) is not SettlementConvention:
+        raise FuturesError("inverse settlement contract conflicts with canonical convention")
+    return version.settlement_convention
+
+
 def settle_and_book_inverse_variation_margin(
     *,
     settlement: FuturesSettlementEvidence,
     contract: FuturesContract,
     exact_amount: Fraction,
-    settlement_quantum: Decimal | str,
-    rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
 ) -> tuple[Decimal, JournalTransaction | None]:
     """Round only at the explicit settlement boundary and book exact currency truth.
 
@@ -800,10 +815,11 @@ def settle_and_book_inverse_variation_margin(
         raise FuturesError("settlement price currency does not match contract")
     if settlement.settlement_currency != contract.settlement_currency:
         raise FuturesError("settlement currency does not match contract")
+    convention = inverse_settlement_convention(contract)
     settled = settle_fraction(
         exact_amount,
-        quantum=settlement_quantum,
-        rounding=rounding,
+        quantum=convention.quantum,
+        rounding=convention.rounding,
     )
     if settled == 0:
         return settled, None

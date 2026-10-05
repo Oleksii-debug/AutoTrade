@@ -13,6 +13,7 @@ from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Literal
+from weakref import ref as weakref_ref
 
 from .accounting import JournalTransaction, posting, validate_transaction
 from .exact_decimal import (
@@ -222,34 +223,124 @@ class FuturesContract:
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
         if type(version) is not InstrumentVersion:
             raise FuturesError("exact canonical InstrumentVersion is required")
-        if version.asset_class != "FUTURE":
+        try:
+            detached = _detached_instrument_version(version)
+        except (TypeError, ValueError) as error:
+            raise FuturesError("canonical InstrumentVersion is invalid") from error
+        if detached.asset_class != "FUTURE":
             raise FuturesError("canonical instrument must have FUTURE asset_class")
-        if version.payoff not in {"LINEAR", "INVERSE"}:
+        if detached.payoff not in {"LINEAR", "INVERSE"}:
             raise FuturesError("canonical future payoff must be LINEAR or INVERSE")
         if (
-            version.expiry is None
-            or version.last_trade_at is None
-            or version.delivery_cutoff is None
-            or version.settlement_method not in {"CASH", "PHYSICAL"}
+            detached.expiry is None
+            or detached.last_trade_at is None
+            or detached.delivery_cutoff is None
+            or detached.settlement_method not in {"CASH", "PHYSICAL"}
         ):
             raise FuturesError(
                 "canonical future requires expiry, last_trade_at, delivery_cutoff and settlement_method"
             )
-        return cls(
-            instrument=f"{version.instrument_id}@{version.version}",
-            payoff=version.payoff,
-            multiplier=version.contract_multiplier,
-            quote_currency=version.quote_currency,
-            settlement_currency=version.settlement_currency,
-            last_trade_at=version.last_trade_at,
-            delivery_cutoff=version.delivery_cutoff,
-            expiry=version.expiry,
-            settlement_method=version.settlement_method,
+        contract = cls(
+            instrument=f"{detached.instrument_id}@{detached.version}",
+            payoff=detached.payoff,
+            multiplier=detached.contract_multiplier,
+            quote_currency=detached.quote_currency,
+            settlement_currency=detached.settlement_currency,
+            last_trade_at=detached.last_trade_at,
+            delivery_cutoff=detached.delivery_cutoff,
+            expiry=detached.expiry,
+            settlement_method=detached.settlement_method,
             price_base_currency=(
-                version.base_currency if version.payoff == "INVERSE" else None
+                detached.base_currency if detached.payoff == "INVERSE" else None
             ),
-            canonical_instrument=version,
+            canonical_instrument=detached,
         )
+        if detached.payoff == "INVERSE":
+            if type(detached.settlement_convention) is not SettlementConvention:
+                raise FuturesError(
+                    "canonical INVERSE future requires exact settlement convention"
+                )
+            _bind_futures_contract_settlement_authority(
+                contract,
+                detached.settlement_convention,
+            )
+        return contract
+
+
+def _install_futures_contract_settlement_authority():
+    """Bind terminal settlement economics outside caller-writable object state."""
+
+    authorities = {}
+    contract_type = FuturesContract
+    convention_type = SettlementConvention
+    canonical_type = type
+    canonical_id = id
+    canonical_ref = weakref_ref
+    object_getattribute = object.__getattribute__
+    error_type = FuturesError
+    names = (
+        "provider_id",
+        "instrument_id",
+        "instrument_version",
+        "settlement_currency",
+        "quantum",
+        "rounding",
+        "evidence_artifact_id",
+        "evidence_sha256",
+    )
+
+    def snapshot(convention):
+        if canonical_type(convention) is not convention_type:
+            raise error_type("settlement convention authority must be exact")
+        return tuple(object_getattribute(convention, name) for name in names)
+
+    def prune():
+        dead = [
+            key
+            for key, (contract_ref, _expected) in tuple(authorities.items())
+            if contract_ref() is None
+        ]
+        for key in dead:
+            authorities.pop(key, None)
+
+    def bind(contract, convention):
+        if canonical_type(contract) is not contract_type:
+            raise error_type("settlement authority requires exact FuturesContract")
+        prune()
+        key = canonical_id(contract)
+        if key in authorities:
+            raise error_type("settlement authority is already established")
+        authorities[key] = (canonical_ref(contract), snapshot(convention))
+
+    def resolve(contract, current_convention):
+        if canonical_type(contract) is not contract_type:
+            raise error_type("settlement authority requires exact FuturesContract")
+        prune()
+        entry = authorities.get(canonical_id(contract))
+        if entry is None or entry[0]() is not contract:
+            raise error_type("settlement convention authority is not established")
+        expected = entry[1]
+        if snapshot(current_convention) != expected:
+            raise error_type("settlement convention changed after contract admission")
+        return convention_type(
+            provider_id=expected[0],
+            instrument_id=expected[1],
+            instrument_version=expected[2],
+            settlement_currency=expected[3],
+            quantum=expected[4],
+            rounding=expected[5],
+            evidence_artifact_id=expected[6],
+            evidence_sha256=expected[7],
+        )
+
+    return bind, resolve
+
+
+(
+    _bind_futures_contract_settlement_authority,
+    _resolve_futures_contract_settlement_authority,
+) = _install_futures_contract_settlement_authority()
+del _install_futures_contract_settlement_authority
 
 
 @dataclass(frozen=True)
@@ -790,7 +881,10 @@ def inverse_settlement_convention(contract: FuturesContract) -> SettlementConven
         raise FuturesError("inverse settlement convention is invalid") from error
     if canonical != contract or type(version.settlement_convention) is not SettlementConvention:
         raise FuturesError("inverse settlement contract conflicts with canonical convention")
-    return version.settlement_convention
+    return _resolve_futures_contract_settlement_authority(
+        contract,
+        version.settlement_convention,
+    )
 
 
 def settle_and_book_inverse_variation_margin(

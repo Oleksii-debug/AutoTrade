@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.product_risk_price_semantics import (
+    ProductRiskPriceSemanticsBinding,
     ProductRiskPriceSemanticsComposer,
     ProductRiskPriceSemanticsError,
 )
@@ -474,6 +475,32 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 "binding authority changed",
             ):
                 other.bind_snapshot(request, base, binding, prepared)
+
+    def test_binding_getattribute_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+            callbacks = []
+
+            def forged_getattribute(_self, _name):
+                callbacks.append(True)
+                raise AssertionError("forged binding attribute reader executed")
+
+            with patch.object(
+                ProductRiskPriceSemanticsBinding,
+                "__getattribute__",
+                forged_getattribute,
+            ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "binding authority changed",
+                ):
+                    composer.bind_snapshot(request, base, binding, prepared)
+            self.assertEqual(callbacks, [])
 
     def test_snapshot_binding_rejects_a_different_canonical_prepared_request(self):
         with TemporaryDirectory() as directory:

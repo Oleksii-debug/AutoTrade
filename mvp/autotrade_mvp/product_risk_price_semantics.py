@@ -505,6 +505,7 @@ def _install_product_risk_price_semantics_binding_authority(
     binding_init_code = binding_init.__code__
     binding_post_init = binding_type.__post_init__
     binding_post_init_code = binding_post_init.__code__
+    binding_getattribute = binding_type.__getattribute__
     fields = (
         "provider_id",
         "account_id",
@@ -543,6 +544,7 @@ def _install_product_risk_price_semantics_binding_authority(
             or binding_init.__code__ is not binding_init_code
             or binding_type.__post_init__ is not binding_post_init
             or binding_post_init.__code__ is not binding_post_init_code
+            or binding_type.__getattribute__ is not binding_getattribute
         ):
             authority_changed()
 
@@ -569,7 +571,7 @@ def _install_product_risk_price_semantics_binding_authority(
             authority_changed()
         if snapshot(value) != expected:
             authority_changed()
-        return value
+        return expected
 
     def canonical_compose(
         self,
@@ -597,14 +599,21 @@ def _install_product_risk_price_semantics_binding_authority(
         prepared_request: BybitPreparedSubmission,
     ) -> AuthoritativeRiskSnapshot:
         purge_dead()
-        require_issued(self, binding)
-        return bind_snapshot_method(
+        expected = require_issued(self, binding)
+        sealed_binding = binding_type(
+            **dict(zip(fields, expected))
+        )
+        result = bind_snapshot_method(
             self,
             request,
             snapshot_value,
-            binding,
+            sealed_binding,
             prepared_request,
         )
+        implementation_changed()
+        if snapshot(binding) != expected:
+            authority_changed()
+        return result
 
     return canonical_compose, canonical_bind_snapshot
 

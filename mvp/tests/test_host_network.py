@@ -1058,5 +1058,96 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
+        for field in ("state_version", "event_cursor"):
+            with self.subTest(field=field):
+                def malformed_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = int(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-{field}.sqlite3"
+                    ),
+                    snapshot_provider=malformed_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+
+    def test_command_expected_state_version_rejects_noncanonical_sequence(self):
+        for version in ("00", "01", "+0", "-0", " 0", "0 ", "\u0660"):
+            with self.subTest(version=version):
+                command = self.command(expected_state_version=version)
+                response = self.app.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers=self.headers(json_body=True),
+                    body=json.dumps(command).encode("utf-8"),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(self.app.store.state_version, 0)
+
+    def test_event_cursor_rejects_noncanonical_query_aliases(self):
+        targets = (
+            "/api/v1/events?after=01",
+            "/api/v1/events?after=%31",
+            "/api/v1/events?after=%30",
+            "/api/v1/events?a%66ter=0",
+            "/api/v1/events?after=%2B1",
+            "/api/v1/events?after=-0",
+            "/api/v1/events?after=%200",
+            "/api/v1/events?after=0%20",
+            "/api/v1/events?after=",
+        )
+        for target in targets:
+            with self.subTest(target=target):
+                response = self.app.dispatch(
+                    method="GET",
+                    target=target,
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_EVENT_CURSOR"},
+                )
+
+        canonical = self.app.dispatch(
+            method="GET",
+            target="/api/v1/events?after=0",
+            headers=self.headers(),
+        )
+        self.assertEqual(canonical.status, 200)
+
+
+    def test_canonical_long_state_version_returns_conflict_not_parse_error(self):
+        command = self.command(expected_state_version="9" * 5000)
+        response = self.app.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=self.headers(json_body=True),
+            body=json.dumps(command).encode("utf-8"),
+        )
+        self.assertEqual(response.status, 409)
+        payload = self.body(response)
+        self.assertEqual(payload["status"], "CONFLICT")
+        self.assertEqual(payload["reason_codes"], ["stale_state_version"])
+        self.assertEqual(self.app.store.state_version, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

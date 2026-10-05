@@ -18,8 +18,9 @@ from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
     prepare_order_submission,
 )
-from mvp.autotrade_mvp.instruments import InstrumentRegistry
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentRegistryError
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.product_risk_price_semantics import (
     ProductRiskPriceSemanticsComposer,
     ProductRiskPriceSemanticsError,
@@ -88,6 +89,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
     def _prepared(
         self,
         *,
+        symbol="BTCUSDT",
         side="BUY",
         quantity="1",
         order_type="LIMIT",
@@ -105,7 +107,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             at=READ_AT,
             provider_environment=cap.provider_environment,
             product_family="SPOT",
-            symbol="BTCUSDT",
+            symbol=symbol,
             side=side,
             order_type=order_type,
             quantity=quantity,
@@ -119,6 +121,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
         resolved,
         capability,
         *,
+        symbol="BTCUSDT",
         side="BUY",
         quantity="1",
         price="100.00",
@@ -126,7 +129,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
     ):
         return RiskAuthorityRequest(
             risk_intent=RiskIntent.create(
-                symbol="BTCUSDT",
+                symbol=symbol,
                 side=side,
                 quantity=quantity,
                 price=price,
@@ -264,6 +267,40 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                     ):
                         composer.compose(request, prepared)
 
+    def test_quantity_must_already_match_causal_instrument_grid(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared(quantity="0.0005")
+            request = self._request(
+                resolved,
+                capability,
+                quantity="0.0005",
+            )
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "minimum_quantity|quantity_step",
+            ):
+                composer.compose(request, prepared)
+
+    def test_prepared_symbol_must_match_causal_instrument_symbol(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared(symbol="ETHUSDT")
+            request = self._request(
+                resolved,
+                capability,
+                symbol="ETHUSDT",
+            )
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "causal instrument authority",
+            ):
+                composer.compose(request, prepared)
+
     def test_provider_domain_capability_and_instrument_are_cross_bound(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)
@@ -353,7 +390,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(
-                Exception,
+                ProviderCoreError,
                 "prepared submission authority changed",
             ):
                 ProductRiskPriceSemanticsComposer(
@@ -399,12 +436,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 ProductRiskPriceSemanticsError,
                 "binding authority changed",
             ):
-                composer.bind_snapshot(
-                    request,
-                    base,
-                    forged,
-                    prepared,
-                )
+                composer.bind_snapshot(request, base, forged, prepared)
 
     def test_post_issue_binding_mutation_fails_closed(self):
         with TemporaryDirectory() as directory:
@@ -424,12 +456,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 ProductRiskPriceSemanticsError,
                 "binding authority changed",
             ):
-                composer.bind_snapshot(
-                    request,
-                    base,
-                    binding,
-                    prepared,
-                )
+                composer.bind_snapshot(request, base, binding, prepared)
 
     def test_binding_is_scoped_to_issuing_composer(self):
         with TemporaryDirectory() as directory:
@@ -445,12 +472,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 ProductRiskPriceSemanticsError,
                 "binding authority changed",
             ):
-                other.bind_snapshot(
-                    request,
-                    base,
-                    binding,
-                    prepared,
-                )
+                other.bind_snapshot(request, base, binding, prepared)
 
     def test_snapshot_binding_rejects_a_different_canonical_prepared_request(self):
         with TemporaryDirectory() as directory:

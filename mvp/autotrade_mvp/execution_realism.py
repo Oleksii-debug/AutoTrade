@@ -293,6 +293,36 @@ class ExecutionModel:
             ),
         )
 
+    @classmethod
+    def create_for_instrument_version(
+        cls,
+        *,
+        instrument_version,
+        **kwargs,
+    ) -> "ExecutionModel":
+        """Create a MARKET model with its price grid taken from canonical instrument metadata.
+
+        The exact InstrumentVersion object is the only source for price_tick and
+        instrument identity at this boundary. Callers cannot override either field.
+        """
+
+        from .instruments import InstrumentVersion
+
+        if type(instrument_version) is not InstrumentVersion:
+            raise TypeError("instrument_version must be exact InstrumentVersion")
+        if "price_quantum" in kwargs or "price_grid_instrument_version" in kwargs:
+            raise ExecutionRealismError(
+                "price grid is authoritative from instrument_version"
+            )
+        instrument_ref = f"{instrument_version.instrument_id}@{instrument_version.version}"
+        return cls.create(
+            **kwargs,
+            price_quantum=instrument_version.price_tick,
+            price_projection_policy_id=MARKET_PRICE_PROJECTION_POLICY_ID,
+            price_projection_policy_version=MARKET_PRICE_PROJECTION_POLICY_VERSION,
+            price_grid_instrument_version=instrument_ref,
+        )
+
     @property
     def fingerprint(self) -> str:
         payload = {

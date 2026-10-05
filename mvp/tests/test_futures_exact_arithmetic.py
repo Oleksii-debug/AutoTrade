@@ -28,6 +28,7 @@ from mvp.autotrade_mvp.futures import (
 )
 from mvp.autotrade_mvp.exact_decimal import MAX_SIGNIFICANT_DIGITS
 from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.settlement_convention import SettlementConvention
 
 
 def utc(day: int, hour: int = 0) -> datetime:
@@ -257,7 +258,14 @@ class FuturesExactArithmeticTests(unittest.TestCase):
 
     def test_inverse_lifecycle_quantity_obeys_bound_grid(self):
         original = self._contract()
-        version = replace(original.canonical_instrument, payoff="INVERSE", base_currency="BTC", settlement_currency="BTC", quantity_step=Decimal("0.125"))
+        convention = SettlementConvention(provider_id="TEST_CLEARER",
+            instrument_id=original.canonical_instrument.instrument_id, instrument_version=1,
+            settlement_currency="BTC", quantum="0.00000001", rounding="HALF_EVEN",
+            evidence_artifact_id="00000000-0000-0000-0000-000000000303", evidence_sha256="sha256:" + "3" * 64)
+        version = replace(original.canonical_instrument, payoff="INVERSE", base_currency="BTC",
+            settlement_currency="BTC", quantity_step=Decimal("0.125"), settlement_convention=convention,
+            metadata_evidence=({"artifact_id":convention.evidence_artifact_id,
+                "sha256":convention.evidence_sha256,"observed_at":"2026-09-01T00:00:00Z"},))
         contract = FuturesContract.from_instrument_version(version)
         for quantity in ("0.125", "-0.125", "100"):
             state = InverseVariationMarginState(contract, Decimal(quantity), Decimal("100"), self._scope())

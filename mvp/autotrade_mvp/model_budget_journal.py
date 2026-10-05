@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -245,6 +246,7 @@ class DurableModelBudget:
         object | None,
         type | None,
         dict[str, object] | None,
+        tuple[tuple[type, str, Mapping[str, object]], ...],
     ]:
         """Freeze budget/journal authority before executing the injected clock."""
         budget_class = object.__getattribute__(self, "__class__")
@@ -274,6 +276,27 @@ class DurableModelBudget:
             if identity is not None
             else None
         )
+        authority_classes: list[type] = []
+        seen_class_ids: set[int] = set()
+        for selected_class in (budget_class, journal_class, identity_class):
+            if selected_class is None:
+                continue
+            for candidate_class in selected_class.__mro__:
+                if candidate_class is object:
+                    continue
+                candidate_id = id(candidate_class)
+                if candidate_id in seen_class_ids:
+                    continue
+                seen_class_ids.add(candidate_id)
+                authority_classes.append(candidate_class)
+        class_authority = tuple(
+            (
+                authority_class,
+                authority_class.__module__ + "." + authority_class.__qualname__,
+                MappingProxyType(dict(vars(authority_class))),
+            )
+            for authority_class in authority_classes
+        )
         return (
             budget_class,
             budget_state,
@@ -283,6 +306,7 @@ class DurableModelBudget:
             identity,
             identity_class,
             identity_state,
+            class_authority,
         )
 
     @staticmethod
@@ -297,6 +321,7 @@ class DurableModelBudget:
             object | None,
             type | None,
             dict[str, object] | None,
+            tuple[tuple[type, str, Mapping[str, object]], ...],
         ],
     ) -> list[str]:
         """Restore budget/journal authority without rebound-class dispatch."""
@@ -309,8 +334,46 @@ class DurableModelBudget:
             identity,
             identity_class,
             identity_state,
+            class_authority,
         ) = snapshot
         changes: list[str] = []
+
+        for authority_class, class_label, expected_class_state in class_authority:
+            current_class_state = vars(authority_class)
+            current_names = set(current_class_state)
+            expected_names = set(expected_class_state)
+            for name in sorted(current_names | expected_names):
+                label = "class." + class_label + "." + name
+                if name not in expected_class_state:
+                    changes.append(label)
+                    try:
+                        type.__delattr__(authority_class, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ValueError(
+                            label + " could not be removed after model budget clock"
+                        ) from error
+                    continue
+                expected = expected_class_state[name]
+                if (
+                    name not in current_class_state
+                    or current_class_state[name] is not expected
+                ):
+                    changes.append(label)
+                    try:
+                        type.__setattr__(authority_class, name, expected)
+                    except TypeError as error:
+                        raise ValueError(
+                            label + " could not be restored after model budget clock"
+                        ) from error
+            restored_class_state = vars(authority_class)
+            if set(restored_class_state) != expected_names or any(
+                restored_class_state[name] is not expected_class_state[name]
+                for name in expected_names
+            ):
+                raise ValueError(
+                    "model budget class authority restore is incomplete for "
+                    + class_label
+                )
 
         def restore_class(value: object, expected: type, label: str) -> None:
             current = object.__getattribute__(value, "__class__")
@@ -374,6 +437,7 @@ class DurableModelBudget:
         return changes
 
     def _clock_now(self) -> str:
+        restore_clock_authority = DurableModelBudget._restore_clock_authority
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -386,7 +450,7 @@ class DurableModelBudget:
         except Exception as error:
             clock_error = error
         finally:
-            changes = DurableModelBudget._restore_clock_authority(
+            changes = restore_clock_authority(
                 self,
                 snapshot,
             )

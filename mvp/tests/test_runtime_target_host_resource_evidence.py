@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 import mvp.autotrade_mvp.runtime_target_host_resource_evidence as resource_evidence_module
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.runtime_target_host_campaign_authority import (
     RuntimeTargetHostCampaignAuthority,
 )
@@ -99,16 +100,43 @@ def _run_result() -> RuntimeTargetHostRunResult:
     )
 
 
+def _journal(root: str) -> JournalStore:
+    return JournalStore(Path(root) / "journal.sqlite3")
+
+
+def _backlog_evidence(
+    *,
+    start_transition_sequence: int = 0,
+    end_transition_sequence: int = 0,
+    start_pending_count: int = 0,
+    end_pending_count: int = 0,
+    high_water: int = 0,
+) -> dict[str, int]:
+    return {
+        "start_transition_sequence": start_transition_sequence,
+        "end_transition_sequence": end_transition_sequence,
+        "start_pending_count": start_pending_count,
+        "end_pending_count": end_pending_count,
+        "high_water": high_water,
+    }
+
+
 def _issue_for_test(
     run: RuntimeTargetHostRunResult,
     *,
     before: RuntimeTargetHostResourceSnapshot,
     after: RuntimeTargetHostResourceSnapshot,
+    outbox_backlog: dict[str, int] | None = None,
 ) -> RuntimeTargetHostResourceEvidence:
     return issue_runtime_target_host_resource_evidence(
         run,
         before=before,
         after=after,
+        outbox_backlog=(
+            _backlog_evidence()
+            if outbox_backlog is None
+            else outbox_backlog
+        ),
         _issuer_token=resource_evidence_module._ISSUER_TOKEN,
     )
 
@@ -175,6 +203,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                 _run_result(),
                 before=_snapshot(monotonic_ns=1, process_cpu_ns=1),
                 after=_snapshot(monotonic_ns=2, process_cpu_ns=2),
+                outbox_backlog=_backlog_evidence(),
             )
 
     def test_public_constructor_cannot_mint_resource_evidence(self):
@@ -199,6 +228,11 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                 measurement_payload_sha256=MEASUREMENT_DIGEST,
                 run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
                 run_receipt_payload_sha256=RUN_RECEIPT_DIGEST,
+                outbox_transition_start_sequence=0,
+                outbox_transition_end_sequence=0,
+                outbox_backlog_start_pending_count=0,
+                outbox_backlog_end_pending_count=0,
+                queue_backlog_high_water=0,
                 reconnect_backlog_remaining=0,
                 before=before,
                 after=after,
@@ -231,15 +265,26 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.io_write_delta_bytes, 1_200)
         self.assertEqual(evidence.disk_free_delta_bytes, -1_000)
         self.assertEqual(evidence.resource_evidence_status, "COLLECTED_PROCESS_DISK_V1")
+        self.assertEqual(evidence.schema_version, "1.1.0")
+        self.assertEqual(evidence.queue_backlog_high_water, 0)
         self.assertFalse(evidence.terminal_qualification_eligible)
         payload = evidence.canonical_payload()
+        self.assertEqual(
+            payload["outbox_backlog"],
+            {
+                "transition_start_sequence": 0,
+                "transition_end_sequence": 0,
+                "start_pending_count": 0,
+                "end_pending_count": 0,
+                "high_water": 0,
+            },
+        )
         self.assertEqual(payload["derived"]["process_id"], 4242)
         self.assertEqual(
             payload["unclosed_authorities"],
             [
                 "independent_chronology",
                 "provider_source_clock_freshness",
-                "queue_backlog_high_water",
                 "signed_terminal_qualification",
             ],
         )
@@ -347,7 +392,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                 ) as runner,
             ):
                 result = run_declared_target_host_campaign_with_resources(
-                    journal=object(),
+                    journal=_journal(root),
                     evidence_store=store,
                     spec=object(),
                     authority_id="resource-authority",
@@ -406,7 +451,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                         "class descriptor changed",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -458,7 +503,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                         "class descriptor changed.*authority_id",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -514,7 +559,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                         "class descriptor changed.*measurement",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -569,7 +614,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                         "class descriptor changed.*authority_id",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -596,7 +641,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                     "must be distinct",
                 ):
                     run_declared_target_host_campaign_with_resources(
-                        journal=object(),
+                        journal=_journal(root),
                         evidence_store=store,
                         spec=object(),
                         authority_id="resource-authority",

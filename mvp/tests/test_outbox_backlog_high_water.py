@@ -104,6 +104,85 @@ class OutboxBacklogHighWaterTests(unittest.TestCase):
             self.assertEqual(replay["end_pending_count"], 1)
             self.assertEqual(replay["high_water"], 1)
 
+    def test_canonical_transition_writes_avoid_full_history_sequence_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JournalStore(Path(root) / "journal.sqlite3")
+            start = store.outbox_backlog_cut()
+
+            with patch.object(
+                JournalStore,
+                "_outbox_transition_sequence_value",
+                side_effect=AssertionError("full transition scan executed"),
+            ):
+                store.append_event(
+                    _event("evt-tail-writer-a", aggregate_id="tail-writer-a"),
+                    outbox_topic="events",
+                )
+                store.append_event(
+                    _event("evt-tail-writer-b", aggregate_id="tail-writer-b"),
+                    outbox_topic="events",
+                )
+                first = store.pending_outbox()[0]
+                self.assertTrue(
+                    store.mark_outbox_delivered(
+                        first["outbox_id"],
+                        expected_envelope_hash=first["envelope_hash"],
+                    )
+                )
+                tail = store.outbox_backlog_tail_cut(
+                    start_transition_sequence=start["transition_sequence"],
+                    start_pending_count=start["pending_count"],
+                )
+
+            self.assertEqual(
+                tail,
+                {"transition_sequence": 3, "pending_count": 1},
+            )
+            evidence = store.outbox_backlog_high_water_since(
+                start_transition_sequence=start["transition_sequence"],
+                start_pending_count=start["pending_count"],
+            )
+            self.assertEqual(evidence["end_transition_sequence"], 3)
+            self.assertEqual(evidence["high_water"], 2)
+            self.assertEqual(evidence["end_pending_count"], 1)
+
+    def test_transition_write_rejects_tampered_tail_pending_chain(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(
+                _event("evt-tail-chain-a", aggregate_id="tail-chain-a"),
+                outbox_topic="events",
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    UPDATE outbox_backlog_transitions
+                    SET pending_count = 9
+                    WHERE transition_sequence = 1
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "outbox backlog transition does not extend durable tail",
+            ):
+                store.append_event(
+                    _event("evt-tail-chain-b", aggregate_id="tail-chain-b"),
+                    outbox_topic="events",
+                )
+
+            self.assertEqual(
+                store.load_events("outbox-high-water-test", "tail-chain-b"),
+                [],
+            )
+            self.assertEqual(store.pending_outbox_count(), 1)
+
     def test_tail_cut_candidate_does_not_authenticate_tampered_transition(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "journal.sqlite3"

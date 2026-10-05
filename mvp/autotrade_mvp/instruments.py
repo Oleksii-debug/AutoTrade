@@ -1308,6 +1308,7 @@ class InstrumentRegistry:
 # not an independent instrument owner.
 _PRICE_SEMANTICS_REGISTRY_TYPE = InstrumentRegistry
 _PRICE_SEMANTICS_VERSION_TYPE = InstrumentVersion
+_PRICE_SEMANTICS_ARTIFACT_STORE_TYPE = ArtifactStore
 _PRICE_SEMANTICS_AT_KNOWN = InstrumentRegistry.at_known
 _PRICE_SEMANTICS_AT_KNOWN_CODE = InstrumentRegistry.at_known.__code__
 _PRICE_SEMANTICS_METADATA_KNOWN_BY = InstrumentRegistry._metadata_known_by
@@ -1329,6 +1330,7 @@ _PRICE_SEMANTICS_SPLIT_REF_CODE = _split_instrument_version_ref.__code__
 _PRICE_SEMANTICS_UTC = _utc
 _PRICE_SEMANTICS_UTC_CODE = _utc.__code__
 _PRICE_SEMANTICS_JSON_DUMPS = json.dumps
+_PRICE_SEMANTICS_JSON_DUMPS_CODE = json.dumps.__code__
 _PRICE_SEMANTICS_SHA256 = sha256
 
 
@@ -1359,9 +1361,11 @@ def authenticated_price_semantics_digest(
 
     if type(registry) is not _PRICE_SEMANTICS_REGISTRY_TYPE:
         raise TypeError("registry must be exact InstrumentRegistry")
-    if type(artifact_store) is not ArtifactStore:
+    if type(artifact_store) is not _PRICE_SEMANTICS_ARTIFACT_STORE_TYPE:
         raise TypeError("artifact_store must be the canonical ArtifactStore")
     if (
+        ArtifactStore is not _PRICE_SEMANTICS_ARTIFACT_STORE_TYPE
+        or
         InstrumentRegistry.at_known is not _PRICE_SEMANTICS_AT_KNOWN
         or InstrumentRegistry.at_known.__code__ is not _PRICE_SEMANTICS_AT_KNOWN_CODE
         or InstrumentRegistry._metadata_known_by is not _PRICE_SEMANTICS_METADATA_KNOWN_BY
@@ -1387,6 +1391,7 @@ def authenticated_price_semantics_digest(
         or _utc is not _PRICE_SEMANTICS_UTC
         or _utc.__code__ is not _PRICE_SEMANTICS_UTC_CODE
         or json.dumps is not _PRICE_SEMANTICS_JSON_DUMPS
+        or json.dumps.__code__ is not _PRICE_SEMANTICS_JSON_DUMPS_CODE
         or sha256 is not _PRICE_SEMANTICS_SHA256
     ):
         raise InstrumentRegistryError(

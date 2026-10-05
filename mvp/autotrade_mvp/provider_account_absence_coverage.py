@@ -272,24 +272,43 @@ def _install_historical_unknown_authority():
             )
         return value
 
-    return register, require
+    def seal_resolver(resolve_impl):
+        def sealed_resolve_historical_unknown_submission(
+            store: JournalStore,
+            *,
+            environment: str,
+            account_id: str,
+            attempt_id: str,
+        ) -> HistoricalUnknownSubmissionBinding:
+            value, path, store_identity = resolve_impl(
+                store,
+                environment=environment,
+                account_id=account_id,
+                attempt_id=attempt_id,
+            )
+            register(value, store, path, store_identity)
+            return value
+
+        return sealed_resolve_historical_unknown_submission
+
+    return seal_resolver, require
 
 
 (
-    _register_historical_unknown_submission_authority,
+    _seal_historical_unknown_submission_resolver,
     require_historical_unknown_submission_authority,
 ) = _install_historical_unknown_authority()
 del _install_historical_unknown_authority
 
 
-def resolve_historical_unknown_submission(
+def _resolve_historical_unknown_submission_unregistered(
     store: JournalStore,
     *,
     environment: str,
     account_id: str,
     attempt_id: str,
-) -> HistoricalUnknownSubmissionBinding:
-    """Resolve only a durable possible-send UNKNOWN, never caller submission fields."""
+) -> tuple[HistoricalUnknownSubmissionBinding, object, object]:
+    """Resolve durable possible-send UNKNOWN material before authority issuance."""
 
     path, store_identity = _canonical_journal_authority_snapshot(store)
     normalized_environment = _exact_text(environment, name="environment").upper()
@@ -434,13 +453,14 @@ def resolve_historical_unknown_submission(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_historical_unknown_submission_authority(
-        value,
-        store,
-        path,
-        store_identity,
-    )
-    return value
+    return value, path, store_identity
+
+
+resolve_historical_unknown_submission = _seal_historical_unknown_submission_resolver(
+    _resolve_historical_unknown_submission_unregistered
+)
+del _seal_historical_unknown_submission_resolver
+del _resolve_historical_unknown_submission_unregistered
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -657,11 +677,37 @@ def _install_surface_coverage_authority():
             )
         return value
 
-    return register, require, require_current
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_surface_coverage(
+            *,
+            absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+            page_chain: ProviderAccountPageChain,
+            historical_submission: HistoricalUnknownSubmissionBinding,
+            qualification_registry: DurableProviderQualificationRegistry,
+            at: datetime,
+        ) -> ProviderAccountSurfaceCoverage:
+            value = issue_impl(
+                absence_semantics=absence_semantics,
+                page_chain=page_chain,
+                historical_submission=historical_submission,
+                qualification_registry=qualification_registry,
+                at=at,
+            )
+            register(
+                value,
+                page_chain,
+                historical_submission,
+                qualification_registry,
+            )
+            return value
+
+        return sealed_issue_provider_account_surface_coverage
+
+    return seal_issuer, require, require_current
 
 
 (
-    _register_provider_account_surface_coverage_authority,
+    _seal_provider_account_surface_coverage_issuer,
     require_provider_account_surface_coverage_authority,
     require_current_provider_account_surface_coverage_authority,
 ) = _install_surface_coverage_authority()
@@ -785,7 +831,7 @@ def _validate_query_shape(
     return search_binding, start_ms, end_ms
 
 
-def issue_provider_account_surface_coverage(
+def _issue_provider_account_surface_coverage_unregistered(
     *,
     absence_semantics: QualifiedProviderAccountAbsenceSemantics,
     page_chain: ProviderAccountPageChain,
@@ -983,10 +1029,11 @@ def issue_provider_account_surface_coverage(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_provider_account_surface_coverage_authority(
-        value,
-        page_chain,
-        historical_submission,
-        qualification_registry,
-    )
     return value
+
+
+issue_provider_account_surface_coverage = _seal_provider_account_surface_coverage_issuer(
+    _issue_provider_account_surface_coverage_unregistered
+)
+del _seal_provider_account_surface_coverage_issuer
+del _issue_provider_account_surface_coverage_unregistered

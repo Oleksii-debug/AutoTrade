@@ -2032,7 +2032,7 @@ class DurableFinancingTests(unittest.TestCase):
                     0,
                 )
 
-    def test_bybit_funding_transaction_must_be_inside_authenticated_query_window(self):
+    def test_bybit_reobservation_same_provider_fact_preserves_first_receipt(self):
         transaction_time = int(BASE.timestamp() * 1000)
         response = {
             "retCode": 0,
@@ -2041,7 +2041,7 @@ class DurableFinancingTests(unittest.TestCase):
                 "nextPageCursor": "",
                 "list": [
                     {
-                        "id": "funding-outside-window",
+                        "id": "funding-fact-reobserve",
                         "symbol": "XRPUSDT",
                         "category": "linear",
                         "side": "Buy",
@@ -2064,53 +2064,96 @@ class DurableFinancingTests(unittest.TestCase):
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
-        observed_at = BASE + timedelta(seconds=2)
-        observation = bybit_activity_observation(
-            raw,
-            observed_at=observed_at,
-            extra_query={
-                "startTime": str(transaction_time + 1),
-                "endTime": str(transaction_time + 60000),
-            },
-        )
-        artifact = "00000000-0000-0000-0000-000000000094"
-        raw_store = ArtifactStore(Path(self.temp.name) / "bybit-window-artifacts")
-        raw_store.publish_bytes(
-            artifact_id=artifact,
-            data=raw,
-            media_type="application/json",
-            rights={"storage": True, "export": False},
-            source_refs=[observation.evidence_ref],
-            metadata={"evidence_class": "provider_response"},
-        )
-        paper_economic = DurableProviderEconomicBook(
-            self.store,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="SIMULATION",
-        )
-        paper_financing = DurableFinancingBook(
-            self.store,
-            paper_economic,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="SIMULATION",
-        )
-        with self.assertRaisesRegex(FinancingError, "precedes authenticated query"):
-            paper_financing.record_bybit_funding_observation(
-                observation,
-                raw_store,
-                artifact_id=artifact,
-                row_id="funding-outside-window",
-                instrument_registry=bybit_instrument_registry()[0],
-                instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
-                committed_at=observed_at.isoformat(),
+        first_seen = BASE + timedelta(seconds=2)
+        second_seen = BASE + timedelta(minutes=10)
+        first_observation = bybit_activity_observation(raw, observed_at=first_seen)
+        second_observation = bybit_activity_observation(raw, observed_at=second_seen)
+
+        with TemporaryDirectory() as directory:
+            first_store = ArtifactStore(Path(directory) / "first")
+            second_store = ArtifactStore(Path(directory) / "second")
+            first_artifact = "00000000-0000-0000-0000-000000000111"
+            second_artifact = "00000000-0000-0000-0000-000000000112"
+            for artifacts, artifact_id, observation in (
+                (first_store, first_artifact, first_observation),
+                (second_store, second_artifact, second_observation),
+            ):
+                artifacts.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=raw,
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[observation.evidence_ref],
+                    metadata={"evidence_class": "provider_response"},
+                )
+
+            economic = DurableProviderEconomicBook(
+                self.store,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
             )
-        self.assertEqual(
-            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
-            0,
-        )
+            financing = DurableFinancingBook(
+                self.store,
+                economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+            first = financing.record_bybit_funding_observation(
+                first_observation,
+                first_store,
+                artifact_id=first_artifact,
+                row_id="funding-fact-reobserve",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions={
+                    "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                },
+                committed_at=first_seen.isoformat(),
+            )
+            second = financing.record_bybit_funding_observation(
+                second_observation,
+                second_store,
+                artifact_id=second_artifact,
+                row_id="funding-fact-reobserve",
+                instrument_registry=bybit_instrument_registry()[0],
+                instrument_versions={
+                    "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                },
+                committed_at=second_seen.isoformat(),
+            )
 
+            self.assertTrue(first.inserted)
+            self.assertFalse(second.inserted)
+            self.assertEqual(second.event, first.event)
+            self.assertEqual(second.event.available_at, first_seen)
+            self.assertEqual(
+                economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+                Decimal("0.003676"),
+            )
+            self.assertEqual(
+                len(
+                    self.store.load_events(
+                        "provider_financing_charge",
+                        financing._aggregate_id("BYBIT:TRANSACTION:funding-fact-reobserve:FUNDING"),
+                    )
+                ),
+                1,
+            )
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_bybit_funding_transaction_must_be_inside_authenticated_query_window(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-outside-window",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.003676",

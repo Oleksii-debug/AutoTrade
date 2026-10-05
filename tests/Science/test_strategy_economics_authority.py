@@ -120,16 +120,21 @@ def _binding(item, **overrides) -> StrategyEconomicsBinding:
     return StrategyEconomicsBinding(**values)
 
 
-def _registry() -> InstrumentRegistry:
+def _instrument_version(
+    *,
+    version: int = 1,
+    provider_symbol: str = "AAA",
+    effective_from: datetime = BASE,
+) -> InstrumentVersion:
     calendar = TradingCalendar.continuous_24_7(
         "CONTINUOUS_24_7"
     )
-    version = InstrumentVersion(
+    return InstrumentVersion(
         instrument_id=INSTRUMENT_ID,
-        version=1,
+        version=version,
         provider_id="SIMULATED",
         venue_id="SIM",
-        provider_symbol="AAA",
+        provider_symbol=provider_symbol,
         asset_class="CRYPTO_SPOT",
         base_currency="AAA",
         quote_currency="USD",
@@ -141,11 +146,19 @@ def _registry() -> InstrumentRegistry:
         minimum_quantity=Decimal("1"),
         calendar_id=calendar.calendar_id,
         timezone_id=calendar.timezone_id,
-        effective_from=BASE,
+        effective_from=effective_from,
     )
+
+
+def _registry(*versions: InstrumentVersion) -> InstrumentRegistry:
+    calendar = TradingCalendar.continuous_24_7(
+        "CONTINUOUS_24_7"
+    )
+    if not versions:
+        versions = (_instrument_version(),)
     return InstrumentRegistry(
         calendars=(calendar,),
-        versions=(version,),
+        versions=versions,
     )
 
 
@@ -236,6 +249,52 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             assessment.unresolved_owners,
         )
 
+    def test_cross_symbol_instrument_substitution_fails_before_assessment(self):
+        item = _proposal()
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "proposal symbol does not match instrument provider_symbol",
+        ):
+            assess_strategy_economics_authority(
+                item,
+                _binding(item),
+                instrument_registry=_registry(
+                    _instrument_version(provider_symbol="BBB")
+                ),
+            )
+
+    def test_future_instrument_version_is_not_valid_at_information_cutoff(self):
+        item = _proposal()
+        with self.assertRaises(InstrumentNotFound):
+            assess_strategy_economics_authority(
+                item,
+                _binding(item),
+                instrument_registry=_registry(
+                    _instrument_version(
+                        effective_from=BASE + timedelta(minutes=2)
+                    )
+                ),
+            )
+
+    def test_superseded_exact_version_cannot_bind_later_proposal_cut(self):
+        item = _proposal()
+        registry = _registry(
+            _instrument_version(),
+            _instrument_version(
+                version=2,
+                effective_from=BASE + timedelta(seconds=30),
+            ),
+        )
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "instrument_version is not the registry version effective at information_cutoff",
+        ):
+            assess_strategy_economics_authority(
+                item,
+                _binding(item),
+                instrument_registry=registry,
+            )
+
     def test_public_structural_binder_rebind_cannot_redirect_assessment(self):
         item = _proposal()
         binding = _binding(item)
@@ -282,6 +341,33 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             )
         finally:
             InstrumentRegistry.exact = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(assessment.instrument_version, INSTRUMENT_VERSION)
+        self.assertIn(
+            "instrument_registry_authority",
+            assessment.unresolved_owners,
+        )
+
+    def test_public_registry_at_rebind_cannot_redirect_assessment(self):
+        item = _proposal()
+        binding = _binding(item)
+        original = InstrumentRegistry.at
+        calls = []
+
+        def hostile_at(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("rebound public effective-version lookup executed")
+
+        InstrumentRegistry.at = hostile_at
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                binding,
+                instrument_registry=_registry(),
+            )
+        finally:
+            InstrumentRegistry.at = original
 
         self.assertEqual(calls, [])
         self.assertEqual(assessment.instrument_version, INSTRUMENT_VERSION)

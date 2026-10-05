@@ -846,6 +846,7 @@ class DurableModelCallOrchestrator:
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
         module_globals=globals(),
+        dataclass_fields=fields,
         journal_class_authority_changes=_model_journal_class_authority_changes,
         journal_authority_guard=require_exact_journal_store_authority,
     ) -> list[str]:
@@ -887,6 +888,15 @@ class DurableModelCallOrchestrator:
                 module_globals,
                 "DurableModelBudget",
                 budget_class,
+            )
+
+        current_fields = dict.get(module_globals, "fields")
+        if current_fields is not dataclass_fields:
+            changes.append("module.fields")
+            dict.__setitem__(
+                module_globals,
+                "fields",
+                dataclass_fields,
             )
 
         current_journal_helper = dict.get(

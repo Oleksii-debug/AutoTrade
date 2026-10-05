@@ -377,5 +377,55 @@ class ModelCallRestoreDispatchAuthorityTests(unittest.TestCase):
             self.assertEqual(orchestrator._events(attempt_id), [])
 
 
+    def test_cancel_callback_cannot_redirect_dataclass_fields_module_alias(self):
+        original_fields = model_call_module.fields
+        forged_calls = []
+        inference_calls = []
+
+        def forged_fields(*_args, **_kwargs):
+            forged_calls.append("called")
+            raise AssertionError("callback redirected dataclass fields authority")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+
+            def hostile_cancel():
+                model_call_module.fields = forged_fields
+                return False
+
+            try:
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    r"cancellation probe mutated orchestrator authority:.*module\.fields",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: inference_calls.append("inference"),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                        cancel_requested=hostile_cancel,
+                    )
+            finally:
+                model_call_module.fields = original_fields
+
+            self.assertEqual(forged_calls, [])
+            self.assertIs(model_call_module.fields, original_fields)
+            self.assertEqual(inference_calls, [])
+            self.assertEqual(
+                budget.active_reservation(attempt_id),
+                Decimal("1.2"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

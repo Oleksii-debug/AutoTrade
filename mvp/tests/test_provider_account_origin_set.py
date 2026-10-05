@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.provider_account_origin_set import (
     ProviderAccountOriginBindingSet,
     ProviderAccountOriginSetError,
     issue_provider_account_origin_set,
+    require_current_provider_account_origin_set_authority,
     require_provider_account_origin_set_authority,
 )
 from mvp.tests.test_provider_origin import ProviderOriginJournalTests
@@ -239,6 +240,126 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
                     response_bindings=(response,),
                     at=NOW,
                 )
+
+    def test_issued_origin_set_is_not_current_after_new_acquisition(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-before-super",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+            self.assertIs(
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                ),
+                issued,
+            )
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="origin-set-acquisition-currentness-2",
+                committed_at=NOW,
+            )
+            # Historical provenance remains inspectable, but it cannot be
+            # consumed as current financial evidence after supersession.
+            self.assertIs(
+                require_provider_account_origin_set_authority(issued),
+                issued,
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountOriginSetError,
+                "no longer exact current authority",
+            ):
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                )
+
+    def test_issued_origin_set_is_not_current_after_q_expiry(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-q-expiry",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountOriginSetError,
+                "no longer exact current Q",
+            ):
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW + timedelta(days=2),
+                )
+
+    def test_current_origin_set_requires_exact_timezone_aware_time(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-time",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+            for invalid in (None, "2026-10-05T00:00:00Z"):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(
+                        ProviderAccountOriginSetError,
+                        "timezone-aware datetime",
+                    ):
+                        require_current_provider_account_origin_set_authority(
+                            issued,
+                            at=invalid,
+                        )
 
     def test_duplicate_origin_is_rejected(self):
         with TemporaryDirectory() as directory:

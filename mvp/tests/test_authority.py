@@ -2822,6 +2822,73 @@ class AuthorityTests(unittest.TestCase):
                 1,
             )
 
+    def test_historical_financial_retry_rejects_missing_evaluated_intent_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            first = authority.admit(
+                command_id="cmd-historical-evaluated-intent",
+                idempotency_key="idem-historical-evaluated-intent",
+                admission_id="admission-historical-evaluated-intent",
+                policy_id=item.policy_id,
+                intent_id="intent-historical-evaluated-intent",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-historical-evaluated-intent",
+                **public_financial_kwargs(store),
+            )
+            restarted = authority_service(store)
+            original_store_call = authority_module._authority_store_call
+
+            def without_evaluated_intent(service, method_name, *args, **kwargs):
+                result = original_store_call(
+                    service, method_name, *args, **kwargs
+                )
+                if (
+                    method_name == "load_events"
+                    and len(args) >= 2
+                    and args[0] == "risk_decision"
+                    and args[1] == first.risk_decision_id
+                ):
+                    result = [
+                        {
+                            **event,
+                            "payload": {
+                                key: value
+                                for key, value in event["payload"].items()
+                                if key != "evaluated_intent_hash"
+                            },
+                        }
+                        for event in result
+                    ]
+                return result
+
+            with patch.object(
+                authority_module,
+                "_authority_store_call",
+                without_evaluated_intent,
+            ), self.assertRaisesRegex(
+                AuthorityConflict,
+                "historical risk evaluated intent identity is missing or inconsistent",
+            ):
+                restarted._validate_historical_financial_retry_evidence(
+                    first,
+                    item,
+                )
+
+
     def test_public_financial_retry_rejects_changed_risk_intent_before_evaluation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

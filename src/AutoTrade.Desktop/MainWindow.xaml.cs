@@ -15,7 +15,14 @@ public partial class MainWindow : Window
     private EmergencyHostStatus? _lastKnownCurrentStatus;
 
     public MainWindow()
-        : this(DesktopHostClientFactory.Create())
+        : this(DesktopHostClientFactory.CreateConnection())
+    {
+    }
+
+    private MainWindow(DesktopHostConnection connection)
+        : this(
+            (connection ?? throw new ArgumentNullException(nameof(connection))).Client,
+            connection.SessionProvider)
     {
     }
 

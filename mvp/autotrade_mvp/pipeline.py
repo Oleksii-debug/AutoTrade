@@ -20,7 +20,8 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .exact_decimal import (
-    as_fraction, bounded_fraction, parse_bounded_exact_decimal,
+    as_fraction, bounded_fraction, exact_abs, exact_add, exact_multiply,
+    exact_subtract, exact_sum, parse_bounded_exact_decimal,
     round_fraction_to_quantum, terminating_decimal,
 )
 from .persistence import JournalStore, payload_digest
@@ -85,7 +86,7 @@ def handle_reconciliation(provider: SimulatedProvider, ledger: EconomicLedger) -
 
 
 def handle_portfolio(ledger: EconomicLedger, last_price: Decimal) -> Decimal:
-    return _money(ledger.cash + ledger.position * last_price)
+    return _money(exact_add(ledger.cash, exact_multiply(ledger.position, last_price)))
 
 
 def handle_restart_recovery(state_dir: str | Path, initial_cash: Decimal) -> tuple[dict, bool]:
@@ -264,13 +265,23 @@ class RiskGate:
 
     def admit(self, decision: Decision, current_position: Decimal, current_cash: Decimal,
               fee_rate: Decimal) -> tuple[bool, str]:
-        signed = decision.quantity if decision.side == "BUY" else -decision.quantity
-        if abs(current_position + signed) > self.max_abs_position:
+        signed = (
+            decision.quantity
+            if decision.side == "BUY"
+            else exact_subtract(Decimal("0"), decision.quantity)
+        )
+        if exact_abs(exact_add(current_position, signed)) > self.max_abs_position:
             return False, "max_position"
-        if decision.quantity * decision.price > self.max_notional:
+        notional = exact_multiply(decision.quantity, decision.price)
+        if notional > self.max_notional:
             return False, "max_notional"
-        if decision.side == "BUY" and decision.quantity * decision.price * (1 + fee_rate) > current_cash:
-            return False, "insufficient_cash"
+        if decision.side == "BUY":
+            cash_required = exact_multiply(
+                notional,
+                exact_add(Decimal("1"), fee_rate),
+            )
+            if cash_required > current_cash:
+                return False, "insufficient_cash"
         return True, "admitted"
 
 
@@ -290,7 +301,7 @@ class SimulatedProvider:
             side=intent.side,
             quantity=intent.quantity,
             price=intent.price,
-            fee=_money(intent.quantity * intent.price * fee_rate),
+            fee=_money(exact_multiply(intent.quantity, intent.price, fee_rate)),
         )
         self.fills[intent.client_order_id] = fill
         return fill
@@ -304,8 +315,18 @@ class EconomicLedger:
     def apply_fill(self, fill: Fill) -> bool:
         if any(row["fill_id"] == fill.fill_id for row in self.postings):
             return False
-        signed_quantity = fill.quantity if fill.side == "BUY" else -fill.quantity
-        cash_delta = -(signed_quantity * fill.price) - fill.fee
+        signed_quantity = (
+            fill.quantity
+            if fill.side == "BUY"
+            else exact_subtract(Decimal("0"), fill.quantity)
+        )
+        cash_delta = exact_subtract(
+            exact_subtract(
+                Decimal("0"),
+                exact_multiply(signed_quantity, fill.price),
+            ),
+            fill.fee,
+        )
         self.postings.append(
             {
                 "fill_id": fill.fill_id,
@@ -318,11 +339,19 @@ class EconomicLedger:
 
     @property
     def cash(self) -> Decimal:
-        return _money(self.initial_cash + sum((Decimal(row["cash_delta"]) for row in self.postings), Decimal("0")))
+        return _money(
+            exact_sum(
+                (Decimal(row["cash_delta"]) for row in self.postings),
+                start=self.initial_cash,
+            )
+        )
 
     @property
     def position(self) -> Decimal:
-        return sum((Decimal(row["position_delta"]) for row in self.postings), Decimal("0"))
+        return exact_sum(
+            (Decimal(row["position_delta"]) for row in self.postings),
+            start=Decimal("0"),
+        )
 
 
 def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
@@ -399,8 +428,20 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
         raise ValueError("Fill and ledger counts do not reconcile")
     for fill in provider.fills.values():
         row = postings.get(fill.fill_id)
-        signed = fill.quantity if fill.side == "BUY" else -fill.quantity
-        expected_cash = _money(-signed * fill.price - fill.fee)
+        signed = (
+            fill.quantity
+            if fill.side == "BUY"
+            else exact_subtract(Decimal("0"), fill.quantity)
+        )
+        expected_cash = _money(
+            exact_subtract(
+                exact_subtract(
+                    Decimal("0"),
+                    exact_multiply(signed, fill.price),
+                ),
+                fill.fee,
+            )
+        )
         if row is None or Decimal(row["position_delta"]) != signed or _money(row["cash_delta"]) != expected_cash:
             raise ValueError("Fill and economic ledger do not reconcile")
     return True

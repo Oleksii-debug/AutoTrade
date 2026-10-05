@@ -673,6 +673,47 @@ class BinanceUsdmTemporalIngressTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_text_ingress_rejects_str_subclass_before_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "symbol is required"):
+            BinanceUsdmOrderIntent.create(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol=HostileText("BTCUSDT"),
+                side="BUY",
+                order_type="MARKET",
+                quantity="0.010",
+                position_side="BOTH",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_capability_subclass_before_admits(self):
+        callbacks = []
+        trusted = capability()
+
+        class HostileCapability(CapabilitySnapshot):
+            def admits(self, *args, **kwargs):
+                callbacks.append("admits")
+                return True
+
+        hostile = object.__new__(HostileCapability)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-usdm-hostile-capability",
+                capability=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_order_admission_keeps_builtin_fixed_offset_supported(self):
         fixed = timezone(timedelta(hours=2))
         request = prepare_order_request(

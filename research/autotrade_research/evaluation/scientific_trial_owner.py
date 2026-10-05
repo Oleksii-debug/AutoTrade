@@ -95,6 +95,17 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
 
+    exact_text: dict[str, str] = {}
+    for name in (
+        "profile_id",
+        "primary_baseline_id",
+        "selection_correction",
+    ):
+        value = object.__getattribute__(profile, name)
+        if type(value) is not str:
+            raise TypeError(f"{name} must remain exact built-in text")
+        exact_text[name] = value
+
     baseline_ids = object.__getattribute__(profile, "baseline_ids")
     required_regimes = object.__getattribute__(profile, "required_regimes")
     for name, values in (
@@ -109,7 +120,7 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
             )
 
     return GateProfile(
-        profile_id=object.__getattribute__(profile, "profile_id"),
+        profile_id=exact_text["profile_id"],
         minimum_net_advantage=object.__getattribute__(
             profile, "minimum_net_advantage"
         ),
@@ -118,13 +129,9 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
             profile, "max_adverse_cost_loss"
         ),
         min_power=object.__getattribute__(profile, "min_power"),
-        primary_baseline_id=object.__getattribute__(
-            profile, "primary_baseline_id"
-        ),
+        primary_baseline_id=exact_text["primary_baseline_id"],
         baseline_ids=baseline_ids,
-        selection_correction=object.__getattribute__(
-            profile, "selection_correction"
-        ),
+        selection_correction=exact_text["selection_correction"],
         max_trials=object.__getattribute__(profile, "max_trials"),
         required_regimes=required_regimes,
         require_complete_trials=object.__getattribute__(

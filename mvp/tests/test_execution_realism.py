@@ -149,10 +149,30 @@ class ExecutionRealismTests(unittest.TestCase):
         ):
             simulate_execution(order(), top(), model(price_quantum=None))
 
-    def test_market_projection_policy_identity_changes_model_fingerprint(self):
-        one = model(price_projection_policy_version=1)
-        two = model(price_projection_policy_version=2)
-        self.assertNotEqual(one.fingerprint, two.fingerprint)
+    def test_market_projection_policy_identity_matches_implemented_algorithm(self):
+        for override in (
+            {"price_projection_policy_id": "OTHER_POLICY"},
+            {"price_projection_policy_version": 2},
+        ):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "unsupported price_projection_policy",
+                ):
+                    model(**override)
+
+    def test_market_runtime_rejects_mutated_projection_policy_identity(self):
+        configured = model()
+        object.__setattr__(
+            configured,
+            "price_projection_policy_id",
+            "OTHER_POLICY",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price projection policy identity is unsupported",
+        ):
+            simulate_execution(order(), top(), configured)
 
     def test_market_projection_requires_all_policy_evidence_fields(self):
         for override in (

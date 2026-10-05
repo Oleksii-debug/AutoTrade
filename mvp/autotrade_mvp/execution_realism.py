@@ -92,6 +92,10 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
+MARKET_PRICE_PROJECTION_POLICY_ID = "ADVERSE_PRICE_GRID"
+MARKET_PRICE_PROJECTION_POLICY_VERSION = 1
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     model_version: str
@@ -171,14 +175,15 @@ class ExecutionModel:
             as_fraction(quantum)
             object.__setattr__(self, "price_quantum", quantum)
         if self.price_projection_policy_id is not None:
-            object.__setattr__(
-                self,
-                "price_projection_policy_id",
-                _text(
-                    self.price_projection_policy_id,
-                    name="price_projection_policy_id",
-                ),
+            policy_id = _text(
+                self.price_projection_policy_id,
+                name="price_projection_policy_id",
             )
+            if policy_id != MARKET_PRICE_PROJECTION_POLICY_ID:
+                raise ExecutionRealismError(
+                    "unsupported price_projection_policy_id for implemented MARKET projection"
+                )
+            object.__setattr__(self, "price_projection_policy_id", policy_id)
         if self.price_grid_instrument_version is not None:
             object.__setattr__(
                 self,
@@ -196,6 +201,10 @@ class ExecutionModel:
             ):
                 raise ExecutionRealismError(
                     "price_projection_policy_version must be a positive integer"
+                )
+            if self.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION:
+                raise ExecutionRealismError(
+                    "unsupported price_projection_policy_version for implemented MARKET projection"
                 )
 
     @classmethod
@@ -716,6 +725,13 @@ def simulate_execution(
     ):
         raise ExecutionRealismError(
             "MARKET execution requires complete price projection policy evidence"
+        )
+    if order.order_type == "MARKET" and (
+        model.price_projection_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+        or model.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
+    ):
+        raise ExecutionRealismError(
+            "MARKET execution price projection policy identity is unsupported"
         )
     if (
         order.order_type == "MARKET"

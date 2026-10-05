@@ -8,7 +8,7 @@ reconciliation contracts. Order acknowledgement is never execution evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -30,6 +30,7 @@ from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 _MAX_UNIX_MILLIS = 253_402_300_799_999
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_PREPARED_REQUEST_TOKEN = object()
 
 
 BINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
@@ -239,8 +240,13 @@ class BinanceUsdmPreparedRequest:
     body: Mapping[str, str]
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceUsdmAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
         object.__setattr__(
             self,
             "body",
@@ -341,6 +347,7 @@ def prepare_order_request(
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=BINANCE_USDM_DOCS,
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 

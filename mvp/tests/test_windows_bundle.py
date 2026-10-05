@@ -2,16 +2,31 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 import zipfile
 
-import research.autotrade_research.artifacts.durable_publish as durable_publish_module
-from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
+import autotrade_runtime.artifacts.durable_publish as durable_publish_module
+from tools.build_windows_bundle import (
+    BundleError,
+    WINDOWS_REPARSE_POINT,
+    _RELEASE_RUNTIME_REQUIRED,
+    _has_windows_reparse_point,
+    _windows_path_key,
+    build_bundle,
+)
 
 
-SOURCE_SHA = "a" * 40
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_SHA = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPOSITORY_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 
 
 class DeterministicWindowsBundleTests(unittest.TestCase):
@@ -21,6 +36,10 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.staging = self.root / "staging"
         self.staging.mkdir()
+        # Release-mode tests now traverse the real exact-Git runtime stager.
+        # POSIX publication intentionally requires this nested authority parent
+        # to exist before it can publish descendant source-controlled leaves.
+        (self.staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
         (self.staging / "AutoTrade.exe").write_bytes(b"binary-placeholder")
         (self.staging / "contracts").mkdir()
         (self.staging / "contracts" / "baseline.json").write_text(
@@ -39,6 +58,104 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             os.link(target, link)
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_windows_reparse_attribute_predicate_is_fail_closed(self):
+        regular = type("RegularStat", (), {"st_file_attributes": 0})()
+        reparse = type(
+            "ReparseStat",
+            (),
+            {"st_file_attributes": WINDOWS_REPARSE_POINT},
+        )()
+        invalid = type(
+            "InvalidStat",
+            (),
+            {"st_file_attributes": "reparse"},
+        )()
+        self.assertFalse(_has_windows_reparse_point(regular))
+        self.assertTrue(_has_windows_reparse_point(reparse))
+        with self.assertRaisesRegex(BundleError, "file attributes are invalid"):
+            _has_windows_reparse_point(invalid)
+
+    def _junction_or_skip(self, junction: Path, target: Path):
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(
+                "directory junction creation unavailable: "
+                + (result.stderr or result.stdout).strip()
+            )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+                capture_output=True,
+                check=False,
+            )
+            if junction.exists()
+            else None
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_directory_junction_in_staging_is_rejected_before_descent(self):
+        external = self.root / "external-junction-target"
+        external.mkdir()
+        (external / "outside.bin").write_bytes(b"must-not-enter-bundle")
+        junction = self.staging / "junction"
+        self._junction_or_skip(junction, external)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_ancestor_junction_is_rejected(self):
+        external_parent = self.root / "external-parent"
+        external_parent.mkdir()
+        nested = external_parent / "payload"
+        nested.mkdir()
+        (nested / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction_parent = self.root / "junction-parent"
+        self._junction_or_skip(junction_parent, external_parent)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction_parent / "payload",
+                output=self.root / "ancestor-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "ancestor-junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_root_junction_is_rejected(self):
+        real_staging = self.root / "real-staging"
+        real_staging.mkdir()
+        (real_staging / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction = self.root / "junction-staging"
+        self._junction_or_skip(junction, real_staging)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction,
+                output=self.root / "root-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "root-junction.zip").exists())
 
     def test_hardlinked_staged_file_is_rejected_without_reading_alias(self):
         staged = self.staging / "AutoTrade.exe"
@@ -137,23 +254,35 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             encoding="utf-8",
         )
         components = []
+        runtime_descriptors = {
+            descriptor.path: descriptor
+            for descriptor in _RELEASE_RUNTIME_REQUIRED
+        }
         for path in sorted(self.staging.rglob("*")):
             if path.is_file() and not path.is_symlink():
                 relative = path.relative_to(self.staging).as_posix()
-                if relative == "dependency-lock.json":
-                    kind = "dependency-lock"
-                elif relative == "sbom.spdx.json":
-                    kind = "sbom"
-                elif relative.endswith(".exe"):
-                    kind = "runtime"
+                descriptor = runtime_descriptors.get(relative)
+                if descriptor is not None:
+                    component_id = descriptor.component_id
+                    kind = descriptor.kind
+                    version = "source-controlled"
                 else:
-                    kind = "asset"
+                    component_id = relative.replace("/", "-")
+                    version = "1.0.0"
+                    if relative == "dependency-lock.json":
+                        kind = "dependency-lock"
+                    elif relative == "sbom.spdx.json":
+                        kind = "sbom"
+                    elif relative.endswith(".exe"):
+                        kind = "runtime"
+                    else:
+                        kind = "asset"
                 components.append(
                     {
-                        "component_id": relative.replace("/", "-"),
+                        "component_id": component_id,
                         "kind": kind,
                         "path": relative,
-                        "version": "1.0.0",
+                        "version": version,
                         "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
                     }
                 )
@@ -178,6 +307,94 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         path = self.root / "composition.json"
         path.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
         return path
+
+    def test_executable_bundle_scalars_fail_before_filesystem_or_provenance_reads(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip callback executed")
+
+            def lower(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile lower callback executed")
+
+            def __hash__(self):
+                type(self).callbacks += 1
+                raise AssertionError("hostile hash callback executed")
+
+        cases = (
+            ("version", HostileText("1.0.0"), "version is required"),
+            ("source_sha", HostileText(SOURCE_SHA), "source_sha is required"),
+            ("mode", HostileText("diagnostics"), "mode must be diagnostics or release"),
+        )
+        for field, hostile, expected in cases:
+            with self.subTest(field=field):
+                HostileText.callbacks = 0
+                arguments = {
+                    "staging": self.root / "must-not-be-read",
+                    "output": self.root / f"{field}.zip",
+                    "version": "1.0.0",
+                    "source_sha": SOURCE_SHA,
+                    "mode": "diagnostics",
+                    "provenance_path": self.root / "must-not-be-read.json",
+                }
+                arguments[field] = hostile
+                with self.assertRaisesRegex(BundleError, expected):
+                    build_bundle(**arguments)
+                self.assertEqual(HostileText.callbacks, 0)
+                self.assertFalse(arguments["output"].exists())
+
+    def test_bundle_source_sha_is_exact_lowercase_identity(self):
+        with self.assertRaisesRegex(
+            BundleError,
+            "exact 40-character lowercase Git SHA",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-source.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA.upper(),
+                mode="diagnostics",
+                provenance_path=self.root / "must-not-be-read.json",
+            )
+        self.assertFalse((self.root / "uppercase-source.zip").exists())
+
+    def test_release_provenance_source_sha_must_be_canonical_lowercase(self):
+        with self.assertRaisesRegex(
+            BundleError,
+            "release provenance must bind an exact 40-character lowercase source_sha",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-provenance.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(
+                    eligible=True,
+                    source_sha=SOURCE_SHA.upper(),
+                ),
+            )
+        self.assertFalse((self.root / "uppercase-provenance.zip").exists())
+
+    def test_composition_source_sha_must_be_canonical_lowercase(self):
+        composition = self.composition(source_sha=SOURCE_SHA.upper())
+        with self.assertRaisesRegex(
+            BundleError,
+            "composition source_sha must be an exact lowercase Git object id",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "uppercase-composition.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=composition,
+            )
+        self.assertFalse((self.root / "uppercase-composition.zip").exists())
 
     def test_diagnostics_bundle_is_byte_reproducible(self):
         provenance = self.provenance(eligible=False)
@@ -385,7 +602,8 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 "contracts/baseline.json",
                 "dependency-lock.json",
                 "sbom.spdx.json",
-            },
+            }
+            | {descriptor.path for descriptor in _RELEASE_RUNTIME_REQUIRED},
         )
 
         extra = self.staging / "debug.log"
@@ -557,6 +775,29 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 composition_path=bad_runtime,
             )
 
+        invalid_minimum_windows = {
+            **document,
+            "runtime": {
+                **document["runtime"],
+                "minimum_windows_version": "Windows 11",
+            },
+        }
+        bad_minimum_windows = self.root / "composition-invalid-minimum-windows.json"
+        bad_minimum_windows.write_text(
+            json.dumps(invalid_minimum_windows),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(BundleError, "major.minor.build"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "invalid-minimum-windows.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=bad_minimum_windows,
+            )
+
         uppercase_digest = {
             **document,
             "dependency_lock_sha256": document["dependency_lock_sha256"].upper(),
@@ -573,6 +814,41 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=True),
                 composition_path=bad_case,
             )
+
+    def test_release_composition_requires_canonical_ordered_schema_range(self):
+        cases = (
+            (
+                {"minimum": "latest", "maximum": "1.0.x"},
+                "schema minimum must use major.minor.patch",
+            ),
+            (
+                {"minimum": "1.0.0", "maximum": "1.x"},
+                "schema maximum must use major.minor.patch or major.minor.x",
+            ),
+            (
+                {"minimum": "2.0.0", "maximum": "1.9.x"},
+                "schema compatibility maximum precedes minimum",
+            ),
+            (
+                {"minimum": "1.0.2", "maximum": "1.0.1"},
+                "schema compatibility maximum precedes minimum",
+            ),
+        )
+        for index, (schema_range, expected) in enumerate(cases):
+            with self.subTest(schema_range=schema_range):
+                composition = self.composition(
+                    overrides={"schema_compatibility": schema_range}
+                )
+                with self.assertRaisesRegex(BundleError, expected):
+                    build_bundle(
+                        staging=self.staging,
+                        output=self.root / f"invalid-schema-{index}.zip",
+                        version="1.0.0",
+                        source_sha=SOURCE_SHA,
+                        mode="release",
+                        provenance_path=self.provenance(eligible=True),
+                        composition_path=composition,
+                    )
 
     def test_release_mode_requires_exact_head_provenance_binding(self):
         missing = self.root / "eligible-without-sha.json"
@@ -1082,6 +1358,24 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                 provenance_path=self.provenance(eligible=False),
             )
 
+    def test_posix_windows_forbidden_staging_name_fails_before_bundle_publication(self):
+        if os.name == "nt":
+            self.skipTest("Windows cannot create the forbidden source filename")
+        forbidden = self.staging / "bad?.dll"
+        forbidden.write_bytes(b"forbidden-on-windows")
+        output = self.root / "forbidden-name.zip"
+        with self.assertRaisesRegex(BundleError, "Windows-forbidden"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse(output.exists())
+        self.assertFalse(output.with_suffix(".zip.sha256").exists())
+
     def test_windows_reserved_and_trailing_dot_paths_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "reserved device name"):
             _windows_path_key("CON.txt")
@@ -1093,6 +1387,20 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             _windows_path_key("nested/report ")
         with self.assertRaisesRegex(BundleError, "alternate-data-stream"):
             _windows_path_key("nested/report.txt:payload")
+        with self.assertRaisesRegex(BundleError, "Windows separator"):
+            _windows_path_key(r"nested\\payload.dll")
+        for unsafe in (
+            "nested/bad?.dll",
+            "nested/bad*.dll",
+            'nested/bad".dll',
+            "nested/bad<.dll",
+            "nested/bad>.dll",
+            "nested/bad|.dll",
+            "nested/bad\x1f.dll",
+        ):
+            with self.subTest(path=unsafe):
+                with self.assertRaisesRegex(BundleError, "Windows-forbidden"):
+                    _windows_path_key(unsafe)
 
     def test_source_sha_and_empty_staging_are_rejected(self):
         with self.assertRaisesRegex(BundleError, "source_sha"):

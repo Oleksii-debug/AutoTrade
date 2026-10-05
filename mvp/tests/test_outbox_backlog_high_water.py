@@ -291,6 +291,61 @@ class OutboxBacklogHighWaterTests(unittest.TestCase):
             self.assertEqual(evidence["end_pending_count"], 1)
             self.assertEqual(evidence["high_water"], 1)
 
+    def test_commit_command_batch_uses_tail_sequence_inside_one_transaction(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JournalStore(Path(root) / "journal.sqlite3")
+            start = store.outbox_backlog_cut()
+
+            with patch.object(
+                JournalStore,
+                "_outbox_transition_sequence_value",
+                side_effect=AssertionError("full transition scan executed"),
+            ):
+                saved, inserted, appended = store.commit_command(
+                    command_id="cmd-tail-writer-batch",
+                    actor="qualification",
+                    environment="PAPER",
+                    idempotency_key="key-tail-writer-batch",
+                    request={"action": "QUALIFICATION.TAIL.BATCH"},
+                    result={"status": "RECORDED"},
+                    state_version=1,
+                    events=[
+                        (
+                            _event(
+                                "evt-tail-writer-batch-a",
+                                aggregate_id="tail-writer-batch-a",
+                            ),
+                            "events",
+                        ),
+                        (
+                            _event(
+                                "evt-tail-writer-batch-b",
+                                aggregate_id="tail-writer-batch-b",
+                            ),
+                            "events",
+                        ),
+                    ],
+                )
+                tail = store.outbox_backlog_tail_cut(
+                    start_transition_sequence=start["transition_sequence"],
+                    start_pending_count=start["pending_count"],
+                )
+
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "RECORDED"})
+            self.assertEqual(len(appended), 2)
+            self.assertEqual(
+                tail,
+                {"transition_sequence": 2, "pending_count": 2},
+            )
+            evidence = store.outbox_backlog_high_water_since(
+                start_transition_sequence=start["transition_sequence"],
+                start_pending_count=start["pending_count"],
+            )
+            self.assertEqual(evidence["end_transition_sequence"], 2)
+            self.assertEqual(evidence["high_water"], 2)
+            self.assertEqual(evidence["end_pending_count"], 2)
+
     def test_v9_migration_uses_exact_pending_baseline_without_inventing_history(self):
         class LegacyV9Store(persistence_impl.JournalStore):
             SCHEMA_VERSION = 9

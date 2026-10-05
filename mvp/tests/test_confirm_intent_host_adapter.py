@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.authority import (
     AuthorityPolicy,
@@ -165,6 +166,20 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
         )
         return pending
 
+    def _register_second_risk_policy(
+        self,
+    ) -> tuple[DurableRiskPolicyRegistry, RiskPolicyScope]:
+        risk_registry = DurableRiskPolicyRegistry(self.store)
+        scope = self._scope()
+        risk_registry.register(
+            scope=scope,
+            policy_id="risk-policy-1",
+            version=2,
+            policy=self._risk_policy(max_single_notional="900"),
+            committed_at=NOW + timedelta(seconds=1),
+        )
+        return risk_registry, scope
+
     def host(self) -> JournalBackedHostCommandStore:
         return JournalBackedHostCommandStore(
             self.store,
@@ -242,9 +257,6 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
             accepted.payload["action_payload"]["actor_id"],
             "owner-1",
         )
-        # The detached dict boundary means the original Mapping.get() callback
-        # is never authority. Before the repair its first actor result became
-        # ContextVar authority while the second actor result passed auth.
         self.assertEqual(hostile.actor_gets, 0)
 
     def test_client_financial_override_is_rejected_before_host_mutation(self) -> None:
@@ -292,6 +304,66 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
             restarted.execute_authority_operation(accepted.operation_id),
             replayed,
         )
+
+    def test_risk_reactivation_after_claim_cannot_mint_confirmation(self) -> None:
+        host = self.host()
+        accepted = host.submit(self.command())
+        risk_registry, scope = self._register_second_risk_policy()
+        original_claim = DurablePendingIntentRegistry.claim_confirmation
+
+        def claim_then_reactivate(registry, *args, **kwargs):
+            claimed = original_claim(registry, *args, **kwargs)
+            risk_registry.activate(
+                scope=scope,
+                policy_id="risk-policy-1",
+                version=2,
+                committed_at=NOW + timedelta(seconds=2),
+            )
+            return claimed
+
+        with patch.object(
+            DurablePendingIntentRegistry,
+            "claim_confirmation",
+            claim_then_reactivate,
+        ):
+            failed = host.execute_authority_operation(accepted.operation_id)
+
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertNotIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
+        _pending, claim = self.pending._read("pending-host-confirm-1")
+        self.assertIsNotNone(claim)
+
+    def test_risk_reactivation_during_authority_append_is_cut_fenced(self) -> None:
+        host = self.host()
+        accepted = host.submit(self.command())
+        risk_registry, scope = self._register_second_risk_policy()
+        original_add = AuthorityService.add_financial_confirmation
+        raced = False
+
+        def reactivate_then_add(authority, *args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                risk_registry.activate(
+                    scope=scope,
+                    policy_id="risk-policy-1",
+                    version=2,
+                    committed_at=NOW + timedelta(seconds=2),
+                )
+            return original_add(authority, *args, **kwargs)
+
+        with patch.object(
+            AuthorityService,
+            "add_financial_confirmation",
+            reactivate_then_add,
+        ):
+            failed = host.execute_authority_operation(accepted.operation_id)
+
+        self.assertTrue(raced)
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertNotIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
+        _pending, claim = self.pending._read("pending-host-confirm-1")
+        self.assertIsNotNone(claim)
 
     def test_stale_authority_cut_fails_without_claiming_pending_intent(self) -> None:
         host = self.host()

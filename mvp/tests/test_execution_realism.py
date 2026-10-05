@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_realism import (
@@ -60,6 +60,121 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_execution_scalar_ingress_rejects_hostile_subclasses_without_callbacks(self):
+        class HostileDecimal(Decimal):
+            finite_calls = 0
+
+            def is_finite(self):
+                type(self).finite_calls += 1
+                raise AssertionError("hostile decimal callback executed")
+
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile text callback executed")
+
+        class HostileInt(int):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile latency comparison executed")
+
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate=HostileDecimal("0.001"))
+        self.assertEqual(HostileDecimal.finite_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "order_id is required"):
+            order(order_id=HostileText("sim-1"))
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            model(latency_ms=HostileInt(100))
+        self.assertEqual(HostileInt.compare_calls, 0)
+
+    def test_execution_scalar_ingress_enforces_shared_decimal_resource_envelope(self):
+        with self.assertRaisesRegex(ExecutionRealismError, "finite decimal"):
+            model(fee_rate="9" * 257)
+
+    def test_simulation_rejects_domain_subclasses_before_execution_logic(self):
+        class DerivedOrder(SimulatedOrder):
+            pass
+
+        class DerivedObservation(LiquidityObservation):
+            pass
+
+        class DerivedModel(ExecutionModel):
+            pass
+
+        exact_order = order()
+        exact_observation = top()
+        exact_model = model()
+        derived_order = DerivedOrder(**exact_order.__dict__)
+        derived_observation = DerivedObservation(**exact_observation.__dict__)
+        derived_model = DerivedModel(**exact_model.__dict__)
+
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            simulate_execution(derived_order, exact_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            simulate_execution(exact_order, derived_observation, exact_model)
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            simulate_execution(exact_order, exact_observation, derived_model)
+
+    def test_simulation_revalidates_exact_objects_after_frozen_mutation(self):
+        exact_observation = top()
+        exact_model = model()
+
+        mutated_order = order()
+        object.__setattr__(mutated_order, "quantity", Decimal("-1"))
+        with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):
+            simulate_execution(mutated_order, exact_observation, exact_model)
+
+        mutated_observation = top()
+        object.__setattr__(
+            mutated_observation,
+            "available_at",
+            "2026-09-24T09:59:59Z",
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "available_at cannot precede market_time",
+        ):
+            simulate_execution(order(), mutated_observation, exact_model)
+
+        mutated_model = model()
+        object.__setattr__(mutated_model, "latency_ms", -1)
+        with self.assertRaisesRegex(ExecutionRealismError, "latency_ms must be"):
+            simulate_execution(order(), exact_observation, mutated_model)
+
+        injected_order = order()
+        object.__setattr__(injected_order, "shadow_authority", "forged")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            simulate_execution(injected_order, exact_observation, exact_model)
+
+        class HostileStateField(str):
+            armed = False
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                if type(self).armed:
+                    raise AssertionError("hostile state-field equality executed")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_key_order = order()
+        hostile_state = dict(hostile_key_order.__dict__)
+        quantity = hostile_state.pop("quantity")
+        hostile_state[HostileStateField("quantity")] = quantity
+        object.__setattr__(hostile_key_order, "__dict__", hostile_state)
+        HostileStateField.armed = True
+        with self.assertRaisesRegex(TypeError, "non-canonical state field names"):
+            simulate_execution(hostile_key_order, exact_observation, exact_model)
+        self.assertEqual(HostileStateField.equality_calls, 0)
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,
@@ -115,6 +230,36 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, expected)
         self.assertEqual(result.fee, Decimal("10") * expected * Decimal("0.001"))
+
+    def test_limit_execution_is_invariant_to_ambient_decimal_context(self):
+        def execute(*, precision, rounding):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                return simulate_execution(
+                    order(
+                        order_type="LIMIT",
+                        quantity="9999999999999999999.99",
+                        lot_size="0.01",
+                        limit_price="102.12345678901234567890123456789",
+                    ),
+                    top(
+                        available_volume="12345678901234567890.12",
+                        ask="101",
+                    ),
+                    model(
+                        max_participation="0.123456789012345678",
+                        fee_rate="0.001234567890123456789",
+                    ),
+                )
+
+        low_floor = execute(precision=6, rounding=ROUND_FLOOR)
+        low_ceiling = execute(precision=6, rounding=ROUND_CEILING)
+        high_precision = execute(precision=80, rounding=ROUND_CEILING)
+        self.assertEqual(low_floor, low_ceiling)
+        self.assertEqual(low_floor, high_precision)
+        self.assertEqual(low_floor.status, "PARTIAL")
+        self.assertGreater(low_floor.filled_quantity, Decimal("0"))
 
     def test_available_volume_and_participation_create_partial_fill(self):
         result = simulate_execution(

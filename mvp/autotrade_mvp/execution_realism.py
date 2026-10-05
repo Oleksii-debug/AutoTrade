@@ -8,12 +8,21 @@ exact Decimal-compatible values; binary floats are rejected.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Literal
+
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    exact_multiply,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+    round_fraction_to_quantum,
+)
 
 
 class ExecutionRealismError(ValueError):
@@ -21,15 +30,12 @@ class ExecutionRealismError(ValueError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if isinstance(value, (bool, float)):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
+        return parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
         raise ExecutionRealismError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ExecutionRealismError(f"{name} must be a finite decimal")
-    return result
 
 
 def _non_negative(value, *, name: str) -> Decimal:
@@ -47,7 +53,7 @@ def _positive(value, *, name: str) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ExecutionRealismError(f"{name} is required")
     return value.strip()
 
@@ -105,11 +111,7 @@ class ExecutionModel:
     scenario_cost_multiplier: Decimal
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.latency_ms, bool)
-            or not isinstance(self.latency_ms, int)
-            or self.latency_ms < 0
-        ):
+        if type(self.latency_ms) is not int or self.latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(self.data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:
@@ -177,7 +179,7 @@ class ExecutionModel:
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
     ) -> "ExecutionModel":
-        if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
+        if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
         fidelity = _text(data_fidelity, name="data_fidelity").upper()
         if fidelity not in {"BAR", "TOP_OF_BOOK", "BOOK"}:
@@ -272,7 +274,13 @@ class SimulatedOrder:
             raise TypeError("already_triggered must be boolean")
         quantity = _positive(self.quantity, name="quantity")
         lot_size = _positive(self.lot_size, name="lot_size")
-        if quantity % lot_size != 0:
+        try:
+            quantity_is_multiple = is_exact_decimal_multiple(quantity, lot_size)
+        except ExactDecimalError as error:
+            raise ExecutionRealismError(
+                "quantity multiple check exceeds exact arithmetic resource envelope"
+            ) from error
+        if not quantity_is_multiple:
             raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
         limit = None if self.limit_price is None else _positive(
             self.limit_price, name="limit_price"
@@ -347,7 +355,16 @@ class SimulatedOrder:
         submitted = _instant(submitted_at, name="submitted_at")
         normalized_quantity = _positive(quantity, name="quantity")
         normalized_lot_size = _positive(lot_size, name="lot_size")
-        if normalized_quantity % normalized_lot_size != 0:
+        try:
+            quantity_is_multiple = is_exact_decimal_multiple(
+                normalized_quantity,
+                normalized_lot_size,
+            )
+        except ExactDecimalError as error:
+            raise ExecutionRealismError(
+                "quantity multiple check exceeds exact arithmetic resource envelope"
+            ) from error
+        if not quantity_is_multiple:
             raise ExecutionRealismError("quantity must be an exact multiple of lot_size")
         return cls(
             order_id=_text(order_id, name="order_id"),
@@ -520,9 +537,46 @@ class SimulatedExecution:
         return self.scenario == "OPTIMISTIC"
 
 
+def _detached_dataclass_input(value, expected_type, *, name: str):
+    """Take one held canonical snapshot of a caller-owned execution DTO."""
+
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise TypeError(f"{name} must expose canonical dataclass state")
+    snapshot = dict(state)
+    state_keys = tuple(snapshot)
+    if any(type(field_name) is not str for field_name in state_keys):
+        raise TypeError(f"{name} has non-canonical state field names")
+    expected_fields = tuple(field.name for field in fields(expected_type))
+    if set(state_keys) != set(expected_fields):
+        raise TypeError(f"{name} has unexpected state fields")
+    return expected_type(
+        **{field_name: snapshot[field_name] for field_name in expected_fields}
+    )
+
+
+def _exact_product(*values: Decimal, name: str) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    return lots * lot_size
+    try:
+        return round_fraction_to_quantum(
+            as_fraction(quantity),
+            lot_size,
+            mode="FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "quantity rounding exceeds exact arithmetic resource envelope"
+        ) from error
 
 
 def _capacity_quantity(
@@ -532,10 +586,12 @@ def _capacity_quantity(
     model: ExecutionModel,
     lot_size: Decimal,
 ) -> Decimal:
-    raw = min(
-        order_quantity,
-        observation.available_volume * model.max_participation,
+    participating_volume = _exact_product(
+        observation.available_volume,
+        model.max_participation,
+        name="participation capacity",
     )
+    raw = min(order_quantity, participating_volume)
     return _round_down(raw, lot_size)
 
 
@@ -622,12 +678,13 @@ def simulate_execution(
     that same or earlier liquidity by default.
     """
 
-    if not isinstance(order, SimulatedOrder):
-        raise TypeError("order must be SimulatedOrder")
-    if not isinstance(observation, LiquidityObservation):
-        raise TypeError("observation must be LiquidityObservation")
-    if not isinstance(model, ExecutionModel):
-        raise TypeError("model must be ExecutionModel")
+    order = _detached_dataclass_input(order, SimulatedOrder, name="order")
+    observation = _detached_dataclass_input(
+        observation,
+        LiquidityObservation,
+        name="observation",
+    )
+    model = _detached_dataclass_input(model, ExecutionModel, name="model")
     if observation.instrument_version != order.instrument_version:
         raise ExecutionRealismError(
             "liquidity instrument_version must exactly match order instrument_version"
@@ -837,8 +894,17 @@ def simulate_execution(
                 "configured adverse costs produce non-positive execution price"
             )
 
-    notional = capacity * fill_price
-    fee = max(notional * model.fee_rate, model.minimum_fee)
+    notional = _exact_product(
+        capacity,
+        fill_price,
+        name="execution notional",
+    )
+    proportional_fee = _exact_product(
+        notional,
+        model.fee_rate,
+        name="execution fee",
+    )
+    fee = max(proportional_fee, model.minimum_fee)
     status = "FILLED" if capacity == order.quantity else "PARTIAL"
     return SimulatedExecution(
         status=status,

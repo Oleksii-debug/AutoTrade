@@ -1522,7 +1522,63 @@ class DurableModelCallOrchestrator:
                     decision.reason,
                 )
 
-        materialized = tuple(descriptors)
+        descriptor_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        descriptor_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        descriptor_shape = self._callback_shape_snapshot()
+        descriptor_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        descriptor_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        descriptor_error: Exception | None = None
+        descriptor_changes: list[str] = []
+        materialized: tuple[ModelDescriptor, ...] | tuple[object, ...] = ()
+        try:
+            try:
+                materialized = tuple(descriptors)
+            except Exception as error:
+                descriptor_error = error
+        finally:
+            for name, expected in descriptor_refs.items():
+                if getattr(self, name, None) is not expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in descriptor_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in descriptor_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    descriptor_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in descriptor_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    descriptor_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            descriptor_changes.extend(self._restore_callback_shape(descriptor_shape))
+        if descriptor_changes:
+            raise ModelCallError(
+                "descriptor inventory mutated orchestrator authority:"
+                + ",".join(sorted(set(descriptor_changes)))
+            )
+        if descriptor_error is not None:
+            raise ModelCallError("descriptor inventory could not be materialized") from descriptor_error
         if any(type(item) is not ModelDescriptor for item in materialized):
             raise TypeError("descriptors must be exact ModelDescriptor values")
         materialized = tuple(ModelDescriptor(**{

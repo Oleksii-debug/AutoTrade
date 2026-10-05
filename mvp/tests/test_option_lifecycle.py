@@ -488,6 +488,23 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             )
         )
 
+    def seed_underlying_position(self, signed_quantity: str) -> None:
+        quantity = Decimal(signed_quantity)
+        if quantity == 0:
+            raise ValueError("seed position must be non-zero")
+        side = "BUY" if quantity > 0 else "SELL"
+        self.book.append(
+            book_equity_fill(
+                transaction_id=f"seed-underlying-{side.lower()}-{abs(quantity)}",
+                cause_event_id=f"seed-underlying-cause-{side.lower()}-{abs(quantity)}",
+                instrument="ABC",
+                settlement_currency="USD",
+                side=side,
+                quantity=abs(quantity),
+                price=Decimal("1"),
+            )
+        )
+
     def forged_observation(self) -> OptionLifecycleObservation:
         return OptionLifecycleObservation(
             provider_id="BYBIT",
@@ -758,6 +775,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_correction_reproves_quantity_grid_before_any_reversal(self):
         self.seed_option_position("-2")
+        self.seed_underlying_position("200")
         first = self.evidence(
             external_event_id="assignment-grid-r1",
             event_kind="ASSIGNMENT",
@@ -793,6 +811,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
     def test_correction_rejects_changed_instrument_grid_authority_before_reversal(self):
         self.seed_option_position("-2")
+        self.seed_underlying_position("200")
         first = self.evidence(
             external_event_id="assignment-grid-authority-r1",
             event_kind="ASSIGNMENT",
@@ -1070,8 +1089,40 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             [],
         )
 
-    def test_short_assignment_has_exact_opposite_obligations(self):
+    def test_short_assignment_that_widens_underlying_short_fails_before_mutation(self):
         self.seed_option_position("-1")
+        before_transactions = tuple(self.book.transactions)
+        before_economic = tuple(
+            self.store.load_events("economic_book", self.book.book_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "without atomic borrow authority",
+        ):
+            self.authority.apply(
+                self.evidence(
+                    event_kind="ASSIGNMENT",
+                    signed_contracts="-1",
+                )
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            tuple(self.store.load_events("economic_book", self.book.book_id)),
+            before_economic,
+        )
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+        self.assertEqual(self.book.cash("USD"), Decimal("1"))
+
+    def test_short_assignment_covered_by_owned_underlying_has_exact_obligations(self):
+        self.seed_option_position("-1")
+        self.seed_underlying_position("100")
         result = self.authority.apply(
             self.evidence(
                 event_kind="ASSIGNMENT",
@@ -1081,11 +1132,11 @@ class DurableOptionLifecycleTests(unittest.TestCase):
 
         self.assertTrue(result.inserted)
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(self.book.position("ABC"), Decimal("-100"))
-        self.assertEqual(self.book.cash("USD"), Decimal("5001"))
-
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+        self.assertEqual(self.book.cash("USD"), Decimal("4901"))
     def test_correction_reusing_provider_revision_fails_closed(self):
         self.seed_option_position("-2")
+        self.seed_underlying_position("200")
         first = self.evidence(
             external_event_id="assignment-r1",
             event_kind="ASSIGNMENT",
@@ -1109,11 +1160,15 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             self.authority.apply(correction)
 
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
-        self.assertEqual(self.book.position("ABC"), Decimal("-100"))
-        # The -2 seed is itself canonical economics: selling two contracts at\n        # 1 USD credits 2 USD before the -1 assignment adds 5000 USD. Rejected\n        # correction evidence must leave that exact 5002 USD state unchanged.\n        self.assertEqual(self.book.cash("USD"), Decimal("5002"))\n        self.assertEqual(\n            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),\n            1,\n        )
-
+        self.assertEqual(self.book.position("ABC"), Decimal("100"))
+        self.assertEqual(self.book.cash("USD"), Decimal("4802"))
+        self.assertEqual(
+            len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            1,
+        )
     def test_correction_atomically_reverses_and_replaces_economics(self):
         self.seed_option_position("-2")
+        self.seed_underlying_position("200")
         first = self.evidence(
             external_event_id="assignment-r1",
             event_kind="ASSIGNMENT",
@@ -1136,11 +1191,13 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(len(corrected.reversal_transaction_ids), 1)
         self.assertEqual(len(corrected.active_transaction_ids), 1)
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(self.book.position("ABC"), Decimal("-200"))
-        self.assertEqual(self.book.cash("USD"), Decimal("10002"))
-        self.assertEqual(len(self.book.transactions), 4)
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+        self.assertEqual(self.book.cash("USD"), Decimal("9802"))
+        self.assertEqual(len(self.book.transactions), 5)
 
-        _seed, original, reversal, replacement = self.book.transactions
+        _option_seed, _underlying_seed, original, reversal, replacement = (
+            self.book.transactions
+        )
         self.assertEqual(original.transaction_id, original_id)
         self.assertEqual(reversal.reverses_transaction_id, original_id)
         self.assertEqual(replacement.corrects_transaction_id, original_id)
@@ -1161,10 +1218,9 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             environment="PAPER",
         )
         self.assertEqual(restarted.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(restarted.position("ABC"), Decimal("-200"))
-        self.assertEqual(restarted.cash("USD"), Decimal("10002"))
-        self.assertEqual(len(restarted.transactions), 4)
-
+        self.assertEqual(restarted.position("ABC"), Decimal("0"))
+        self.assertEqual(restarted.cash("USD"), Decimal("9802"))
+        self.assertEqual(len(restarted.transactions), 5)
     def test_adjusted_deliverable_without_explicit_exercise_cash_fails_closed(self):
         self.seed_option_position("1")
         registry = InstrumentRegistry(

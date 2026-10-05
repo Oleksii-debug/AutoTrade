@@ -941,6 +941,8 @@ class DurableFinancingBook:
         self,
         charge_id: str,
         events: list[dict[str, Any]],
+        *,
+        economic_transactions: tuple[JournalTransaction, ...],
     ) -> FinancingRevisionBook:
         history: list[FinancingEvent] = []
         aggregate_id = self._aggregate_id(charge_id)
@@ -1015,24 +1017,33 @@ class DurableFinancingBook:
         charge_id: str,
         *,
         max_attempts: int = 4,
-    ) -> tuple[int, list[dict[str, Any]], FinancingRevisionBook]:
+    ) -> tuple[
+        int,
+        list[dict[str, Any]],
+        tuple[JournalTransaction, ...],
+        FinancingRevisionBook,
+    ]:
         """Read financing + economics only from a bounded stable journal cut."""
 
         _require_durable_financing_authority(self)
         for _attempt in range(max_attempts):
             cut_before = self.store.current_journal_sequence()
             durable_events = self._events(charge_id)
-            self.economic_book.refresh()
-            book = self._book_from_durable_events(charge_id, durable_events)
+            economic_cut = self.economic_book.read_cut()
+            book = self._book_from_durable_events(
+                charge_id,
+                durable_events,
+                economic_transactions=economic_cut.transactions,
+            )
             cut_after = self.store.current_journal_sequence()
             if cut_before == cut_after:
-                return cut_before, durable_events, book
+                return cut_before, durable_events, economic_cut.transactions, book
         raise FinancingConflict(
             "financing authority could not obtain a stable JournalStore cut"
         )
 
     def _replay(self, charge_id: str) -> FinancingRevisionBook:
-        return self._stable_replay_cut(charge_id)[2]
+        return self._stable_replay_cut(charge_id)[3]
 
     def _economic_transaction(
         self,
@@ -1078,12 +1089,13 @@ class DurableFinancingBook:
         event_id: str,
         event: FinancingEvent,
         economic_delta: Decimal,
+        economic_transactions: tuple[JournalTransaction, ...],
     ) -> JournalTransaction | None:
         """Require exact one-to-one financing/economic durable conservation."""
 
         matches = tuple(
             transaction
-            for transaction in self.economic_book.transactions
+            for transaction in economic_transactions
             if transaction.cause_event_id == event_id
         )
         if economic_delta == 0:
@@ -1115,13 +1127,7 @@ class DurableFinancingBook:
             raise FinancingConflict(
                 "durable financing revision economic posting does not match canonical financing delta"
             )
-        try:
-            durable_batch = self.economic_book.prepare_batch_mutation((expected,))
-        except AccountingConflict as error:
-            raise FinancingConflict(
-                "durable financing revision canonical economic batch is invalid"
-            ) from error
-        if not durable_batch.already_committed:
+        if expected not in economic_transactions:
             raise FinancingConflict(
                 "durable financing revision is missing its canonical economic batch"
             )
@@ -1266,7 +1272,9 @@ class DurableFinancingBook:
     ) -> DurableFinancingResult:
         _require_durable_financing_authority(self)
         aggregate_id = self._aggregate_id(event.charge_id)
-        accepted_cut, durable_events, book = self._stable_replay_cut(event.charge_id)
+        accepted_cut, durable_events, economic_transactions, book = self._stable_replay_cut(
+            event.charge_id
+        )
         incoming_charge_scope = _charge_scope(
             charge_scope_type,
             charge_scope_id,
@@ -1299,6 +1307,7 @@ class DurableFinancingBook:
                 prior = self._book_from_durable_events(
                     event.charge_id,
                     durable_events[:-1],
+                    economic_transactions=economic_transactions,
                 )
                 previous = prior.latest(event.charge_id)
                 previous_final = (
@@ -1314,17 +1323,14 @@ class DurableFinancingBook:
                         event=event,
                         economic_delta=expected_delta,
                     )
-                    existing_economics = self.economic_book.prepare_batch_mutation(
-                        (economic_transaction,)
-                    )
-                    if not existing_economics.already_committed:
+                    if economic_transaction not in economic_transactions:
                         raise FinancingConflict(
                             "durable financing revision is missing its economic posting"
                         )
             else:
                 stray = tuple(
                     transaction
-                    for transaction in self.economic_book.transactions
+                    for transaction in economic_transactions
                     if transaction.cause_event_id == durable_event_id
                 )
                 if stray:
@@ -1334,7 +1340,7 @@ class DurableFinancingBook:
             if event.kind == "FINAL" and expected_delta == 0:
                 stray = tuple(
                     transaction
-                    for transaction in self.economic_book.transactions
+                    for transaction in economic_transactions
                     if transaction.cause_event_id == durable_event_id
                 )
                 if stray:

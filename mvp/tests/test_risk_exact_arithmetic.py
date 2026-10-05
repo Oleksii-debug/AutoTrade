@@ -947,6 +947,93 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 valid_until="2026-10-05T10:01:00Z",
             )
 
+    def test_bound_fingerprint_rejects_rehydrated_intent_identity_mismatch(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash=risk_module.risk_intent_hash(intent),
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        substituted = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        rehydrated = type(bound)(
+            **{
+                **vars(bound),
+                "evaluated_intent_hash": risk_module.risk_intent_hash(substituted),
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "bound risk decision intent_hash does not match evaluated intent identity",
+        ):
+            risk_module.risk_decision_fingerprint(rehydrated)
+        with self.assertRaisesRegex(
+            ValueError,
+            "bound risk decision intent_hash does not match evaluated intent identity",
+        ):
+            risk_module.validate_bound_risk_decision(
+                rehydrated,
+                now="2026-10-05T10:00:30Z",
+            )
+
+    def test_bound_fingerprint_rejects_malformed_rehydrated_intent_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash=risk_module.risk_intent_hash(intent),
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        malformed = type(bound)(
+            **{
+                **vars(bound),
+                "evaluated_intent_hash": "risk-intent:sha256:" + "A" * 64,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated_intent_hash must be canonical lowercase",
+        ):
+            risk_module.risk_decision_fingerprint(malformed)
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated_intent_hash must be canonical lowercase",
+        ):
+            risk_module.validate_bound_risk_decision(
+                malformed,
+                now="2026-10-05T10:00:30Z",
+            )
+
     def test_bound_risk_uses_the_same_resealed_state_version_after_evaluation(self):
         original_context = exact_context()
         intent = RiskIntent.create(

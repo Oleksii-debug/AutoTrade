@@ -2545,7 +2545,7 @@ class BinanceSpotTemporalIngressTests(unittest.TestCase):
             symbol="BTCUSDT",
             side="BUY",
             order_type="LIMIT",
-            quantity="0.010",
+            quantity="0.100",
             price="100.00",
             time_in_force="GTC",
         )

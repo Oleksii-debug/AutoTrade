@@ -447,9 +447,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("101"),
-            fee=Decimal("0.101"),
+            fee=Decimal("1.010"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(ExecutionOracleError, "same or earlier"):
@@ -469,9 +469,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("110"),
-            fee=Decimal("0.110"),
+            fee=Decimal("1.100"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(
@@ -499,9 +499,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("110"),
-            fee=Decimal("0.110"),
+            fee=Decimal("1.100"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(ExecutionOracleError, "before venue arrival"):

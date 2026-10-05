@@ -947,15 +947,16 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             "sha256:" + sha256(bundle.read_bytes()).hexdigest(),
         )
         paths = [item["target_relative_path"] for item in verified["files"]]
-        self.assertEqual(
-            paths,
+        expected_paths = sorted(
             [
                 "AutoTrade.Desktop.exe",
                 "contracts/manifest.json",
                 "dependency-lock.json",
                 "sbom.spdx.json",
-            ],
+                *(descriptor.path for descriptor in _RELEASE_RUNTIME_REQUIRED),
+            ]
         )
+        self.assertEqual(paths, expected_paths)
 
 
     def tamper_manifest_path(self, source, destination, new_path):

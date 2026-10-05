@@ -100,7 +100,7 @@ class ProviderEvidenceNamespaceGenerationTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     ArtifactIntegrityError,
-                    "publication store does not match trusted artifact namespace generation",
+                    "publication store does not match trusted artifact root",
                 ):
                     trusted_authenticated_reader(
                         root,

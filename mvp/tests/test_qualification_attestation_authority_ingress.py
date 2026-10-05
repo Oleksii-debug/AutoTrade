@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -95,14 +96,30 @@ class QualificationAttestationAuthorityIngressTests(unittest.TestCase):
         )
         signed = attestation(trust_root)
         receipt = SignedQualificationAttestation(signed, sign(signed))
+        expected_policy_id = exact_policy.policy_id
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
-            publish(store)
             with self.assertRaisesRegex(
                 TypeError,
                 "policy must be QualificationTrustPolicy",
             ):
-                verify(receipt, store, derived_policy)
+                verify_qualification_attestation(
+                    receipt,
+                    policy=derived_policy,
+                    evidence_store=store,
+                    evidence_root=store.root,
+                    expected_policy_id=expected_policy_id,
+                    expected_policy_version=exact_policy.policy_version,
+                    expected_source_sha="a" * 40,
+                    expected_domain="RELEASE",
+                    expected_gate="FREEZE",
+                    expected_package_id="WP-54",
+                    expected_protocol_id="release-freeze-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id="release-candidate-freeze",
+                    expected_release_artifact_id=receipt.attestation.release_artifact_id,
+                    expected_release_artifact_sha256=receipt.attestation.release_artifact_sha256,
+                )
         self.assertEqual(touched, [])
 
     def test_receipt_subclass_is_rejected_before_attestation_dispatch(self):

@@ -1186,6 +1186,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
     for values, name in (

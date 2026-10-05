@@ -277,6 +277,7 @@ _ORDER_STATE_FIELDS = frozenset(
         "host_id",
         "owner_epoch",
         "evidence_artifact_store",
+        "_provider_evidence_reader",
         "aggregate_id",
         "_book",
         "_idempotency",
@@ -312,19 +313,32 @@ def _order_projection_binding_operations():
         )
         return tuple((type(value), value) for value in values)
 
+    def current_entry(value):
+        object_id = id(value)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        owner_ref = entry[0]
+        owner = owner_ref()
+        if owner is value:
+            return entry
+        if owner is None:
+            bindings.pop(object_id, None)
+            return None
+        raise OrderProjectionConflict(
+            "durable OMS selection authority identity collision"
+        )
+
     def registered(value):
         with lock:
-            entry = bindings.get(id(value))
-            return entry is not None and entry[0]() is value
+            return current_entry(value) is not None
 
     def bind(value):
         with lock:
-            if registered(value):
+            if current_entry(value) is not None:
                 raise OrderProjectionConflict(
                     "durable OMS composition is already initialized"
                 )
-            for key in [key for key, entry in bindings.items() if entry[0]() is None]:
-                bindings.pop(key)
             state = object.__getattribute__(value, "__dict__")
             store = state["store"]
             identity = require_exact_journal_store_authority(
@@ -346,43 +360,89 @@ def _order_projection_binding_operations():
                     raise OrderProjectionConflict(
                         "provider evidence trusted reader authority is unavailable"
                     ) from error
-            binding_key = id(value)
 
-            def release_binding(reference, *, binding_key=binding_key):
-                with lock:
-                    entry = bindings.get(binding_key)
-                    if entry is not None and entry[0] is reference:
-                        bindings.pop(binding_key, None)
-
-            reference = weakref.ref(value, release_binding)
-            bindings[binding_key] = (
-                reference,
-                store,
-                identity,
-                scope,
-                evidence,
-                frozen_evidence_namespace,
+            # Keep every registry weakref callback-free. Python exposes weakref
+            # callbacks through weakref.getweakrefs(), so a cleanup callback on
+            # a live OMS would itself become a caller-invokable trust-binding
+            # eraser. The live projection owns store/evidence through its normal
+            # immutable state and owns the trusted reader through a private
+            # immutable field; the registry retains only weak references.
+            owner_ref = weakref.ref(value)
+            store_ref = weakref.ref(store)
+            evidence_ref = None if evidence is None else weakref.ref(evidence)
+            reader_ref = (
+                None if trusted_reader is None else weakref.ref(trusted_reader)
+            )
+            object.__setattr__(
+                value,
+                "_provider_evidence_reader",
                 trusted_reader,
             )
+            object_id = id(value)
+            bindings[object_id] = (
+                owner_ref,
+                store_ref,
+                identity,
+                scope,
+                evidence_ref,
+                frozen_evidence_namespace,
+                reader_ref,
+            )
+
+            # Publish no partially replayed financial authority to competing
+            # threads. The RLock remains held across initial durable replay;
+            # re-entrant require() calls from this initializer are permitted,
+            # while other threads block until replay either completes or the
+            # unpublished binding is removed.
+            try:
+                DurableOrderBookProjection._reload(value)
+            except BaseException:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
+                    bindings.pop(object_id, None)
+                state = object.__getattribute__(value, "__dict__")
+                if state.get("_provider_evidence_reader") is trusted_reader:
+                    object.__setattr__(
+                        value,
+                        "_provider_evidence_reader",
+                        None,
+                    )
+                raise
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:
             raise TypeError("OMS must be exact DurableOrderBookProjection")
         with lock:
-            entry = bindings.get(id(value))
-            if entry is None or entry[0]() is not value:
+            entry = current_entry(value)
+            if entry is None:
                 raise OrderProjectionConflict(
                     "durable OMS selection authority is unavailable"
                 )
             (
                 _,
-                store,
+                store_ref,
                 identity,
                 scope,
-                evidence,
+                evidence_ref,
                 frozen_evidence_namespace,
-                trusted_reader,
+                reader_ref,
             ) = entry
+            store = store_ref()
+            evidence = None if evidence_ref is None else evidence_ref()
+            trusted_reader = None if reader_ref is None else reader_ref()
+            if store is None:
+                raise OrderProjectionConflict(
+                    "durable OMS selected store authority was lost"
+                )
+            if evidence_ref is not None and evidence is None:
+                raise OrderProjectionConflict(
+                    "provider evidence ArtifactStore authority was lost"
+                )
+            if reader_ref is not None and trusted_reader is None:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority was released while OMS is live"
+                )
+
             state = object.__getattribute__(value, "__dict__")
             if (
                 type(state) is not dict
@@ -397,6 +457,10 @@ def _order_projection_binding_operations():
                 raise OrderProjectionConflict("durable OMS scope changed")
             if state["store"] is not store or state["evidence_artifact_store"] is not evidence:
                 raise OrderProjectionConflict("durable OMS selected store changed")
+            if state["_provider_evidence_reader"] is not trusted_reader:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority changed"
+                )
             if (
                 require_exact_journal_store_authority(
                     store,
@@ -435,12 +499,13 @@ def _order_projection_binding_operations():
     def read_provider_evidence(value, artifact_id: str):
         require(value)
         with lock:
-            entry = bindings.get(id(value))
-            if entry is None or entry[0]() is not value:
+            entry = current_entry(value)
+            if entry is None:
                 raise OrderProjectionConflict(
                     "durable OMS selection authority is unavailable"
                 )
-            trusted_reader = entry[6]
+            reader_ref = entry[6]
+            trusted_reader = None if reader_ref is None else reader_ref()
             if trusted_reader is None:
                 raise OrderProjectionConflict(
                     "provider evidence trusted reader authority is unavailable"
@@ -448,7 +513,6 @@ def _order_projection_binding_operations():
         return trusted_reader(artifact_id)
 
     return registered, bind, require, read_provider_evidence
-
 
 (
     _order_projection_is_registered,
@@ -503,6 +567,7 @@ class DurableOrderBookProjection:
                 "evidence_artifact_store must be the exact canonical ArtifactStore"
             )
         self.evidence_artifact_store = evidence_artifact_store
+        self._provider_evidence_reader = None
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -514,7 +579,6 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         _bind_order_projection(self)
-        self._reload()
 
     def _new_book(self) -> OrderBookProjection:
         return OrderBookProjection(

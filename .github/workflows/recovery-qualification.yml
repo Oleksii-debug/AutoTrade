@@ -8,6 +8,7 @@ on:
       - "mvp/autotrade_mvp/qualification_attestation.py"
       - "mvp/tests/test_recovery_qualification.py"
       - "research/autotrade_research/artifacts/**"
+      - "tools/write_ci_evidence.py"
       - ".github/workflows/recovery-qualification.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "mvp/autotrade_mvp/qualification_attestation.py"
       - "mvp/tests/test_recovery_qualification.py"
       - "research/autotrade_research/artifacts/**"
+      - "tools/write_ci_evidence.py"
       - ".github/workflows/recovery-qualification.yml"
 
 concurrency:

@@ -554,6 +554,49 @@ class AccountingFoundationTests(unittest.TestCase):
             del accounting_module._transaction_digest_cache_lock
             del accounting_module._cached_transaction_digest
 
+    def test_scoped_economic_book_constructor_ignores_rebound_module_authorities(self):
+        original_class = accounting_module.ScopedEconomicBook
+        original_book_type = accounting_module.EconomicBook
+        original_bind = accounting_module._bind_scoped_economic_book_owner
+        original_name = accounting_module._name
+        hostile_calls = []
+
+        class HostileBook:
+            def __init__(self, _transactions=()):
+                hostile_calls.append("book")
+
+        accounting_module.ScopedEconomicBook = object
+        accounting_module.EconomicBook = HostileBook
+        accounting_module._bind_scoped_economic_book_owner = (
+            lambda *_args: hostile_calls.append("bind")
+        )
+        accounting_module._name = lambda *_args, **_kwargs: (
+            hostile_calls.append("name") or "FORGED"
+        )
+        try:
+            scoped = ScopedEconomicBook(
+                environment="paper",
+                account_id=" acct-1 ",
+                transactions=(
+                    book_external_cash_flow(
+                        transaction_id="seed-constructor",
+                        cause_event_id="seed-constructor-cause",
+                        currency="USD",
+                        amount="100",
+                    ),
+                ),
+            )
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(scoped.environment, "PAPER")
+            self.assertEqual(scoped.account_id, "acct-1")
+            self.assertEqual(scoped.cash("USD"), Decimal("100"))
+            self.assertIs(type(object.__getattribute__(scoped, "__dict__")["_book"]), original_book_type)
+        finally:
+            accounting_module.ScopedEconomicBook = original_class
+            accounting_module.EconomicBook = original_book_type
+            accounting_module._bind_scoped_economic_book_owner = original_bind
+            accounting_module._name = original_name
+
     def test_scoped_economic_book_rejects_post_construction_owner_retargeting(self):
         scoped = ScopedEconomicBook(
             environment="PAPER",

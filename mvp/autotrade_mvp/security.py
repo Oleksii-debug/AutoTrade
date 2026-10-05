@@ -102,6 +102,7 @@ class SecurityBoundary:
             raise TypeError("credential_vault must be a ProtectedCredentialVault")
         self._paired_origins = {_authenticated_origin(value) for value in allowed_origins}
         self._credential_vault = credential_vault
+        self._credential_vault_lease = credential_vault.lease
         if session_authorizer is not None and not callable(session_authorizer):
             raise TypeError("session_authorizer must be callable or None")
         self._session_authorizer = session_authorizer
@@ -509,7 +510,7 @@ class SecurityBoundary:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
         if not isinstance(handle, CredentialHandle):
             raise PermissionError("Credential handle is invalid")
-        with self._credential_vault.lease(
+        with self._credential_vault_lease(
             handle,
             execution_identity=_credential_text(
                 execution_identity,

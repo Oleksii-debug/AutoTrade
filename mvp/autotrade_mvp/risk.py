@@ -1582,14 +1582,12 @@ def bind_risk_decision(
     _validate_risk_decision_shape(decision)
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
         raise ValueError("risk decision must use the current exact arithmetic policy")
-    ihash = _canonical_risk_intent_hash(intent_hash, name="intent_hash")
+    ihash = _risk_binding_text(intent_hash, name="intent_hash")
     evaluated_intent_hash = decision.evaluated_intent_hash
     if evaluated_intent_hash is None:
         raise ValueError("risk decision lacks evaluated intent identity")
-    evaluated_intent_hash = _canonical_risk_intent_hash(
-        evaluated_intent_hash,
-        name="evaluated_intent_hash",
-    )
+    if _RISK_INTENT_HASH_RE.fullmatch(evaluated_intent_hash) is None:
+        raise ValueError("risk decision evaluated intent identity is malformed")
     if ihash != evaluated_intent_hash:
         raise ValueError("intent_hash does not match the evaluated risk intent")
     capability = _risk_binding_text(

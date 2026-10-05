@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
@@ -31,12 +31,130 @@ jobs:
         run: |
           from pathlib import Path
 
+          persistence_path = Path('mvp/autotrade_mvp/_persistence_impl.py')
+          persistence = persistence_path.read_text(encoding='utf-8')
+          delivery_state = '''    def outbox_delivery_state(
+              self,
+              event_id: str,
+              *,
+              topic: str,
+          ) -> dict[str, Any] | None:
+              """Read one exact outbox row without mutating delivery authority.
+
+              The returned identity is accepted only after the same event-envelope,
+              canonical-JSON, and hash checks used by pending_outbox() and the
+              delivery acknowledgement path.  Recovery may therefore inspect a
+              completed publication without weakening durable outbox integrity.
+              """
+
+              event_id = self._require_text(event_id, "event_id")
+              topic = self._require_text(topic, "topic")
+              with self._connect() as connection:
+                  row = connection.execute(
+                      """
+                      SELECT
+                          outbox.outbox_id,
+                          outbox.event_id,
+                          outbox.topic,
+                          outbox.payload_json AS outbox_payload_json,
+                          outbox.created_at,
+                          outbox.envelope_hash,
+                          outbox.delivered_at,
+                          events.event_type,
+                          events.aggregate_type,
+                          events.aggregate_id,
+                          events.aggregate_version,
+                          events.payload_json AS event_payload_json,
+                          events.payload_hash,
+                          events.committed_at,
+                          events.envelope_json AS event_envelope_json,
+                          events.envelope_hash AS event_envelope_hash
+                      FROM outbox
+                      JOIN events ON events.event_id = outbox.event_id
+                      WHERE outbox.event_id = ? AND outbox.topic = ?
+                      """,
+                      (event_id, topic),
+                  ).fetchone()
+              if row is None:
+                  return None
+
+              raw_outbox_payload = str(row["outbox_payload_json"])
+              actual_outbox_hash = _outbox_envelope_digest(
+                  str(row["topic"]),
+                  raw_outbox_payload,
+              )
+              if row["envelope_hash"] != actual_outbox_hash:
+                  raise ValueError("outbox envelope hash does not match stored payload")
+              event_row = {
+                  "event_id": row["event_id"],
+                  "event_type": row["event_type"],
+                  "aggregate_type": row["aggregate_type"],
+                  "aggregate_id": row["aggregate_id"],
+                  "aggregate_version": row["aggregate_version"],
+                  "payload_json": row["event_payload_json"],
+                  "payload_hash": row["payload_hash"],
+                  "committed_at": row["committed_at"],
+                  "envelope_json": row["event_envelope_json"],
+                  "envelope_hash": row["event_envelope_hash"],
+              }
+              event = self._decode_event_row(event_row)
+              try:
+                  outbox_payload = json.loads(raw_outbox_payload)
+              except (json.JSONDecodeError, TypeError) as error:
+                  raise ValueError("outbox payload is not valid JSON") from error
+              if canonical_json(outbox_payload) != raw_outbox_payload:
+                  raise ValueError("outbox payload is not canonical JSON")
+              raw_authoritative_envelope = row["event_envelope_json"]
+              if not isinstance(raw_authoritative_envelope, str):
+                  raise ValueError("journal event envelope authority is missing")
+              try:
+                  authoritative_envelope = json.loads(raw_authoritative_envelope)
+              except (json.JSONDecodeError, TypeError) as error:
+                  raise ValueError("journal event envelope is not valid JSON") from error
+              if canonical_json(authoritative_envelope) != raw_authoritative_envelope:
+                  raise ValueError("journal event envelope is not canonical JSON")
+              core_envelope = {
+                  "event_id": event["event_id"],
+                  "event_type": event["event_type"],
+                  "aggregate_type": event["aggregate_type"],
+                  "aggregate_id": event["aggregate_id"],
+                  "aggregate_version": str(event["aggregate_version"]),
+                  "payload": event["payload"],
+                  "payload_hash": event["payload_hash"],
+                  "committed_at": event["committed_at"],
+              }
+              for key, expected in core_envelope.items():
+                  if authoritative_envelope.get(key) != expected:
+                      raise ValueError(
+                          "journal event envelope conflicts with core journal event"
+                      )
+              if raw_outbox_payload != raw_authoritative_envelope:
+                  raise ValueError(
+                      "outbox payload does not match authoritative journal event envelope"
+                  )
+              return {
+                  "outbox_id": row["outbox_id"],
+                  "event_id": row["event_id"],
+                  "topic": row["topic"],
+                  "payload": outbox_payload,
+                  "created_at": row["created_at"],
+                  "envelope_hash": row["envelope_hash"],
+                  "delivered": row["delivered_at"] is not None,
+              }
+
+'''
+          marker = '    def mark_outbox_delivered(\n'
+          assert persistence.count(marker) == 1
+          assert 'def outbox_delivery_state(' not in persistence
+          persistence = persistence.replace(marker, delivery_state + marker, 1)
+          persistence_path.write_text(persistence, encoding='utf-8')
+
           checkpoint_path = Path('mvp/autotrade_mvp/simulation_runtime_checkpoint.py')
           checkpoint = checkpoint_path.read_text(encoding='utf-8')
-
-          helper = '''\n\ndef _autonomous_publication_owned(\n    item: Mapping[str, object],\n    *,\n    run_id: str,\n) -> bool:\n    payload = item.get("payload")\n    if type(payload) is not dict:\n        raise AutonomousRuntimeCheckpointError(\n            "pending outbox payload is not a canonical event envelope"\n        )\n    aggregate_type = payload.get("aggregate_type")\n    aggregate_id = payload.get("aggregate_id")\n    if aggregate_type == "canonical_autonomous_simulation":\n        return aggregate_id == run_id\n    return (\n        aggregate_type in _COMPONENT_AGGREGATE_TYPES\n        and payload.get("environment") == "SIMULATION"\n        and payload.get("host_id") == "local-simulation"\n    )\n\n\ndef _autonomous_owned_pending_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> tuple[dict[str, object], ...]:\n    pending = JournalStore.pending_outbox(store, limit=1000)\n    if (\n        len(pending) == 1000\n        and JournalStore.pending_outbox_count(store) > len(pending)\n    ):\n        raise AutonomousRuntimeCheckpointError(\n            "runtime checkpoint publication ownership scan exceeded bounded outbox window"\n        )\n    return tuple(\n        item\n        for item in pending\n        if _autonomous_publication_owned(item, run_id=run_id)\n    )\n\n\ndef deliver_autonomous_owned_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> None:\n    """Acknowledge only publications owned by the closed ZERO authority scope."""\n    for item in _autonomous_owned_pending_publications(store, run_id=run_id):\n        JournalStore.mark_outbox_delivered(\n            store,\n            item["outbox_id"],\n            expected_envelope_hash=item["envelope_hash"],\n        )\n'''
+          helper = '''\n\ndef _autonomous_publication_owned(\n    item: Mapping[str, object],\n    *,\n    run_id: str,\n) -> bool:\n    envelope = item.get("payload")\n    if type(envelope) is not dict:\n        raise AutonomousRuntimeCheckpointError(\n            "pending outbox payload is not a canonical event envelope"\n        )\n    aggregate_type = envelope.get("aggregate_type")\n    aggregate_id = envelope.get("aggregate_id")\n    if aggregate_type == "canonical_autonomous_simulation":\n        return aggregate_id == run_id\n    return aggregate_type in _COMPONENT_AGGREGATE_TYPES\n\n\ndef _autonomous_owned_pending_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> tuple[dict[str, object], ...]:\n    pending = JournalStore.pending_outbox(store, limit=1000)\n    if (\n        len(pending) == 1000\n        and JournalStore.pending_outbox_count(store) > len(pending)\n    ):\n        raise AutonomousRuntimeCheckpointError(\n            "runtime checkpoint publication ownership scan exceeded bounded outbox window"\n        )\n    return tuple(\n        item\n        for item in pending\n        if _autonomous_publication_owned(item, run_id=run_id)\n    )\n\n\ndef deliver_autonomous_owned_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> None:\n    """Acknowledge only publications owned by the closed ZERO authority scope."""\n    for item in _autonomous_owned_pending_publications(store, run_id=run_id):\n        JournalStore.mark_outbox_delivered(\n            store,\n            item["outbox_id"],\n            expected_envelope_hash=item["envelope_hash"],\n        )\n'''
           marker = '\n\ndef _stable_runtime_components(\n'
           assert checkpoint.count(marker) == 1
+          assert '_autonomous_owned_pending_publications(' not in checkpoint
           checkpoint = checkpoint.replace(marker, helper + marker, 1)
 
           old_pending = '''    before = JournalStore.whole_store_state_cut(store)\n\n    pending = JournalStore.pending_outbox_count(store)\n    if pending and not (\n        completion_preimage is not None\n        and pending == 1\n        and [item["event_id"] for item in JournalStore.pending_outbox(store, limit=2)]\n        == [completion_preimage[0]]\n    ):\n        raise AutonomousRuntimeCheckpointError(\n            "runtime checkpoint requires a fully delivered outbox cut"\n        )\n'''
@@ -60,12 +178,12 @@ jobs:
           checkpoint = checkpoint.replace(old_cut, new_cut, 1)
 
           old_repair = '''    prior_cut = receipt["prior_cut"]\n    expected = {"journal_sequence": prior_cut["journal_sequence"] + 1,\n                "counts": dict(prior_cut["counts"])}\n    for name in ("events", "outbox", "command_dedupe"):\n        expected["counts"][name] += 1\n    if (terminal["journal_sequence"] != expected["journal_sequence"]\n            or JournalStore.whole_store_state_cut(store) != expected):\n        raise AutonomousRuntimeCheckpointError("completion checkpoint does not match current authorities")\n'''
-          new_repair = '''    prior_cut = receipt["prior_cut"]\n    expected_terminal_sequence = prior_cut["journal_sequence"] + 1\n    if terminal["journal_sequence"] != expected_terminal_sequence:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal event is not the authorized next journal event"\n        )\n    terminal_publication = JournalStore.outbox_delivery_state(\n        store,\n        terminal["event_id"],\n        topic="autotrade.simulation.events",\n    )\n'''
+          new_repair = '''    prior_cut = receipt["prior_cut"]\n    expected_terminal_sequence = prior_cut["journal_sequence"] + 1\n    if terminal["journal_sequence"] != expected_terminal_sequence:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal event is not the authorized next journal event"\n        )\n    terminal_publication = JournalStore.outbox_delivery_state(\n        store,\n        terminal["event_id"],\n        topic="autotrade.simulation.events",\n    )\n    if terminal_publication is None:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal publication is missing"\n        )\n'''
           assert checkpoint.count(old_repair) == 1
           checkpoint = checkpoint.replace(old_repair, new_repair, 1)
 
           old_delivery = '''    for item in JournalStore.pending_outbox(store, limit=2):\n        if item["event_id"] != terminal["event_id"]:\n            raise AutonomousRuntimeCheckpointError("completion checkpoint has foreign pending publication")\n        JournalStore.mark_outbox_delivered(\n            store, item["outbox_id"], expected_envelope_hash=item["envelope_hash"],\n            expected_journal_sequence=expected["journal_sequence"],\n            expected_whole_store_counts=expected["counts"],\n        )\n'''
-          new_delivery = '''    if not terminal_publication["delivered"]:\n        JournalStore.mark_outbox_delivered(\n            store,\n            terminal_publication["outbox_id"],\n            expected_envelope_hash=terminal_publication["envelope_hash"],\n        )\n        terminal_publication = JournalStore.outbox_delivery_state(\n            store,\n            terminal["event_id"],\n            topic="autotrade.simulation.events",\n        )\n    if not terminal_publication["delivered"]:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal publication remains undelivered"\n        )\n'''
+          new_delivery = '''    if not terminal_publication["delivered"]:\n        JournalStore.mark_outbox_delivered(\n            store,\n            terminal_publication["outbox_id"],\n            expected_envelope_hash=terminal_publication["envelope_hash"],\n        )\n        terminal_publication = JournalStore.outbox_delivery_state(\n            store,\n            terminal["event_id"],\n            topic="autotrade.simulation.events",\n        )\n    if terminal_publication is None or not terminal_publication["delivered"]:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal publication remains undelivered"\n        )\n'''
           assert checkpoint.count(old_delivery) == 1
           checkpoint = checkpoint.replace(old_delivery, new_delivery, 1)
           checkpoint_path.write_text(checkpoint, encoding='utf-8')
@@ -75,6 +193,7 @@ jobs:
           loop_marker = '\n\ndef _loop_event(\n'
           assert session.count(loop_marker) == 1
           wrapper = '''\n\ndef _deliver_autonomous_owned_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> None:\n    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications\n\n    deliver_autonomous_owned_publications(store, run_id=run_id)\n'''
+          assert '_deliver_autonomous_owned_publications(' not in session
           session = session.replace(loop_marker, wrapper + loop_marker, 1)
           lines = session.splitlines(keepends=True)
           rewritten = []
@@ -122,6 +241,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/shared-store-zero-implementation-v3.yml
-          git add mvp/autotrade_mvp/simulation_runtime_checkpoint.py mvp/autotrade_mvp/simulation_session.py
+          git add mvp/autotrade_mvp/_persistence_impl.py mvp/autotrade_mvp/simulation_runtime_checkpoint.py mvp/autotrade_mvp/simulation_session.py
           git commit -m 'Fix: scope ZERO checkpoint and outbox ownership'
           git push origin HEAD:fix/shared-store-zero-checkpoint-outbox-20261005-sol56

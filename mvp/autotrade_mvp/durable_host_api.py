@@ -19,6 +19,7 @@ from .host_api import (
     CommandResult,
     EventGap,
     HostEvent,
+    canonical_event_cursor,
     OperationResult,
     command_result_payload,
     scoped_host_operation_id,
@@ -907,12 +908,7 @@ class JournalBackedHostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
-        try:
-            cursor = int(after)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Cursor must be an integer sequence") from error
-        if cursor < 0:
-            raise ValueError("Cursor must be non-negative")
+        cursor = canonical_event_cursor(after)
         current = self.state_version
         if cursor > current:
             raise ValueError("Cursor is ahead of host state")

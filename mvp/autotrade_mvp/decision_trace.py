@@ -15,6 +15,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 GENESIS_HASH = "0" * 64
+_BUILD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
 REQUIRED_FIELDS = (
     "trace_id",
     "input_hash",
@@ -34,6 +35,9 @@ _SENSITIVE_KEYS = {
     "password_hash",
     "secret",
     "client_secret",
+    "credential",
+    "credential_id",
+    "proxy_authorization",
     "session",
     "session_id",
     "session_token",
@@ -53,13 +57,56 @@ _SENSITIVE_KEYS = {
 
 
 def _normalized_key(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("diagnostic keys must be exact strings")
+    # Preserve acronym boundaries as well as ordinary camelCase so aliases such
+    # as XApiKey, accessToken and proxyAuthorization canonicalize to the same
+    # security vocabulary as x_api_key, access_token and proxy_authorization.
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value.strip())
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
     return "_".join(
         part
         for part in "".join(
             character.lower() if character.isalnum() else "_"
-            for character in str(value).strip()
+            for character in separated
         ).split("_")
         if part
+    )
+
+
+# These are non-secret diagnostic counters whose names intentionally mention a
+# security concept.  The key alone is never sufficient to bypass redaction:
+# only an exact non-negative integer value may use this narrow exemption.
+_BENIGN_DIAGNOSTIC_KEYS = {
+    "api_secret_rotation_count",
+    "token_budget",
+}
+
+_COMPOUND_SENSITIVE_KEY_PARTS = {
+    "authorization",
+    "password",
+    "secret",
+    "credential",
+    "cookie",
+    "session",
+    "token",
+    "apikey",
+}
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    if normalized in _SENSITIVE_KEYS:
+        return True
+
+    parts = tuple(part for part in normalized.split("_") if part)
+    part_set = set(parts)
+    if any(part in _COMPOUND_SENSITIVE_KEY_PARTS for part in parts):
+        return True
+    if {"api", "key"} <= part_set or {"private", "key"} <= part_set:
+        return True
+    return "txc" in part_set and bool(
+        part_set & {"apikey", "payload", "signature"}
     )
 
 
@@ -89,12 +136,6 @@ _PRIVATE_KEY_MARKERS = (
     "-----BEGIN EC PRIVATE KEY-----",
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 )
-
-_URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
-    "credential",
-    "proxy_authorization",
-}
-
 
 def _redact_structured_json_text(value: str) -> str | None:
     try:
@@ -131,8 +172,7 @@ def _redact_structured_url_query(value: str) -> str | None:
     query_parts: list[str] = []
     for part in parsed.query.split("&"):
         raw_key, separator, _ = part.partition("=")
-        normalized = _normalized_key(unquote_plus(raw_key))
-        if normalized in _URL_QUERY_SENSITIVE_KEYS:
+        if _is_sensitive_key(unquote_plus(raw_key)):
             query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
             changed = True
         else:
@@ -169,18 +209,32 @@ def _redact_embedded_secret_text(value: str) -> str:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, str):
+    if type(value) is str:
         return _redact_embedded_secret_text(value)
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         result: dict[str, Any] = {}
         for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("diagnostic object keys must be exact strings")
             normalized = _normalized_key(key)
-            result[str(key)] = "[REDACTED]" if normalized in _SENSITIVE_KEYS else _redact(item)
+            benign_counter = (
+                normalized in _BENIGN_DIAGNOSTIC_KEYS
+                and type(item) is int
+                and item >= 0
+            )
+            if _is_sensitive_key(key) and not benign_counter:
+                result[key] = "[REDACTED]"
+            else:
+                result[key] = _redact(item)
         return result
-    if isinstance(value, list):
+    if type(value) is list:
         return [_redact(item) for item in value]
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return tuple(_redact(item) for item in value)
+    if isinstance(value, (str, Mapping, list, tuple)):
+        raise ValueError(
+            "diagnostic structured values must use exact built-in containers and strings"
+        )
     return value
 
 
@@ -192,6 +246,32 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _validate_digest_map(
+    name: str,
+    value: object,
+    expected_ids: Iterable[str],
+) -> None:
+    if type(value) is not dict:
+        raise ValueError(f"{name} must be an exact object")
+    expected_items = tuple(expected_ids)
+    if any(type(identity) is not str for identity in expected_items):
+        raise ValueError(f"{name} linked identities must be exact strings")
+    for identity, digest in value.items():
+        if type(identity) is not str:
+            raise ValueError(f"{name} keys must be exact strings")
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or digest != digest.lower()
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise ValueError(f"{name} must contain lowercase SHA-256 digests")
+    # Set construction is intentionally last: after the exact-string fence no
+    # caller-controlled __hash__/__eq__ implementation can execute here.
+    if set(value) != set(expected_items):
+        raise ValueError(f"{name} keys must exactly match linked identities")
 
 
 def _hash_record(record: dict[str, Any]) -> str:
@@ -231,14 +311,14 @@ class DecisionTraceStore:
 
     @staticmethod
     def _validate_input(trace: dict[str, Any]) -> None:
-        if not isinstance(trace, dict):
-            raise ValueError("Decision trace must be an object")
+        if type(trace) is not dict:
+            raise ValueError("Decision trace must be an exact object")
         for field in REQUIRED_FIELDS:
             if field not in trace:
                 raise ValueError(f"Missing decision trace field: {field}")
         for field in ("trace_id", "input_hash", "strategy_version", "decision", "decision_reason", "risk_outcome"):
             value = trace[field]
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
         input_hash = trace["input_hash"]
         if (
@@ -248,11 +328,27 @@ class DecisionTraceStore:
         ):
             raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
 
+        source_sha = trace.get("source_sha")
+        if source_sha is not None and (
+            type(source_sha) is not str
+            or len(source_sha) not in {40, 64}
+            or source_sha != source_sha.lower()
+            or any(ch not in "0123456789abcdef" for ch in source_sha)
+        ):
+            raise ValueError("source_sha must be a canonical lowercase Git/object SHA")
+
+        build_id = trace.get("build_id")
+        if build_id is not None and (
+            type(build_id) is not str
+            or _BUILD_ID_PATTERN.fullmatch(build_id) is None
+        ):
+            raise ValueError("build_id must be a canonical bounded build token")
+
         refs = trace["evidence_refs"]
         if (
-            not isinstance(refs, list)
+            type(refs) is not list
             or any(
-                not isinstance(item, str)
+                type(item) is not str
                 or not item.strip()
                 or item != item.strip()
                 for item in refs
@@ -264,17 +360,17 @@ class DecisionTraceStore:
 
         correlation_id = trace.get("correlation_id")
         if correlation_id is not None and (
-            not isinstance(correlation_id, str) or not correlation_id.strip()
+            type(correlation_id) is not str or not correlation_id.strip()
         ):
             raise ValueError("correlation_id must be a non-empty string")
 
         event_ids = trace.get("event_ids")
         if event_ids is not None:
             if (
-                not isinstance(event_ids, list)
+                type(event_ids) is not list
                 or not event_ids
                 or any(
-                    not isinstance(item, str)
+                    type(item) is not str
                     or not item.strip()
                     or item != item.strip()
                     for item in event_ids
@@ -284,9 +380,16 @@ class DecisionTraceStore:
             if len(event_ids) != len(set(event_ids)):
                 raise ValueError("event_ids must not contain duplicates")
 
+        evidence_digests = trace.get("evidence_digests")
+        if evidence_digests is not None:
+            _validate_digest_map("evidence_digests", evidence_digests, refs)
+        event_digests = trace.get("event_digests")
+        if event_digests is not None:
+            _validate_digest_map("event_digests", event_digests, event_ids or [])
+
         attributes = trace.get("attributes")
-        if attributes is not None and not isinstance(attributes, dict):
-            raise ValueError("attributes must be an object")
+        if attributes is not None and type(attributes) is not dict:
+            raise ValueError("attributes must be an exact object")
 
     def append(self, trace: dict[str, Any]) -> bool:
         """Append a trace once; identical retry is a no-op, conflicting retry fails closed."""
@@ -334,8 +437,8 @@ class DecisionTraceStore:
     ) -> dict[str, Any]:
         """Reconstruct a durable decision only when all linked evidence is available."""
 
-        if not isinstance(trace_id, str) or not trace_id.strip():
-            raise ValueError("trace_id is required")
+        if type(trace_id) is not str or not trace_id.strip():
+            raise ValueError("trace_id must be an exact non-empty string")
         events = set(available_event_ids)
         evidence = set(available_evidence_ids)
         record = next(
@@ -355,6 +458,66 @@ class DecisionTraceStore:
                 f"missing_events={missing_events}, missing_evidence={missing_evidence}"
             )
         return _semantic_payload(record)
+
+    def reconstruct_exact(
+        self,
+        trace_id: str,
+        *,
+        expected_source_sha: str,
+        expected_build_id: str,
+        available_event_digests: Mapping[str, str],
+        available_evidence_digests: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Reconstruct only when links, content digests and source/build identity match."""
+
+        if type(available_event_digests) is not dict:
+            raise ValueError("available_event_digests must be an exact object")
+        if type(available_evidence_digests) is not dict:
+            raise ValueError("available_evidence_digests must be an exact object")
+        _validate_digest_map(
+            "available_event_digests",
+            available_event_digests,
+            available_event_digests.keys(),
+        )
+        _validate_digest_map(
+            "available_evidence_digests",
+            available_evidence_digests,
+            available_evidence_digests.keys(),
+        )
+
+        candidate = {
+            "trace_id": "identity-check",
+            "input_hash": "0" * 64,
+            "strategy_version": "identity-check",
+            "decision": "identity-check",
+            "decision_reason": "identity-check",
+            "risk_outcome": "identity-check",
+            "evidence_refs": [],
+            "source_sha": expected_source_sha,
+            "build_id": expected_build_id,
+        }
+        self._validate_input(candidate)
+        record = self.reconstruct(
+            trace_id,
+            available_event_ids=available_event_digests.keys(),
+            available_evidence_ids=available_evidence_digests.keys(),
+        )
+        if record.get("source_sha") != expected_source_sha:
+            raise ValueError("trace source identity mismatch")
+        if record.get("build_id") != expected_build_id:
+            raise ValueError("trace build identity mismatch")
+
+        stored_event_digests = record.get("event_digests")
+        stored_evidence_digests = record.get("evidence_digests")
+        if type(stored_event_digests) is not dict or type(stored_evidence_digests) is not dict:
+            raise ValueError("trace evidence digest identity missing")
+        for identity in record.get("event_ids", []):
+            if available_event_digests.get(identity) != stored_event_digests.get(identity):
+                raise ValueError("trace event digest mismatch")
+        for identity in record["evidence_refs"]:
+            if available_evidence_digests.get(identity) != stored_evidence_digests.get(identity):
+                raise ValueError("trace evidence digest mismatch")
+        return record
 
     def accessible_export(self, trace_id: str) -> str:
         """Return a linear, screen-reader-friendly view of one verified trace."""
@@ -376,13 +539,29 @@ class DecisionTraceStore:
         correlation_id = record.get("correlation_id")
         if correlation_id:
             lines.append(f"Correlation: {correlation_id}")
+        source_sha = record.get("source_sha")
+        build_id = record.get("build_id")
+        lines.append(f"Source SHA: {source_sha or 'unavailable'}")
+        lines.append(f"Build: {build_id or 'unavailable'}")
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])
-        lines.extend(f"- {item}" for item in event_ids) if event_ids else lines.append("- none")
+        event_digests = record.get("event_digests", {})
+        if event_ids:
+            for item in event_ids:
+                digest = event_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Evidence:")
-        lines.extend(f"- {item}" for item in record["evidence_refs"]) if record["evidence_refs"] else lines.append("- none")
+        evidence_digests = record.get("evidence_digests", {})
+        if record["evidence_refs"]:
+            for item in record["evidence_refs"]:
+                digest = evidence_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Attributes:")
         attributes = record.get("attributes", {})
@@ -428,10 +607,13 @@ class DecisionTraceStore:
 class BoundedMetricBacklog:
     """Bounded diagnostic queue; unlike durable traces, metrics may be dropped."""
 
-    def __init__(self, max_items: int = 256) -> None:
-        if not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0:
-            raise ValueError("max_items must be a positive integer")
+    def __init__(self, max_items: int = 256, max_label_bytes: int = 4096) -> None:
+        if type(max_items) is not int or max_items <= 0:
+            raise ValueError("max_items must be an exact positive integer")
+        if type(max_label_bytes) is not int or max_label_bytes <= 0:
+            raise ValueError("max_label_bytes must be an exact positive integer")
         self._items: deque[dict[str, Any]] = deque(maxlen=max_items)
+        self._max_label_bytes = max_label_bytes
         self._dropped = 0
 
     @property
@@ -439,18 +621,21 @@ class BoundedMetricBacklog:
         return self._dropped
 
     def record(self, name: str, value: float, **labels: Any) -> None:
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("metric name is required")
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not isfinite(value)
-        ):
-            raise ValueError("metric value must be a finite number")
+        if type(name) is not str or not name.strip():
+            raise ValueError("metric name must be an exact non-empty string")
+        if type(value) not in (int, float) or not isfinite(value):
+            raise ValueError("metric value must be an exact finite number")
+        redacted_labels = _redact(dict(labels))
+        try:
+            encoded_labels = canonical_json(redacted_labels).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise ValueError("metric labels must be finite JSON values") from error
+        if len(encoded_labels) > self._max_label_bytes:
+            raise ValueError("metric labels exceed bounded size")
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(
-            {"name": name.strip(), "value": value, "labels": _redact(dict(labels))}
+            {"name": name.strip(), "value": value, "labels": redacted_labels}
         )
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:

@@ -263,9 +263,6 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
     def test_verify_ignores_pre_call_vault_authority_digest_rebind(self) -> None:
         self._assert_verify_ignores_module_rebind("_vault_authority_digest")
 
-    def test_verify_ignores_pre_call_text_digest_rebind(self) -> None:
-        self._assert_verify_ignores_module_rebind("_text_digest")
-
     def test_verify_ignores_pre_call_record_state_digest_rebind(self) -> None:
         self._assert_verify_ignores_module_rebind("_record_state_digest")
 

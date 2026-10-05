@@ -43,6 +43,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.reservations import ReservationSnapshot
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -2601,6 +2602,72 @@ class BinanceSpotTemporalIngressTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=symbol_rules(),
                 at=hostile,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_text_ingress_rejects_str_subclass_before_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "symbol is required"):
+            BinanceSpotOrderIntent.create(
+                instrument_version="BTCUSDT:v1",
+                symbol=HostileText("BTCUSDT"),
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.100",
+                price="100.00",
+                time_in_force="GTC",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_capability_subclass_before_admits(self):
+        callbacks = []
+        trusted = capability()
+
+        class HostileCapability(CapabilitySnapshot):
+            def admits(self, *args, **kwargs):
+                callbacks.append("admits")
+                return True
+
+        hostile = object.__new__(HostileCapability)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-capability",
+                capability=hostile,
+                symbol_rules=symbol_rules(),
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_symbol_rules_subclass_before_validate(self):
+        callbacks = []
+        trusted = symbol_rules()
+
+        class HostileRules(BinanceSpotSymbolRules):
+            def validate(self, *args, **kwargs):
+                callbacks.append("validate")
+                return None
+
+        hostile = object.__new__(HostileRules)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact BinanceSpotSymbolRules"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-rules",
+                capability=capability(),
+                symbol_rules=hostile,
+                at=NOW,
             )
         self.assertEqual(callbacks, [])
 

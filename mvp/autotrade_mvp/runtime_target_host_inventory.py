@@ -315,7 +315,8 @@ def publish_runtime_target_host_inventory(
         expected_host_fingerprint=expected_host_fingerprint,
     )
     raw = inventory.canonical_bytes()
-    manifest = evidence_store.publish_bytes(
+    manifest = ArtifactStore.publish_bytes(
+        evidence_store,
         artifact_id=normalized_artifact_id,
         data=raw,
         media_type=JSON_MEDIA_TYPE,

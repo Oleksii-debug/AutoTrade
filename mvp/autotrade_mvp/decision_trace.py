@@ -762,10 +762,14 @@ class BoundedMetricBacklog:
             or not isfinite(value)
         ):
             raise ValueError("metric value must be a finite number")
+        redacted_labels = _redact(dict(labels))
+        # Metric labels must be immediately JSON-safe. Otherwise a NaN/Inf label
+        # can enter the bounded queue and make later diagnostic export fail.
+        canonical_json(redacted_labels)
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(
-            {"name": name.strip(), "value": value, "labels": _redact(dict(labels))}
+            {"name": name.strip(), "value": value, "labels": redacted_labels}
         )
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:

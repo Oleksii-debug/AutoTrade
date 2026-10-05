@@ -9,6 +9,7 @@ XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
+AUTH_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
 COMMON_SCHEMA = ROOT / "contracts" / "jsonschema" / "common.schema.json"
@@ -26,6 +27,63 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertEqual(package_refs[0].attrib.get("Include"), "Microsoft.Web.WebView2")
         self.assertEqual(package_refs[0].attrib.get("Version"), "1.0.4258.31")
         self.assertEqual(project.tag, "Project")
+
+    def test_primary_webview2_surface_is_real_and_native_safety_remains_independent(self):
+        xaml = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn(
+            'xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"',
+            xaml,
+        )
+        self.assertIn('<wv2:WebView2 x:Name="ProductWebView"', xaml)
+        self.assertIn('AutomationProperties.Name="AutoTrade application web interface"', xaml)
+        self.assertIn('Content="_Focus application web interface"', xaml)
+        self.assertIn('AutomationProperties.Name="Block new exposure"', xaml)
+        self.assertIn('AutomationProperties.Name="Host connection status"', xaml)
+        self.assertIn("await ConnectWebExperienceAsync();", code)
+        self.assertIn("ProductWebView.Visibility = Visibility.Visible;", code)
+        self.assertIn("FocusWebButton.IsEnabled = true;", code)
+
+    def test_webview2_security_events_delegate_to_shared_policy_and_fail_closed(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("WebExperienceSecurityPolicy policy = new(origin);", code)
+        self.assertIn("core.Settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;", code)
+        self.assertIn(
+            "core.Settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;",
+            code,
+        )
+        self.assertIn("core.FrameNavigationStarting += (_, e) => e.Cancel = true;", code)
+        self.assertIn("core.NewWindowRequested += (_, e) => e.Handled = true;", code)
+        self.assertIn("core.DownloadStarting += (_, e) => e.Cancel = true;", code)
+        self.assertIn("CoreWebView2PermissionState.Deny", code)
+        self.assertIn("CoreWebView2ServerCertificateErrorAction.Cancel", code)
+        self.assertIn("policy.AllowsTopLevelNavigation(target)", code)
+        self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
+        self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+
+    def test_webview2_session_never_becomes_a_cookie_and_stale_browser_authority_is_purged(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertNotIn('CreateCookie("AutoTradeSession"', code)
+        self.assertNotIn("Cookie = ", code)
+        self.assertIn("core.CookieManager.DeleteAllCookies();", code)
+        self.assertIn("CoreWebView2BrowsingDataKinds.ServiceWorkers", code)
+        self.assertIn('e.Request.Headers.RemoveHeader("Authorization")', code)
+        self.assertIn('e.Request.Headers.RemoveHeader("X-AutoTrade-Actor")', code)
+
+    def test_webview2_reuses_the_same_paired_session_authority_as_native_host_client(self):
+        auth = AUTH_CLIENT.read_text(encoding="utf-8")
+        app = APP.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("internal sealed record DesktopHostConnection(", auth)
+        self.assertIn("WindowsCredentialManagerSessionProvider sessionProvider = new(", auth)
+        self.assertIn("new AuthenticatedEmergencyHostClient(", auth)
+        self.assertIn("return new DesktopHostConnection(client, sessionProvider);", auth)
+        self.assertIn("DesktopHostClientFactory.CreateConnection()", app)
+        self.assertIn("connection.Client, connection.SessionProvider", app)
+        self.assertIn("_sessionProvider.GetSession().Validated()", code)
+        self.assertIn('"AutoTrade-Session " + currentSession.Token', code)
+        self.assertIn('"X-AutoTrade-Actor",\n                        currentSession.Actor', code)
+        self.assertNotIn('"X-AutoTrade-Actor", "local-owner"', code)
 
     def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
         text = WEB_POLICY.read_text(encoding="utf-8")

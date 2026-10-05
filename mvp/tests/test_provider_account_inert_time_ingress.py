@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone, tzinfo
 import unittest
 
+from mvp.autotrade_mvp import provider_account_absence_coverage as absence_coverage
 from mvp.autotrade_mvp import provider_account_accepted_cut as accepted_cut
 from mvp.autotrade_mvp import provider_account_coverage_set as coverage_set
 from mvp.autotrade_mvp import provider_account_currentness as currentness
@@ -36,6 +37,10 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             (
                 reconciliation_semantics._at,
                 reconciliation_semantics.ProviderAccountReconciliationSemanticsError,
+            ),
+            (
+                absence_coverage._at_point,
+                absence_coverage.ProviderAccountAbsenceCoverageError,
             ),
         )
         for validator, error_type in boundaries:
@@ -86,6 +91,10 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             self.assertIs(accepted_cut._at(value), value)
             self.assertIs(reconciliation_semantics._at(value), value)
             self.assertIs(origin_set._utc(value, name="at"), value)
+            self.assertEqual(
+                absence_coverage._at_point(value),
+                value.astimezone(timezone.utc),
+            )
 
 
 if __name__ == "__main__":

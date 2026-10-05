@@ -279,12 +279,26 @@ def _require_binding_matches_durable_admission(
     durable_side = durable_intent.get("side")
     durable_quantity = durable_intent.get("quantity")
     durable_price = durable_intent.get("price")
+    durable_reduce_only = durable_intent.get("reduce_only")
+    durable_action = durable_intent.get("action")
+    canonical_action = _exact_text(action, name="action").upper()
     if durable_side != binding.side:
         raise FinancialSendAuthorityError("financial binding side differs from admitted risk")
     if durable_quantity != binding.quantity:
         raise FinancialSendAuthorityError("financial binding quantity differs from admitted risk")
     if durable_price != binding.price:
         raise FinancialSendAuthorityError("financial binding price differs from admitted risk")
+    if (
+        type(durable_reduce_only) is not bool
+        or durable_reduce_only != binding.reduce_only
+    ):
+        raise FinancialSendAuthorityError(
+            "financial binding reduce-only differs from admitted risk"
+        )
+    if durable_action != canonical_action:
+        raise FinancialSendAuthorityError(
+            "financial send action differs from evaluated admitted risk"
+        )
 
     return admission
 
@@ -349,7 +363,22 @@ def require_exact_bybit_financial_request(
         raise FinancialSendAuthorityError("Bybit body digest differs from financial binding")
 
     expected_side = "Buy" if binding.side == "BUY" else "Sell"
-    expected_order_type = "Market" if binding.order_type == "MARKET" else "Limit"
+    if binding.order_type == "MARKET":
+        expected_order_type = "Market"
+    elif binding.order_type == "LIMIT":
+        expected_order_type = "Limit"
+    else:
+        raise FinancialSendAuthorityError(
+            "financial binding order type is unsupported by canonical Bybit preparation"
+        )
+    if binding.time_in_force == "POST_ONLY":
+        expected_time_in_force = "PostOnly"
+    elif binding.time_in_force in {"GTC", "IOC", "FOK"}:
+        expected_time_in_force = binding.time_in_force
+    else:
+        raise FinancialSendAuthorityError(
+            "financial binding TIF is unsupported by canonical Bybit preparation"
+        )
     if body.get("orderLinkId") != binding.client_order_id:
         raise FinancialSendAuthorityError("Bybit client order id differs from financial binding")
     if body.get("side") != expected_side:
@@ -358,7 +387,7 @@ def require_exact_bybit_financial_request(
         raise FinancialSendAuthorityError("Bybit quantity differs from financial binding")
     if body.get("orderType") != expected_order_type:
         raise FinancialSendAuthorityError("Bybit order type differs from financial binding")
-    if body.get("timeInForce") != binding.time_in_force:
+    if body.get("timeInForce") != expected_time_in_force:
         raise FinancialSendAuthorityError("Bybit TIF differs from financial binding")
     if binding.order_type == "LIMIT":
         if body.get("price") != binding.price:
@@ -1003,6 +1032,8 @@ class FinanciallyBoundBybitOrderSender:
         "__issuer",
         "__runtime",
         "__provider_environment",
+        "__request_validator",
+        "__request_validator_code",
     )
 
     def __init_subclass__(cls, **_kwargs) -> None:
@@ -1099,9 +1130,17 @@ class FinanciallyBoundBybitOrderSender:
         self.__sender_dispatch = sender_dispatch
         self.__sender_dispatch_function = sender_dispatch_function
         self.__sender_dispatch_code = sender_dispatch_function.__code__
+        request_validator = require_exact_bybit_financial_request
+        request_validator_code = getattr(request_validator, "__code__", None)
+        if request_validator_code is None:
+            raise FinancialSendAuthorityError(
+                "Bybit financial request validator executable authority is unavailable"
+            )
         self.__issuer = issuer
         self.__runtime = runtime
         self.__provider_environment = sender.provider_environment
+        self.__request_validator = request_validator
+        self.__request_validator_code = request_validator_code
 
     @property
     def provider_environment(self) -> str:
@@ -1126,6 +1165,17 @@ class FinanciallyBoundBybitOrderSender:
                 "Bybit sender dispatch binding authority changed"
             )
 
+    def _require_request_validator_authority(self) -> None:
+        request_validator = self.__request_validator
+        if require_exact_bybit_financial_request is not request_validator:
+            raise FinancialSendAuthorityError(
+                "Bybit financial request validator authority changed"
+            )
+        if request_validator.__code__ is not self.__request_validator_code:
+            raise FinancialSendAuthorityError(
+                "Bybit financial request validator authority code changed"
+            )
+
     def dispatch(
         self,
         *,
@@ -1140,6 +1190,7 @@ class FinanciallyBoundBybitOrderSender:
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
         self._require_sender_dispatch_authority()
+        self._require_request_validator_authority()
         request_snapshot = _detached_mapping_snapshot(request, name="request")
         submission_scope_snapshot = (
             {}
@@ -1163,7 +1214,9 @@ class FinanciallyBoundBybitOrderSender:
             raise FinancialSendAuthorityError(
                 "dispatch intent differs from sealed financial authority"
             )
-        require_exact_bybit_financial_request(
+        self._require_request_validator_authority()
+        request_validator = self.__request_validator
+        request_validator(
             authority_binding,
             request_snapshot,
             submission_scope_snapshot,

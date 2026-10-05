@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal, ROUND_DOWN
+from fractions import Fraction
+
+from .exact_decimal import as_fraction, round_fraction_to_quantum
 
 from .execution_realism import (
     ExecutionModel,
@@ -101,6 +104,10 @@ def assert_conservative_execution(
             raise ExecutionOracleError("fee cannot be negative")
 
         if order.order_type == "MARKET":
+            if model.price_quantum is None:
+                raise ExecutionOracleError(
+                    "MARKET execution requires an authoritative price_quantum"
+                )
             if model.data_fidelity == "BAR":
                 if observation.bar_high is None or observation.bar_low is None:
                     raise ExecutionOracleError("BAR market fill lacks price bounds")
@@ -124,6 +131,54 @@ def assert_conservative_execution(
             if order.side == "SELL" and result.fill_price > reference:
                 raise ExecutionOracleError(
                     "market sell result is more favorable than executable reference"
+                )
+
+            participation = (
+                as_fraction(independent_capacity)
+                / as_fraction(observation.available_volume)
+                if observation.available_volume > 0
+                else Fraction(0, 1)
+            )
+            max_participation = as_fraction(model.max_participation)
+            impact_fraction = (
+                participation / max_participation
+                if max_participation > 0
+                else Fraction(0, 1)
+            )
+            impact_fraction = min(impact_fraction, Fraction(1, 1))
+            impact_bps = (
+                as_fraction(model.impact_bps_at_max_participation)
+                * impact_fraction
+            )
+            additional_spread = (
+                model.bar_half_spread_bps
+                if model.data_fidelity == "BAR"
+                else Decimal("0")
+            )
+            total_bps = (
+                as_fraction(additional_spread)
+                + as_fraction(model.slippage_bps)
+                + impact_bps
+            ) * as_fraction(model.scenario_cost_multiplier)
+            target = (
+                as_fraction(reference)
+                + as_fraction(reference) * total_bps / 10000
+                if order.side == "BUY"
+                else as_fraction(reference)
+                - as_fraction(reference) * total_bps / 10000
+            )
+            if target <= 0:
+                raise ExecutionOracleError(
+                    "configured adverse costs produce non-positive execution price"
+                )
+            projected = round_fraction_to_quantum(
+                target,
+                model.price_quantum,
+                mode="CEILING" if order.side == "BUY" else "FLOOR",
+            )
+            if result.fill_price != projected:
+                raise ExecutionOracleError(
+                    "market fill price does not match independent price-grid projection"
                 )
         else:
             if order.limit_price is None:

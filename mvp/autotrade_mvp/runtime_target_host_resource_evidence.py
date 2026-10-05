@@ -36,7 +36,11 @@ from .performance_qualification import RuntimeBudgetSpec
 from .persistence import JournalStore
 from .runtime_target_host_campaign_authority import RuntimeTargetHostCampaignAuthority
 from .runtime_target_host_inventory import PublishedRuntimeTargetHostInventory
-from .runtime_target_host_measurement import RuntimeTargetHostMeasurementArtifact
+from .runtime_target_host_measurement import (
+    RuntimeTargetHostMeasurementArtifact,
+    TargetHostFinancialSample,
+    TargetHostResearchSample,
+)
 from .runtime_target_host_measurement_publication import (
     PublishedRuntimeTargetHostMeasurement,
 )
@@ -527,6 +531,8 @@ def _capture_descriptor_authority(
             function = descriptor
         elif type(descriptor) is property and type(descriptor.fget) is FunctionType:
             function = descriptor.fget
+        elif type(descriptor) is classmethod and type(descriptor.__func__) is FunctionType:
+            function = descriptor.__func__
         else:
             function = None
         result.append(
@@ -650,6 +656,38 @@ _RESOURCE_DESCRIPTOR_SPECS = (
             "__init__",
             "__post_init__",
             "digest",
+        ),
+    ),
+    (
+        TargetHostFinancialSample,
+        (
+            "event_id",
+            "event_journal_sequence",
+            "measurement_event_id",
+            "measurement_journal_sequence",
+            "event_payload_hash",
+            "monotonic_start_ns",
+            "monotonic_end_ns",
+            "latency_us",
+            "staleness_us",
+            "__init__",
+            "from_durable",
+            "payload",
+        ),
+    ),
+    (
+        TargetHostResearchSample,
+        (
+            "sample_id",
+            "phase",
+            "measurement_event_id",
+            "measurement_journal_sequence",
+            "monotonic_start_ns",
+            "monotonic_end_ns",
+            "interference_us",
+            "__init__",
+            "from_durable",
+            "payload",
         ),
     ),
     (

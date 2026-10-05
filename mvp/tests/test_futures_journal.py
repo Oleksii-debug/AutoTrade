@@ -942,6 +942,35 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
 
 
+    def test_durable_contract_reseal_rejects_hostile_scalar_without_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile contract text executed")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("hostile contract equality executed")
+
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        object.__setattr__(contract, "instrument", HostileText(contract.instrument))
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "contract conflicts with canonical InstrumentVersion",
+        ):
+            variation_margin_aggregate_id(opening)
+        self.assertEqual(callbacks, [])
+
+
     def test_durable_scope_rejects_post_construction_contract_drift(self):
         contract = self._contract()
         opening = VariationMarginState(

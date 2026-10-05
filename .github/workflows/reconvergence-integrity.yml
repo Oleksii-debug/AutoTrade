@@ -30,7 +30,17 @@ jobs:
           test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
           git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
-      - name: Resolve trusted protected-sentinel modification authorization
+      - name: Verify target branch tip matches event base
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          target_tip="$(git ls-remote origin "refs/heads/${BASE_REF}" | awk '{print $1}')"
+          test -n "$target_tip"
+          test "$target_tip" = "$EVENT_BASE_SHA"
+      - name: Resolve trusted protected-sentinel path authorization
         if: github.event_name == 'pull_request_target'
         shell: bash
         env:
@@ -38,9 +48,13 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           if [ "$AUTHOR_LOGIN" = "$REPOSITORY_OWNER" ]; then
-            echo "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION=1" >> "$GITHUB_ENV"
+            cat >> "$GITHUB_ENV" <<'EOF'
+          AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS
+          .github/workflows/reconvergence-integrity.yml
+          control/tools/reconvergence_integrity.py
+          EOF
           else
-            echo "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION=0" >> "$GITHUB_ENV"
+            echo 'AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS=' >> "$GITHUB_ENV"
           fi
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
@@ -49,6 +63,5 @@ jobs:
           python -m control.tools.reconvergence_integrity
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
-          $([ "${AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION:-0}" = "1" ] && printf '%s' "--allow-protected-sentinel-modification")
       - name: Run trusted guard regression tests
         run: python -m unittest tests.Control.test_reconvergence_integrity -v

@@ -308,6 +308,83 @@ def prepare_only(orchestrator, budget, call_spec, request, route_descriptor=None
     return decision, pricing
 
 class ModelCallLifecycleTests(unittest.TestCase):
+    def test_integer_subclasses_cannot_enter_model_call_identity_or_recovery_lease(self):
+        class HostileInt(int):
+            comparison_calls = 0
+
+            def __lt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("hostile integer comparison executed")
+
+            def __gt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("hostile integer comparison executed")
+
+            def __eq__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("hostile integer equality executed")
+
+        with self.assertRaisesRegex(ValueError, "fallback_index"):
+            spec(fallback_index=HostileInt(1))
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            with self.assertRaisesRegex(ValueError, "started_lease_seconds"):
+                orchestrator_for(
+                    budget=budget,
+                    clock=MutableClock(),
+                    started_lease_seconds=HostileInt(60),
+                )
+
+        self.assertEqual(HostileInt.comparison_calls, 0)
+
+    def test_execute_reseals_postconstruction_mutated_model_call_spec(self):
+        class HostileInt(int):
+            comparison_calls = 0
+
+            def __lt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("mutated fallback comparison executed")
+
+            def __gt__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("mutated fallback comparison executed")
+
+            def __eq__(self, other):
+                type(self).comparison_calls += 1
+                raise AssertionError("mutated fallback equality executed")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                pricing_evidence_resolver=lambda *_args: self.fail(
+                    "mutated spec must fail before pricing evidence"
+                ),
+            )
+            call_spec = spec()
+            original_attempt_id = orchestrator.attempt_id(call_spec)
+            request = request_for(orchestrator, call_spec)
+            object.__setattr__(call_spec, "fallback_index", HostileInt(1))
+
+            with self.assertRaisesRegex(ValueError, "fallback_index"):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request,
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail(
+                        "mutated spec must fail before inference"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(HostileInt.comparison_calls, 0)
+            self.assertEqual(orchestrator._events(original_attempt_id), [])
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_schema_invalid_parent_remains_fallback_eligible_after_billing_evidence(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

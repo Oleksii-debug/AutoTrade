@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-import json
 from threading import RLock
 from typing import Any, Mapping
 from weakref import WeakKeyDictionary, ref
@@ -60,26 +59,42 @@ def _exact_text(value: object, *, name: str) -> str:
     return value
 
 
-def _detached_object(value: object, *, name: str) -> dict[str, Any]:
-    """Materialize caller-owned mapping state once into detached canonical JSON."""
+def _exact_json_value(value: object, *, name: str) -> object:
+    """Detach exact JSON-domain values without caller-polymorphic execution."""
 
-    if not isinstance(value, Mapping):
-        raise TypeError(f"{name} must be a mapping")
-    try:
-        detached = json.loads(canonical_json(dict(value)))
-    except (TypeError, ValueError) as error:
-        raise AdmittedFinancialRequestAuthorityError(
-            f"{name} is not canonical JSON material"
-        ) from error
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    if type(value) is list:
+        return [
+            _exact_json_value(item, name=f"{name}[{index}]")
+            for index, item in enumerate(list.copy(value))
+        ]
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise TypeError(f"{name} keys must be exact strings")
+        detached = dict.copy(value)
+        return {
+            key: _exact_json_value(item, name=f"{name}.{key}")
+            for key, item in detached.items()
+        }
+    raise TypeError(f"{name} must contain exact JSON-domain values")
+
+
+def _detached_object(value: object, *, name: str) -> dict[str, Any]:
+    """Snapshot an exact built-in JSON object before financial comparison."""
+
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
+    detached = _exact_json_value(value, name=name)
     if type(detached) is not dict:
-        raise AdmittedFinancialRequestAuthorityError(
-            f"{name} must canonicalize to an object"
-        )
+        raise TypeError(f"{name} must be an exact dict")
     return detached
 
 
-def _json_digest(value: Mapping[str, Any]) -> str:
-    return "sha256:" + sha256(canonical_json(dict(value)).encode("utf-8")).hexdigest()
+def _json_digest(value: dict[str, Any]) -> str:
+    if type(value) is not dict:
+        raise TypeError("digest value must be an exact dict")
+    return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _identity(

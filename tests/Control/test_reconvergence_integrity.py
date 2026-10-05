@@ -397,14 +397,12 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             git("init")
             git("config", "user.email", "reconvergence-test@example.invalid")
             git("config", "user.name", "Reconvergence Test")
-            (root / "README.md").write_text("root
-", encoding="utf-8")
+            (root / "README.md").write_text("root\n", encoding="utf-8")
             git("add", "README.md")
             git("commit", "-m", "root")
             base_sha = git("rev-parse", "HEAD")
 
-            (root / "README.md").write_text("child
-", encoding="utf-8")
+            (root / "README.md").write_text("child\n", encoding="utf-8")
             git("commit", "-am", "child")
             head_sha = git("rev-parse", "HEAD")
 
@@ -447,15 +445,13 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             git("init")
             git("config", "user.email", "reconvergence-test@example.invalid")
             git("config", "user.name", "Reconvergence Test")
-            (root / "README.md").write_text("base
-", encoding="utf-8")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
             git("add", "README.md")
             git("commit", "-m", "base")
             base_sha = git("rev-parse", "HEAD")
 
             git("checkout", "-b", "stale-rebuild")
-            (root / "README.md").write_text("stale
-", encoding="utf-8")
+            (root / "README.md").write_text("stale\n", encoding="utf-8")
             git("commit", "-am", "stale")
             head_sha = git("rev-parse", "HEAD")
 

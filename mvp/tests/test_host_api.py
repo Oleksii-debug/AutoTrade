@@ -39,6 +39,66 @@ class HostCommandStateTests(unittest.TestCase):
             "payload": payload or {},
         }
 
+    def test_account_scope_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("account_id strip callback must not run")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "account_id must be a non-empty string",
+        ):
+            HostCommandStore(
+                account_id=HostileText("paper-account-1"),
+                environment="PAPER",
+                session_validator=lambda session, actor, origin, action: True,
+                request_origin_provider=lambda: "https://local.autotrade.invalid",
+            )
+
+        self.assertEqual(callbacks, [])
+
+
+    def test_permission_ingress_requires_exact_origin_and_literal_true(self):
+        callbacks = []
+
+        class HostileOrigin(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("request origin strip callback must not run")
+
+        hostile_origin_store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: True,
+            request_origin_provider=lambda: HostileOrigin(
+                "https://local.autotrade.invalid"
+            ),
+        )
+        with self.assertRaisesRegex(PermissionError, "origin is unavailable"):
+            hostile_origin_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(hostile_origin_store.state_version, 0)
+
+        class TruthyDecision:
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("session decision truthiness must not run")
+
+        non_boolean_store = HostCommandStore(
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: TruthyDecision(),
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+        )
+        with self.assertRaisesRegex(PermissionError, "Session is not authorized"):
+            non_boolean_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(non_boolean_store.state_version, 0)
+
+
     def test_v2_scope_is_required_canonical_and_matches_active_host(self):
         missing_account = self.command()
         missing_account.pop("account_id")

@@ -114,6 +114,8 @@ def _normalized_exact_paths(paths: Sequence[str] | None) -> frozenset[str]:
             raise ValueError("exact protected path authorization is malformed")
         normalized.add(value)
     return frozenset(normalized)
+
+
 def assess_reconvergence(
     *,
     base_paths: Sequence[str],

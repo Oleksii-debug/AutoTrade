@@ -24,6 +24,9 @@ from .persistence import JournalStore
 from .pipeline import run_vertical_slice
 
 
+_EVIDENCE_SCHEMA_VERSION = "1.1.0"
+
+
 def _json_native_identity(value: object) -> object:
     """Normalize immutable/generic containers without weakening identity semantics."""
 
@@ -158,12 +161,19 @@ class RuntimeLoadCampaignEvidence:
             raise ValueError("recovered event identities must be unique")
         if len(self.recovered_event_ids) != len(self.recovered_journal_sequences):
             raise ValueError("recovered event identities and sequences must align")
+        if tuple(self.observation.recovered_financial_event_ids) != tuple(
+            self.recovered_event_ids
+        ):
+            raise ValueError(
+                "observation recovered financial identities must match retained journal cut"
+            )
         object.__setattr__(self, "host_identity", MappingProxyType(dict(self.host_identity)))
 
     @property
     def evidence_digest(self) -> str:
         return _sha256_identity(
             {
+                "schema_version": _EVIDENCE_SCHEMA_VERSION,
                 "scenario_id": self.observation.scenario_id,
                 "spec_digest": self.observation.spec_digest,
                 "release_sha": self.observation.release_sha,
@@ -178,6 +188,15 @@ class RuntimeLoadCampaignEvidence:
                 "financial_latency_us": list(self.observation.financial_latency_us),
                 "financial_staleness_us": list(self.observation.financial_staleness_us),
                 "research_interference_us": list(self.observation.research_interference_us),
+                "recovered_financial_event_ids": list(
+                    self.observation.recovered_financial_event_ids
+                ),
+                "financial_latency_event_ids": list(
+                    self.observation.financial_latency_event_ids
+                ),
+                "financial_staleness_event_ids": list(
+                    self.observation.financial_staleness_event_ids
+                ),
                 "reconnect_backlog_remaining": self.observation.reconnect_backlog_remaining,
                 "declared_duration_us": self.observation.declared_duration_us,
                 "observed_duration_us": self.observation.observed_duration_us,
@@ -203,16 +222,15 @@ def collect_vertical_slice_load_evidence(
     Unrelated durable events cannot compensate for a missing measured event.
     This collector intentionally leaves staleness and research-interference
     sample sets empty because this synchronous slice does not measure either
-    dimension; the canonical evaluator must therefore remain INCONCLUSIVE.
+    dimension. It reports the actual durable outbox backlog rather than a
+    synthetic zero, so the canonical evaluator cannot produce a favorable
+    reconnect result from missing measurement authority.
     """
 
     if not isinstance(spec, RuntimeBudgetSpec):
         raise TypeError("spec must be RuntimeBudgetSpec")
     _require_exact_source(spec.release_sha)
-    if (
-        type(declared_duration_us) is not int
-        or declared_duration_us <= 0
-    ):
+    if type(declared_duration_us) is not int or declared_duration_us <= 0:
         raise ValueError("declared_duration_us must be a positive integer")
     if isinstance(episodes, (str, bytes)) or not isinstance(episodes, Sequence) or not episodes:
         raise ValueError("episodes must be a non-empty sequence")
@@ -234,11 +252,14 @@ def collect_vertical_slice_load_evidence(
         latencies.append(elapsed_us)
     campaign_us = max(1, (perf_counter_ns() - campaign_start) // 1000)
     store = JournalStore(journal_path)
-    recovered_events = _recovered_simulation_event_records(
-        store, after_sequence=before
-    )
+    recovered_events = _recovered_simulation_event_records(store, after_sequence=before)
+    recovered_ids = tuple(str(event["event_id"]) for event in recovered_events)
     after = store.current_journal_sequence()
+    reconnect_backlog = store.pending_outbox_count()
+    if type(reconnect_backlog) is not int or reconnect_backlog < 0:
+        raise RuntimeError("canonical JournalStore returned invalid reconnect backlog")
 
+    latency_event_ids = recovered_ids if len(latencies) == len(recovered_ids) else ()
     observation = RuntimeLoadObservation.create(
         scenario_id=spec.scenario_id,
         spec_digest=spec.digest,
@@ -250,23 +271,30 @@ def collect_vertical_slice_load_evidence(
         financial_latency_us=latencies,
         # This bounded collector does not have a wall-clock source-availability
         # signal or a concurrent research workload. Empty samples deliberately
-        # force the canonical evaluator to INCONCLUSIVE rather than fabricating
-        # zero staleness/interference evidence.
+        # prevent a terminal PASS rather than fabricating zero staleness or
+        # interference evidence.
         financial_staleness_us=(),
         research_interference_us=(),
-        reconnect_backlog_remaining=0,
+        reconnect_backlog_remaining=reconnect_backlog,
         declared_duration_us=declared_duration_us,
         observed_duration_us=campaign_us,
+        recovered_financial_event_ids=recovered_ids,
+        financial_latency_event_ids=latency_event_ids,
+        financial_staleness_event_ids=(),
     )
     return RuntimeLoadCampaignEvidence(
         observation=observation,
         journal_sequence_before=before,
         journal_sequence_after=after,
-        recovered_event_ids=tuple(str(event["event_id"]) for event in recovered_events),
+        recovered_event_ids=recovered_ids,
         recovered_journal_sequences=tuple(
             int(event["journal_sequence"]) for event in recovered_events
         ),
-        host_identity=dict(host_identity) if isinstance(host_identity, Mapping) else {"identity": host_identity},
+        host_identity=(
+            dict(host_identity)
+            if isinstance(host_identity, Mapping)
+            else {"identity": host_identity}
+        ),
     )
 
 
@@ -300,7 +328,7 @@ def runtime_load_campaign_evidence_document(
         raise TypeError("evidence must be RuntimeLoadCampaignEvidence")
     observation = evidence.observation
     return {
-        "schema_version": "1.0.0",
+        "schema_version": _EVIDENCE_SCHEMA_VERSION,
         "evidence_type": "AUTOTRADE_RUNTIME_LOAD_CAMPAIGN",
         "evidence_digest": evidence.evidence_digest,
         "observation": {
@@ -314,6 +342,15 @@ def runtime_load_campaign_evidence_document(
             "financial_latency_us": list(observation.financial_latency_us),
             "financial_staleness_us": list(observation.financial_staleness_us),
             "research_interference_us": list(observation.research_interference_us),
+            "recovered_financial_event_ids": list(
+                observation.recovered_financial_event_ids
+            ),
+            "financial_latency_event_ids": list(
+                observation.financial_latency_event_ids
+            ),
+            "financial_staleness_event_ids": list(
+                observation.financial_staleness_event_ids
+            ),
             "reconnect_backlog_remaining": observation.reconnect_backlog_remaining,
             "declared_duration_us": observation.declared_duration_us,
             "observed_duration_us": observation.observed_duration_us,
@@ -395,7 +432,7 @@ def load_runtime_load_campaign_evidence(
     }:
         raise ValueError("runtime load evidence structure is not canonical")
     if (
-        document.get("schema_version") != "1.0.0"
+        document.get("schema_version") != _EVIDENCE_SCHEMA_VERSION
         or document.get("evidence_type") != "AUTOTRADE_RUNTIME_LOAD_CAMPAIGN"
     ):
         raise ValueError("unsupported runtime load evidence schema")
@@ -411,6 +448,9 @@ def load_runtime_load_campaign_evidence(
         "financial_latency_us",
         "financial_staleness_us",
         "research_interference_us",
+        "recovered_financial_event_ids",
+        "financial_latency_event_ids",
+        "financial_staleness_event_ids",
         "reconnect_backlog_remaining",
         "declared_duration_us",
         "observed_duration_us",
@@ -421,10 +461,7 @@ def load_runtime_load_campaign_evidence(
         raise ValueError("runtime load host identity must be an object")
     recovered_ids = document.get("recovered_event_ids")
     recovered_sequences = document.get("recovered_journal_sequences")
-    if (
-        not isinstance(recovered_ids, list)
-        or not isinstance(recovered_sequences, list)
-    ):
+    if not isinstance(recovered_ids, list) or not isinstance(recovered_sequences, list):
         raise ValueError("runtime load recovered event identity arrays are required")
 
     observation = RuntimeLoadObservation.create(
@@ -438,6 +475,9 @@ def load_runtime_load_campaign_evidence(
         financial_latency_us=observation_raw["financial_latency_us"],
         financial_staleness_us=observation_raw["financial_staleness_us"],
         research_interference_us=observation_raw["research_interference_us"],
+        recovered_financial_event_ids=observation_raw["recovered_financial_event_ids"],
+        financial_latency_event_ids=observation_raw["financial_latency_event_ids"],
+        financial_staleness_event_ids=observation_raw["financial_staleness_event_ids"],
         reconnect_backlog_remaining=observation_raw["reconnect_backlog_remaining"],
         declared_duration_us=observation_raw["declared_duration_us"],
         observed_duration_us=observation_raw["observed_duration_us"],

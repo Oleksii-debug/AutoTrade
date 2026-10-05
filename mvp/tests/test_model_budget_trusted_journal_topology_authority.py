@@ -10,12 +10,35 @@ from mvp.autotrade_mvp.persistence import JournalStore
 
 NOW_TEXT = "2026-09-25T10:00:00+00:00"
 PREPOISONED_GET_EVENT_CALLS = 0
+HOSTILE_SCOPE_TEXT_CALLS = 0
 
 
 def _poisoned_get_event(*_args, **_kwargs):
     global PREPOISONED_GET_EVENT_CALLS
     PREPOISONED_GET_EVENT_CALLS += 1
     raise AssertionError("pre-poisoned JournalStore.get_event code executed")
+
+
+class HostileScopeText(str):
+    def __str__(self):
+        global HOSTILE_SCOPE_TEXT_CALLS
+        HOSTILE_SCOPE_TEXT_CALLS += 1
+        raise AssertionError("hostile scope text __str__ executed")
+
+    def __eq__(self, _other):
+        global HOSTILE_SCOPE_TEXT_CALLS
+        HOSTILE_SCOPE_TEXT_CALLS += 1
+        raise AssertionError("hostile scope text __eq__ executed")
+
+    def __hash__(self):
+        global HOSTILE_SCOPE_TEXT_CALLS
+        HOSTILE_SCOPE_TEXT_CALLS += 1
+        raise AssertionError("hostile scope text __hash__ executed")
+
+    def strip(self, *_args, **_kwargs):
+        global HOSTILE_SCOPE_TEXT_CALLS
+        HOSTILE_SCOPE_TEXT_CALLS += 1
+        raise AssertionError("hostile scope text strip executed")
 
 
 class HostileJournalStore(JournalStore):
@@ -119,6 +142,35 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 second.load_events("model_budget", "retarget-budget"),
                 [],
             )
+
+    def test_scope_mutation_is_rejected_before_hostile_text_callback(self):
+        global HOSTILE_SCOPE_TEXT_CALLS
+        HOSTILE_SCOPE_TEXT_CALLS = 0
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="inert-scope-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            object.__setattr__(
+                budget,
+                "budget_id",
+                HostileScopeText("hostile-budget-id"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"scope authority changed after construction",
+            ):
+                budget.reserve("inert-scope-request", "0.2")
+
+            self.assertEqual(HOSTILE_SCOPE_TEXT_CALLS, 0)
+            events = journal.load_events("model_budget", "inert-scope-budget")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "ModelBudgetInitialized")
 
     def test_budget_rejects_scope_retarget_after_construction(self):
         mutations = (

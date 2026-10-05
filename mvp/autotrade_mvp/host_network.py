@@ -237,14 +237,14 @@ class AuthenticatedHostApplication:
             raise TypeError("journal must be JournalStore")
         if not isinstance(security_boundary, SecurityBoundary):
             raise TypeError("security_boundary must be SecurityBoundary")
-        if not isinstance(host_id, str) or not host_id.strip():
+        if type(host_id) is not str or not str.strip(host_id):
             raise ValueError("host_id is required")
         if not callable(principal_resolver):
             raise TypeError("principal_resolver must be callable")
         if not callable(snapshot_provider):
             raise TypeError("snapshot_provider must be callable")
         self.security_boundary = security_boundary
-        self.host_id = host_id.strip()
+        self.host_id = str.strip(host_id)
         self.public_origin = _authenticated_origin(public_origin)
         self._principal_resolver = principal_resolver
         self._snapshot_provider = snapshot_provider
@@ -362,7 +362,13 @@ class AuthenticatedHostApplication:
                 raise ValueError(
                     f"UiSnapshot {field} does not match canonical durable host truth"
                 )
-        if payload["account_id"] != durable["account_id"]:
+        account_id = payload["account_id"]
+        durable_account_id = durable["account_id"]
+        if (
+            type(account_id) is not str
+            or type(durable_account_id) is not str
+            or account_id != durable_account_id
+        ):
             raise ValueError("UiSnapshot account_id does not match durable host truth")
         environment = payload["environment"]
         if (
@@ -372,7 +378,8 @@ class AuthenticatedHostApplication:
             raise ValueError(
                 "UiSnapshot environment does not match canonical durable host truth"
             )
-        if payload["host_id"] != self.host_id:
+        snapshot_host_id = payload["host_id"]
+        if type(snapshot_host_id) is not str or snapshot_host_id != self.host_id:
             raise ValueError("UiSnapshot host_id does not match the configured host")
         for field in (
             "permission_summary",

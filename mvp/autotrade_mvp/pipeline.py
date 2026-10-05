@@ -29,7 +29,7 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 3
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:

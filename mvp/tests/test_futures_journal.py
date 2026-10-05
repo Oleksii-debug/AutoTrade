@@ -870,6 +870,36 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(len(read_calls), 2)
 
 
+    def test_durable_scope_rejects_hostile_scope_before_field_reads(self):
+        callbacks = []
+
+        class HostileScope(FuturesSettlementScope):
+            def __getattribute__(self, name):
+                if name in {"provider_id", "account_id", "environment", "source_id"}:
+                    callbacks.append(name)
+                    raise AssertionError("hostile settlement scope attribute executed")
+                return object.__getattribute__(self, name)
+
+        opening = VariationMarginState(
+            contract=self._contract(),
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        base_scope = opening.settlement_scope
+        hostile_scope = object.__new__(HostileScope)
+        for name, value in object.__getattribute__(base_scope, "__dict__").items():
+            object.__setattr__(hostile_scope, name, value)
+        object.__setattr__(opening, "settlement_scope", hostile_scope)
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "exact FuturesSettlementScope",
+        ):
+            variation_margin_aggregate_id(opening)
+        self.assertEqual(callbacks, [])
+
+
     def test_durable_scope_rejects_post_construction_contract_drift(self):
         contract = self._contract()
         opening = VariationMarginState(

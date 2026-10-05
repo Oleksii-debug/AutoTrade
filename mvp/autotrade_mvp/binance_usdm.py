@@ -118,6 +118,10 @@ def _millis(value: object, *, name: str) -> str:
                 f"{name} exceeds the supported UTC millisecond range"
             )
         raw = int(value)
+        if str(raw) != value:
+            raise BinanceUsdmAdapterError(
+                f"{name} must be a canonical non-negative integer millisecond timestamp"
+            )
     else:
         raise BinanceUsdmAdapterError(
             f"{name} must be an integer millisecond timestamp"

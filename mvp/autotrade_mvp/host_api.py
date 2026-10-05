@@ -136,7 +136,7 @@ class HostCommandStore:
         max_events: int = 100,
         now: Callable[[], str] | None = None,
     ) -> None:
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not str.strip(account_id):
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")
@@ -146,7 +146,7 @@ class HostCommandStore:
             raise TypeError("request_origin_provider must be callable")
         if max_events < 1:
             raise ValueError("max_events must be positive")
-        self.account_id = account_id.strip()
+        self.account_id = str.strip(account_id)
         self.environment = environment
         self._session_validator = session_validator
         self._request_origin_provider = request_origin_provider
@@ -229,9 +229,16 @@ class HostCommandStore:
                 "expected_state_version must be a canonical Sequence"
             )
         request_origin = self._request_origin_provider()
-        if not isinstance(request_origin, str) or not request_origin.strip():
+        if type(request_origin) is not str or not str.strip(request_origin):
             raise PermissionError("Current request origin is unavailable")
-        if not self._session_validator(session, actor, request_origin.strip(), action):
+        normalized_origin = str.strip(request_origin)
+        authorized = self._session_validator(
+            session,
+            actor,
+            normalized_origin,
+            action,
+        )
+        if authorized is not True:
             raise PermissionError(
                 "Session is not authorized for actor, request origin, and action"
             )

@@ -666,7 +666,6 @@ class AccountingFoundationTests(unittest.TestCase):
             scoped = ScopedEconomicBook(
                 environment="paper",
                 account_id=" acct-1 ",
-                transactions=(seed,),
             )
             self.assertEqual(hostile_calls, [])
             self.assertEqual(scoped.environment, "PAPER")
@@ -676,10 +675,12 @@ class AccountingFoundationTests(unittest.TestCase):
                 original_book_type,
             )
 
-            # _name is also consulted by EconomicBook projections. Restore only
-            # that broader primitive while keeping every scoped-owner decoy in
-            # place; the facade must continue using its captured authority.
+            # _name is a broader EconomicBook normalization/projection
+            # dependency, not ScopedEconomicBook construction authority. Restore
+            # it before exercising the retained canonical book, while keeping
+            # every scoped-owner/class/book/weakref decoy in place.
             accounting_module._name = original_name
+            self.assertTrue(scoped.append(seed))
             self.assertEqual(scoped.cash("USD"), Decimal("100"))
             self.assertEqual(hostile_calls, [])
 

@@ -34,12 +34,17 @@ from .exact_decimal import (
     canonical_decimal_text, exact_add, exact_multiply,
     parse_bounded_exact_decimal,
 )
+from .fill_accounting import (
+    ProjectedFillEvidence,
+    build_provider_fill_financial_plan,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
     commit_order_fill_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
 from .reconciliation import (
     ProviderFillEvidence,
@@ -1490,18 +1495,41 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         raise ValueError("acknowledgement is not a fill; reconciliation required")
     fill = fills[0]
     fee = fill["fees"][0]
-    fill_transaction = book_equity_fill(
-        transaction_id=_uuid("fill-transaction", episode_id),
-        cause_event_id=fill["provider_execution_id"],
+    provider_fill = ProviderFillEvidence.create(
+        provider_id=PROVIDER,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        provider_execution_id=fill["provider_execution_id"],
+        client_order_id=dispatch.client_order_id,
         instrument=fill["instrument_version"],
-        settlement_currency="USD",
-        side=fill["side"],
         quantity=fill["last_quantity"]["value"],
         price=fill["last_price"],
-        fee=fee["amount"],
+        fee_amount=fee["amount"],
         fee_currency=fee["currency"],
-        economic_effective_at=fill["trade_time"],
-        economic_order_key=f"provider:{PROVIDER}:execution:{fill['provider_execution_id']}",
+        trade_time=fill["trade_time"],
+        side=fill["side"],
+        evidence_refs=(
+            f"simulated:provider-execution:{fill['provider_execution_id']}",
+        ),
+    )
+    projected_fill = ProjectedFillEvidence.create(
+        fill_id=_uuid("projected-fill", episode_id),
+        provider_execution_id=provider_fill.provider_execution_id,
+        intent_id=intent_id,
+        client_order_id=dispatch.client_order_id,
+        side=provider_fill.side,
+        quantity=provider_fill.quantity,
+        price=provider_fill.price,
+    )
+    reservation_id = _uuid("reservation", episode_id)
+    financial_plan = build_provider_fill_financial_plan(
+        book=economic,
+        provider_id=PROVIDER,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        reservation_snapshot=reservations.get(reservation_id),
         observed_at=fill["receipt_time"],
     )
     trade_point = datetime.fromisoformat(
@@ -1514,20 +1542,24 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         settlement_date=settlement_date,
     )
     settlement_obligation = equity_cash_obligation_from_transaction(
-        fill_transaction,
+        financial_plan.transaction,
         obligation_id=_uuid("settlement-obligation", episode_id),
         instrument=INSTRUMENT,
         settlement_currency="USD",
         settlement_date=settlement_date,
         rule_binding=settlement_rule,
     )
-    commit_economic_batch_with_reservation_consumption(
-        economic, reservations,
+    commit_provider_fill_with_reservation_consumption(
+        economic,
+        reservations,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
-        reservation_id=_uuid("reservation", episode_id),
-        usage={"CASH:USD": required_text},
-        transactions=(fill_transaction,),
+        reservation_id=reservation_id,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        expected_instrument=INSTRUMENT,
+        settlement_currency="USD",
+        observed_at=fill["receipt_time"],
         committed_at=timestamp,
         settlement_book=settlements,
         settlement_obligations=(settlement_obligation,),

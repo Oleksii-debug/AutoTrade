@@ -309,10 +309,6 @@ def assess_strategy_economics_authority(
         raise StrategyEconomicsAuthorityError(
             "instrument_version is not the registry version effective at information_cutoff"
         )
-    if proposal.symbol != instrument.provider_symbol:
-        raise StrategyEconomicsAuthorityError(
-            "proposal symbol does not match instrument provider_symbol"
-        )
 
     verified = {
         "instrument_registry_shape",

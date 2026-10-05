@@ -1,6 +1,8 @@
 from decimal import Decimal
+import gc
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+import weakref
 import sqlite3
 import unittest
 
@@ -87,6 +89,20 @@ def provider_evidence(
 
 
 class DurableOrderProjectionTests(unittest.TestCase):
+    def test_projection_gc_releases_registry_store_binding_without_second_oms(self):
+        with TemporaryDirectory() as directory:
+            def build():
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                book = durable(store)
+                return weakref.ref(book), weakref.ref(store), book
+
+            book_ref, store_ref, book = build()
+            del book
+            gc.collect()
+
+            self.assertIsNone(book_ref())
+            self.assertIsNone(store_ref())
+
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

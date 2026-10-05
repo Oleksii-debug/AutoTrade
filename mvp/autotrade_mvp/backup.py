@@ -1234,6 +1234,15 @@ def create_backup(
         )
         os.replace(stage, target)
         published = True
+        # Close the final check-to-rename race. A source that changed after
+        # the pre-publication cut must not survive as a durably committed
+        # backup merely because the rename itself succeeded.
+        _assert_mutable_sources_unchanged(
+            state,
+            artifacts,
+            source_inventory,
+            source_rechecks,
+        )
         _fsync_directory(target.parent)
         return target
     except BaseException:

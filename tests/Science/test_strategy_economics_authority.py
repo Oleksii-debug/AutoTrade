@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
 from uuid import UUID
 
 from mvp.autotrade_mvp.instruments import (
+    InstrumentNotFound,
     InstrumentRegistry,
     InstrumentVersion,
     TradingCalendar,
 )
+import qualification.strategy_economics.qualify as economics_authority
 from qualification.strategy_economics.qualify import (
     StrategyEconomicsAuthorityAssessment,
     StrategyEconomicsAuthorityError,
@@ -179,6 +182,26 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             "dimension_fx",
             assessment.unresolved_owners,
         )
+        self.assertIn(
+            "provider_scope_binding",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "instrument_registry_authority",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "provider_economic_cut",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "instrument_registry_shape",
+            assessment.verified_owners,
+        )
+        self.assertNotIn(
+            "instrument_registry",
+            assessment.verified_owners,
+        )
         with self.assertRaisesRegex(
             StrategyEconomicsAuthorityError,
             "terminal strategy economics is INCONCLUSIVE",
@@ -211,6 +234,74 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         self.assertIn(
             "capacity_evidence_authority",
             assessment.unresolved_owners,
+        )
+
+    def test_public_registry_exact_rebind_cannot_redirect_assessment(self):
+        item = _proposal()
+        binding = _binding(item)
+        original = InstrumentRegistry.exact
+        calls = []
+
+        def hostile_exact(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("rebound public registry lookup executed")
+
+        InstrumentRegistry.exact = hostile_exact
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                binding,
+                instrument_registry=_registry(),
+            )
+        finally:
+            InstrumentRegistry.exact = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(assessment.instrument_version, INSTRUMENT_VERSION)
+        self.assertIn(
+            "instrument_registry_authority",
+            assessment.unresolved_owners,
+        )
+
+    def test_caller_provider_replay_does_not_satisfy_owner_authority(self):
+        item = _proposal()
+        original = economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT
+        calls = []
+
+        def replay(book, cut, *, expected_visibility_journal_sequence):
+            calls.append((book, cut, expected_visibility_journal_sequence))
+            return SimpleNamespace(
+                provider_id="SIMULATED",
+                cut_digest="sha256:" + "4" * 64,
+            )
+
+        book = object.__new__(economics_authority.DurableProviderEconomicBook)
+        cut = object.__new__(economics_authority.ProviderEconomicCut)
+        economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT = replay
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                _binding(item),
+                instrument_registry=_registry(),
+                provider_economic_book=book,
+                provider_economic_cut=cut,
+                expected_visibility_journal_sequence=7,
+            )
+        finally:
+            economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT = original
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn(
+            "provider_economic_cut_replay",
+            assessment.verified_owners,
+        )
+        self.assertIn(
+            "provider_economic_cut",
+            assessment.unresolved_owners,
+        )
+        self.assertEqual(
+            assessment.provider_economic_cut_digest,
+            "sha256:" + "4" * 64,
         )
 
     def test_assessment_is_issued_and_mutation_invalidates_it(self):
@@ -253,6 +344,53 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 provider_economic_cut_digest=None,
             )
 
+    def test_private_issue_token_still_cannot_mint_positive_status(self):
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "positive strategy economics issuance is unavailable",
+        ):
+            StrategyEconomicsAuthorityAssessment(
+                status="QUALIFIED",
+                binding_fingerprint="sha256:" + "a" * 64,
+                bound_proposal_fingerprint="sha256:" + "b" * 64,
+                instrument_version=INSTRUMENT_VERSION,
+                instrument_provider_id="SIMULATED",
+                verified_owners=(
+                    "instrument_registry_shape",
+                ),
+                unresolved_owners=(),
+                provider_economic_cut_digest=None,
+                _token=economics_authority._ISSUE_TOKEN,
+            )
+
+    def test_private_registry_cannot_reseal_mutated_positive_authority(self):
+        item = _proposal()
+        assessment = assess_strategy_economics_authority(
+            item,
+            _binding(item),
+            instrument_registry=_registry(),
+        )
+
+        # Python-private symbols are importable by same-process callers.  Prove
+        # that even a caller who mutates an issued diagnostic and re-registers
+        # a matching private seal still cannot obtain terminal authority.
+        object.__setattr__(assessment, "status", "QUALIFIED")
+        object.__setattr__(assessment, "unresolved_owners", ())
+        economics_authority._register_issued(
+            assessment,
+            _token=economics_authority._ISSUE_TOKEN,
+        )
+
+        self.assertIs(
+            require_strategy_economics_assessment(assessment),
+            assessment,
+        )
+        with self.assertRaisesRegex(
+            StrategyEconomicsAuthorityError,
+            "positive strategy economics issuance is unavailable on current main",
+        ):
+            require_qualified_strategy_economics(assessment)
+
     def test_unknown_instrument_fails_before_assessment_issuance(self):
         item = _proposal()
         empty_registry = InstrumentRegistry(
@@ -260,7 +398,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 TradingCalendar.continuous_24_7(),
             )
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(InstrumentNotFound):
             assess_strategy_economics_authority(
                 item,
                 _binding(item),

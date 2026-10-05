@@ -7,6 +7,7 @@ from types import FunctionType
 from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
+from mvp.autotrade_mvp.persistence import JournalStore
 import mvp.autotrade_mvp.runtime_target_host_resource_evidence as resource_module
 from mvp.autotrade_mvp.runtime_target_host_resource_evidence import (
     RuntimeTargetHostResourceEvidenceError,
@@ -19,6 +20,10 @@ from mvp.tests.test_runtime_target_host_resource_evidence import (
     RUN_RECEIPT_ARTIFACT_ID,
     _run_result,
 )
+
+
+def _journal(root: str) -> JournalStore:
+    return JournalStore(Path(root) / "journal.sqlite3")
 
 
 class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
@@ -55,7 +60,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -105,7 +110,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency changed before target-host run: disk usage",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -151,7 +156,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency changed during target-host run: disk usage os.statvfs",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -193,7 +198,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency changed before target-host run: disk usage os.statvfs",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -240,7 +245,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency changed during target-host run: disk usage result constructor",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -284,7 +289,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                         "resource platform dependency changed before target-host run: disk usage result constructor",
                     ):
                         run_declared_target_host_campaign_with_resources(
-                            journal=object(),
+                            journal=_journal(root),
                             evidence_store=store,
                             spec=object(),
                             authority_id="resource-authority",
@@ -316,7 +321,7 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
                     "resource platform dependency changed before target-host run: disk usage",
                 ):
                     run_declared_target_host_campaign_with_resources(
-                        journal=object(),
+                        journal=_journal(root),
                         evidence_store=store,
                         spec=object(),
                         authority_id="resource-authority",

@@ -649,7 +649,7 @@ def verify_replay(state_dir: str | Path) -> bool:
             if type(event) is not dict:
                 return False
             if event.get("event_type") != "SimulationEpisodeRecorded":
-                continue
+                return False
             payload = event.get("payload")
             if (
                 type(payload) is not dict

@@ -106,14 +106,32 @@ def _require_checkpoint_configuration(
         raise ValueError("Checkpoint financial configuration digest mismatch")
     if configuration != expected or digest != expected_digest:
         raise ValueError("Checkpoint financial configuration changed")
+    if state.get("schema_version") != configuration.get("checkpoint_schema_version"):
+        raise ValueError("Checkpoint schema does not match financial configuration")
+    if (
+        type(state.get("symbol")) is not str
+        or state["symbol"] != configuration.get("symbol")
+    ):
+        raise ValueError("Checkpoint symbol does not match financial configuration")
+    if (
+        type(state.get("initial_cash")) is not str
+        or state["initial_cash"] != configuration.get("initial_cash")
+    ):
+        raise ValueError("Checkpoint initial cash does not match financial configuration")
 
 
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
     normalized: list[Decimal] = []
     for value in prices:
+        if type(value) is float:
+            presentation: object = str(value)
+        elif type(value) in (str, int, Decimal):
+            presentation = value
+        else:
+            raise ValueError("Prices must be exact float, str, int or Decimal values")
         try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
+            numeric = parse_bounded_exact_decimal(presentation)
+        except (ValueError, ArithmeticError, TypeError) as error:
             raise ValueError("Prices must be finite and positive") from error
         if not numeric.is_finite() or numeric <= 0:
             raise ValueError("Prices must be finite and positive")
@@ -431,6 +449,35 @@ class EconomicLedger:
         )
 
 
+def _has_residual_durable_state(root: Path) -> bool:
+    """Reject rebinding an existing run directory after its checkpoint is lost."""
+
+    if (root / "learning-evidence.jsonl").exists():
+        return True
+    if any(root.glob("journal.sqlite3*")):
+        return True
+    if (root / "checkpoint.json.tmp").exists():
+        return True
+    intents = root / "order-intents"
+    return intents.is_dir() and any(intents.glob("*.json"))
+
+
+def _initial_checkpoint(financial_configuration: dict[str, object]) -> dict[str, object]:
+    """Persist run economics before the first durable intent/provider mutation."""
+
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "symbol": financial_configuration["symbol"],
+        "financial_configuration": financial_configuration,
+        "financial_configuration_hash": _stable_hash(financial_configuration),
+        "initial_cash": financial_configuration["initial_cash"],
+        "postings": [],
+        "fills": {},
+        "evidence_ids": [],
+        "evidence_records": {},
+    }
+
+
 def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
     if not path.exists():
         return {"initial_cash": str(initial_cash), "postings": [], "fills": {}, "evidence_ids": []}, False
@@ -465,11 +512,13 @@ def _find_evidence(path: Path, evidence_id: str) -> dict | None:
             if not line.strip():
                 continue
             recorded = json.loads(line)
+            if type(recorded) is not dict or type(recorded.get("evidence_id")) is not str:
+                raise ValueError("Corrupt learning evidence")
             if recorded["evidence_id"] == evidence_id:
                 if found is not None:
                     raise ValueError("Duplicate learning evidence ID")
                 found = recorded
-    except (json.JSONDecodeError, KeyError) as error:
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise ValueError("Corrupt learning evidence") from error
     return found
 
@@ -556,12 +605,25 @@ def verify_replay(state_dir: str | Path) -> bool:
         symbol = configuration.get("symbol")
         if type(symbol) is not str or not symbol:
             return False
+        if checkpoint.get("symbol") != symbol:
+            return False
+        if checkpoint.get("initial_cash") != configuration.get("initial_cash"):
+            return False
+        if configuration.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+            return False
         records = checkpoint["evidence_records"]
         ids = checkpoint["evidence_ids"]
         rows = [
             json.loads(line)
             for line in evidence_path.read_text(encoding="utf-8").splitlines()
         ]
+        if any(
+            type(row) is not dict
+            or type(row.get("evidence_id")) is not str
+            or row.get("financial_configuration_hash") != configuration_hash
+            for row in rows
+        ):
+            return False
         observed = {row["evidence_id"]: row for row in rows}
         if not isinstance(records, dict) or not isinstance(ids, list):
             return False
@@ -571,7 +633,12 @@ def verify_replay(state_dir: str | Path) -> bool:
             return False
         if set(ids) != set(records) or set(ids) != set(observed):
             return False
-        if any(observed[key] != records[key] for key in ids):
+        if any(
+            type(records[key]) is not dict
+            or records[key].get("financial_configuration_hash") != configuration_hash
+            or observed[key] != records[key]
+            for key in ids
+        ):
             return False
 
         store = JournalStore(journal_path)
@@ -631,11 +698,14 @@ def run_vertical_slice(
         max_notional=notional_limit,
         fee_rate=rate,
     )
+    financial_configuration_hash = _stable_hash(financial_configuration)
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed:
-        if state.get("symbol", symbol) != symbol:
-            raise ValueError("Checkpoint belongs to another symbol")
         _require_checkpoint_configuration(state, financial_configuration)
+    elif _has_residual_durable_state(root):
+        raise ValueError(
+            "Durable state exists without exact financial configuration identity"
+        )
     ledger = EconomicLedger(
         _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
         list(state.get("postings", [])),
@@ -664,6 +734,7 @@ def run_vertical_slice(
             "quantity": str(decision.quantity),
             "price": str(decision.price),
             "input_hash": _stable_hash([str(item) for item in normalized]),
+            "financial_configuration_hash": financial_configuration_hash,
         }
         intent = OrderIntent(
             client_order_id="intent-" + _stable_hash(intent_payload)[:20], symbol=symbol, side=decision.side,
@@ -674,6 +745,11 @@ def run_vertical_slice(
         else:
             admitted, risk_reason = handle_risk(decision, ledger.position, ledger.cash, rate, position_limit, notional_limit)
         if admitted:
+            if not resumed and not checkpoint_path.exists():
+                _atomic_json(
+                    checkpoint_path,
+                    _initial_checkpoint(financial_configuration),
+                )
             handle_durable_order_intent(intent, root)
             fill = handle_simulated_provider(intent, rate, provider)
             handle_economic_ledger(fill, ledger)
@@ -686,8 +762,10 @@ def run_vertical_slice(
     evidence_ids = set(state.get("evidence_ids", []))
     evidence_records = dict(state.get("evidence_records", {}))
     evidence_id = "evidence-" + _stable_hash({
-        "symbol": symbol, "input": [str(x) for x in normalized],
+        "symbol": symbol,
+        "input": [str(x) for x in normalized],
         "intent": intent.client_order_id if intent else None,
+        "financial_configuration_hash": financial_configuration_hash,
     })[:20]
     fresh_evidence = {
         "schema_version": 1,
@@ -702,6 +780,7 @@ def run_vertical_slice(
         "position": str(ledger.position),
         "equity": str(equity),
         "reconciled": reconciled,
+        "financial_configuration_hash": financial_configuration_hash,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     recorded_evidence = _find_evidence(evidence_path, evidence_id)
@@ -712,9 +791,15 @@ def run_vertical_slice(
         evidence = recorded_evidence
     else:
         evidence = fresh_evidence
-    if (evidence.get("input_hash") != fresh_evidence["input_hash"]
-            or evidence.get("order_id") != fresh_evidence["order_id"]
-            or evidence.get("fill_id") != fresh_evidence["fill_id"]):
+    if type(evidence) is not dict:
+        raise ValueError("Checkpoint evidence conflicts with this episode")
+    comparable_evidence = {
+        key: value for key, value in evidence.items() if key != "recorded_at"
+    }
+    comparable_fresh = {
+        key: value for key, value in fresh_evidence.items() if key != "recorded_at"
+    }
+    if comparable_evidence != comparable_fresh:
         raise ValueError("Checkpoint evidence conflicts with this episode")
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
@@ -722,7 +807,7 @@ def run_vertical_slice(
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "symbol": symbol,
         "financial_configuration": financial_configuration,
-        "financial_configuration_hash": _stable_hash(financial_configuration),
+        "financial_configuration_hash": financial_configuration_hash,
         "initial_cash": str(ledger.initial_cash),
         "postings": ledger.postings,
         "fills": {key: {**asdict(value), "quantity": str(value.quantity), "price": str(value.price), "fee": str(value.fee)} for key, value in provider.fills.items()},
@@ -739,7 +824,7 @@ def run_vertical_slice(
         root,
         symbol,
         evidence,
-        checkpoint["financial_configuration_hash"],
+        financial_configuration_hash,
     )
     if not verify_replay(root):
         raise ValueError("Learning evidence does not replay against checkpoint")

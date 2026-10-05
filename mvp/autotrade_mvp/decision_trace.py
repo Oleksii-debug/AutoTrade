@@ -804,22 +804,32 @@ class BoundedMetricBacklog:
     def record(self, name: str, value: float, **labels: Any) -> None:
         if type(name) is not str or not name.strip():
             raise ValueError("metric name is required")
-        if (
-            type(value) not in (int, float)
-            or not isfinite(value)
-        ):
+        if type(value) not in (int, float):
             raise ValueError("metric value must be a finite number")
-        redacted_labels = _redact(dict(labels))
-        # Metric labels must be immediately JSON-safe. Otherwise a NaN/Inf label
-        # can enter the bounded queue and make later diagnostic export fail.
-        canonical_json(redacted_labels)
+        if type(value) is float and not isfinite(value):
+            raise ValueError("metric value must be a finite number")
+        try:
+            redacted_labels = _redact(dict(labels))
+        except RecursionError as error:
+            raise ValueError(
+                "metric item is not JSON compliant or exceeds strict JSON resource domain"
+            ) from error
+        item = {"name": name.strip(), "value": value, "labels": redacted_labels}
+        try:
+            encoded_item = canonical_json(item)
+            strict_json_loads(encoded_item)
+        except (ValueError, RecursionError) as error:
+            raise ValueError(
+                "metric item is not JSON compliant or exceeds strict JSON resource domain"
+            ) from error
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
-        self._items.append(
-            {"name": name.strip(), "value": value, "labels": redacted_labels}
-        )
+        self._items.append(item)
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:
-        # Never expose mutable references owned by the backlog. JSON round-trip
-        # yields detached built-in diagnostic values and preserves redaction.
-        return tuple(json.loads(canonical_json(item)) for item in self._items)
+        # Never expose mutable references owned by the backlog. Strict JSON
+        # round-trip yields detached built-in values under the same admission
+        # domain used by record().
+        return tuple(
+            strict_json_loads(canonical_json(item)) for item in self._items
+        )

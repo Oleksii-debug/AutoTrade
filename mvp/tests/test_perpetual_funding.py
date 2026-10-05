@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.perpetual_funding import (
     PerpetualFundingConflict,
     PerpetualFundingError,
     PerpetualFundingObservation,
+    canonical_perpetual_funding_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -53,7 +54,7 @@ def funding_capability():
             provider_id="BINANCE",
             account_id="acct-1",
             entity_id="entity-1",
-            environment="PAPER",
+            environment="SIMULATION",
             instrument_version=f"{FUNDING_ID}@1",
             observed_at=observed,
             expires_at=expires,
@@ -211,12 +212,62 @@ def seed_position(
 
 
 class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
+    def test_canonical_funding_serializer_rejects_dto_subclasses(self):
+        evidence = sealed_funding()
+        valid = normalize(evidence)
+
+        class DerivedFundingObservation(PerpetualFundingObservation):
+            pass
+
+        forged = object.__new__(DerivedFundingObservation)
+        forged.__dict__.update(vars(valid))
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact PerpetualFundingObservation",
+        ):
+            canonical_perpetual_funding_observation(forged)
+
+    def test_funding_observation_rejects_hostile_scalar_and_datetime_subclasses(self):
+        evidence = sealed_funding()
+        valid = normalize(evidence)
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile strip callback executed")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal callback executed")
+
+        class HostileDateTime(datetime):
+            def astimezone(self, *args, **kwargs):
+                raise AssertionError("hostile astimezone callback executed")
+
+            def utcoffset(self):
+                raise AssertionError("hostile utcoffset callback executed")
+
+        for field, value in (
+            ("provider_id", HostileText(valid.provider_id)),
+            ("funding_rate", HostileDecimal(valid.funding_rate)),
+            (
+                "effective_at",
+                HostileDateTime(
+                    2026, 9, 25, 10, 0, tzinfo=timezone.utc
+                ),
+            ),
+        ):
+            with self.subTest(field=field):
+                payload = vars(valid).copy()
+                payload[field] = value
+                with self.assertRaises(PerpetualFundingError):
+                    PerpetualFundingObservation(**payload)
+
     def authority(self, store, evidence, *, registry=None, seed=True):
         book = DurableProviderEconomicBook(
             store,
             provider_id="BINANCE",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         if seed and not book.transactions:
             seed_position(book)
@@ -232,6 +283,49 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
         )
         return authority, book
 
+    def test_paper_and_live_funding_reject_content_evidence_before_resolver_callback(self):
+        evidence = sealed_funding()
+
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                touched = []
+
+                def resolver(_reference):
+                    touched.append("called")
+                    return evidence
+
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                book = DurableProviderEconomicBook(
+                    store,
+                    provider_id="BINANCE",
+                    account_id="acct-1",
+                    environment=environment,
+                )
+                seed_position(book)
+                authority = DurablePerpetualFundingAuthority(
+                    store,
+                    economic_book=book,
+                    instrument_registry=InstrumentRegistry(
+                        versions=(perpetual_version(),)
+                    ),
+                    evidence_resolver=resolver,
+                    funding_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingError,
+                    "requires durable provider-origin authority",
+                ):
+                    authority.apply(evidence.evidence_ref)
+
+                self.assertEqual(touched, [])
+                self.assertEqual(
+                    store.load_events_by_aggregate_type("perpetual_funding"),
+                    [],
+                )
+                self.assertEqual(len(book.transactions), 1)
+
     def test_arbitrary_funding_normalizer_cannot_be_injected(self):
         evidence = sealed_funding()
         with TemporaryDirectory() as directory:
@@ -240,7 +334,7 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 store,
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
             )
             seed_position(book)
             resolver = {evidence.evidence_ref: evidence}

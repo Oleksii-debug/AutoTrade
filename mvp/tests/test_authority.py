@@ -1893,6 +1893,103 @@ class AuthorityTests(unittest.TestCase):
             authority_module._risk_object_fingerprint(legacy),
         )
 
+    def test_authoritative_risk_snapshot_binds_accepted_account_q_instrument_cut(self):
+        snapshot = public_authoritative_risk_snapshot(public_risk_authority_request())
+        accepted = replace(
+            snapshot,
+            account_cut_id="provider-account-cut:sha256:" + "1" * 64,
+            account_cut_digest="sha256:" + "2" * 64,
+            account_head_journal_sequence=snapshot.journal_sequence_cut,
+            qualification_identity_digest="provider-qualification:sha256:" + "3" * 64,
+            quantity_unit="CONTRACT",
+            equivalent_exposure_digest="sha256:" + "4" * 64,
+        )
+
+        payload = accepted.evidence_payload()
+        self.assertEqual(payload["account_cut_id"], accepted.account_cut_id)
+        self.assertEqual(
+            payload["qualification_identity_digest"],
+            accepted.qualification_identity_digest,
+        )
+        self.assertEqual(payload["quantity_unit"], "CONTRACT")
+        self.assertEqual(
+            payload["equivalent_exposure_digest"],
+            accepted.equivalent_exposure_digest,
+        )
+
+        variants = (
+            replace(accepted, account_cut_id="provider-account-cut:sha256:" + "5" * 64),
+            replace(accepted, account_cut_digest="sha256:" + "6" * 64),
+            replace(
+                accepted,
+                account_head_journal_sequence=snapshot.journal_sequence_cut + 1,
+            ),
+            replace(
+                accepted,
+                qualification_identity_digest="provider-qualification:sha256:" + "7" * 64,
+            ),
+            replace(accepted, quantity_unit="BASE"),
+            replace(
+                accepted,
+                equivalent_exposure_digest="sha256:" + "8" * 64,
+            ),
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertNotEqual(accepted.snapshot_id, variant.snapshot_id)
+
+    def test_authoritative_risk_snapshot_rejects_partial_account_q_instrument_cut(self):
+        snapshot = public_authoritative_risk_snapshot(public_risk_authority_request())
+        with self.assertRaisesRegex(
+            ValueError,
+            "account/Q/instrument evidence must be complete",
+        ):
+            replace(
+                snapshot,
+                account_cut_id="provider-account-cut:sha256:" + "1" * 64,
+            )
+
+    def test_authoritative_risk_snapshot_rejects_account_cut_beyond_financial_cut(self):
+        snapshot = public_authoritative_risk_snapshot(public_risk_authority_request())
+        accepted_values = dict(
+            account_cut_id="provider-account-cut:sha256:" + "1" * 64,
+            account_cut_digest="sha256:" + "2" * 64,
+            account_head_journal_sequence=snapshot.journal_sequence_cut + 1,
+            qualification_identity_digest="provider-qualification:sha256:" + "3" * 64,
+            quantity_unit="CONTRACT",
+            equivalent_exposure_digest="sha256:" + "4" * 64,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "account head cannot be newer",
+        ):
+            replace(snapshot, **accepted_values)
+
+    def test_authoritative_risk_snapshot_rejects_malformed_account_q_instrument_identity(self):
+        snapshot = public_authoritative_risk_snapshot(public_risk_authority_request())
+        cases = (
+            {"account_cut_id": "sha256:" + "1" * 64, "account_cut_digest": "sha256:" + "2" * 64,
+             "account_head_journal_sequence": 0,
+             "qualification_identity_digest": "provider-qualification:sha256:" + "3" * 64,
+             "quantity_unit": "CONTRACT", "equivalent_exposure_digest": "sha256:" + "4" * 64},
+            {"account_cut_id": "provider-account-cut:sha256:" + "1" * 64, "account_cut_digest": "sha256:" + "2" * 64,
+             "account_head_journal_sequence": 0,
+             "qualification_identity_digest": "sha256:" + "3" * 64,
+             "quantity_unit": "CONTRACT", "equivalent_exposure_digest": "sha256:" + "4" * 64},
+            {"account_cut_id": "provider-account-cut:sha256:" + "1" * 64, "account_cut_digest": "2" * 64,
+             "account_head_journal_sequence": 0,
+             "qualification_identity_digest": "provider-qualification:sha256:" + "3" * 64,
+             "quantity_unit": "CONTRACT", "equivalent_exposure_digest": "sha256:" + "4" * 64},
+            {"account_cut_id": "provider-account-cut:sha256:" + "1" * 64, "account_cut_digest": "sha256:" + "2" * 64,
+             "account_head_journal_sequence": 0,
+             "qualification_identity_digest": "provider-qualification:sha256:" + "3" * 64,
+             "quantity_unit": "contract", "equivalent_exposure_digest": "sha256:" + "4" * 64},
+        )
+        for values in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    replace(snapshot, **values)
+
     def test_authoritative_risk_snapshot_detaches_caller_context_graph(self):
         caller = public_risk_context()
         snapshot = public_authoritative_risk_snapshot(

@@ -46,6 +46,14 @@ def _install_product_risk_price_semantics_authority():
     _TIMEZONE_VALUE = timezone
     _DECIMAL_TYPE = Decimal
     _INVALID_OPERATION_TYPE = InvalidOperation
+    _TYPE = type
+    _DICT = dict
+    _GETATTR = getattr
+    _STR = str
+    _INT = int
+    _BOOL = bool
+    _VALUE_ERROR = ValueError
+    _TYPE_ERROR = TypeError
     _REPLACE = replace
     _REPLACE_CODE = replace.__code__
     _BYBIT_MODULE = _bybit_module
@@ -80,6 +88,14 @@ def _install_product_risk_price_semantics_authority():
             or timezone is not _TIMEZONE_VALUE
             or Decimal is not _DECIMAL_TYPE
             or InvalidOperation is not _INVALID_OPERATION_TYPE
+            or type is not _TYPE
+            or dict is not _DICT
+            or getattr is not _GETATTR
+            or str is not _STR
+            or int is not _INT
+            or bool is not _BOOL
+            or ValueError is not _VALUE_ERROR
+            or TypeError is not _TYPE_ERROR
             or replace is not _REPLACE
             or replace.__code__ is not _REPLACE_CODE
             or _bybit_module is not _BYBIT_MODULE
@@ -115,12 +131,12 @@ def _install_product_risk_price_semantics_authority():
     
     
     def _instant(value: str, *, name: str) -> datetime:
-        if type(value) is not str or not value or value != value.strip():
+        if _TYPE(value) is not _STR or not value or value != value.strip():
             raise _ERROR_TYPE(f"{name} must be canonical text")
         raw = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
             point = _DATETIME_TYPE.fromisoformat(raw)
-        except ValueError as error:
+        except _VALUE_ERROR as error:
             raise _ERROR_TYPE(
                 f"{name} must be an ISO-8601 instant"
             ) from error
@@ -130,12 +146,12 @@ def _install_product_risk_price_semantics_authority():
     
     
     def _exact_decimal(value: object, *, name: str) -> Decimal:
-        if type(value) not in {str, int, _DECIMAL_TYPE} or type(value) is bool:
+        if _TYPE(value) not in {_STR, _INT, _DECIMAL_TYPE} or _TYPE(value) is _BOOL:
             raise _ERROR_TYPE(
                 f"{name} must use exact decimal-compatible input"
             )
         try:
-            result = value if type(value) is _DECIMAL_TYPE else _DECIMAL_TYPE(value)
+            result = value if _TYPE(value) is _DECIMAL_TYPE else _DECIMAL_TYPE(value)
         except (_INVALID_OPERATION_TYPE, ValueError) as error:
             raise _ERROR_TYPE(f"{name} is invalid") from error
         if not result.is_finite():
@@ -145,9 +161,9 @@ def _install_product_risk_price_semantics_authority():
     
     def _instrument_ref(request: RiskAuthorityRequest) -> str:
         identity = request.instrument_version
-        instrument_id = getattr(identity, "instrument_id", None)
-        version = getattr(identity, "version", None)
-        if type(instrument_id) is not str or type(version) is not int or version < 1:
+        instrument_id = _GETATTR(identity, "instrument_id", None)
+        version = _GETATTR(identity, "version", None)
+        if _TYPE(instrument_id) is not _STR or _TYPE(version) is not _INT or version < 1:
             raise _ERROR_TYPE(
                 "risk request instrument identity is non-canonical"
             )
@@ -185,17 +201,17 @@ def _install_product_risk_price_semantics_authority():
         __slots__ = ("__registry", "__artifact_store")
     
         def __init_subclass__(cls, **_kwargs) -> None:
-            raise TypeError("ProductRiskPriceSemanticsComposer is sealed")
+            raise _TYPE_ERROR("ProductRiskPriceSemanticsComposer is sealed")
     
         def __init__(
             self,
             registry: InstrumentRegistry,
             artifact_store: ArtifactStore,
         ) -> None:
-            if type(registry) is not _REGISTRY_TYPE:
-                raise TypeError("registry must be exact InstrumentRegistry")
-            if type(artifact_store) is not _ARTIFACT_STORE_TYPE:
-                raise TypeError("artifact_store must be exact ArtifactStore")
+            if _TYPE(registry) is not _REGISTRY_TYPE:
+                raise _TYPE_ERROR("registry must be exact InstrumentRegistry")
+            if _TYPE(artifact_store) is not _ARTIFACT_STORE_TYPE:
+                raise _TYPE_ERROR("artifact_store must be exact ArtifactStore")
             _require_module_authority()
             self.__registry = registry
             self.__artifact_store = artifact_store
@@ -206,10 +222,10 @@ def _install_product_risk_price_semantics_authority():
             prepared_request: BybitPreparedSubmission,
         ) -> ProductRiskPriceSemanticsBinding:
             _require_module_authority()
-            if type(request) is not _REQUEST_TYPE:
-                raise TypeError("request must be exact RiskAuthorityRequest")
-            if type(prepared_request) is not _PREPARED_TYPE:
-                raise TypeError(
+            if _TYPE(request) is not _REQUEST_TYPE:
+                raise _TYPE_ERROR("request must be exact RiskAuthorityRequest")
+            if _TYPE(prepared_request) is not _PREPARED_TYPE:
+                raise _TYPE_ERROR(
                     "prepared_request must be exact BybitPreparedSubmission"
                 )
             _REQUIRE_PREPARED(prepared_request)
@@ -222,11 +238,11 @@ def _install_product_risk_price_semantics_authority():
                 raise _ERROR_TYPE(
                     "prepared Bybit request cannot satisfy another provider"
                 )
-            if type(request.provider_environment) is not str:
+            if _TYPE(request.provider_environment) is not _STR:
                 raise _ERROR_TYPE(
                     "production risk request requires provider_environment"
                 )
-            if type(request.entity_policy_id) is not str or not request.entity_policy_id:
+            if _TYPE(request.entity_policy_id) is not _STR or not request.entity_policy_id:
                 raise _ERROR_TYPE(
                     "production risk request requires entity_policy_id"
                 )
@@ -253,7 +269,7 @@ def _install_product_risk_price_semantics_authority():
                     "prepared instrument version differs from risk request"
                 )
     
-            body = dict(prepared_request.body)
+            body = _DICT(prepared_request.body)
             intent = request.risk_intent
             if body.get("symbol") != intent.symbol:
                 raise _ERROR_TYPE(
@@ -270,7 +286,7 @@ def _install_product_risk_price_semantics_authority():
                 )
             prepared_reduce_only = body.get("reduceOnly", False)
             if (
-                type(prepared_reduce_only) is not bool
+                _TYPE(prepared_reduce_only) is not bool
                 or prepared_reduce_only != intent.reduce_only
             ):
                 raise _ERROR_TYPE(
@@ -320,7 +336,7 @@ def _install_product_risk_price_semantics_authority():
                 order_type=order_type,
                 price=semantic_price,
             )
-            if type(price_evidence) is not _PRICE_EVIDENCE_TYPE:
+            if _TYPE(price_evidence) is not _PRICE_EVIDENCE_TYPE:
                 raise _ERROR_TYPE(
                     "instrument price-semantics evidence is non-canonical"
                 )
@@ -359,7 +375,7 @@ def _install_product_risk_price_semantics_authority():
                 knowledge_cutoff=point,
                 artifact_store=artifact_store,
             )
-            if type(selected) is not _VERSION_TYPE:
+            if _TYPE(selected) is not _VERSION_TYPE:
                 raise _ERROR_TYPE(
                     "instrument registry returned non-canonical version"
                 )
@@ -415,16 +431,16 @@ def _install_product_risk_price_semantics_authority():
             """
     
             _require_module_authority()
-            if type(request) is not _REQUEST_TYPE:
-                raise TypeError("request must be exact RiskAuthorityRequest")
-            if type(snapshot) is not _SNAPSHOT_TYPE:
-                raise TypeError("snapshot must be exact AuthoritativeRiskSnapshot")
-            if type(binding) is not ProductRiskPriceSemanticsBinding:
-                raise TypeError(
+            if _TYPE(request) is not _REQUEST_TYPE:
+                raise _TYPE_ERROR("request must be exact RiskAuthorityRequest")
+            if _TYPE(snapshot) is not _SNAPSHOT_TYPE:
+                raise _TYPE_ERROR("snapshot must be exact AuthoritativeRiskSnapshot")
+            if _TYPE(binding) is not ProductRiskPriceSemanticsBinding:
+                raise _TYPE_ERROR(
                     "binding must be exact ProductRiskPriceSemanticsBinding"
                 )
-            if type(prepared_request) is not _PREPARED_TYPE:
-                raise TypeError(
+            if _TYPE(prepared_request) is not _PREPARED_TYPE:
+                raise _TYPE_ERROR(
                     "prepared_request must be exact BybitPreparedSubmission"
                 )
             _REQUIRE_PREPARED(prepared_request)
@@ -506,7 +522,7 @@ def _install_product_risk_price_semantics_authority():
                     "base risk snapshot already carries price semantics"
                 )
     
-            refs = dict(snapshot.evidence_refs.items())
+            refs = _DICT(snapshot.evidence_refs.items())
             existing = refs.get("INSTRUMENT")
             if existing is not None and existing != binding.instrument_evidence_binding:
                 raise _ERROR_TYPE(

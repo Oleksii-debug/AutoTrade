@@ -389,6 +389,31 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parse_name_status([f"M\t{path}"])
 
+    def test_assessment_revalidates_synthetic_change_records(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md", "control/INDEX.json"],
+                changes=[Change(status="M", path="../control/INDEX.json")],
+            )
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="U", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[
+                    Change(
+                        status="M",
+                        path="README.md",
+                        previous_path="old.md",
+                    )
+                ],
+                protected_sentinels=frozenset(),
+            )
+
     def test_nul_delimited_parser_preserves_rename_fields(self):
         changes = parse_name_status_z(
             b"M\x00mvp/runtime.py\x00R100\x00old.py\x00new.py\x00"

@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotAdapterError,
+    BinanceSpotDepthCursor,
+    BinanceSpotDepthRange,
     BinanceSpotOrderIntent,
     BinanceSpotReferencePrice,
     BinanceSpotSymbolRules,
@@ -447,6 +449,97 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                     "orderId": HostileInt(8),
                     "clientOrderId": "usdm-client-8",
                     "updateTime": 1791187200123,
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+
+    def test_spot_raw_provider_parsers_reject_mapping_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileMapping(dict):
+            def get(self, key, default=None):
+                callbacks.append(("get", key))
+                raise AssertionError("hostile provider mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append(("iter", None))
+                raise AssertionError("hostile provider mapping iteration executed")
+
+        hostile = HostileMapping({})
+        parsers = (
+            lambda: BinanceSpotDepthRange.from_diff_depth_payload(hostile),
+            lambda: BinanceSpotDepthCursor.from_snapshot(
+                symbol="BTCUSDT",
+                payload=hostile,
+            ),
+            lambda: BinanceSpotReferencePrice.from_reference_price_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload=hostile,
+            ),
+            lambda: BinanceSpotReferencePrice.from_average_price_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload=hostile,
+            ),
+            lambda: BinanceSpotReferencePrice.from_last_trade_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload=hostile,
+            ),
+            lambda: BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload=hostile,
+            ),
+        )
+        for parse in parsers:
+            with self.subTest(parse=parse):
+                with self.assertRaisesRegex(
+                    BinanceSpotAdapterError,
+                    "exact decoded object",
+                ):
+                    parse()
+        self.assertEqual(callbacks, [])
+
+    def test_spot_exchange_info_rejects_list_subclass_before_iteration_callback(self):
+        callbacks = []
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile filter-list callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "exact decoded array",
+        ):
+            BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload={
+                    "symbol": "BTCUSDT",
+                    "filters": HostileList([]),
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_spot_exchange_info_rejects_filter_mapping_subclass_before_get_callback(self):
+        callbacks = []
+
+        class HostileFilter(dict):
+            def get(self, key, default=None):
+                callbacks.append(key)
+                raise AssertionError("hostile filter mapping callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            r"exchangeInfo filter\[0\].*exact decoded object",
+        ):
+            BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload={
+                    "symbol": "BTCUSDT",
+                    "filters": [HostileFilter({"filterType": "PRICE_FILTER"})],
                 },
             )
         self.assertEqual(callbacks, [])

@@ -61,7 +61,7 @@ _REQUIRED_SCENARIOS = frozenset(RecoveryScenario)
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -76,7 +76,7 @@ def _artifact_id(value: str, *, name: str) -> str:
 
 def _git_sha(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or value != value.lower()
         or _GIT_SHA.fullmatch(value) is None
@@ -98,7 +98,7 @@ def _sha256(value: str, *, name: str) -> str:
 
 
 def _nonnegative_int(value: int, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
 
@@ -110,8 +110,8 @@ def _boolean(value: bool, *, name: str) -> bool:
 
 
 def _text_tuple(value: tuple[str, ...], *, name: str, allow_empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise TypeError(f"{name} must be a tuple")
+    if type(value) is not tuple:
+        raise TypeError(f"{name} must be an exact tuple")
     normalized = tuple(_text(item, name=name) for item in value)
     if not allow_empty and not normalized:
         raise ValueError(f"{name} must be non-empty")
@@ -150,10 +150,10 @@ class RecoveryScenarioEvidence:
     protection_state: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.scenario, RecoveryScenario):
-            raise TypeError("scenario must be RecoveryScenario")
-        if not isinstance(self.status, RecoveryEvidenceStatus):
-            raise TypeError("status must be RecoveryEvidenceStatus")
+        if type(self.scenario) is not RecoveryScenario:
+            raise TypeError("scenario must be exact RecoveryScenario")
+        if type(self.status) is not RecoveryEvidenceStatus:
+            raise TypeError("status must be exact RecoveryEvidenceStatus")
         object.__setattr__(self, "source_sha", _git_sha(self.source_sha, name="source_sha"))
         object.__setattr__(
             self,
@@ -175,8 +175,8 @@ class RecoveryScenarioEvidence:
             "evidence_artifact_sha256",
             _sha256(self.evidence_artifact_sha256, name="evidence_artifact_sha256"),
         )
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
-            raise ValueError("evidence_refs must be a non-empty tuple")
+        if type(self.evidence_refs) is not tuple or not self.evidence_refs:
+            raise ValueError("evidence_refs must be a non-empty exact tuple")
         normalized_refs = tuple(_text(value, name="evidence_ref") for value in self.evidence_refs)
         if len(normalized_refs) != len(set(normalized_refs)):
             raise ValueError("evidence_refs must be unique")
@@ -262,11 +262,11 @@ class RecoveryQualificationPolicy:
             _text(self.evidence_schema_version, name="evidence_schema_version"),
         )
         object.__setattr__(self, "protocol_id", _text(self.protocol_id, name="protocol_id"))
-        if not isinstance(self.max_downtime_ms, Mapping):
-            raise TypeError("max_downtime_ms must be a mapping")
+        if type(self.max_downtime_ms) is not dict:
+            raise TypeError("max_downtime_ms must be an exact dict")
         normalized: dict[RecoveryScenario, int] = {}
         for scenario, limit in self.max_downtime_ms.items():
-            if not isinstance(scenario, RecoveryScenario):
+            if type(scenario) is not RecoveryScenario:
                 raise TypeError("max_downtime_ms keys must be RecoveryScenario")
             if scenario in normalized:
                 raise ValueError("duplicate recovery scenario limit")
@@ -275,11 +275,11 @@ class RecoveryQualificationPolicy:
             raise ValueError("max_downtime_ms must cover every required recovery scenario")
         object.__setattr__(self, "max_downtime_ms", MappingProxyType(normalized))
 
-        if not isinstance(self.required_tests, Mapping):
-            raise TypeError("required_tests must be a mapping")
+        if type(self.required_tests) is not dict:
+            raise TypeError("required_tests must be an exact dict")
         normalized_tests: dict[RecoveryScenario, tuple[str, ...]] = {}
         for scenario, tests in self.required_tests.items():
-            if not isinstance(scenario, RecoveryScenario):
+            if type(scenario) is not RecoveryScenario:
                 raise TypeError("required_tests keys must be RecoveryScenario")
             if scenario in normalized_tests:
                 raise ValueError("duplicate recovery scenario test requirement")
@@ -301,8 +301,8 @@ def recovery_evidence_receipt_metadata(
 ) -> dict[str, object]:
     """Canonical immutable binding carried by one recovery evidence receipt."""
 
-    if not isinstance(item, RecoveryScenarioEvidence):
-        raise TypeError("item must be RecoveryScenarioEvidence")
+    if type(item) is not RecoveryScenarioEvidence:
+        raise TypeError("item must be exact RecoveryScenarioEvidence")
     return {
         "evidence_kind": "RECOVERY_SCENARIO_EVIDENCE",
         "scenario": item.scenario.value,
@@ -432,16 +432,16 @@ class RecoveryQualificationDecision:
         )
         if not isinstance(self.status, RecoveryEvidenceStatus):
             raise TypeError("status must be RecoveryEvidenceStatus")
-        if not isinstance(self.blockers, tuple):
-            raise TypeError("blockers must be a tuple")
+        if type(self.blockers) is not tuple:
+            raise TypeError("blockers must be an exact tuple")
         blockers = tuple(_text(value, name="blocker") for value in self.blockers)
         if len(blockers) != len(set(blockers)):
             raise ValueError("blockers must be unique")
-        if not isinstance(self.measured_downtime_ms, Mapping):
-            raise TypeError("measured_downtime_ms must be a mapping")
+        if type(self.measured_downtime_ms) is not dict:
+            raise TypeError("measured_downtime_ms must be an exact dict")
         measured: dict[RecoveryScenario, int] = {}
         for scenario, value in self.measured_downtime_ms.items():
-            if not isinstance(scenario, RecoveryScenario):
+            if type(scenario) is not RecoveryScenario:
                 raise TypeError("measured_downtime_ms keys must be RecoveryScenario")
             if scenario in measured:
                 raise ValueError("duplicate measured recovery scenario")
@@ -472,8 +472,8 @@ class RecoveryQualificationDecision:
         return False
 
     def matches_policy(self, policy: RecoveryQualificationPolicy) -> bool:
-        if not isinstance(policy, RecoveryQualificationPolicy):
-            raise TypeError("policy must be RecoveryQualificationPolicy")
+        if type(policy) is not RecoveryQualificationPolicy:
+            raise TypeError("policy must be exact RecoveryQualificationPolicy")
         return (
             self.source_sha == policy.source_sha
             and self.release_artifact_id == policy.release_artifact_id
@@ -493,18 +493,20 @@ def qualify_recovery_release(
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
-    if not isinstance(policy, RecoveryQualificationPolicy):
-        raise TypeError("policy must be RecoveryQualificationPolicy")
-    if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
-        raise TypeError("evidence must be a sequence")
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be exact RecoveryQualificationPolicy")
+    if type(evidence) not in (list, tuple):
+        raise TypeError("evidence must be an exact list or tuple")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
         )
-    if qualification_receipt is not None and not isinstance(
-        qualification_receipt, SignedQualificationAttestation
-    ):
-        raise TypeError("qualification_receipt must be SignedQualificationAttestation")
+    if qualification_receipt is not None and type(
+        qualification_receipt
+    ) is not SignedQualificationAttestation:
+        raise TypeError(
+            "qualification_receipt must be exact SignedQualificationAttestation"
+        )
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
     hard_failure = False
@@ -526,8 +528,8 @@ def qualify_recovery_release(
             trusted_read = None
 
     for item in evidence:
-        if not isinstance(item, RecoveryScenarioEvidence):
-            raise TypeError("evidence must contain RecoveryScenarioEvidence")
+        if type(item) is not RecoveryScenarioEvidence:
+            raise TypeError("evidence must contain exact RecoveryScenarioEvidence")
         if item.scenario in by_scenario:
             raise ValueError(f"duplicate evidence for {item.scenario.value}")
         by_scenario[item.scenario] = item

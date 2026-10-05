@@ -832,6 +832,7 @@ class DurableModelCallOrchestrator:
         ],
         module_globals=globals(),
         journal_class_authority_changes=_model_journal_class_authority_changes,
+        journal_authority_guard=require_exact_journal_store_authority,
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
         (
@@ -883,6 +884,18 @@ class DurableModelCallOrchestrator:
                 module_globals,
                 "_model_journal_class_authority_changes",
                 journal_class_authority_changes,
+            )
+
+        current_journal_guard = dict.get(
+            module_globals,
+            "require_exact_journal_store_authority",
+        )
+        if current_journal_guard is not journal_authority_guard:
+            changes.append("module.require_exact_journal_store_authority")
+            dict.__setitem__(
+                module_globals,
+                "require_exact_journal_store_authority",
+                journal_authority_guard,
             )
 
         # Restore the trusted JournalStore class topology before any generic
@@ -1017,7 +1030,7 @@ class DurableModelCallOrchestrator:
             )
 
         try:
-            require_exact_journal_store_authority(
+            journal_authority_guard(
                 journal,
                 subject="model budget journal",
             )

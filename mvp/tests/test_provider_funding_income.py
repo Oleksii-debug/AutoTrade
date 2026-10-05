@@ -8,7 +8,11 @@ wire claim and then relabel that state as provider execution.
 
 import json
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import patch
+
+import mvp.autotrade_mvp.provider_funding_income as funding_income_module
 
 from mvp.autotrade_mvp.provider_core import _decode_exact_json
 from mvp.autotrade_mvp.provider_funding_income import (
@@ -149,6 +153,55 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             rows[0].provider_transaction_at.isoformat(),
             "2022-12-27T08:00:00.001000+00:00",
         )
+
+    def test_epoch_conversion_does_not_dispatch_host_timestamp_authority(self):
+        class HostileDateTime:
+            calls = 0
+
+            @classmethod
+            def fromtimestamp(cls, *_args, **_kwargs):
+                cls.calls += 1
+                raise AssertionError("host time_t conversion executed")
+
+        with patch(
+            "mvp.autotrade_mvp.provider_funding_income.datetime",
+            HostileDateTime,
+        ):
+            instant = funding_income_module._datetime_from_epoch_millis(
+                1_672_128_000_001,
+                name="transactionTime",
+            )
+        self.assertEqual(HostileDateTime.calls, 0)
+        self.assertEqual(
+            instant,
+            datetime(2022, 12, 27, 8, 0, 0, 1000, tzinfo=timezone.utc),
+        )
+
+    def test_epoch_conversion_preserves_exact_utc_upper_boundary(self):
+        self.assertEqual(
+            funding_income_module._datetime_from_epoch_millis(
+                253402300799999,
+                name="transactionTime",
+            ),
+            datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "outside supported UTC range",
+        ):
+            funding_income_module._datetime_from_epoch_millis(
+                253402300800000,
+                name="transactionTime",
+            )
+
+    def test_epoch_millisecond_token_is_bounded_before_integer_materialization(self):
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "bounded epoch-millisecond",
+        ):
+            self._parse(
+                payload=self._payload(transaction_time="9" * 257)
+            )
 
     def test_transaction_after_response_observation_fails_closed(self):
         with self.assertRaisesRegex(

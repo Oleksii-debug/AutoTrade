@@ -4792,8 +4792,13 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 self.assertEqual(exact.http_status, status)
                 expected_ret_code = {200: 0, 429: 10006, 503: 10016}[status]
                 self.assertEqual(exact.payload["retCode"], expected_ret_code)
-                self.assertEqual(exact.requires_reconciliation, status == 503)
-                if status == 503:
+                self.assertEqual(exact.requires_reconciliation, status != 200)
+                if status == 429:
+                    self.assertEqual(
+                        exact.ambiguity_reason,
+                        "bybit_http_non_2xx_execution_unknown",
+                    )
+                elif status == 503:
                     self.assertEqual(
                         exact.ambiguity_reason,
                         "bybit_http_5xx_execution_unknown",
@@ -4805,9 +4810,9 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                     "capability", "resolve", "capability", "guard",
                 ])
 
-    def test_bybit_5xx_classifier_preserves_exact_evidence_and_marks_unknown(self):
+    def test_bybit_classifier_preserves_exact_evidence_and_marks_unknown(self):
         raw = b'{"retCode":10016,"retMsg":"server error","result":{}}'
-        for status in (500, 502, 503, 599):
+        for status in (400, 429, 500, 502, 503, 599):
             with self.subTest(status=status):
                 exact = _bybit_exact_trading_response(
                     TradingWireResponse(http_status=status, body=raw)
@@ -4817,7 +4822,29 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 self.assertTrue(exact.requires_reconciliation)
                 self.assertEqual(
                     exact.ambiguity_reason,
-                    "bybit_http_5xx_execution_unknown",
+                    (
+                        "bybit_http_5xx_execution_unknown"
+                        if status >= 500
+                        else "bybit_http_non_2xx_execution_unknown"
+                    ),
+                )
+
+        for code in (429, 10000, 10014, 10016):
+            with self.subTest(ret_code=code):
+                body = (
+                    '{"retCode":'
+                    + str(code)
+                    + ',"retMsg":"ambiguous","result":{}}'
+                ).encode("ascii")
+                exact = _bybit_exact_trading_response(
+                    TradingWireResponse(http_status=200, body=body)
+                )
+                self.assertEqual(exact.response_bytes, body)
+                self.assertEqual(exact.http_status, 200)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(
+                    exact.ambiguity_reason,
+                    "bybit_ambiguous_ret_code_execution_unknown",
                 )
 
         accepted = _bybit_exact_trading_response(

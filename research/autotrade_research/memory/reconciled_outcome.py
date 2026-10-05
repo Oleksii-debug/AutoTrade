@@ -16,7 +16,18 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import UUID
 
-from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
+from autotrade_research.memory.episodes import (
+    CoveragePopulationSnapshot,
+    ExperienceMemory,
+    MemoryIntegrityError,
+)
+
+
+_COVERAGE_READ = ExperienceMemory.coverage_population_snapshot
+_COVERAGE_READ_RAW = ExperienceMemory.__dict__["coverage_population_snapshot"]
+_MEMORY_CONNECT_RAW = ExperienceMemory.__dict__["_connect"]
+_COVERAGE_VERIFY = CoveragePopulationSnapshot.verify_integrity
+_COVERAGE_VERIFY_RAW = CoveragePopulationSnapshot.__dict__["verify_integrity"]
 
 
 def _text(value: object, *, name: str) -> str:
@@ -111,6 +122,45 @@ def _hash(value: Any) -> str:
     return "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _assert_memory_authority(memory: ExperienceMemory) -> None:
+    if type(memory) is not ExperienceMemory:
+        raise TypeError("memory must be exact ExperienceMemory")
+    if (
+        ExperienceMemory.__dict__.get("coverage_population_snapshot")
+        is not _COVERAGE_READ_RAW
+    ):
+        raise MemoryIntegrityError(
+            "ExperienceMemory coverage executable changed after composition"
+        )
+    if ExperienceMemory.__dict__.get("_connect") is not _MEMORY_CONNECT_RAW:
+        raise MemoryIntegrityError(
+            "ExperienceMemory persistence executable changed after composition"
+        )
+    if (
+        CoveragePopulationSnapshot.__dict__.get("verify_integrity")
+        is not _COVERAGE_VERIFY_RAW
+    ):
+        raise MemoryIntegrityError(
+            "coverage snapshot verifier changed after composition"
+        )
+    state = object.__getattribute__(memory, "__dict__")
+    if type(state) is not dict:
+        raise MemoryIntegrityError("ExperienceMemory state is not canonical")
+    shadowed = tuple(
+        sorted(
+            name
+            for name in state
+            if name in ExperienceMemory.__dict__
+            and callable(getattr(ExperienceMemory, name, None))
+        )
+    )
+    if shadowed:
+        raise MemoryIntegrityError(
+            "ExperienceMemory shadows canonical executables: "
+            + ", ".join(shadowed)
+        )
+
+
 def _validate_query(
     *,
     memory: ExperienceMemory,
@@ -120,8 +170,7 @@ def _validate_query(
     task: str | None,
     instrument_family: str | None,
 ) -> tuple[str, tuple[str, ...]]:
-    if type(memory) is not ExperienceMemory:
-        raise TypeError("memory must be exact ExperienceMemory")
+    _assert_memory_authority(memory)
     canonical_episode_id = _text(episode_id, name="episode_id")
     try:
         parsed_episode_id = str(UUID(canonical_episode_id))
@@ -145,6 +194,31 @@ def _validate_query(
     if instrument_family is not None:
         _text(instrument_family, name="instrument_family")
     return canonical_episode_id, permissions
+
+
+def _fact_identity_payload(evidence: "ReconciledOutcomeFactEvidence") -> Mapping[str, Any]:
+    return {
+        "schema_version": 1,
+        "causal_cutoff": evidence.causal_cutoff,
+        "permission_classes": evidence.permission_classes,
+        "task": evidence.task,
+        "instrument_family": evidence.instrument_family,
+        "population_root_hash": evidence.population_root_hash,
+        "episode_id": evidence.episode_id,
+        "episode_hash": evidence.episode_hash,
+        "effective_outcome": evidence.effective_outcome,
+        "correction_lineage": evidence.correction_lineage,
+    }
+
+
+def _verify_fact_integrity(evidence: "ReconciledOutcomeFactEvidence") -> None:
+    if type(evidence) is not ReconciledOutcomeFactEvidence:
+        raise TypeError("evidence must be exact ReconciledOutcomeFactEvidence")
+    expected = _hash(_fact_identity_payload(evidence))
+    if evidence.evidence_digest != expected:
+        raise MemoryIntegrityError(
+            "reconciled outcome evidence digest does not match its canonical fact"
+        )
 
 
 @dataclass(frozen=True)
@@ -194,7 +268,9 @@ class ReconciledOutcomeFactEvidence:
             raise MemoryIntegrityError("episode_id must be a canonical UUID")
         _digest(self.episode_hash, name="episode_hash")
         if type(self.correction_lineage) is not tuple:
-            raise MemoryIntegrityError("correction_lineage must be an exact immutable tuple")
+            raise MemoryIntegrityError(
+                "correction_lineage must be an exact immutable tuple"
+            )
         object.__setattr__(self, "effective_outcome", _freeze(self.effective_outcome))
         object.__setattr__(
             self,
@@ -202,30 +278,14 @@ class ReconciledOutcomeFactEvidence:
             tuple(_freeze(item) for item in self.correction_lineage),
         )
         _digest(self.evidence_digest, name="evidence_digest")
-        ReconciledOutcomeFactEvidence.verify_integrity(self)
+        _verify_fact_integrity(self)
 
     def _identity_payload(self) -> Mapping[str, Any]:
-        return {
-            "schema_version": 1,
-            "causal_cutoff": self.causal_cutoff,
-            "permission_classes": self.permission_classes,
-            "task": self.task,
-            "instrument_family": self.instrument_family,
-            "population_root_hash": self.population_root_hash,
-            "episode_id": self.episode_id,
-            "episode_hash": self.episode_hash,
-            "effective_outcome": self.effective_outcome,
-            "correction_lineage": self.correction_lineage,
-        }
+        return _fact_identity_payload(self)
 
     def verify_integrity(self) -> None:
         """Reject mutation or a digest that does not bind the complete fact."""
-
-        expected = _hash(ReconciledOutcomeFactEvidence._identity_payload(self))
-        if self.evidence_digest != expected:
-            raise MemoryIntegrityError(
-                "reconciled outcome evidence digest does not match its canonical fact"
-            )
+        _verify_fact_integrity(self)
 
 
 def resolve_reconciled_outcome_fact(
@@ -247,21 +307,27 @@ def resolve_reconciled_outcome_fact(
         task=task,
         instrument_family=instrument_family,
     )
-    snapshot = ExperienceMemory.coverage_population_snapshot(
+    snapshot = _COVERAGE_READ(
         memory,
         causal_cutoff=causal_cutoff,
         granted_permissions=set(permissions),
         task=task,
         instrument_family=instrument_family,
     )
-    snapshot.verify_integrity()
+    if type(snapshot) is not CoveragePopulationSnapshot:
+        raise MemoryIntegrityError(
+            "canonical memory returned a non-canonical coverage snapshot"
+        )
+    _COVERAGE_VERIFY(snapshot)
     matches = tuple(
         row for row in snapshot.rows if row.get("episode_id") == normalized_episode_id
     )
     if not matches:
         raise KeyError(normalized_episode_id)
     if len(matches) != 1:
-        raise MemoryIntegrityError("canonical population contains duplicate episode identity")
+        raise MemoryIntegrityError(
+            "canonical population contains duplicate episode identity"
+        )
     row = matches[0]
     tombstones = row.get("tombstone_lineage")
     if type(tombstones) is not tuple:
@@ -289,7 +355,7 @@ def resolve_reconciled_outcome_fact(
         "effective_outcome": payload["outcome"],
         "correction_lineage": correction_lineage,
     }
-    return ReconciledOutcomeFactEvidence(
+    result = ReconciledOutcomeFactEvidence(
         causal_cutoff=snapshot.causal_cutoff,
         permission_classes=snapshot.permission_classes,
         task=snapshot.task,
@@ -301,6 +367,8 @@ def resolve_reconciled_outcome_fact(
         correction_lineage=correction_lineage,
         evidence_digest=_hash(identity),
     )
+    _assert_memory_authority(memory)
+    return result
 
 
 def reverify_reconciled_outcome_fact(
@@ -309,11 +377,8 @@ def reverify_reconciled_outcome_fact(
 ) -> ReconciledOutcomeFactEvidence:
     """Re-resolve a fact from durable memory and require exact historical identity."""
 
-    if type(memory) is not ExperienceMemory:
-        raise TypeError("memory must be exact ExperienceMemory")
-    if type(evidence) is not ReconciledOutcomeFactEvidence:
-        raise TypeError("evidence must be exact ReconciledOutcomeFactEvidence")
-    ReconciledOutcomeFactEvidence.verify_integrity(evidence)
+    _assert_memory_authority(memory)
+    _verify_fact_integrity(evidence)
     resolved = resolve_reconciled_outcome_fact(
         memory,
         episode_id=evidence.episode_id,

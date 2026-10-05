@@ -635,7 +635,9 @@ def _inspect_autonomous_loop(store, events, cut, history_limit):
             if (
                 set(payload)
                 != {"episode", "protocol_digest", "provider_state",
-                    "fills" if protocol.get("execution_profile") == "TWO_EQUAL_PARTIALS" else "fill"}
+                    "fills" if protocol.get("execution_profile") in {
+                        "TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"
+                    } else "fill"}
                 or type(payload.get("provider_state")) is not dict
             ):
                 raise ValueError(

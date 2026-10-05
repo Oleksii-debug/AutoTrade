@@ -102,7 +102,19 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "simulated crash"):
                     run_vertical_slice([100, 101, 102, 103], directory)
             self.assertEqual(len(list((Path(directory) / "order-intents").glob("*.json"))), 1)
-            self.assertFalse((Path(directory) / "checkpoint.json").exists())
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            self.assertTrue(checkpoint_path.exists())
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertEqual(checkpoint["schema_version"], 2)
+            self.assertEqual(checkpoint["postings"], [])
+            self.assertEqual(checkpoint["fills"], {})
+            self.assertEqual(checkpoint["evidence_ids"], [])
+            self.assertEqual(checkpoint["evidence_records"], {})
+            self.assertEqual(
+                checkpoint["initial_cash"],
+                checkpoint["financial_configuration"]["initial_cash"],
+            )
+            self.assertEqual(len(checkpoint["financial_configuration_hash"]), 64)
             recovered = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertEqual(recovered.status, "filled")
             self.assertEqual(recovered.position, 1)
@@ -165,6 +177,49 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
                 run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_market_data_rejects_oversized_text_before_decimal_construction(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with patch.object(
+            pipeline_module,
+            "Decimal",
+            side_effect=AssertionError("unbounded Decimal construction"),
+        ):
+            with self.assertRaisesRegex(ValueError, "finite and positive"):
+                pipeline_module.handle_market_data(["1e999999"])
+
+    def test_market_data_rejects_hostile_scalar_subclasses_without_virtual_conversion(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        class HostileStr(str):
+            def __str__(self):
+                raise AssertionError("hostile str conversion")
+
+        class HostileFloat(float):
+            def __str__(self):
+                raise AssertionError("hostile float conversion")
+
+        class HostileInt(int):
+            def __str__(self):
+                raise AssertionError("hostile int conversion")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal conversion")
+
+        for value in (
+            HostileStr("100"),
+            HostileFloat(100.0),
+            HostileInt(100),
+            HostileDecimal("100"),
+        ):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "exact float, str, int or Decimal",
+                ):
+                    pipeline_module.handle_market_data([value])
 
     def test_cash_limit_and_invalid_configuration(self):
         with TemporaryDirectory() as directory:
@@ -307,6 +362,91 @@ class VerticalSliceTests(unittest.TestCase):
                 sorted(path.name for path in (root / "order-intents").glob("*.json")),
                 intents_before,
             )
+
+    def test_checkpoint_state_cannot_diverge_from_bound_financial_configuration(self):
+        cases = (
+            ("initial_cash", "9999", "initial cash does not match"),
+            ("symbol", "OTHER", "symbol does not match"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                run_vertical_slice([100, 101, 102, 103], directory)
+                root = Path(directory)
+                checkpoint_path = root / "checkpoint.json"
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                checkpoint[field] = value
+                checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+                evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+                journal_before = (root / "journal.sqlite3").read_bytes()
+                intents_before = {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                }
+
+                with self.assertRaisesRegex(ValueError, message):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+                self.assertEqual(
+                    (root / "learning-evidence.jsonl").read_bytes(),
+                    evidence_before,
+                )
+                self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+                self.assertEqual(
+                    {
+                        path.name: path.read_bytes()
+                        for path in (root / "order-intents").glob("*.json")
+                    },
+                    intents_before,
+                )
+
+    def test_missing_checkpoint_cannot_rebind_residual_durable_state(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint_path.unlink()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Durable state exists without exact financial configuration identity",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertFalse(checkpoint_path.exists())
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+    def test_learning_evidence_is_bound_to_financial_configuration(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row["financial_configuration_hash"] = "0" * 64
+            evidence_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            self.assertFalse(verify_replay(directory))
+            with self.assertRaisesRegex(
+                ValueError,
+                "Learning evidence conflicts with checkpoint",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
 
     def test_rehashed_checkpoint_configuration_cannot_redefine_resume_policy(self):
         with TemporaryDirectory() as directory:

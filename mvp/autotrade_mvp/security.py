@@ -807,6 +807,8 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     lease_views = WeakKeyDictionary()
     original_init = boundary_type.__init__
     original_init_code = getattr(original_init, "__code__", None)
+    namespace_type = SimpleNamespace
+    vault_type = ProtectedCredentialVault
 
     retained_provider_domain_text = _retain_function_globals(
         _provider_domain._environment_text
@@ -901,7 +903,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
             provider_environment=handle.provider_environment,
         )
 
-    retained_os = SimpleNamespace(
+    retained_os = namespace_type(
         name=_windows_secrets.os.name,
         O_RDONLY=_windows_secrets.os.O_RDONLY,
         O_RDWR=_windows_secrets.os.O_RDWR,
@@ -917,11 +919,11 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     for flag_name in ("O_CLOEXEC", "O_NOFOLLOW"):
         if hasattr(_windows_secrets.os, flag_name):
             setattr(retained_os, flag_name, getattr(_windows_secrets.os, flag_name))
-    retained_stat = SimpleNamespace(
+    retained_stat = namespace_type(
         S_ISREG=_windows_secrets.stat.S_ISREG,
         S_ISLNK=_windows_secrets.stat.S_ISLNK,
     )
-    retained_sys = SimpleNamespace(platform=_windows_secrets.sys.platform)
+    retained_sys = namespace_type(platform=_windows_secrets.sys.platform)
 
     retained_vault_leaf = _retain_function_globals(
         _windows_secrets._require_vault_leaf,
@@ -1003,6 +1005,62 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     ):
         raise TypeError("SecurityBoundary credential authority is not canonical")
 
+    def retained_unprotector(protector):
+        unprotect = getattr(protector, "unprotect", None)
+        if not callable(unprotect):
+            raise TypeError("credential protector must retain callable unprotect")
+        function = getattr(unprotect, "__func__", None)
+        executable = function if function is not None else unprotect
+        code = getattr(executable, "__code__", None)
+
+        def invoke(ciphertext: bytes, *, entropy: bytes) -> bytes:
+            if function is not None:
+                if getattr(unprotect, "__func__", None) is not function:
+                    raise PermissionError("Credential protector binding changed")
+                if code is not None and getattr(function, "__code__", None) is not code:
+                    raise PermissionError("Credential protector code changed")
+            elif code is not None and getattr(unprotect, "__code__", None) is not code:
+                raise PermissionError("Credential protector code changed")
+            return unprotect(ciphertext, entropy=entropy)
+
+        return namespace_type(unprotect=invoke)
+
+    normalize_scope_code = getattr(vault_normalize_scope, "__code__", None)
+    load_code = getattr(vault_load, "__code__", None)
+    handle_code = getattr(vault_handle, "__code__", None)
+    if normalize_scope_code is None or load_code is None or handle_code is None:
+        raise TypeError("credential vault helper authority is not canonical")
+
+    def retained_vault_view(vault):
+        if type(vault) is not vault_type:
+            raise TypeError("terminal credential vault authority must be exact")
+        view = namespace_type(
+            path=vault.path,
+            lock_path=vault.lock_path,
+            FORMAT_VERSION=vault_format_version,
+            _protector=retained_unprotector(vault._protector),
+        )
+
+        def normalize_scope(**kwargs):
+            if getattr(vault_normalize_scope, "__code__", None) is not normalize_scope_code:
+                raise PermissionError("Credential scope normalization code changed")
+            return vault_normalize_scope(**kwargs)
+
+        def load():
+            if getattr(vault_load, "__code__", None) is not load_code:
+                raise PermissionError("Credential vault load code changed")
+            return vault_load(view)
+
+        def handle(record):
+            if getattr(vault_handle, "__code__", None) is not handle_code:
+                raise PermissionError("Credential handle reader code changed")
+            return vault_handle(record)
+
+        view._normalize_scope = normalize_scope
+        view._load = load
+        view._handle = handle
+        return view
+
     def vault_for_boundary(boundary):
         try:
             return lease_views[boundary]
@@ -1028,13 +1086,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
             session_authorizer=session_authorizer,
             now=now,
         )
-        lease_views[self] = _RetainedCredentialLeaseView(
-            credential_vault,
-            normalize_scope=vault_normalize_scope,
-            load=vault_load,
-            handle_reader=vault_handle,
-            format_version=vault_format_version,
-        )
+        lease_views[self] = retained_vault_view(credential_vault)
 
     boundary_type.__init__ = retained_init
     boundary_type.lease_for_execution = _build_execution_lease_authority(

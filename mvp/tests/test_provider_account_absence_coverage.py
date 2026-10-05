@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.provider_account_absence_coverage import (
     ProviderAccountAbsenceCoverageError,
     ProviderAccountSurfaceCoverage,
     issue_provider_account_surface_coverage,
+    require_current_provider_account_surface_coverage_authority,
     require_historical_unknown_submission_authority,
     require_provider_account_surface_coverage_authority,
     resolve_historical_unknown_submission,
@@ -490,6 +491,54 @@ class ProviderAccountAbsenceCoverageTests(unittest.TestCase):
                 )
             )
             require_provider_account_surface_coverage_authority(value)
+
+    def test_surface_coverage_rejects_acquisition_superseded_after_issuance(self):
+        with TemporaryDirectory() as directory:
+            (
+                journal,
+                qualifications,
+                absence,
+                page_chain,
+                historical,
+                *_rest,
+            ) = self._fixture(directory)
+            value = issue_provider_account_surface_coverage(
+                absence_semantics=absence,
+                page_chain=page_chain,
+                historical_submission=historical,
+                qualification_registry=qualifications,
+                at=NOW,
+            )
+            provider_scope = qualifications.qualification(
+                page_chain.qualification_id
+            ).scope.provider_scope
+            DurableProviderAccountAcquisitionAuthority(journal).issue_serialized(
+                provider_scope=provider_scope,
+                account_id=page_chain.account_id,
+                acquisition_request_id="absence-coverage-acquisition-after-issuance",
+                committed_at=NOW,
+            )
+
+            require_provider_account_surface_coverage_authority(value)
+            with self.assertRaisesRegex(
+                ProviderAccountAbsenceCoverageError,
+                "not exact current authority",
+            ):
+                require_current_provider_account_surface_coverage_authority(
+                    value,
+                    at=NOW,
+                )
+            with self.assertRaisesRegex(
+                ProviderAccountAbsenceCoverageError,
+                "source authority is unavailable",
+            ):
+                issue_provider_account_surface_coverage(
+                    absence_semantics=absence,
+                    page_chain=page_chain,
+                    historical_submission=historical,
+                    qualification_registry=qualifications,
+                    at=NOW,
+                )
 
     def test_surface_issuer_has_no_caller_completeness_or_horizon_flags(self):
         parameters = inspect.signature(

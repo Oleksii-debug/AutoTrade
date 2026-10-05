@@ -623,6 +623,7 @@ def rotate_trade_credential_with_receipt(
     _text_fn=_CANONICAL_TEXT,
     _issue_locked_fn=_issue_locked,
     _b64encode=_CANONICAL_B64ENCODE,
+    _asdict=_CANONICAL_ASDICT,
 ) -> tuple[PersistentCredentialHandle, CredentialTransitionReceipt]:
     """Rotate one exact TRADE generation and atomically retain its receipt."""
 
@@ -677,7 +678,7 @@ def rotate_trade_credential_with_receipt(
             purpose=next_handle.purpose,
             generation=next_handle.generation,
         )
-        record["handle"] = _CANONICAL_ASDICT(next_handle)
+        record["handle"] = _asdict(next_handle)
         record["ciphertext"] = _b64encode(
             vault._protector.protect(
                 new_secret_value.encode("utf-8"),

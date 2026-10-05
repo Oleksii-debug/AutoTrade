@@ -248,6 +248,9 @@ def _started_owners(
             payload.get("target_owner_epoch"), name="target_owner_epoch"
         ),
     )
+    # owner_id may be stable across a process restart. Epoch is the durable
+    # sender-fence generation, so the successor identity remains distinct only
+    # when it advances exactly by one below.
     if target.epoch != source.epoch + 1:
         raise DurableTakeoverError(
             "takeover owner epoch transition is invalid"
@@ -829,6 +832,7 @@ def _execute_durable_takeover_impl(
         provider_id=provider_id,
     )
 
+    # Phase 1: durable freeze. Do not touch the vault under this sender gate.
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
@@ -845,6 +849,8 @@ def _execute_durable_takeover_impl(
                 raise DurableTakeoverError(
                     "source owner is not current durable owner"
                 )
+            # A production host_id is stable configuration, not a process nonce.
+            # Same-id restart takeover is valid only through the mandatory next epoch.
             target = OwnerFence(
                 target_owner_id, source.epoch + 1
             )
@@ -944,6 +950,8 @@ def _execute_durable_takeover_impl(
                 "durable owner changed outside takeover sequence"
             )
 
+    # Phase 2: STARTED is durable and freezes ordinary sends, so now it is safe
+    # to wait for the vault lock without holding the sender gate.
     pending = _pending_for_scope(
         store, owner_scope=owner_scope
     )
@@ -1097,6 +1105,9 @@ def _execute_durable_takeover_impl(
                 "issued takeover evidence does not match durable credential anchor"
             )
 
+    # Phase 3: old credential is durably inactive; now reacquire the same sender
+    # gate, rescan ambiguity, and advance durable sender authority only if the
+    # complete validation interval still ends on the exact JournalStore cut.
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:

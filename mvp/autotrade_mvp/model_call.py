@@ -1794,8 +1794,14 @@ class DurableModelCallOrchestrator:
         The caller must provide the existing canonical host/recovery fence. This
         method does not invent a second ownership authority.
         """
-        if not isinstance(spec, ModelCallSpec):
+        if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        # Fence callbacks may capture caller-owned objects in closures. Freeze
+        # recovery identity before invoking the fence so it cannot redirect the
+        # reservation lookup by mutating a frozen ModelCallSpec.
+        spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
         recovery_fence()

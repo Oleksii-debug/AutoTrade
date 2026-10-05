@@ -1,0 +1,96 @@
+name: Converge product authority gaps
+
+on:
+  push:
+    branches:
+      - integration/convention-runtime-load-depth-1746-20261005-sol56
+
+permissions:
+  contents: write
+
+jobs:
+  converge-test-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Fetch pinned reviewed donors
+        shell: bash
+        run: |
+          git fetch origin wp28/futures-settlement-convention-main-5350-20261003-sol56
+          git fetch origin reconverge/wp65-live-main-60e7-sol56
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python tools/_converge_product_authority_gaps.py
+      - name: Compile changed production authority surfaces
+        run: >-
+          python -m py_compile
+          mvp/autotrade_mvp/settlement_convention.py
+          mvp/autotrade_mvp/instruments.py
+          mvp/autotrade_mvp/futures.py
+          mvp/autotrade_mvp/futures_journal.py
+          mvp/autotrade_mvp/journal_taxonomy.py
+          mvp/autotrade_mvp/performance_qualification.py
+          mvp/autotrade_mvp/runtime_load_campaign.py
+          mvp/autotrade_mvp/runtime_load_evidence.py
+          mvp/autotrade_mvp/runtime_load_measurement.py
+          mvp/autotrade_mvp/runtime_load_plan.py
+          mvp/autotrade_mvp/runtime_load_research_measurement.py
+          mvp/autotrade_mvp/binance_spot.py
+      - name: Futures economic authority regression
+        run: >-
+          python -m unittest
+          mvp.tests.test_futures
+          mvp.tests.test_futures_exact_arithmetic
+          mvp.tests.test_futures_journal
+          mvp.tests.test_futures_settlement_snapshot_authority
+          mvp.tests.test_futures_settlement_convention_authority
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Binance depth continuity regression
+        run: >-
+          python -m unittest
+          mvp.tests.test_binance_depth_equal_cursor
+          mvp.tests.test_binance_spot
+          mvp.tests.test_binance_provider_ingress_regression
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: WP-65 durable runtime-load regression
+        run: >-
+          python -m unittest
+          mvp.tests.test_performance_qualification
+          mvp.tests.test_runtime_load_campaign
+          mvp.tests.test_runtime_load_campaign_backlog
+          mvp.tests.test_runtime_load_evidence
+          mvp.tests.test_runtime_load_evidence_full_cut
+          mvp.tests.test_runtime_load_evidence_input_snapshot
+          mvp.tests.test_runtime_load_measurement
+          mvp.tests.test_runtime_load_measurement_backlog
+          mvp.tests.test_runtime_load_measurement_cut
+          mvp.tests.test_runtime_load_measurement_journal_transitive_authority
+          mvp.tests.test_runtime_load_measurement_plan_instance_authority
+          mvp.tests.test_runtime_load_measurement_schema_authority
+          mvp.tests.test_runtime_load_plan
+          mvp.tests.test_runtime_load_plan_limits
+          mvp.tests.test_runtime_load_research_measurement
+          mvp.tests.test_runtime_load_research_measurement_frame_authority
+          mvp.tests.test_runtime_resource_budget
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Commit integrated result and retire one-shot machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Oleksii-debug'
+          git config user.email 'oleksiy.az.09@gmail.com'
+          git rm tools/_converge_product_authority_gaps.py .github/workflows/converge-product-authority-gaps.yml
+          git add -A
+          git commit -m 'Integrate settlement convention, runtime-load evidence and depth continuity'
+          git push origin HEAD:${GITHUB_REF_NAME}

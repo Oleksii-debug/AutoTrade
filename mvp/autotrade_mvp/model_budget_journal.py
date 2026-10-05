@@ -488,6 +488,11 @@ class DurableModelBudget:
         restore_clock_authority = DurableModelBudget._restore_clock_authority
         clock_text = _clock_text
         module_globals = globals()
+        clock_dependencies = (
+            ("datetime", datetime),
+            ("timedelta", timedelta),
+            ("timezone", timezone),
+        )
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -509,13 +514,18 @@ class DurableModelBudget:
                     )
                 )
             finally:
-                current_clock_text = dict.get(module_globals, "_clock_text")
-                if current_clock_text is not clock_text:
-                    changes.append("module._clock_text")
+                for name, expected in (
+                    ("_clock_text", clock_text),
+                    *clock_dependencies,
+                ):
+                    current = dict.get(module_globals, name)
+                    if current is expected:
+                        continue
+                    changes.append("module." + name)
                     dict.__setitem__(
                         module_globals,
-                        "_clock_text",
-                        clock_text,
+                        name,
+                        expected,
                     )
 
         if changes:

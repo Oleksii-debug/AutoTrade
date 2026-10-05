@@ -11,6 +11,7 @@ timestamp is not target-host chronology evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from gc import get_referents
 from hashlib import sha256
 import json
 import re
@@ -109,9 +110,19 @@ def _artifact_id(value: object) -> str:
 
 
 def _normalize_host_identity(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise RuntimeTargetHostInventoryError("host identity must be a mapping")
-    identity = dict(value)
+    if type(value) is dict:
+        identity = dict(value)
+    elif type(value) is MappingProxyType:
+        referents = get_referents(value)
+        if len(referents) != 1 or type(referents[0]) is not dict:
+            raise RuntimeTargetHostInventoryError(
+                "host identity mappingproxy must wrap an exact built-in dict"
+            )
+        identity = dict(referents[0])
+    else:
+        raise RuntimeTargetHostInventoryError(
+            "host identity must be an exact dict or canonical mappingproxy"
+        )
     if set(identity) != _HOST_IDENTITY_KEYS:
         raise RuntimeTargetHostInventoryError(
             "host identity fields do not match the canonical runtime identity"

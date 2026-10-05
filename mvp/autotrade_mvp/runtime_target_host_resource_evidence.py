@@ -685,6 +685,10 @@ def run_declared_target_host_campaign_with_resources(
             RuntimeTargetHostResourceRunResult,
             ("__init__", "terminal_qualification_eligible"),
         ),
+        # publish_runtime_target_host_resource_evidence dynamically resolves this
+        # descriptor after caller callbacks. Freeze that exact class surface too;
+        # retaining only the ArtifactStore class object is insufficient.
+        *_capture_descriptor_authority(ArtifactStore, ("publish_bytes",)),
     )
 
     before = capture_snapshot(evidence_root=evidence_store.root)

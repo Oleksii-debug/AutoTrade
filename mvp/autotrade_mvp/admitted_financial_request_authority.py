@@ -19,9 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from weakref import WeakKeyDictionary, ref
 
+from . import durable_financial_request_binding as _registry_module
+from . import financial_binding_dispatch as _dispatch_module
 from .durable_financial_request_binding import (
     DurableFinancialRequestBindingError,
     DurableFinancialRequestBindingRegistry,
@@ -163,8 +165,129 @@ def _identity(
     )
 
 
+def _method_authority(
+    owner: type,
+    name: str,
+) -> tuple[str, Callable[..., Any], object]:
+    function = owner.__dict__.get(name)
+    code = getattr(function, "__code__", None)
+    if not callable(function) or code is None:
+        raise RuntimeError(f"{owner.__name__}.{name} executable authority is unavailable")
+    return name, function, code
+
+
+def _function_authority(
+    module: object,
+    name: str,
+) -> tuple[str, Callable[..., Any], object]:
+    function = getattr(module, name, None)
+    code = getattr(function, "__code__", None)
+    if not callable(function) or code is None:
+        raise RuntimeError(f"{name} executable authority is unavailable")
+    return name, function, code
+
+
+_REGISTRY_TYPE = DurableFinancialRequestBindingRegistry
+_REGISTRY_METHOD_AUTHORITIES = tuple(
+    _method_authority(_REGISTRY_TYPE, name)
+    for name in (
+        "__init__",
+        "_require_store",
+        "_current_sequence",
+        "_authority",
+        "_load_payload",
+        "resolve",
+    )
+)
+_REGISTRY_RESOLVE = _REGISTRY_TYPE.__dict__["resolve"]
+_REGISTRY_FUNCTION_AUTHORITIES = tuple(
+    _function_authority(_registry_module, name)
+    for name in (
+        "_text",
+        "_store_identity_digest",
+        "_material_from_payload",
+        "_binding_payload",
+        "_risk_intent_axis",
+        "_reservation_scope_digest",
+        "_reservation_cut_digest",
+        "_reservation_authority",
+        "_admission_journal_sequence",
+        "_simulation_account_cut",
+        "_simulation_qualification_identity",
+        "_validate_material_against_admission",
+        "journal_store_identity_digest",
+    )
+)
+_REGISTRY_OBJECT_AUTHORITIES = {
+    name: getattr(_registry_module, name)
+    for name in (
+        "JournalStore",
+        "DurableReservationBook",
+        "ProviderFinancialScope",
+        "_CANONICAL_APPEND_EVENT",
+        "_CANONICAL_LOAD_EVENTS",
+        "_CANONICAL_CURRENT_SEQUENCE",
+        "_CANONICAL_STORE_IDENTITY",
+        "_CANONICAL_PAYLOAD_DIGEST",
+        "_AUTHORITY_TYPE",
+        "_ADMISSION_TYPE",
+        "_MATERIAL_TYPE",
+    )
+}
+_LOCAL_FUNCTION_AUTHORITIES = tuple(
+    (name, function, function.__code__)
+    for name, function in (
+        ("_exact_utf8_text", _exact_utf8_text),
+        ("_exact_text", _exact_text),
+        ("_exact_json_value", _exact_json_value),
+        ("_detached_object", _detached_object),
+        ("_json_digest", _json_digest),
+        ("_identity", _identity),
+    )
+)
+_DISPATCH_FUNCTION_AUTHORITIES = tuple(
+    _function_authority(_dispatch_module, name)
+    for name in ("_text", "financial_submission_scope")
+)
+_DISPATCH_OBJECT_AUTHORITIES = {
+    "_FINANCIAL_SCOPE_SCHEMA": getattr(_dispatch_module, "_FINANCIAL_SCOPE_SCHEMA"),
+    "FinancialRequestBindingMaterial": getattr(
+        _dispatch_module,
+        "FinancialRequestBindingMaterial",
+    ),
+}
+_CANONICAL_JSON_AUTHORITY = canonical_json
+_CANONICAL_JSON_CODE = getattr(_CANONICAL_JSON_AUTHORITY, "__code__", None)
+if _CANONICAL_JSON_CODE is None:
+    raise RuntimeError("canonical_json executable authority is unavailable")
+_SHA256_AUTHORITY = sha256
+
+
 def _install_authority_types():
     """Keep minting/binding state outside module- and instance-writable data."""
+
+    module_globals = globals()
+    registry_module = _registry_module
+    dispatch_module = _dispatch_module
+    registry_type = _REGISTRY_TYPE
+    registry_resolve = _REGISTRY_RESOLVE
+    registry_method_authorities = _REGISTRY_METHOD_AUTHORITIES
+    registry_function_authorities = _REGISTRY_FUNCTION_AUTHORITIES
+    registry_object_authorities = dict(_REGISTRY_OBJECT_AUTHORITIES)
+    local_function_authorities = _LOCAL_FUNCTION_AUTHORITIES
+    dispatch_function_authorities = _DISPATCH_FUNCTION_AUTHORITIES
+    dispatch_object_authorities = dict(_DISPATCH_OBJECT_AUTHORITIES)
+    canonical_json_authority = _CANONICAL_JSON_AUTHORITY
+    canonical_json_code = _CANONICAL_JSON_CODE
+    sha256_authority = _SHA256_AUTHORITY
+    exact_text = _exact_text
+    detached_object = _detached_object
+    json_digest = _json_digest
+    identity_builder = _identity
+    scope_builder = financial_submission_scope
+    material_type = FinancialRequestBindingMaterial
+    journal_store_type = JournalStore
+    registry_error_type = DurableFinancialRequestBindingError
 
     issuer_states: WeakKeyDictionary[object, DurableFinancialRequestBindingRegistry] = (
         WeakKeyDictionary()
@@ -174,6 +297,84 @@ def _install_authority_types():
         tuple[object, str, str],
     ] = WeakKeyDictionary()
     lock = RLock()
+
+    def require_executable_authority() -> None:
+        if module_globals.get("DurableFinancialRequestBindingRegistry") is not registry_type:
+            raise AdmittedFinancialRequestAuthorityError(
+                "durable binding registry type authority changed"
+            )
+        if getattr(registry_module, "DurableFinancialRequestBindingRegistry", None) is not registry_type:
+            raise AdmittedFinancialRequestAuthorityError(
+                "durable binding registry module authority changed"
+            )
+        for name, function, code in registry_method_authorities:
+            current = registry_type.__dict__.get(name)
+            if current is not function or getattr(function, "__code__", None) is not code:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"durable binding registry {name} executable authority changed"
+                )
+        for name, function, code in registry_function_authorities:
+            current = getattr(registry_module, name, None)
+            if current is not function or getattr(function, "__code__", None) is not code:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"durable binding {name} executable authority changed"
+                )
+        for name, authority in registry_object_authorities.items():
+            if getattr(registry_module, name, None) is not authority:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"durable binding {name} authority changed"
+                )
+
+        for name, function, code in local_function_authorities:
+            current = module_globals.get(name)
+            if current is not function or getattr(function, "__code__", None) is not code:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"admitted request {name} executable authority changed"
+                )
+        if (
+            module_globals.get("canonical_json") is not canonical_json_authority
+            or getattr(canonical_json_authority, "__code__", None)
+            is not canonical_json_code
+            or module_globals.get("sha256") is not sha256_authority
+        ):
+            raise AdmittedFinancialRequestAuthorityError(
+                "admitted request digest executable authority changed"
+            )
+
+        for name, function, code in dispatch_function_authorities:
+            current = getattr(dispatch_module, name, None)
+            if current is not function or getattr(function, "__code__", None) is not code:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"financial submission scope {name} executable authority changed"
+                )
+        for name, authority in dispatch_object_authorities.items():
+            if getattr(dispatch_module, name, None) is not authority:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"financial submission scope {name} authority changed"
+                )
+        if module_globals.get("financial_submission_scope") is not scope_builder:
+            raise AdmittedFinancialRequestAuthorityError(
+                "financial submission scope authority changed"
+            )
+        if module_globals.get("FinancialRequestBindingMaterial") is not material_type:
+            raise AdmittedFinancialRequestAuthorityError(
+                "financial request material type authority changed"
+            )
+        if module_globals.get("JournalStore") is not journal_store_type:
+            raise AdmittedFinancialRequestAuthorityError(
+                "JournalStore type authority changed"
+            )
+
+    def registry_for(
+        issuer: object,
+    ) -> DurableFinancialRequestBindingRegistry:
+        with lock:
+            registry = issuer_states.get(issuer)
+        if registry is None or type(registry) is not registry_type:
+            raise AdmittedFinancialRequestAuthorityError(
+                "admitted request issuer authority is unavailable"
+            )
+        return registry
 
     class AdmittedFinancialRequestAuthority:
         __slots__ = ("__weakref__",)
@@ -211,9 +412,10 @@ def _install_authority_types():
                 raise TypeError(
                     "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
                 )
-            if type(store) is not JournalStore:
+            if type(store) is not journal_store_type:
                 raise TypeError("store must be exact JournalStore")
-            registry = DurableFinancialRequestBindingRegistry(store)
+            require_executable_authority()
+            registry = registry_type(store)
             with lock:
                 if self in issuer_states:
                     raise AdmittedFinancialRequestAuthorityError(
@@ -226,13 +428,8 @@ def _install_authority_types():
                 raise TypeError(
                     "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
                 )
-            with lock:
-                registry = issuer_states.get(self)
-            if registry is None:
-                raise AdmittedFinancialRequestAuthorityError(
-                    "admitted request issuer authority is unavailable"
-                )
-            return registry
+            require_executable_authority()
+            return registry_for(self)
 
         def _resolved(
             self,
@@ -242,6 +439,7 @@ def _install_authority_types():
                 raise TypeError(
                     "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
                 )
+            require_executable_authority()
             if type(authority) is not AdmittedFinancialRequestAuthority:
                 raise AdmittedFinancialRequestAuthorityError(
                     "admitted financial request authority has invalid exact type"
@@ -258,11 +456,15 @@ def _install_authority_types():
                     "admitted financial request authority belongs to another issuer"
                 )
             try:
-                material = self._registry().resolve(admission_id)
-            except DurableFinancialRequestBindingError as error:
+                material = registry_resolve(registry_for(self), admission_id)
+            except registry_error_type as error:
                 raise AdmittedFinancialRequestAuthorityError(
                     "durable admitted request authority cannot be revalidated"
                 ) from error
+            if type(material) is not material_type:
+                raise AdmittedFinancialRequestAuthorityError(
+                    "durable admitted request did not resolve exact material"
+                )
             if material.binding_id != binding_id:
                 raise AdmittedFinancialRequestAuthorityError(
                     "durable admitted request binding changed"
@@ -274,13 +476,18 @@ def _install_authority_types():
                 raise TypeError(
                     "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
                 )
-            aid = _exact_text(admission_id, name="admission_id")
+            require_executable_authority()
+            aid = exact_text(admission_id, name="admission_id")
             try:
-                material = self._registry().resolve(aid)
-            except DurableFinancialRequestBindingError as error:
+                material = registry_resolve(registry_for(self), aid)
+            except registry_error_type as error:
                 raise AdmittedFinancialRequestAuthorityError(
                     "durable admitted request authority is unavailable"
                 ) from error
+            if type(material) is not material_type:
+                raise AdmittedFinancialRequestAuthorityError(
+                    "durable admitted request did not resolve exact material"
+                )
             authority = object.__new__(AdmittedFinancialRequestAuthority)
             with lock:
                 authority_states[authority] = (ref(self), aid, material.binding_id)
@@ -291,7 +498,7 @@ def _install_authority_types():
             authority: AdmittedFinancialRequestAuthority,
         ) -> AdmittedFinancialRequestIdentity:
             admission_id, material = self._resolved(authority)
-            return _identity(admission_id, material)
+            return identity_builder(admission_id, material)
 
         def require_exact_request(
             self,
@@ -303,17 +510,17 @@ def _install_authority_types():
             """Revalidate one issued authority against exact request/scope bytes."""
 
             admission_id, material = self._resolved(authority)
-            detached_request = _detached_object(request, name="request")
-            if _json_digest(detached_request) != material.request_sha256:
+            detached_request = detached_object(request, name="request")
+            if json_digest(detached_request) != material.request_sha256:
                 raise AdmittedFinancialRequestAuthorityError(
                     "request digest differs from durable admitted authority"
                 )
 
-            detached_scope = _detached_object(
+            detached_scope = detached_object(
                 submission_scope,
                 name="submission_scope",
             )
-            expected_scope = financial_submission_scope(
+            expected_scope = scope_builder(
                 admission_id=admission_id,
                 material=material,
             )
@@ -321,7 +528,7 @@ def _install_authority_types():
                 raise AdmittedFinancialRequestAuthorityError(
                     "submission scope differs from durable admitted authority"
                 )
-            if _json_digest(detached_scope) != material.submission_scope_digest:
+            if json_digest(detached_scope) != material.submission_scope_digest:
                 raise AdmittedFinancialRequestAuthorityError(
                     "submission scope digest differs from durable admitted authority"
                 )

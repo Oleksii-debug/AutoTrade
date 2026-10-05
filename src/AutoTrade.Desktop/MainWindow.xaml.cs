@@ -1,24 +1,37 @@
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using System.IO;
+using Microsoft.Web.WebView2.Core;
 
 namespace AutoTrade.Desktop;
 
 public partial class MainWindow : Window
 {
     private readonly IEmergencyHostClient _hostClient;
+    private readonly IEmergencyHostSessionProvider? _sessionProvider;
     private readonly CancellationTokenSource _lifetime = new();
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
 
     public MainWindow()
-        : this(DesktopHostClientFactory.Create())
+        : this(DesktopHostClientFactory.CreateConnection())
     {
     }
 
-    internal MainWindow(IEmergencyHostClient hostClient)
+    private MainWindow(DesktopHostConnection connection)
+        : this(
+            (connection ?? throw new ArgumentNullException(nameof(connection))).Client,
+            connection.SessionProvider)
+    {
+    }
+
+    internal MainWindow(
+        IEmergencyHostClient hostClient,
+        IEmergencyHostSessionProvider? sessionProvider = null)
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
+        _sessionProvider = sessionProvider;
         InitializeComponent();
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
@@ -39,12 +52,140 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        // Native host truth is safety-critical and must not wait for optional
+        // WebView2 runtime/profile initialization.
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        if (!_lifetime.IsCancellationRequested)
+        {
+            await ConnectWebExperienceAsync();
+        }
     }
+
+    private async Task ConnectWebExperienceAsync()
+    {
+        if (_sessionProvider is null)
+        {
+            SetLiveRegionText(
+                WebExperienceStatus,
+                "Web interface unavailable because no paired host session is configured. Native host status and emergency controls remain available.");
+            return;
+        }
+
+        try
+        {
+            EmergencyHostSession initialSession = _sessionProvider.GetSession().Validated();
+            Uri origin = initialSession.Origin;
+            WebExperienceSecurityPolicy policy = new(origin);
+            string userDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AutoTrade",
+                "WebView2");
+            CoreWebView2Environment environment =
+                await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            await ProductWebView.EnsureCoreWebView2Async(environment);
+            CoreWebView2 core = ProductWebView.CoreWebView2;
+
+            core.Settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;
+            core.Settings.AreDefaultContextMenusEnabled = false;
+            core.Settings.AreHostObjectsAllowed = false;
+            core.Settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;
+            core.NavigationStarting += (_, e) =>
+            {
+                e.Cancel = !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
+                    || !policy.AllowsTopLevelNavigation(target);
+            };
+            core.FrameNavigationStarting += (_, e) => e.Cancel = true;
+            core.NewWindowRequested += (_, e) => e.Handled = true;
+            core.DownloadStarting += (_, e) => e.Cancel = true;
+            core.PermissionRequested += (_, e) =>
+                e.State = CoreWebView2PermissionState.Deny;
+            core.ServerCertificateErrorDetected += (_, e) =>
+                e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+
+            // Never persist the host credential in WebView state. Purge stale
+            // cookies/service workers before first trusted navigation.
+            core.CookieManager.DeleteAllCookies();
+            await core.Profile.ClearBrowsingDataAsync(
+                CoreWebView2BrowsingDataKinds.ServiceWorkers);
+
+            core.AddWebResourceRequestedFilter(
+                new Uri(origin, "api/v1/*").AbsoluteUri,
+                CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.Document);
+            core.WebResourceRequested += (_, e) =>
+            {
+                void StripAuthority()
+                {
+                    e.Request.Headers.RemoveHeader("Authorization");
+                    e.Request.Headers.RemoveHeader("X-AutoTrade-Actor");
+                }
+
+                try
+                {
+                    EmergencyHostSession currentSession =
+                        _sessionProvider.GetSession().Validated();
+                    bool sameOrigin =
+                        Uri.Compare(
+                            currentSession.Origin,
+                            origin,
+                            UriComponents.SchemeAndServer,
+                            UriFormat.UriEscaped,
+                            StringComparison.OrdinalIgnoreCase) == 0;
+                    bool admitted =
+                        sameOrigin
+                        && e.RequestedSourceKind
+                            == CoreWebView2WebResourceRequestSourceKinds.Document
+                        && Uri.TryCreate(
+                            e.Request.Uri,
+                            UriKind.Absolute,
+                            out Uri? target)
+                        && policy.AllowsSessionHeaderForwarding(
+                            e.Request.Method,
+                            target,
+                            origin);
+                    if (!admitted)
+                    {
+                        StripAuthority();
+                        return;
+                    }
+
+                    e.Request.Headers.SetHeader(
+                        "Authorization",
+                        "AutoTrade-Session " + currentSession.Token);
+                    e.Request.Headers.SetHeader(
+                        "X-AutoTrade-Actor",
+                        currentSession.Actor);
+                }
+                catch (Exception)
+                {
+                    StripAuthority();
+                }
+            };
+
+            core.Navigate(origin.AbsoluteUri);
+            ProductWebView.Visibility = Visibility.Visible;
+            FocusWebButton.IsEnabled = true;
+            SetLiveRegionText(
+                WebExperienceStatus,
+                "AutoTrade web interface connected to the paired host. Native host status and emergency controls remain independently available.");
+        }
+        catch (Exception)
+        {
+            FocusWebButton.IsEnabled = false;
+            ProductWebView.Visibility = Visibility.Collapsed;
+            SetLiveRegionText(
+                WebExperienceStatus,
+                "Web interface unavailable. Check the paired host session and installed WebView2 Runtime. Native host status and emergency controls remain available.");
+        }
+    }
+
+    private void FocusWeb_Click(object sender, RoutedEventArgs e) =>
+        ProductWebView.Focus();
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _lifetime.Cancel();
+        ProductWebView.Dispose();
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)

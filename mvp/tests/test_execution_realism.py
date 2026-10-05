@@ -321,15 +321,44 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, Decimal("103"))
 
+    def test_market_non_terminating_ratios_are_context_independent(self):
+        from decimal import localcontext, ROUND_CEILING, ROUND_FLOOR
+
+        baseline = None
+        for precision, rounding in (
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_FLOOR),
+        ):
+            with localcontext() as context:
+                context.prec = precision
+                context.rounding = rounding
+                result = simulate_execution(
+                    order(quantity="10"),
+                    top(available_volume="30"),
+                    model(max_participation="0.25"),
+                )
+            current = (result.filled_quantity, result.fill_price, result.fee)
+            if baseline is None:
+                baseline = current
+            else:
+                self.assertEqual(current, baseline)
+
+        # Capacity floors 7.5 to 7 lots, giving 7/30 and then 14/15 impact
+        # ratios. The exact rational price target is 101.144766..., projected
+        # adversely to the 0.01 instrument grid.
+        self.assertEqual(baseline, (Decimal("7"), Decimal("101.15"), Decimal("0.70805")))
+
     def test_market_sell_projection_uses_adverse_floor_on_price_grid(self):
         result = simulate_execution(
             order(side="SELL"),
             top(bid="99", ask="101"),
             model(slippage_bps="5", impact_bps_at_max_participation="4"),
         )
-        # 10% / 25% = 40% impact participation: 4 bps impact + 5 bps slippage.
-        # 99 * (1 - 9 / 10000) = 98.9109, so adverse SELL projection floors to 98.91.
-        self.assertEqual(result.fill_price, Decimal("98.91"))
+        # 10% / 25% = 40% impact participation: 1.6 bps impact + 5 bps slippage.
+        # 99 * (1 - 6.6 / 10000) = 98.93466, so adverse SELL projection floors to 98.93.
+        self.assertEqual(result.fill_price, Decimal("98.93"))
 
     def test_bar_market_uses_adverse_extreme_plus_configured_costs(self):
         result = simulate_execution(

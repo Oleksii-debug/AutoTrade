@@ -212,6 +212,8 @@ class ProviderAccountPageChain:
 
 
 def _install_page_chain_authority():
+    current_origin_set_authority = require_current_provider_account_origin_set_authority
+    current_absence_rule_authority = require_provider_account_absence_rule
     states: dict[
         int,
         tuple[
@@ -303,7 +305,7 @@ def _install_page_chain_authority():
                 "page-chain source authority is unavailable"
             )
         try:
-            require_current_provider_account_origin_set_authority(
+            current_origin_set_authority(
                 origin_set,
                 at=at,
             )
@@ -312,7 +314,7 @@ def _install_page_chain_authority():
                 "page chain is not exact current acquisition authority"
             ) from error
         try:
-            rule = require_provider_account_absence_rule(
+            rule = current_absence_rule_authority(
                 absence_semantics,
                 surface=value.surface,
                 endpoint=value.endpoint,
@@ -510,6 +512,8 @@ def issue_provider_account_page_chain(
                 "request_cursor": cursor,
                 "response_next_cursor": next_cursor,
                 "response_sha256": binding.response_sha256,
+                "observed_at": binding.observed_at,
+                "journal_sequence": binding.journal_sequence,
                 "prepared_journal_sequence": prepared_sequence,
                 "observed_journal_sequence": binding.journal_sequence,
                 "item_count": item_count,

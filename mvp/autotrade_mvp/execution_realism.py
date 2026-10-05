@@ -103,6 +103,9 @@ class ExecutionModel:
     impact_bps_at_max_participation: Decimal
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
+    price_quantum: Decimal | None = None
+    price_projection_policy_id: str | None = None
+    price_projection_policy_version: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -159,6 +162,28 @@ class ExecutionModel:
             _non_negative(self.bar_half_spread_bps, name="bar_half_spread_bps"),
         )
         object.__setattr__(self, "scenario_cost_multiplier", multiplier)
+        if self.price_quantum is not None:
+            quantum = _positive(self.price_quantum, name="price_quantum")
+            as_fraction(quantum)
+            object.__setattr__(self, "price_quantum", quantum)
+        if self.price_projection_policy_id is not None:
+            object.__setattr__(
+                self,
+                "price_projection_policy_id",
+                _text(
+                    self.price_projection_policy_id,
+                    name="price_projection_policy_id",
+                ),
+            )
+        if self.price_projection_policy_version is not None:
+            if (
+                isinstance(self.price_projection_policy_version, bool)
+                or not isinstance(self.price_projection_policy_version, int)
+                or self.price_projection_policy_version < 1
+            ):
+                raise ExecutionRealismError(
+                    "price_projection_policy_version must be a positive integer"
+                )
 
     @classmethod
     def create(
@@ -176,6 +201,9 @@ class ExecutionModel:
         impact_bps_at_max_participation,
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
+        price_quantum=None,
+        price_projection_policy_id=None,
+        price_projection_policy_version=None,
     ) -> "ExecutionModel":
         if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -218,6 +246,20 @@ class ExecutionModel:
                 name="bar_half_spread_bps",
             ),
             scenario_cost_multiplier=multiplier,
+            price_quantum=(
+                None
+                if price_quantum is None
+                else _positive(price_quantum, name="price_quantum")
+            ),
+            price_projection_policy_id=(
+                None
+                if price_projection_policy_id is None
+                else _text(
+                    price_projection_policy_id,
+                    name="price_projection_policy_id",
+                )
+            ),
+            price_projection_policy_version=price_projection_policy_version,
         )
 
     @property
@@ -240,6 +282,12 @@ class ExecutionModel:
                 self.scenario_cost_multiplier
             ),
         }
+        if self.price_quantum is not None:
+            payload["price_quantum"] = _decimal_text(self.price_quantum)
+        if self.price_projection_policy_id is not None:
+            payload["price_projection_policy_id"] = self.price_projection_policy_id
+        if self.price_projection_policy_version is not None:
+            payload["price_projection_policy_version"] = self.price_projection_policy_version
         encoded = json.dumps(
             payload,
             sort_keys=True,

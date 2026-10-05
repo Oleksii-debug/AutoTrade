@@ -696,6 +696,77 @@ _bind_scoped_economic_book_owner, _require_scoped_economic_book_owner = _scoped_
 del _scoped_economic_owner_operations
 
 
+def _make_scoped_economic_facade(
+    require_owner,
+    *,
+    _digest_payload=payload_digest,
+):
+    """Bind every scoped-book operation to the immutable owner selected at import."""
+
+    def transactions(self):
+        _environment, _account_id, book = require_owner(self)
+        return book.transactions
+
+    def append(self, transaction: JournalTransaction) -> bool:
+        _environment, _account_id, book = require_owner(self)
+        return book.append(transaction)
+
+    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
+        _environment, _account_id, book = require_owner(self)
+        return book.append_batch(transactions)
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        _environment, _account_id, book = require_owner(self)
+        return book.fee_expense(currency)
+
+    def audit_digest(self) -> str:
+        environment, account_id, book = require_owner(self)
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": environment,
+                "account_id": account_id,
+                "economic_book_digest": book.audit_digest(),
+            }
+        )
+
+    return (
+        property(transactions),
+        append,
+        append_batch,
+        balance,
+        cash,
+        position,
+        fee_expense,
+        audit_digest,
+    )
+
+
+(
+    _scoped_transactions,
+    _scoped_append,
+    _scoped_append_batch,
+    _scoped_balance,
+    _scoped_cash,
+    _scoped_position,
+    _scoped_fee_expense,
+    _scoped_audit_digest,
+) = _make_scoped_economic_facade(_require_scoped_economic_book_owner)
+del _make_scoped_economic_facade
+
+
 class ScopedEconomicBook:
     """Account/environment-bound facade over the canonical EconomicBook."""
 
@@ -719,37 +790,24 @@ class ScopedEconomicBook:
         self.account_id = normalized_account
         self._book = book
 
-    @property
-    def transactions(self) -> tuple[JournalTransaction, ...]:
-        return self._book.transactions
+    transactions = _scoped_transactions
+    append = _scoped_append
+    append_batch = _scoped_append_batch
+    balance = _scoped_balance
+    cash = _scoped_cash
+    position = _scoped_position
+    fee_expense = _scoped_fee_expense
+    audit_digest = _scoped_audit_digest
 
-    def append(self, transaction: JournalTransaction) -> bool:
-        return self._book.append(transaction)
 
-    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
-        return self._book.append_batch(transactions)
-
-    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
-        return self._book.balance(ledger_account, asset_or_currency)
-
-    def cash(self, currency: str) -> Decimal:
-        return self._book.cash(currency)
-
-    def position(self, instrument: str) -> Decimal:
-        return self._book.position(instrument)
-
-    def fee_expense(self, currency: str) -> Decimal:
-        return self._book.fee_expense(currency)
-
-    def audit_digest(self) -> str:
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "environment": self.environment,
-                "account_id": self.account_id,
-                "economic_book_digest": self._book.audit_digest(),
-            }
-        )
+del _scoped_transactions
+del _scoped_append
+del _scoped_append_batch
+del _scoped_balance
+del _scoped_cash
+del _scoped_position
+del _scoped_fee_expense
+del _scoped_audit_digest
 
 
 def book_external_cash_flow(

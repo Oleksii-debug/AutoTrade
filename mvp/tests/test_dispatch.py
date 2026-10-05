@@ -9,6 +9,8 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -744,6 +746,11 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(binding.payload["provider_order_id"], "p-1")
             self.assertEqual(binding.submission_scope["endpoint"], "/orders")
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["attempt_id"], "exact-response-a1")
+            self.assertIs(projected["submission_scope"], binding.submission_scope)
+            self.assertIs(projected["response_bytes"], binding.response_bytes)
+            require_canonical_submission_response_binding(binding)
 
             reopened = JournalStore(f"{directory}/journal.sqlite3")
             after_restart = load_submission_response_binding(
@@ -758,6 +765,40 @@ class DispatchTests(unittest.TestCase):
                 after_restart.submission_scope_hash,
                 binding.submission_scope_hash,
             )
+            require_canonical_submission_response_binding(after_restart)
+            self.assertEqual(
+                submission_response_binding_projection(after_restart)["response_sha256"],
+                binding.response_sha256,
+            )
+
+            clone = object.__new__(SubmissionResponseBinding)
+            for name in (
+                "attempt_id",
+                "aggregate_id",
+                "provider",
+                "request_hash",
+                "client_order_id",
+                "environment",
+                "account_id",
+                "prepared_at",
+                "sent_at",
+                "submission_scope",
+                "submission_scope_hash",
+                "response_bytes",
+                "response_sha256",
+                "http_status",
+                "_factory_token",
+            ):
+                object.__setattr__(
+                    clone,
+                    name,
+                    object.__getattribute__(binding, name),
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(clone)
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

@@ -211,6 +211,41 @@ def seed_position(
 
 
 class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
+    def test_funding_observation_rejects_hostile_scalar_and_datetime_subclasses(self):
+        evidence = sealed_funding()
+        valid = normalize(evidence)
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile strip callback executed")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal callback executed")
+
+        class HostileDateTime(datetime):
+            def astimezone(self, *args, **kwargs):
+                raise AssertionError("hostile astimezone callback executed")
+
+            def utcoffset(self):
+                raise AssertionError("hostile utcoffset callback executed")
+
+        for field, value in (
+            ("provider_id", HostileText(valid.provider_id)),
+            ("funding_rate", HostileDecimal(valid.funding_rate)),
+            (
+                "effective_at",
+                HostileDateTime(
+                    2026, 9, 25, 10, 0, tzinfo=timezone.utc
+                ),
+            ),
+        ):
+            with self.subTest(field=field):
+                payload = vars(valid).copy()
+                payload[field] = value
+                with self.assertRaises(PerpetualFundingError):
+                    PerpetualFundingObservation(**payload)
+
     def authority(self, store, evidence, *, registry=None, seed=True):
         book = DurableProviderEconomicBook(
             store,

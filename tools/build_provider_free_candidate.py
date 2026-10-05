@@ -60,6 +60,71 @@ def _capture_publish(publish):
     return captured
 
 
+def _publish_payload_digest(snapshot, *, evidence_name):
+    if (type(snapshot) is not dict or type(evidence_name) is not str
+        or not evidence_name or evidence_name != evidence_name.strip()
+        or any(type(path) is not str or type(content) is not bytes
+               for path, content in snapshot.items())):
+        raise TypeError('publish payload digest requires an exact snapshot and evidence name')
+    if evidence_name not in snapshot:
+        raise ValueError('publish evidence is absent from snapshot')
+    manifest = [
+        {
+            'path': path,
+            'sha256': 'sha256:' + sha256(snapshot[path]).hexdigest(),
+            'bytes': len(snapshot[path]),
+        }
+        for path in sorted(snapshot)
+        if path != evidence_name
+    ]
+    if not manifest:
+        raise ValueError('publish snapshot has no payload outside evidence')
+    encoded = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+    ).encode('utf-8')
+    return 'sha256:' + sha256(encoded).hexdigest()
+
+
+def bind_publish_evidence(publish, *, executable, evidence_name):
+    """Bind CI PASS evidence to the exact publish payload it is meant to attest.
+
+    The evidence file itself is excluded from the payload digest to avoid a
+    self-referential hash. Every other held publish byte, including the primary
+    executable and runtime/config dependencies, is covered.
+    """
+    snapshot = _capture_publish(publish)
+    if type(executable) is not str or not executable or executable != executable.strip():
+        raise TypeError('publish executable must be canonical text')
+    executable_bytes = snapshot.get(executable)
+    if executable_bytes is None:
+        raise ValueError('publish binding is missing ' + executable)
+    evidence_bytes = snapshot.get(evidence_name)
+    if evidence_bytes is None:
+        raise ValueError('publish binding evidence is missing')
+    try:
+        evidence = json.loads(evidence_bytes.decode('utf-8', errors='strict'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError('publish binding evidence is not JSON') from error
+    if type(evidence) is not dict:
+        raise ValueError('publish binding evidence must be an object')
+    if 'artifact' in evidence or 'publish_payload_sha256' in evidence:
+        raise ValueError('publish evidence is already payload-bound')
+    evidence['artifact'] = {
+        'path': executable,
+        'sha256': 'sha256:' + sha256(executable_bytes).hexdigest(),
+        'bytes': len(executable_bytes),
+    }
+    evidence['publish_payload_sha256'] = _publish_payload_digest(
+        snapshot,
+        evidence_name=evidence_name,
+    )
+    atomic_write_json(publish / evidence_name, evidence)
+    return evidence
+
+
 def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, source_sha, label):
     if (type(snapshot) is not dict or any(type(path) is not str or type(content) is not bytes
                                           for path, content in snapshot.items())
@@ -82,6 +147,16 @@ def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, s
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(label + ' publish evidence is not canonical JSON') from error
     github = evidence.get('github') if type(evidence) is dict else None
+    expected_artifact = {
+        'path': executable,
+        'sha256': 'sha256:' + sha256(executable_bytes).hexdigest(),
+        'bytes': len(executable_bytes),
+    }
+    artifact = evidence.get('artifact') if type(evidence) is dict else None
+    expected_payload_digest = _publish_payload_digest(
+        snapshot,
+        evidence_name=evidence_name,
+    )
     if (type(evidence) is not dict
         or evidence.get('schema_version') != '1.0.0'
         or evidence.get('source_sha') != source_sha
@@ -92,9 +167,17 @@ def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, s
         or evidence.get('python_version') != '3.12.10'
         or evidence.get('contains_secrets') is not False
         or type(github) is not dict
-        or github.get('workflow') != 'provider-free-product'):
+        or github.get('workflow') != 'provider-free-product'
+        or type(artifact) is not dict
+        or set(artifact) != {'path', 'sha256', 'bytes'}
+        or type(artifact.get('path')) is not str
+        or type(artifact.get('sha256')) is not str
+        or type(artifact.get('bytes')) is not int
+        or artifact != expected_artifact
+        or type(evidence.get('publish_payload_sha256')) is not str
+        or evidence.get('publish_payload_sha256') != expected_payload_digest):
         raise ValueError(label + ' publish evidence differs from the selected exact-head build authority')
-    return {'path': executable, 'sha256': 'sha256:' + sha256(executable_bytes).hexdigest(), 'bytes': len(executable_bytes)}
+    return expected_artifact
 
 
 def _require_publish_evidence(publish, *, executable, evidence_name, source_sha, label):

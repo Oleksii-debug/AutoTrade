@@ -298,6 +298,51 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                 ):
                     self._digest(registry, artifact_store)
 
+    def test_price_grid_helper_rebinding_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+
+            def forged(*_args, **_kwargs):
+                raise AssertionError("forged price-grid helper executed")
+
+            for name in ("_decimal", "_is_exact_multiple"):
+                with self.subTest(name=name):
+                    with patch.object(instruments_module, name, forged):
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+
+    def test_exact_decimal_primitive_code_mutation_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            targets = (
+                instruments_module.parse_bounded_exact_decimal,
+                instruments_module.is_exact_decimal_multiple,
+            )
+
+            for target in targets:
+                with self.subTest(target=target.__name__):
+                    original_code = target.__code__
+
+                    def forged(*_args, **_kwargs):
+                        raise AssertionError("forged exact-decimal primitive executed")
+
+                    self.assertEqual(
+                        len(original_code.co_freevars),
+                        len(forged.__code__.co_freevars),
+                    )
+                    try:
+                        target.__code__ = forged.__code__
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+                    finally:
+                        target.__code__ = original_code
+
     def test_snapshot_binds_price_semantics_without_putting_it_in_request(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -6,6 +6,7 @@ from fractions import Fraction
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -411,7 +412,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 FuturesError,
-                "journal payload does not match canonical inverse settlement",
+                "durable inverse settlement economics do not reproduce",
             ):
                 restore_inverse_variation_margin(
                     JournalStore(path),

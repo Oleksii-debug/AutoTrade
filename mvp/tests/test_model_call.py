@@ -3449,6 +3449,55 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                     clock=MutableClock(),
                 )
 
+    def test_cancel_callback_cannot_poison_nested_journal_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            poisoned_identity = budget.journal.__dict__["_store_identity"]
+            original_path = poisoned_identity.canonical_path
+            calls = []
+
+            def hostile_cancel():
+                object.__setattr__(
+                    poisoned_identity,
+                    "canonical_path",
+                    original_path + ".poisoned",
+                )
+                return False
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"cancel callback mutated orchestrator authority:"
+                r"budget\.journal\._store_identity",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_: calls.append("called") or observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
+
+            self.assertEqual(calls, [])
+            restored_identity = budget.journal.__dict__["_store_identity"]
+            self.assertIsNot(restored_identity, poisoned_identity)
+            self.assertEqual(restored_identity.canonical_path, original_path)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+            # The same canonical journal must remain usable for later recovery.
+            self.assertEqual(budget.snapshot().reserved, Decimal("1.2"))
+
     def test_cancel_callback_cannot_shadow_nested_journal_commit(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

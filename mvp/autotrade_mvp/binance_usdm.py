@@ -28,7 +28,11 @@ from .provider_core import (
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
-_MAX_UNIX_MILLIS = 253_402_300_799_999\n\n\nBINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
+_MAX_UNIX_MILLIS = 253_402_300_799_999
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+BINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
     {
         "PLACE_ORDER": "/fapi/v1/order",
         "QUERY_ORDER": "/fapi/v1/order",
@@ -108,7 +112,7 @@ def _millis(value: object, *, name: str) -> str:
             f"{name} exceeds the supported UTC millisecond range"
         )
     seconds, remainder = divmod(raw, 1000)
-    instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
+    instant = _UNIX_EPOCH + timedelta(seconds=seconds, milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 

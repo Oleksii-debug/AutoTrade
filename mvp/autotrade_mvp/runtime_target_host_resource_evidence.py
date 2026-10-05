@@ -1,12 +1,8 @@
-"""Raw process/disk resource evidence for the current WP-65 target-host runner.
+"""Bounded raw process/disk evidence for the current WP-65 target-host runner.
 
-This module extends the existing current-schema target-host campaign without
-creating another scheduler, journal, evaluator, runtime host or trading
-authority. It captures only provider-free resource facts around the canonical
-``run_declared_target_host_campaign`` execution.
-
-No wall-clock timestamp is used. ``COLLECTED_PROCESS_DISK_V1`` means only this
-bounded resource subset and never a terminal WP-65 PASS.
+This composes the existing current-schema runner. It creates no scheduler,
+journal, evaluator, host, chronology, provider or trading authority.
+``COLLECTED_PROCESS_DISK_V1`` is nonterminal raw evidence only.
 """
 
 from __future__ import annotations
@@ -17,6 +13,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 from threading import active_count
@@ -38,7 +35,6 @@ from .runtime_target_host_runner import (
     run_declared_target_host_campaign,
 )
 
-
 _SCHEMA_VERSION = "1.0.0"
 _EVIDENCE_TYPE = "AUTOTRADE_TARGET_HOST_RESOURCE_EVIDENCE_CURRENT"
 _EVIDENCE_KIND = "RUNTIME_TARGET_HOST_RESOURCE_EVIDENCE_CURRENT"
@@ -51,6 +47,8 @@ _UNCLOSED_AUTHORITIES = (
     "signed_terminal_qualification",
 )
 _EVIDENCE_TOKEN = object()
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 
 class RuntimeTargetHostResourceEvidenceError(ValueError):
@@ -61,6 +59,24 @@ def _text(value: object, *, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise RuntimeTargetHostResourceEvidenceError(
             f"{name} must be canonical non-empty text"
+        )
+    return value
+
+
+def _sha(value: object, *, name: str) -> str:
+    value = _text(value, name=name)
+    if _SHA256.fullmatch(value) is None:
+        raise RuntimeTargetHostResourceEvidenceError(
+            f"{name} must be canonical sha256:<64 lowercase hex>"
+        )
+    return value
+
+
+def _git_sha(value: object, *, name: str) -> str:
+    value = _text(value, name=name)
+    if _GIT_SHA.fullmatch(value) is None:
+        raise RuntimeTargetHostResourceEvidenceError(
+            f"{name} must be a lowercase 40- or 64-character Git SHA"
         )
     return value
 
@@ -128,9 +144,7 @@ def _windows_peak_rss_bytes() -> int:
     counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
     process = ctypes.windll.kernel32.GetCurrentProcess()
     ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-        process,
-        ctypes.byref(counters),
-        counters.cb,
+        process, ctypes.byref(counters), counters.cb
     )
     if not ok:
         raise OSError("GetProcessMemoryInfo failed")
@@ -138,13 +152,8 @@ def _windows_peak_rss_bytes() -> int:
 
 
 def _peak_rss_bytes() -> int:
-    """Return process peak resident bytes on supported Windows/Linux hosts."""
-
     if os.name == "nt":
-        return _positive_int(
-            _windows_peak_rss_bytes(),
-            name="process peak RSS",
-        )
+        return _positive_int(_windows_peak_rss_bytes(), name="process peak RSS")
     try:
         import resource
     except ImportError as error:  # pragma: no cover - unsupported target host
@@ -156,8 +165,12 @@ def _peak_rss_bytes() -> int:
         raise RuntimeTargetHostResourceEvidenceError(
             "process peak RSS is unavailable on this target host"
         )
-    multiplier = 1 if sys.platform == "darwin" else 1024
-    return _positive_int(int(raw * multiplier), name="process peak RSS")
+    # Linux reports KiB. Darwin reports bytes; Darwin is developer diagnostics
+    # only because terminal AutoTrade targets Windows/Linux.
+    return _positive_int(
+        int(raw * (1 if sys.platform == "darwin" else 1024)),
+        name="process peak RSS",
+    )
 
 
 def _windows_process_io_bytes() -> tuple[int, int]:
@@ -173,38 +186,32 @@ def _windows_process_io_bytes() -> tuple[int, int]:
 
     counters = IO_COUNTERS()
     process = ctypes.windll.kernel32.GetCurrentProcess()
-    ok = ctypes.windll.kernel32.GetProcessIoCounters(
-        process,
-        ctypes.byref(counters),
-    )
-    if not ok:
+    if not ctypes.windll.kernel32.GetProcessIoCounters(
+        process, ctypes.byref(counters)
+    ):
         raise OSError("GetProcessIoCounters failed")
     return int(counters.ReadTransferCount), int(counters.WriteTransferCount)
 
 
 def _linux_process_io_bytes() -> tuple[int, int]:
-    values: dict[str, int] = {}
     try:
         raw = Path("/proc/self/io").read_text(encoding="ascii")
     except OSError as error:
         raise RuntimeTargetHostResourceEvidenceError(
             "process I/O counters are unavailable on this Linux host"
         ) from error
+    values: dict[str, int] = {}
     for line in raw.splitlines():
         key, separator, value = line.partition(":")
-        if separator != ":":
+        if separator != ":" or key not in {"read_bytes", "write_bytes"}:
             continue
-        if key in {"read_bytes", "write_bytes"}:
-            try:
-                parsed = int(value.strip())
-            except ValueError as error:
-                raise RuntimeTargetHostResourceEvidenceError(
-                    "process I/O counters are malformed"
-                ) from error
-            values[key] = _non_negative_int(
-                parsed,
-                name=f"process {key}",
-            )
+        try:
+            parsed = int(value.strip())
+        except ValueError as error:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "process I/O counters are malformed"
+            ) from error
+        values[key] = _non_negative_int(parsed, name=f"process {key}")
     if set(values) != {"read_bytes", "write_bytes"}:
         raise RuntimeTargetHostResourceEvidenceError(
             "process I/O counters are incomplete"
@@ -214,21 +221,22 @@ def _linux_process_io_bytes() -> tuple[int, int]:
 
 def _process_io_bytes() -> tuple[int, int]:
     if os.name == "nt":
-        read_bytes, write_bytes = _windows_process_io_bytes()
+        values = _windows_process_io_bytes()
     elif sys.platform.startswith("linux"):
-        read_bytes, write_bytes = _linux_process_io_bytes()
+        values = _linux_process_io_bytes()
     else:  # pragma: no cover - unsupported target host
         raise RuntimeTargetHostResourceEvidenceError(
             "process I/O counters are unavailable on this target host"
         )
     return (
-        _non_negative_int(read_bytes, name="process read bytes"),
-        _non_negative_int(write_bytes, name="process write bytes"),
+        _non_negative_int(values[0], name="process read bytes"),
+        _non_negative_int(values[1], name="process write bytes"),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
+    process_id: int
     monotonic_ns: int
     process_cpu_ns: int
     peak_rss_bytes: int
@@ -239,6 +247,7 @@ class RuntimeTargetHostResourceSnapshot:
     thread_count: int
 
     def __post_init__(self) -> None:
+        _positive_int(self.process_id, name="process_id")
         _non_negative_int(self.monotonic_ns, name="monotonic_ns")
         _non_negative_int(self.process_cpu_ns, name="process_cpu_ns")
         _positive_int(self.peak_rss_bytes, name="peak_rss_bytes")
@@ -255,6 +264,7 @@ class RuntimeTargetHostResourceSnapshot:
     @property
     def payload(self) -> dict[str, int]:
         return {
+            "process_id": self.process_id,
             "monotonic_ns": self.monotonic_ns,
             "process_cpu_ns": self.process_cpu_ns,
             "peak_rss_bytes": self.peak_rss_bytes,
@@ -267,10 +277,9 @@ class RuntimeTargetHostResourceSnapshot:
 
 
 def capture_runtime_target_host_resource_snapshot(
-    *,
-    evidence_root: Path,
+    *, evidence_root: Path
 ) -> RuntimeTargetHostResourceSnapshot:
-    """Capture one provider-free resource cut without consulting wall clock."""
+    """Capture a provider-free resource cut without consulting wall clock."""
 
     if type(evidence_root) is not type(Path()):
         raise TypeError("evidence_root must be an exact pathlib path")
@@ -280,13 +289,14 @@ def capture_runtime_target_host_resource_snapshot(
         raise RuntimeTargetHostResourceEvidenceError(
             "target-host evidence filesystem usage is unavailable"
         ) from error
-    io_read_bytes, io_write_bytes = _process_io_bytes()
+    read_bytes, write_bytes = _process_io_bytes()
     return RuntimeTargetHostResourceSnapshot(
+        process_id=_positive_int(os.getpid(), name="process_id"),
         monotonic_ns=_non_negative_int(perf_counter_ns(), name="monotonic_ns"),
         process_cpu_ns=_non_negative_int(process_time_ns(), name="process_cpu_ns"),
         peak_rss_bytes=_peak_rss_bytes(),
-        io_read_bytes=io_read_bytes,
-        io_write_bytes=io_write_bytes,
+        io_read_bytes=read_bytes,
+        io_write_bytes=write_bytes,
         disk_total_bytes=_positive_int(int(usage.total), name="disk_total_bytes"),
         disk_free_bytes=_non_negative_int(int(usage.free), name="disk_free_bytes"),
         thread_count=_positive_int(active_count(), name="thread_count"),
@@ -323,27 +333,28 @@ class RuntimeTargetHostResourceEvidence:
             raise RuntimeTargetHostResourceEvidenceError(
                 "resource evidence must come from canonical issuer"
             )
-        for name in (
-            "authority_id",
-            "authority_digest",
-            "source_sha",
-            "release_artifact_id",
-            "release_artifact_sha256",
-            "scenario_id",
-            "spec_digest",
-            "host_fingerprint",
-            "inventory_artifact_id",
-            "inventory_payload_sha256",
-            "measurement_artifact_id",
-            "measurement_payload_sha256",
-            "run_receipt_artifact_id",
-            "run_receipt_payload_sha256",
-        ):
-            _text(getattr(self, name), name=name)
+        _text(self.authority_id, name="authority_id")
+        _sha(self.authority_digest, name="authority_digest")
+        _git_sha(self.source_sha, name="source_sha")
+        _uuid(self.release_artifact_id, name="release_artifact_id")
+        _sha(self.release_artifact_sha256, name="release_artifact_sha256")
+        _text(self.scenario_id, name="scenario_id")
+        _sha(self.spec_digest, name="spec_digest")
+        _sha(self.host_fingerprint, name="host_fingerprint")
+        _uuid(self.inventory_artifact_id, name="inventory_artifact_id")
+        _sha(self.inventory_payload_sha256, name="inventory_payload_sha256")
+        _uuid(self.measurement_artifact_id, name="measurement_artifact_id")
+        _sha(self.measurement_payload_sha256, name="measurement_payload_sha256")
+        _uuid(self.run_receipt_artifact_id, name="run_receipt_artifact_id")
+        _sha(self.run_receipt_payload_sha256, name="run_receipt_payload_sha256")
         if type(self.before) is not RuntimeTargetHostResourceSnapshot:
             raise TypeError("before must be exact RuntimeTargetHostResourceSnapshot")
         if type(self.after) is not RuntimeTargetHostResourceSnapshot:
             raise TypeError("after must be exact RuntimeTargetHostResourceSnapshot")
+        if self.after.process_id != self.before.process_id:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "process identity changed during target-host run"
+            )
         if self.after.monotonic_ns < self.before.monotonic_ns:
             raise RuntimeTargetHostResourceEvidenceError(
                 "resource monotonic cut moved backwards"
@@ -434,6 +445,7 @@ class RuntimeTargetHostResourceEvidence:
             "before": self.before.payload,
             "after": self.after.payload,
             "derived": {
+                "process_id": self.after.process_id,
                 "elapsed_monotonic_ns": self.elapsed_monotonic_ns,
                 "process_cpu_delta_ns": self.process_cpu_delta_ns,
                 "io_read_delta_bytes": self.io_read_delta_bytes,
@@ -471,13 +483,42 @@ class RuntimeTargetHostResourceRunResult:
         return False
 
 
+def _capture_descriptor_authority(
+    owner: type,
+    names: tuple[str, ...],
+) -> tuple[tuple[type, str, object, FunctionType | None, object | None], ...]:
+    namespace = type.__getattribute__(owner, "__dict__")
+    result: list[
+        tuple[type, str, object, FunctionType | None, object | None]
+    ] = []
+    for name in names:
+        descriptor = namespace[name]
+        function: FunctionType | None
+        if type(descriptor) is FunctionType:
+            function = descriptor
+        elif type(descriptor) is property and type(descriptor.fget) is FunctionType:
+            function = descriptor.fget
+        else:
+            function = None
+        result.append(
+            (
+                owner,
+                name,
+                descriptor,
+                function,
+                function.__code__ if function is not None else None,
+            )
+        )
+    return tuple(result)
+
+
 def issue_runtime_target_host_resource_evidence(
     run: RuntimeTargetHostRunResult,
     *,
     before: RuntimeTargetHostResourceSnapshot,
     after: RuntimeTargetHostResourceSnapshot,
 ) -> RuntimeTargetHostResourceEvidence:
-    """Bind raw resource counters to the exact retained canonical run chain."""
+    """Bind resource counters to the exact retained current-run chain."""
 
     if type(run) is not RuntimeTargetHostRunResult:
         raise TypeError("run must be exact RuntimeTargetHostRunResult")
@@ -485,7 +526,6 @@ def issue_runtime_target_host_resource_evidence(
         raise TypeError("before must be exact RuntimeTargetHostResourceSnapshot")
     if type(after) is not RuntimeTargetHostResourceSnapshot:
         raise TypeError("after must be exact RuntimeTargetHostResourceSnapshot")
-
     measurement_digest = run.measurement.digest
     if run.published_measurement.payload_sha256 != measurement_digest:
         raise RuntimeTargetHostResourceEvidenceError(
@@ -496,7 +536,6 @@ def issue_runtime_target_host_resource_evidence(
         raise RuntimeTargetHostResourceEvidenceError(
             "retained target-host run receipt digest does not match run result"
         )
-
     return RuntimeTargetHostResourceEvidence(
         authority_id=run.authority.authority_id,
         authority_digest=run.authority.digest,
@@ -565,24 +604,6 @@ def publish_runtime_target_host_resource_evidence(
     )
 
 
-def _require_post_callback_function(
-    *,
-    name: str,
-    expected: Callable[..., object],
-    expected_code: object | None,
-    current: object,
-) -> None:
-    if current is not expected:
-        raise RuntimeTargetHostResourceEvidenceError(
-            f"{name} authority changed during target-host run"
-        )
-    if expected_code is not None:
-        if type(expected) is not FunctionType or expected.__code__ is not expected_code:
-            raise RuntimeTargetHostResourceEvidenceError(
-                f"{name} executable authority changed during target-host run"
-            )
-
-
 def run_declared_target_host_campaign_with_resources(
     *,
     journal: JournalStore,
@@ -597,11 +618,10 @@ def run_declared_target_host_campaign_with_resources(
     run_receipt_artifact_id: str,
     resource_artifact_id: str,
 ) -> RuntimeTargetHostResourceRunResult:
-    """Wrap the canonical target-host runner with bounded raw resource capture."""
+    """Run the canonical campaign and retain bounded process/disk evidence."""
 
     resource_artifact_id = _uuid(
-        resource_artifact_id,
-        name="resource_artifact_id",
+        resource_artifact_id, name="resource_artifact_id"
     )
     existing_ids = {
         _uuid(inventory_artifact_id, name="inventory_artifact_id"),
@@ -621,20 +641,50 @@ def run_declared_target_host_campaign_with_resources(
     publish_evidence = publish_runtime_target_host_resource_evidence
     read_snapshot = ArtifactStore.read_authenticated_snapshot
     runner = run_declared_target_host_campaign
-
     capture_state = _capture_callable_authority(capture_snapshot)
     issue_state = _capture_callable_authority(issue_evidence)
     publish_state = _capture_callable_authority(publish_evidence)
     read_state = _capture_callable_authority(read_snapshot)
     runner_state = _capture_callable_authority(runner)
 
+    # These are the verifiers used after caller-owned workload callbacks. Capture
+    # both their transitive authority and raw code/binding identity before load.
     require_callable = _require_callable_authority
     require_store = _require_artifact_store_authority
-    require_callable_code = (
-        require_callable.__code__ if type(require_callable) is FunctionType else None
+    require_callable_state = _capture_callable_authority(require_callable)
+    require_store_state = _capture_callable_authority(require_store)
+    require_callable_code = require_callable.__code__
+    require_store_code = require_store.__code__
+    module_namespace = globals()
+    raw_dict_getitem = dict.__getitem__
+    raw_object_getattribute = object.__getattribute__
+    raw_type_getattribute = type.__getattribute__
+    descriptor_namespace_type = type(
+        raw_type_getattribute(RuntimeTargetHostResourceEvidence, "__dict__")
     )
-    require_store_code = (
-        require_store.__code__ if type(require_store) is FunctionType else None
+    raw_descriptor_getitem = descriptor_namespace_type.__getitem__
+    descriptor_states = (
+        *_capture_descriptor_authority(
+            RuntimeTargetHostResourceSnapshot,
+            ("__init__", "__post_init__", "payload"),
+        ),
+        *_capture_descriptor_authority(
+            RuntimeTargetHostResourceEvidence,
+            (
+                "__init__",
+                "__post_init__",
+                "canonical_payload",
+                "canonical_bytes",
+                "digest",
+            ),
+        ),
+        *_capture_descriptor_authority(
+            PublishedRuntimeTargetHostResourceEvidence, ("__init__",)
+        ),
+        *_capture_descriptor_authority(
+            RuntimeTargetHostResourceRunResult,
+            ("__init__", "terminal_qualification_eligible"),
+        ),
     )
 
     before = capture_snapshot(evidence_root=evidence_store.root)
@@ -651,23 +701,64 @@ def run_declared_target_host_campaign_with_resources(
         run_receipt_artifact_id=run_receipt_artifact_id,
     )
 
-    _require_post_callback_function(
+    # Do not invoke a module-level verifier before proving that verifier survived
+    # caller callbacks. Raw built-in descriptors are retained in local cells.
+    if (
+        raw_dict_getitem(module_namespace, "_require_callable_authority")
+        is not require_callable
+        or raw_object_getattribute(require_callable, "__code__")
+        is not require_callable_code
+    ):
+        raise RuntimeTargetHostResourceEvidenceError(
+            "resource callable verifier changed during target-host run"
+        )
+    if (
+        raw_dict_getitem(module_namespace, "_require_artifact_store_authority")
+        is not require_store
+        or raw_object_getattribute(require_store, "__code__")
+        is not require_store_code
+    ):
+        raise RuntimeTargetHostResourceEvidenceError(
+            "resource ArtifactStore verifier changed during target-host run"
+        )
+    require_callable(
+        require_callable,
+        require_callable_state,
         name="resource callable verifier",
-        expected=require_callable,
-        expected_code=require_callable_code,
-        current=_require_callable_authority,
     )
-    _require_post_callback_function(
+    require_callable(
+        require_store,
+        require_store_state,
         name="resource ArtifactStore verifier",
-        expected=require_store,
-        expected_code=require_store_code,
-        current=_require_artifact_store_authority,
     )
+    for owner, name, descriptor, function, code in descriptor_states:
+        namespace = raw_type_getattribute(owner, "__dict__")
+        current = raw_descriptor_getitem(namespace, name)
+        if current is not descriptor:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource evidence class descriptor changed during target-host run: "
+                f"{name}"
+            )
+        if (
+            function is not None
+            and raw_object_getattribute(function, "__code__") is not code
+        ):
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource evidence class executable changed during target-host run: "
+                f"{name}"
+            )
+
     require_store(evidence_store, store_authority)
-    require_callable(capture_snapshot, capture_state, name="resource snapshot collector")
+    require_callable(
+        capture_snapshot, capture_state, name="resource snapshot collector"
+    )
     require_callable(issue_evidence, issue_state, name="resource evidence issuer")
-    require_callable(publish_evidence, publish_state, name="resource evidence publisher")
-    require_callable(read_snapshot, read_state, name="ArtifactStore authenticated reader")
+    require_callable(
+        publish_evidence, publish_state, name="resource evidence publisher"
+    )
+    require_callable(
+        read_snapshot, read_state, name="ArtifactStore authenticated reader"
+    )
     require_callable(runner, runner_state, name="canonical target-host runner")
 
     after = capture_snapshot(evidence_root=evidence_store.root)

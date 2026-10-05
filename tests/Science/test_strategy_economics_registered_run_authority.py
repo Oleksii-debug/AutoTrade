@@ -16,6 +16,7 @@ from qualification.strategy_economics.qualify import (
     assess_strategy_economics_authority,
     require_qualified_strategy_economics,
 )
+import research.autotrade_research.strategies.deterministic as deterministic_strategy
 from research.autotrade_research.strategies.deterministic import (
     CausalObservation,
     RegisteredStrategyRunReceipt,
@@ -223,6 +224,33 @@ class RegisteredRunEconomicsAuthorityTests(unittest.TestCase):
             assessment.registered_run_receipt_digest,
             receipt.fingerprint,
         )
+
+    def test_registered_run_verifier_dependency_rebind_fails_closed(self):
+        item, receipt = _run()
+        binding = _binding(item, receipt)
+        original = deterministic_strategy.run_baseline
+        calls = []
+
+        def hostile_run(*args, **kwargs):
+            calls.append((args, kwargs))
+            return item
+
+        deterministic_strategy.run_baseline = hostile_run
+        try:
+            with self.assertRaisesRegex(
+                StrategyEconomicsAuthorityError,
+                "registered strategy-run verifier dependency changed",
+            ):
+                assess_strategy_economics_authority(
+                    item,
+                    binding,
+                    instrument_registry=_registry(),
+                    registered_run_receipt=receipt,
+                )
+        finally:
+            deterministic_strategy.run_baseline = original
+
+        self.assertEqual(calls, [])
 
     def test_favorable_fake_economics_remain_unresolved_after_real_run_replay(self):
         item, receipt = _run()

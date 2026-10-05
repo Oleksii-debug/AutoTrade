@@ -223,8 +223,6 @@ class JournalTransaction:
 
 
 _TRANSACTION_DIGEST_CACHE_LIMIT = 2048
-_transaction_digest_cache: dict[tuple[object, ...], str] = {}
-_transaction_digest_cache_lock = RLock()
 
 
 def _require_exact_transaction_graph(transaction: JournalTransaction) -> None:
@@ -351,22 +349,43 @@ def _transaction_digest_fingerprint(
     return (*text_values, tuple(posting_values))
 
 
-def _cached_transaction_digest(transaction: JournalTransaction) -> str:
-    fingerprint = _transaction_digest_fingerprint(transaction)
-    if fingerprint is None:
-        return transaction_digest(transaction)
-    with _transaction_digest_cache_lock:
-        cached = _transaction_digest_cache.get(fingerprint)
-    if cached is not None:
-        return cached
+def _make_cached_transaction_digest(
+    *,
+    _fingerprint=_transaction_digest_fingerprint,
+    _digest=transaction_digest,
+    _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
+    _lock_factory=RLock,
+):
+    """Bind digest memoization state outside mutable module-global authority."""
 
-    digest = transaction_digest(transaction)
-    if _transaction_digest_fingerprint(transaction) != fingerprint:
-        return digest
-    with _transaction_digest_cache_lock:
-        if len(_transaction_digest_cache) >= _TRANSACTION_DIGEST_CACHE_LIMIT:
-            _transaction_digest_cache.clear()
-        return _transaction_digest_cache.setdefault(fingerprint, digest)
+    cache: dict[tuple[object, ...], str] = {}
+    lock = _lock_factory()
+
+    def cached(transaction: JournalTransaction) -> str:
+        fingerprint = _fingerprint(transaction)
+        if fingerprint is None:
+            return _digest(transaction)
+        with lock:
+            value = cache.get(fingerprint)
+        if value is not None:
+            return value
+
+        digest = _digest(transaction)
+        # Direct frozen-dataclass tampering remains possible through
+        # object.__setattr__. Never publish a digest if the graph changed
+        # while canonical validation/digesting was in progress.
+        if _fingerprint(transaction) != fingerprint:
+            return digest
+        with lock:
+            if len(cache) >= _limit:
+                cache.clear()
+            return cache.setdefault(fingerprint, digest)
+
+    return cached
+
+
+_cached_transaction_digest = _make_cached_transaction_digest()
+del _make_cached_transaction_digest
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:

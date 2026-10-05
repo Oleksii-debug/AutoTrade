@@ -143,7 +143,10 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(baseline[0], Decimal("101.10"))
 
     def test_market_projection_requires_explicit_price_quantum(self):
-        with self.assertRaisesRegex(ExecutionRealismError, "complete price projection policy evidence"):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "complete price projection policy evidence",
+        ):
             simulate_execution(order(), top(), model(price_quantum=None))
 
     def test_market_projection_policy_identity_changes_model_fingerprint(self):

@@ -1,0 +1,63 @@
+name: durable-bybit-product-dispatch-implementation
+
+on:
+  push:
+    branches:
+      - integration/durable-bybit-product-dispatch-1713-sol56
+    paths:
+      - .github/scripts/durable_bybit_product_dispatch_patch.py
+      - .github/workflows/durable-bybit-product-dispatch-implementation.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: durable-bybit-product-dispatch-implementation
+  cancel-in-progress: true
+
+jobs:
+  implement-and-prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Apply product-dispatch convergence
+        run: python .github/scripts/durable_bybit_product_dispatch_patch.py
+      - name: Compile bounded production and test sources
+        run: |
+          python -m py_compile \
+            mvp/autotrade_mvp/durable_financial_bybit_sender.py \
+            mvp/autotrade_mvp/durable_financial_send_issuance.py \
+            mvp/autotrade_mvp/production_bybit.py \
+            mvp/tests/test_durable_financial_bybit_sender.py \
+            mvp/tests/test_production_bybit.py
+      - name: Install test dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Prove durable product surface
+        run: python -m unittest mvp.tests.test_durable_financial_bybit_sender -v
+      - name: Prove durable mint regressions
+        run: python -m unittest mvp.tests.test_durable_financial_send_issuance -v
+      - name: Prove financial send authority regressions
+        run: python -m unittest mvp.tests.test_financial_send_authority -v
+      - name: Prove production Bybit regressions
+        run: python -m unittest mvp.tests.test_production_bybit -v
+      - name: Commit bounded convergence and retire worker
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/durable-bybit-product-dispatch-implementation.yml
+          git rm .github/scripts/durable_bybit_product_dispatch_patch.py
+          git add \
+            mvp/autotrade_mvp/durable_financial_bybit_sender.py \
+            mvp/autotrade_mvp/production_bybit.py \
+            mvp/tests/test_durable_financial_bybit_sender.py \
+            mvp/tests/test_production_bybit.py
+          git commit -m 'WP-18: require durable binding on product Bybit dispatch'
+          git push origin HEAD:integration/durable-bybit-product-dispatch-1713-sol56

@@ -112,7 +112,11 @@ def _parse_bybit_page(observation: ProviderOriginObservation) -> tuple[str, int]
     rows = result.get("list")
     if type(rows) is not tuple:
         raise ProviderAccountPageChainError("Bybit page result list is unavailable")
-    cursor = result.get("nextPageCursor", "")
+    if "nextPageCursor" not in result:
+        raise ProviderAccountPageChainError(
+            "Bybit page result lacks explicit nextPageCursor"
+        )
+    cursor = result.get("nextPageCursor")
     if type(cursor) is not str:
         raise ProviderAccountPageChainError(
             "Bybit nextPageCursor must be exact text"

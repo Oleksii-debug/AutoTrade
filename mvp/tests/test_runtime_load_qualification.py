@@ -105,7 +105,25 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
+            observation = first.to_observation(spec)
+            self.assertEqual(
+                observation.recovered_financial_event_ids,
+                ("fin-1", "fin-2"),
+            )
+            self.assertEqual(
+                observation.financial_latency_event_ids,
+                ("fin-1", "fin-2"),
+            )
+            self.assertEqual(
+                observation.financial_staleness_event_ids,
+                ("fin-1", "fin-2"),
+            )
+            decision = evaluate_runtime_campaign(spec, first)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertEqual(
+                decision.reasons,
+                ("unverified_runtime_measurement_provenance",),
+            )
 
             reopened = JournalStore(path)
             second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import copy
 import inspect
 import pickle
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -436,6 +437,31 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     authority,
                     request=request,
                     submission_scope={**scope, "extra": cyclic_list},
+                )
+
+    def test_deep_acyclic_json_fails_as_authority_error_not_recursion_error(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            nested = []
+            for _ in range(sys.getrecursionlimit() + 50):
+                nested = [nested]
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "too deeply nested",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "extra": nested},
+                    submission_scope=scope,
                 )
 
     def test_admission_id_requires_canonical_utf8_before_registry_lookup(self) -> None:

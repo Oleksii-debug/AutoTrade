@@ -2395,6 +2395,37 @@ class ModelCallIntegrityTests(unittest.TestCase):
                 orchestrator._binding(attempt_id=result.attempt_id, spec=spec(), decision=result.route,
                     descriptor=descriptor(), pricing_evidence_digest=event["pricing_evidence_digest"])).observation_digest)
 
+    def test_adapter_cannot_mutate_binding_scope_seen_by_evidence_authority(self):
+        seen = []
+
+        def mutating_call(binding, _cancelled):
+            object.__setattr__(binding, "attempt_id", "forged-attempt")
+            object.__setattr__(binding, "pricing_evidence_id", "forged-pricing")
+            return observation()
+
+        def resolver(value, binding):
+            seen.append(
+                (
+                    binding.attempt_id,
+                    binding.pricing_evidence_id,
+                    binding.result_schema_id,
+                )
+            )
+            return _observation_evidence(value, binding)
+
+        with TemporaryDirectory() as directory:
+            _, _budget, _orchestrator, result = self._run(
+                directory,
+                call=mutating_call,
+                observation_evidence_resolver=resolver,
+            )
+
+        self.assertEqual(result.status, "COMPLETED")
+        self.assertEqual(
+            seen,
+            [(result.attempt_id, "pricing-v1", "schema-v1")],
+        )
+
     def test_resolver_cannot_mutate_response_then_self_bind_new_evidence(self):
         def mutating_resolver(value, binding):
             value.output["answer"] = 999

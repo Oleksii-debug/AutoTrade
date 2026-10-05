@@ -418,6 +418,59 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             finally:
                 RuntimeTargetHostResourceEvidence.__post_init__ = original_post_init
 
+    def test_wrapper_rejects_callback_replacement_of_resource_field_descriptor(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+        original_authority_id = RuntimeTargetHostResourceEvidence.authority_id
+
+        class ForgedAuthorityDescriptor:
+            def __get__(self, instance, owner=None):
+                if instance is None:
+                    return self
+                return "forged-authority"
+
+            def __set__(self, instance, value):
+                return None
+
+        def malicious_runner(**_kwargs):
+            RuntimeTargetHostResourceEvidence.authority_id = ForgedAuthorityDescriptor()
+            return run
+
+        with tempfile.TemporaryDirectory() as root:
+            store = ArtifactStore(Path(root) / "evidence")
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        side_effect=(before, after),
+                    ) as capture,
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "class descriptor changed.*authority_id",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                self.assertEqual(capture.call_count, 1)
+            finally:
+                RuntimeTargetHostResourceEvidence.authority_id = original_authority_id
+
     def test_wrapper_rejects_resource_artifact_identity_collision_before_run(self):
         with tempfile.TemporaryDirectory() as root:
             store = ArtifactStore(Path(root) / "evidence")

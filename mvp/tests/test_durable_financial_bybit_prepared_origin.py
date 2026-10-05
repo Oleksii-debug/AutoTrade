@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp import durable_financial_request_binding as binding_module
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitPreparedSubmission,
     guarded_order_projection,
     prepare_order_submission,
+    require_canonical_bybit_prepared_submission,
 )
 from mvp.autotrade_mvp.durable_financial_request_binding import (
     DurableFinancialRequestBindingError,
@@ -199,6 +201,66 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 drifted = replace(material, **{field: value})
                 with self.assertRaises(DurableFinancialRequestBindingError):
                     _require_bybit_prepared_request_origin(drifted, prepared)
+
+
+    def test_exact_type_clone_without_canonical_issuance_is_rejected(self):
+        material, prepared = canonical_case()
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(prepared, name),
+            )
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks canonical issuance provenance",
+        ):
+            _require_bybit_prepared_request_origin(material, forged)
+        with self.assertRaisesRegex(
+            Exception,
+            "prepared submission authority changed",
+        ):
+            guarded_order_projection(forged)
+
+    def test_post_issue_prepared_object_mutation_is_rejected(self):
+        material, prepared = canonical_case()
+        object.__setattr__(prepared, "endpoint", "/v5/order/amend")
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks canonical issuance provenance",
+        ):
+            _require_bybit_prepared_request_origin(material, prepared)
+
+    def test_provenance_verifier_rebinding_fails_before_forged_verifier_executes(self):
+        material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return _prepared
+
+        with patch.object(
+            binding_module,
+            "require_canonical_bybit_prepared_submission",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "provenance authority changed",
+            ):
+                _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(calls, [])
 
     def test_projection_rebinding_fails_before_forged_projection_executes(self):
         material, prepared = canonical_case()

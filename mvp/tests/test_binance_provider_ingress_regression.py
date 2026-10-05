@@ -547,7 +547,7 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
 
 
-    def test_prepared_request_bodies_reject_mapping_subclass_before_callbacks(self):
+    def test_prepared_requests_reject_caller_minted_mapping_before_callbacks(self):
         callbacks = []
 
         class HostileBody(dict):
@@ -577,11 +577,14 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         )
         for error_type, construct in cases:
             with self.subTest(error_type=error_type.__name__):
-                with self.assertRaisesRegex(error_type, "exact request mapping"):
+                with self.assertRaisesRegex(
+                    error_type,
+                    "canonical order preparation",
+                ):
                     construct(HostileBody({"symbol": "BTCUSDT"}))
         self.assertEqual(callbacks, [])
 
-    def test_prepared_request_bodies_reject_string_subclasses_before_callbacks(self):
+    def test_prepared_requests_reject_caller_minted_text_before_callbacks(self):
         callbacks = []
 
         class HostileText(str):
@@ -611,7 +614,10 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         )
         for error_type, construct in cases:
             with self.subTest(error_type=error_type.__name__):
-                with self.assertRaisesRegex(error_type, "exact strings"):
+                with self.assertRaisesRegex(
+                    error_type,
+                    "canonical order preparation",
+                ):
                     construct({"symbol": HostileText("BTCUSDT")})
         self.assertEqual(callbacks, [])
 

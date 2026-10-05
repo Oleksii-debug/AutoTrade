@@ -383,6 +383,8 @@ def _durable_scope(
         )
     version = canonical_contract.canonical_instrument
     scope = state.settlement_scope
+    if type(scope) is not FuturesSettlementScope:
+        raise FuturesError("durable settlement requires exact FuturesSettlementScope")
     if scope.provider_id is None or scope.account_id is None or scope.environment is None:
         raise FuturesError(
             "durable provider settlement requires provider_id, account_id and environment"

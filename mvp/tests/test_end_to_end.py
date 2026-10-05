@@ -129,6 +129,29 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reconcile"):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_corrupt_financial_checkpoint_rejects_unbounded_decimal_text(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["postings"][0]["cash_delta"] = "1e999999"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "checkpoint cash_delta"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_corrupt_financial_checkpoint_rejects_non_text_fill_scalar(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            fill = next(iter(checkpoint["fills"].values()))
+            fill["quantity"] = 1
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_cash_limit_and_invalid_configuration(self):
         with TemporaryDirectory() as directory:
             rejected = run_vertical_slice([100, 101, 102, 103], directory, initial_cash="10")

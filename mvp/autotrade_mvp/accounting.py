@@ -308,24 +308,32 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
 
 
 def _make_transaction_digest(
+    critical_bindings: tuple[tuple[str, object], ...],
     *,
     _canonicalize=canonical_transaction,
     _digest_payload=payload_digest,
+    _module_globals=globals(),
+    _conflict_type=AccountingConflict,
 ):
-    """Bind the canonicalizer and digest primitive outside module rebinding."""
+    """Bind digest primitives and fail closed if canonicalizer dependencies move."""
 
     def digest(transaction: JournalTransaction) -> str:
+        for name, expected in critical_bindings:
+            if _module_globals.get(name) is not expected:
+                raise _conflict_type(
+                    "transaction digest authority dependency was rebound"
+                )
         return _digest_payload(_canonicalize(transaction))
 
     return digest
 
 
-transaction_digest = _make_transaction_digest()
-del _make_transaction_digest
-
-
 def _transaction_digest_fingerprint(
     transaction: JournalTransaction,
+    *,
+    _transaction_type=JournalTransaction,
+    _posting_type=Posting,
+    _decimal_type=Decimal,
 ) -> tuple[object, ...] | None:
     """Return a callback-free cache key for one exact transaction graph.
 
@@ -336,7 +344,14 @@ def _transaction_digest_fingerprint(
     retains its fail-closed behaviour.
     """
 
-    _require_exact_transaction_graph(transaction)
+    if type(transaction) is not _transaction_type:
+        raise TypeError("transaction must be an exact JournalTransaction")
+    postings = transaction.postings
+    if type(postings) is not tuple:
+        raise TypeError("transaction postings must be an exact tuple")
+    if any(type(item) is not _posting_type for item in postings):
+        raise TypeError("transaction postings must contain exact Posting values")
+
     text_values = (
         transaction.transaction_id,
         transaction.cause_event_id,
@@ -349,11 +364,11 @@ def _transaction_digest_fingerprint(
     if any(value is not None and type(value) is not str for value in text_values):
         return None
     posting_values: list[tuple[str, str, Decimal]] = []
-    for item in transaction.postings:
+    for item in postings:
         if (
             type(item.ledger_account) is not str
             or type(item.asset_or_currency) is not str
-            or type(item.signed_amount) is not Decimal
+            or type(item.signed_amount) is not _decimal_type
         ):
             return None
         posting_values.append(
@@ -363,9 +378,9 @@ def _transaction_digest_fingerprint(
 
 
 def _make_cached_transaction_digest(
+    digest_transaction,
     *,
     _fingerprint=_transaction_digest_fingerprint,
-    _digest=transaction_digest,
     _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
     _lock_factory=RLock,
 ):
@@ -377,13 +392,13 @@ def _make_cached_transaction_digest(
     def cached(transaction: JournalTransaction) -> str:
         fingerprint = _fingerprint(transaction)
         if fingerprint is None:
-            return _digest(transaction)
+            return digest_transaction(transaction)
         with lock:
             value = cache.get(fingerprint)
         if value is not None:
             return value
 
-        digest = _digest(transaction)
+        digest = digest_transaction(transaction)
         # Direct frozen-dataclass tampering remains possible through
         # object.__setattr__. Never publish a digest if the graph changed
         # while canonical validation/digesting was in progress.
@@ -396,9 +411,6 @@ def _make_cached_transaction_digest(
 
     return cached
 
-
-_cached_transaction_digest = _make_cached_transaction_digest()
-del _make_cached_transaction_digest
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -457,11 +469,45 @@ def validate_transaction(transaction: JournalTransaction) -> None:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
 
+def _initialize_transaction_digest_authority():
+    critical_bindings = (
+        ("JournalTransaction", JournalTransaction),
+        ("Posting", Posting),
+        ("Decimal", Decimal),
+        ("ExactDecimalError", ExactDecimalError),
+        ("parse_bounded_exact_decimal", parse_bounded_exact_decimal),
+        ("canonical_decimal_text", canonical_decimal_text),
+        ("exact_sum", exact_sum),
+        ("datetime", datetime),
+        ("timezone", timezone),
+        ("_require_exact_transaction_graph", _require_exact_transaction_graph),
+        ("_name", _name),
+        ("_decimal", _decimal),
+        ("_instant", _instant),
+        ("_instant_value", _instant_value),
+        ("_canonical_decimal", _canonical_decimal),
+        ("_exact_total", _exact_total),
+        ("_normalized_transaction", _normalized_transaction),
+        ("validate_transaction", validate_transaction),
+    )
+    digest = _make_transaction_digest(critical_bindings)
+    return digest, _make_cached_transaction_digest(digest)
+
+
+transaction_digest, _cached_transaction_digest = (
+    _initialize_transaction_digest_authority()
+)
+del _initialize_transaction_digest_authority
+del _make_transaction_digest
+del _make_cached_transaction_digest
+
+
 def _make_economic_book_audit_digest(
     digest_transaction,
     *,
     _digest_payload=payload_digest,
     _normalize_name=_name,
+    _transaction_type=JournalTransaction,
 ):
     """Bind audit-digest dependencies outside mutable module-global authority."""
 
@@ -469,6 +515,13 @@ def _make_economic_book_audit_digest(
         if type(self._transactions) is not list:
             raise TypeError("economic transactions must use an exact list")
         transactions = tuple(self._transactions)
+        if any(
+            type(transaction) is not _transaction_type
+            for transaction in transactions
+        ):
+            raise TypeError(
+                "economic transactions must contain exact JournalTransaction values"
+            )
         return _digest_payload(
             {
                 "schema_version": "1.0.0",

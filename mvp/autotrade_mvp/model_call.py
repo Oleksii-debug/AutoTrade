@@ -515,6 +515,57 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         return _utc_text(self.clock(), name="clock")
 
+    def _callback_shape_snapshot(
+        self,
+    ) -> tuple[frozenset[str], frozenset[str], dict[str, object]]:
+        """Freeze instance-shape and JournalStore state around caller callbacks.
+
+        Explicit authority fields are restored by each boundary. This companion
+        snapshot catches method shadows/new instance attributes and mutation of
+        the canonical JournalStore object's own authority state.
+        """
+        return (
+            frozenset(vars(self)),
+            frozenset(vars(self.budget)),
+            dict(vars(self.journal)),
+        )
+
+    def _restore_callback_shape(
+        self,
+        snapshot: tuple[frozenset[str], frozenset[str], dict[str, object]],
+    ) -> list[str]:
+        orchestrator_names, budget_names, journal_state = snapshot
+        changes: list[str] = []
+
+        for name in tuple(vars(self)):
+            if name not in orchestrator_names:
+                changes.append(name)
+                delattr(self, name)
+        for name in tuple(vars(self.budget)):
+            if name not in budget_names:
+                changes.append("budget." + name)
+                delattr(self.budget, name)
+
+        current_journal_state = vars(self.journal)
+        for name in sorted(set(current_journal_state) | set(journal_state)):
+            if name not in journal_state:
+                changes.append("journal." + name)
+                continue
+            if name not in current_journal_state:
+                changes.append("journal." + name)
+                continue
+            current = current_journal_state[name]
+            expected = journal_state[name]
+            if type(expected) in (str, int, bool, Decimal, type(None)):
+                if type(current) is not type(expected) or current != expected:
+                    changes.append("journal." + name)
+            elif current is not expected:
+                changes.append("journal." + name)
+        if changes:
+            current_journal_state.clear()
+            current_journal_state.update(journal_state)
+        return changes
+
     @staticmethod
     def _sealed_spec(spec: ModelCallSpec) -> ModelCallSpec:
         if type(spec) is not ModelCallSpec:
@@ -705,6 +756,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -743,10 +795,11 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "pricing evidence resolver mutated orchestrator authority:"
-                + ",".join(sorted(callback_changes))
+                + ",".join(sorted(set(callback_changes)))
             )
         if callback_error is not None:
             raise ModelCallError(
@@ -1132,6 +1185,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -1170,10 +1224,11 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "observation evidence resolver mutated orchestrator authority:"
-                + ",".join(sorted(callback_changes))
+                + ",".join(sorted(set(callback_changes)))
             )
         if callback_error is not None:
             raise ModelCallError(
@@ -1603,6 +1658,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        cancellation_shape = self._callback_shape_snapshot()
         cancellation_budget_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -1639,13 +1695,16 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     cancellation_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            cancellation_changes.extend(
+                self._restore_callback_shape(cancellation_shape)
+            )
 
         temporal_reason = self._temporal_reason(prepared_payload, request)
         cancellation_reason: str | None = None
         if cancellation_changes:
             cancellation_reason = (
                 "cancellation_probe_mutated_orchestrator_authority:"
-                + ",".join(sorted(cancellation_changes))
+                + ",".join(sorted(set(cancellation_changes)))
             )
         elif cancellation_error is not None:
             cancellation_reason = "cancellation_probe_failed"
@@ -1735,6 +1794,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        adapter_shape = self._callback_shape_snapshot()
         adapter_budget_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -1771,12 +1831,13 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     authority_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            authority_changes.extend(self._restore_callback_shape(adapter_shape))
 
         if authority_changes:
             payload = {
                 "attempt_id": attempt_id,
                 "reason": "adapter_mutated_orchestrator_authority:"
-                + ",".join(sorted(authority_changes)),
+                + ",".join(sorted(set(authority_changes))),
                 "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
@@ -2008,6 +2069,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        validation_shape = self._callback_shape_snapshot()
         validation_budget_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -2042,6 +2104,7 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     validation_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            validation_changes.extend(self._restore_callback_shape(validation_shape))
         if validation_changes or type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
@@ -2100,6 +2163,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        recovery_shape = self._callback_shape_snapshot()
         recovery_budget_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -2135,10 +2199,11 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     authority_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            authority_changes.extend(self._restore_callback_shape(recovery_shape))
         if authority_changes:
             raise ModelCallError(
                 "recovery fence mutated orchestrator authority:"
-                + ",".join(sorted(authority_changes))
+                + ",".join(sorted(set(authority_changes)))
             )
         if recovery_error is not None:
             raise ModelCallError("recovery fence failed") from recovery_error
@@ -2407,6 +2472,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
             "_clock": self.budget._clock,
@@ -2446,10 +2512,11 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
+            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "billing evidence resolver mutated orchestrator authority:"
-                + ",".join(sorted(callback_changes))
+                + ",".join(sorted(set(callback_changes)))
             )
         if callback_error is not None:
             raise ModelCallError(

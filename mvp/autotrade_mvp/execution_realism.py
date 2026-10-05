@@ -664,17 +664,11 @@ def _bounded_rational(value: Fraction, *, name: str) -> Fraction:
         ) from error
 
 
-def _market_fill_price(
+def _require_market_price_grid(
     *,
     order: SimulatedOrder,
-    observation: LiquidityObservation,
     model: ExecutionModel,
-    capacity: Decimal,
-    base_price: Decimal,
-    additional_spread_bps: Decimal,
-) -> Decimal:
-    """Project MARKET price with exact rational math and an authoritative price grid."""
-
+) -> None:
     if (
         model.price_tick is None
         or model.price_grid_instrument_version is None
@@ -692,6 +686,21 @@ def _market_fill_price(
         raise ExecutionRealismError(
             "unsupported market price projection policy"
         )
+
+
+def _market_fill_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    """Project MARKET price with exact rational math and an authoritative price grid."""
+
+    _require_market_price_grid(order=order, model=model)
+    assert model.price_tick is not None
 
     try:
         if observation.available_volume > 0 and model.max_participation > 0:
@@ -743,11 +752,16 @@ def _market_fill_price(
             raise ExecutionRealismError(
                 "configured adverse costs produce non-positive execution price"
             )
-        return round_fraction_to_quantum(
+        projected = round_fraction_to_quantum(
             raw_fill,
             model.price_tick,
             mode="CEILING" if order.side == "BUY" else "FLOOR",
         )
+        if projected <= 0:
+            raise ExecutionRealismError(
+                "adverse price-grid projection produced non-positive execution price"
+            )
+        return projected
     except ExactDecimalError as error:
         raise ExecutionRealismError(
             "MARKET price projection exceeds exact arithmetic resource envelope"
@@ -864,6 +878,8 @@ def simulate_execution(
         raise ExecutionRealismError(
             "liquidity instrument_version must exactly match order instrument_version"
         )
+    if order.order_type == "MARKET":
+        _require_market_price_grid(order=order, model=model)
 
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)

@@ -178,7 +178,16 @@ class VerticalSliceTests(unittest.TestCase):
             def __str__(self):
                 raise AssertionError("hostile int conversion")
 
-        for value in (HostileStr("100"), HostileFloat(100.0), HostileInt(100)):
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal conversion")
+
+        for value in (
+            HostileStr("100"),
+            HostileFloat(100.0),
+            HostileInt(100),
+            HostileDecimal("100"),
+        ):
             with self.subTest(value=type(value).__name__):
                 with self.assertRaisesRegex(
                     ValueError,

@@ -95,21 +95,21 @@ class ProviderAccountEmptyExclusionTests(unittest.TestCase):
                     at=NOW,
                 )
 
-    def test_foreign_page_chains_cannot_be_substituted(self):
-        with TemporaryDirectory() as first, TemporaryDirectory() as second:
-            one = self._fixture(first)
-            two = self._fixture(second)
-            coverage_set = self._coverage_set(one)
+    def test_non_authoritative_page_chain_value_is_rejected_by_exact_type(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            coverage_set = self._coverage_set(fixture)
+            page_chains = tuple(
+                fixture[6][surface] for surface in sorted(fixture[6])
+            )
             with self.assertRaisesRegex(
-                ProviderAccountEmptyExclusionError,
-                "page chain does not match exact required coverage component",
+                TypeError,
+                "page_chains must be an exact tuple of ProviderAccountPageChain",
             ):
                 issue_provider_account_empty_result_exclusion(
                     coverage_set=coverage_set,
-                    page_chains=tuple(
-                        two[6][surface] for surface in sorted(two[6])
-                    ),
-                    historical_submission=one[5],
+                    page_chains=page_chains[:-1] + (object(),),
+                    historical_submission=fixture[5],
                     at=NOW,
                 )
 

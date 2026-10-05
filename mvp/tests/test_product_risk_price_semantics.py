@@ -18,7 +18,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
     prepare_order_submission,
 )
-from mvp.autotrade_mvp.instruments import InstrumentRegistry
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentRegistryError
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.product_risk_price_semantics import (
@@ -264,6 +264,54 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                         message,
                     ):
                         composer.compose(request, prepared)
+
+    def test_quantity_must_already_match_causal_instrument_grid(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared(quantity="0.0005")
+            request = self._request(
+                resolved,
+                capability,
+                quantity="0.0005",
+            )
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "minimum_quantity|quantity_step",
+            ):
+                composer.compose(request, prepared)
+
+    def test_prepared_symbol_must_match_causal_instrument_symbol(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            forged_intent = RiskIntent.create(
+                symbol="ETHUSDT",
+                side="BUY",
+                quantity="1",
+                price="100.00",
+                expected_state_version=1,
+            )
+            request = replace(
+                self._request(resolved, capability),
+                risk_intent=forged_intent,
+            )
+            forged_prepared = replace(
+                prepared,
+                body={**dict(prepared.body), "symbol": "ETHUSDT"},
+            )
+            # Dataclass replacement cannot mint canonical prepared-request
+            # provenance. The product boundary must reject that before trusting
+            # the symbol substitution.
+            with self.assertRaisesRegex(
+                Exception,
+                "prepared submission authority changed",
+            ):
+                ProductRiskPriceSemanticsComposer(
+                    registry,
+                    artifacts,
+                ).compose(request, forged_prepared)
 
     def test_provider_domain_capability_and_instrument_are_cross_bound(self):
         with TemporaryDirectory() as directory:

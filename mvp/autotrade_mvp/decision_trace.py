@@ -14,7 +14,12 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 from unicodedata import category as unicode_category
 
-from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
+from autotrade_runtime.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_bytes,
+    durable_path_lock,
+    validate_publication_destination,
+)
 from autotrade_runtime.strict_json import strict_json_loads
 
 
@@ -346,6 +351,10 @@ class DecisionTraceStore:
         self.path = Path(os.path.abspath(path_text))
 
     def _load(self) -> list[dict[str, Any]]:
+        try:
+            validate_publication_destination(self.path)
+        except (DurablePublishLockError, OSError) as error:
+            raise ValueError("Corrupt decision trace store: unsafe path alias") from error
         if not self.path.exists():
             return []
         try:

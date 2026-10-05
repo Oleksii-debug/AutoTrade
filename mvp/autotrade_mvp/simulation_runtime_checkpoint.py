@@ -53,6 +53,19 @@ _COMPONENT_AGGREGATE_TYPES = (
     "submission_attempt",
     "valuation_observation",
 )
+_COMPONENT_PUBLICATION_TOPICS: dict[str, str | None] = {
+    "account_reconciliation": "autotrade.reconciliation.events",
+    "authority_state": None,
+    "economic_book": "autotrade.economic.events",
+    "order_projection_book": "autotrade.order-projection.events",
+    "provider_activity": None,
+    "reservation_book": None,
+    "risk_decision": None,
+    "risk_policy_registry": None,
+    "settlement_book": None,
+    "submission_attempt": "autotrade.submission.events",
+    "valuation_observation": None,
+}
 _VERIFIER_LOCK = threading.RLock()
 _VERIFIERS: dict[str, RuntimeStateVerifier] = {}
 
@@ -311,6 +324,58 @@ def _runtime_scope_snapshot(
     return cut, loop_events, authority_events
 
 
+def _payload_scope_value(
+    payload: Mapping[str, object],
+    key: str,
+) -> object | None:
+    """Resolve common durable scope layouts without guessing from unrelated fields."""
+
+    if key in payload:
+        return payload.get(key)
+    scope = payload.get("scope")
+    if type(scope) is dict and key in scope:
+        return scope.get(key)
+    identity = payload.get("identity")
+    if type(identity) is dict:
+        identity_scope = identity.get("scope")
+        if type(identity_scope) is dict and key in identity_scope:
+            return identity_scope.get(key)
+    request = payload.get("request")
+    if type(request) is dict and key in request:
+        return request.get(key)
+    return None
+
+
+def _component_event_definitively_foreign(event: Mapping[str, object]) -> bool:
+    """Exclude only component facts that prove they belong outside ZERO.
+
+    Durable component schemas predate a universal host_id field. Treating a
+    missing host marker as foreign would hide real risk/economic authority from
+    the checkpoint. Unknown scope therefore remains included (fail closed),
+    while an explicit non-SIMULATION environment or non-local host is foreign.
+    """
+
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    environment = event.get("environment")
+    if environment is None:
+        environment = _payload_scope_value(payload, "environment")
+    if environment is not None and environment != "SIMULATION":
+        return True
+
+    if environment is None:
+        environments = payload.get("environments")
+        if type(environments) in {list, tuple} and "SIMULATION" not in environments:
+            return True
+
+    host_id = event.get("host_id")
+    if host_id is None:
+        host_id = _payload_scope_value(payload, "host_id")
+    if host_id is not None and host_id != "local-simulation":
+        return True
+    return False
+
+
 def _autonomous_event_owned(
     event: Mapping[str, object],
     *,
@@ -322,15 +387,9 @@ def _autonomous_event_owned(
     aggregate_id = event.get("aggregate_id")
     if aggregate_type == "canonical_autonomous_simulation":
         return aggregate_id == run_id
-
-    event_payload = event.get("payload")
-    event_payload = event_payload if type(event_payload) is dict else {}
-    environment = event.get("environment", event_payload.get("environment"))
-    host_id = event.get("host_id", event_payload.get("host_id"))
     return (
         aggregate_type in _COMPONENT_AGGREGATE_TYPES
-        and environment == "SIMULATION"
-        and host_id == "local-simulation"
+        and not _component_event_definitively_foreign(event)
     )
 
 
@@ -347,6 +406,24 @@ def _autonomous_publication_owned(
             "outbox payload is not a canonical event envelope"
         )
     return _autonomous_event_owned(envelope, run_id=run_id)
+
+
+def _canonical_publication_topic(envelope: Mapping[str, object]) -> str | None:
+    aggregate_type = envelope.get("aggregate_type")
+    if aggregate_type == "canonical_autonomous_simulation":
+        return "autotrade.simulation.events"
+    if aggregate_type == "authority_state":
+        payload = envelope.get("payload")
+        if (
+            envelope.get("event_type") == "AuthorityAdmissionRecorded"
+            and type(payload) is dict
+            and payload.get("outcome") == "ADMITTED"
+        ):
+            return "financial.admission.ready"
+        return None
+    if aggregate_type not in _COMPONENT_PUBLICATION_TOPICS:
+        return None
+    return _COMPONENT_PUBLICATION_TOPICS[aggregate_type]
 
 
 def _autonomous_owned_event_ids(
@@ -395,13 +472,18 @@ def _autonomous_owned_pending_publications(
                 "exact ZERO outbox state escaped runtime ownership"
             )
         envelope = state.get("payload")
-        if (
-            type(envelope) is dict
-            and envelope.get("aggregate_type") == "canonical_autonomous_simulation"
-            and state.get("topic") != "autotrade.simulation.events"
-        ):
+        if type(envelope) is not dict:
             raise AutonomousRuntimeCheckpointError(
-                "ZERO loop publication routing topic is not canonical"
+                "ZERO publication payload is not a canonical event envelope"
+            )
+        expected_topic = _canonical_publication_topic(envelope)
+        if expected_topic is None:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO component event unexpectedly has an outbox publication"
+            )
+        if state.get("topic") != expected_topic:
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO publication routing topic is not canonical"
             )
         if state["delivered"]:
             continue

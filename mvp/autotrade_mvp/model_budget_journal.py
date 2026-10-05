@@ -10,8 +10,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
+import weakref
 from zoneinfo import ZoneInfo
 
 from mvp.autotrade_mvp.model_gateway import (
@@ -344,6 +346,63 @@ def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
     )
 
 
+def _build_model_budget_journal_authority_accessors():
+    """Retain one exact JournalStore generation outside caller-mutable budget state."""
+
+    bindings: dict[int, tuple[weakref.ReferenceType, weakref.ReferenceType, object]] = {}
+    lock = RLock()
+
+    def initialize(value: object, journal: object) -> None:
+        if type(value) is not DurableModelBudget:
+            raise TypeError("model budget must be exact DurableModelBudget")
+        _require_model_budget_journal_authority(journal)
+        identity = require_exact_journal_store_authority(
+            journal,
+            subject="model budget journal",
+        )
+        object_id = id(value)
+
+        def cleanup(value_ref, *, object_id=object_id) -> None:
+            with lock:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0] is value_ref:
+                    bindings.pop(object_id, None)
+
+        value_ref = weakref.ref(value, cleanup)
+        journal_ref = weakref.ref(journal)
+        with lock:
+            existing = bindings.get(object_id)
+            if existing is not None and existing[0]() is value:
+                raise ValueError("model budget journal authority is already established")
+            bindings[object_id] = (value_ref, journal_ref, identity)
+
+    def require(value: object):
+        if type(value) is not DurableModelBudget:
+            raise TypeError("model budget must be exact DurableModelBudget")
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None or entry[0]() is not value:
+                raise ValueError("model budget journal authority is not established")
+            _value_ref, journal_ref, expected_identity = entry
+        journal = journal_ref()
+        if journal is None:
+            raise ValueError("model budget journal authority was released")
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict or state.get("journal") is not journal:
+            raise ValueError("model budget journal authority changed after construction")
+        _require_model_budget_journal_authority(journal)
+        current_identity = require_exact_journal_store_authority(
+            journal,
+            subject="model budget journal",
+        )
+        if current_identity != expected_identity:
+            raise ValueError("model budget JournalStore generation changed")
+        return journal
+
+    return initialize, require
+
+
 class DurableModelBudget:
     """Durable adapter over the canonical model-cost BudgetLedger.
 
@@ -368,11 +427,12 @@ class DurableModelBudget:
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
         self._clock = _now if clock is None else clock
+        _initialize_model_budget_journal_authority(self, journal)
 
         candidate = BudgetLedger(ceiling)
         self._ceiling = candidate.snapshot().ceiling
-        _require_model_budget_journal_authority(self.journal)
-        existing = self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.load_events(_AGGREGATE_TYPE, self.budget_id)
         if not existing:
             payload = {
                 "ceiling": str(self._ceiling),
@@ -385,11 +445,11 @@ class DurableModelBudget:
                 event_id=_event_id(self.budget_id, "initialize"),
             )
             try:
-                _require_model_budget_journal_authority(self.journal)
-                self.journal.append_event(envelope)
+                journal = _require_model_budget_bound_journal(self)
+                journal.append_event(envelope)
             except ValueError:
-                _require_model_budget_journal_authority(self.journal)
-                concurrent = self.journal.get_event(envelope["event_id"])
+                journal = _require_model_budget_bound_journal(self)
+                concurrent = journal.get_event(envelope["event_id"])
                 if (
                     concurrent is None
                     or concurrent["event_type"] != "ModelBudgetInitialized"
@@ -405,8 +465,8 @@ class DurableModelBudget:
             raise ValueError("budget ceiling conflicts with durable model budget")
 
     def _events(self) -> list[dict[str, Any]]:
-        _require_model_budget_journal_authority(self.journal)
-        return self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
+        journal = _require_model_budget_bound_journal(self)
+        return journal.load_events(_AGGREGATE_TYPE, self.budget_id)
 
     @staticmethod
     def _safe_authority_state(
@@ -439,17 +499,14 @@ class DurableModelBudget:
         tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
     ]:
         """Freeze budget/journal authority before executing the injected clock."""
-        _require_model_budget_journal_authority(
-            object.__getattribute__(self, "__dict__").get("journal")
-        )
+        journal = _require_model_budget_bound_journal(self)
         budget_class = object.__getattribute__(self, "__class__")
         budget_state = DurableModelBudget._safe_authority_state(
             self,
             subject="model budget",
         )
-        journal = budget_state.get("journal")
-        if not isinstance(journal, JournalStore):
-            raise ValueError("model budget journal authority is invalid")
+        if budget_state.get("journal") is not journal:
+            raise ValueError("model budget journal authority changed after construction")
         journal_class = object.__getattribute__(journal, "__class__")
         journal_state = DurableModelBudget._safe_authority_state(
             journal,
@@ -800,6 +857,8 @@ class DurableModelBudget:
                     "_require_model_budget_journal_class_authority",
                     "_require_model_budget_journal_authority",
                     "require_exact_journal_store_authority",
+                    "_initialize_model_budget_journal_authority",
+                    "_require_model_budget_bound_journal",
                     *referenced_names(restore_function_state[0][1]),
                     *referenced_names(clock_text_function_state[0][1]),
                 )
@@ -1081,8 +1140,8 @@ class DurableModelBudget:
         command_id = _command_id(self.budget_id, idempotency_key)
         event_id = _event_id(self.budget_id, idempotency_key)
 
-        _require_model_budget_journal_authority(self.journal)
-        existing = self.journal.get_event(event_id)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(event_id)
         if existing is not None:
             if (
                 existing["event_type"] != event_type
@@ -1094,8 +1153,8 @@ class DurableModelBudget:
                     "model budget idempotency identity conflicts with durable event"
                 )
             original_envelope = _rehydrate_committed_event(existing)
-            _require_model_budget_journal_authority(self.journal)
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -1129,8 +1188,8 @@ class DurableModelBudget:
             event_id=event_id,
         )
         try:
-            _require_model_budget_journal_authority(self.journal)
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -1158,8 +1217,8 @@ class DurableModelBudget:
                 payload=payload,
                 event_id=event_id,
             )
-            _require_model_budget_journal_authority(self.journal)
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -1317,8 +1376,8 @@ class DurableModelBudget:
             identity=request.request_id,
         )
         event_id = _event_id(self.budget_id, idempotency_key)
-        _require_model_budget_journal_authority(self.journal)
-        existing = self.journal.get_event(event_id)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(event_id)
         if existing is not None:
             payload = existing.get("payload")
             if (
@@ -1443,8 +1502,8 @@ class DurableModelBudget:
             action="release",
             identity=request_id,
         )
-        _require_model_budget_journal_authority(self.journal)
-        existing = self.journal.get_event(
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(
             _event_id(self.budget_id, idempotency_key)
         )
         if existing is not None:
@@ -1565,3 +1624,10 @@ class DurableModelBudget:
             result={"reconciled": True, **request},
             validate=validate,
         )
+
+
+
+_initialize_model_budget_journal_authority, _require_model_budget_bound_journal = (
+    _build_model_budget_journal_authority_accessors()
+)
+del _build_model_budget_journal_authority_accessors

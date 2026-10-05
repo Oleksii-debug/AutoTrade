@@ -1,4 +1,5 @@
 from decimal import Decimal
+from types import MappingProxyType
 import unittest
 
 from autotrade_research.forward_paper import (
@@ -974,6 +975,23 @@ class ForwardPaperQualificationTests(unittest.TestCase):
             self.evidence(costs_by_currency=HostileDict({"USD": "12.34"}))
         with self.assertRaisesRegex(ForwardPaperError, "plain list or tuple"):
             self.evidence(predictions=HostileList(self.predictions()))
+        self.assertEqual(callbacks, [])
+
+    def test_authority_ingress_rejects_mappingproxy_over_hostile_mapping(self):
+        callbacks = []
+
+        class HostileDict(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("caller mapping callback must not execute")
+
+            def keys(self):
+                callbacks.append("keys")
+                raise AssertionError("caller mapping callback must not execute")
+
+        wrapped = MappingProxyType(HostileDict({"USD": "12.34"}))
+        with self.assertRaisesRegex(TypeError, "plain mapping"):
+            self.evidence(costs_by_currency=wrapped)
         self.assertEqual(callbacks, [])
 
     def test_assessment_readmits_frozen_protocol_after_post_init_mutation(self):

@@ -99,8 +99,12 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
             self.assertEqual(resolved.cost_components, tuple(REQUIRED_COMPONENTS))
             self.assertFalse(resolved.terminal_numeric_operands)
             self.assertEqual(
+                resolved.missing_terminal_evidence,
+                ("utility_numeric_projection", "complete_cost_composite"),
+            )
+            self.assertEqual(
                 resolved.blocking_reason,
-                "canonical_complete_cost_composite_evidence_unavailable",
+                "canonical_terminal_numeric_operand_evidence_unavailable",
             )
             self.assertTrue(resolved.bundle_digest.startswith("sha256:"))
             self.assertFalse(hasattr(resolved, "utility"))
@@ -164,6 +168,31 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
                 "preflight digest does not match canonical material",
+            ):
+                reverify_ablation_owned_operand_preflight(
+                    authority,
+                    [pair],
+                    outcome_refs=list(refs),
+                    evidence=evidence,
+                )
+
+    def test_missing_terminal_evidence_cannot_be_narrowed_by_mutation(self):
+        with TemporaryDirectory() as directory:
+            _registration, pair, refs, authority = self._build_fixture(Path(directory))
+            evidence = resolve_ablation_owned_operand_preflight(
+                authority,
+                [pair],
+                outcome_refs=list(refs),
+            )
+            object.__setattr__(
+                evidence,
+                "missing_terminal_evidence",
+                ("complete_cost_composite",),
+            )
+
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "missing-evidence set is not canonical",
             ):
                 reverify_ablation_owned_operand_preflight(
                     authority,

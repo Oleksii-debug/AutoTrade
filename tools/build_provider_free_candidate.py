@@ -49,21 +49,46 @@ def _write_new_payload_json(path, value):
     _write_new_payload_bytes(path, payload)
 
 
-def _require_publish_evidence(publish, *, executable, evidence_name, source_sha, label):
-    if type(publish) is not Path or type(executable) is not str or type(evidence_name) is not str or type(label) is not str:
+def _capture_publish(publish):
+    if type(publish) is not Path:
+        raise TypeError('publish root must be an exact Path')
+    captured = {}
+    for relative, _, content in _collect(publish):
+        if relative in captured:
+            raise ValueError('publish snapshot contains a duplicate path: ' + relative)
+        captured[relative] = content
+    return captured
+
+
+def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, source_sha, label):
+    if (type(snapshot) is not dict or any(type(path) is not str or type(content) is not bytes
+                                          for path, content in snapshot.items())
+        or type(executable) is not str or type(evidence_name) is not str or type(label) is not str):
         raise TypeError('publish evidence inputs must use exact canonical types')
-    executable_path = publish / executable
-    if not executable_path.is_file():
+    executable_bytes = snapshot.get(executable)
+    if executable_bytes is None:
         raise ValueError(label + ' publish is missing ' + executable)
-    evidence_path = publish / evidence_name
-    if not evidence_path.is_file():
+    evidence_bytes = snapshot.get(evidence_name)
+    if evidence_bytes is None:
         raise ValueError(label + ' publish evidence is missing')
-    evidence = json.loads(evidence_path.read_text(encoding='utf-8'))
+    try:
+        evidence = json.loads(evidence_bytes.decode('utf-8', errors='strict'))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(label + ' publish evidence is not canonical JSON') from error
     if (type(evidence) is not dict or evidence.get('source_sha') != source_sha
         or evidence.get('checked_out_sha') != source_sha or evidence.get('result') != 'PASS'):
         raise ValueError(label + ' publish evidence differs from the exact product source')
-    executable_bytes = executable_path.read_bytes()
     return {'path': executable, 'sha256': 'sha256:' + sha256(executable_bytes).hexdigest(), 'bytes': len(executable_bytes)}
+
+
+def _require_publish_evidence(publish, *, executable, evidence_name, source_sha, label):
+    return _require_publish_snapshot_evidence(
+        _capture_publish(publish),
+        executable=executable,
+        evidence_name=evidence_name,
+        source_sha=source_sha,
+        label=label,
+    )
 
 
 def stage_source(source_root, source_sha, destination, composition_path):
@@ -121,13 +146,22 @@ def extract_pinned(archive_path, destination, expected_digest, *, overrides=None
         if missing_overrides: raise ValueError('archive override path is absent: ' + ','.join(sorted(missing_overrides)))
 
 
-def _copy_publish(publish, destination):
-    snapshot = {}
-    for relative, _, content in _collect(publish):
+def _copy_publish_snapshot(publish_snapshot, destination):
+    if (type(publish_snapshot) is not dict
+        or any(type(path) is not str or type(content) is not bytes
+               for path, content in publish_snapshot.items())):
+        raise TypeError('publish snapshot must be an exact str-to-bytes dict')
+    copied = {}
+    for relative in sorted(publish_snapshot):
+        content = publish_snapshot[relative]
         identity = {'sha256': 'sha256:' + sha256(content).hexdigest(), 'bytes': len(content)}
-        snapshot[relative] = identity
+        copied[relative] = identity
         _write_new_payload_bytes(destination / relative, content)
-    return snapshot
+    return copied
+
+
+def _copy_publish(publish, destination):
+    return _copy_publish_snapshot(_capture_publish(publish), destination)
 
 
 def _require_copied_executable(expected, snapshot, *, label):
@@ -143,13 +177,17 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     stage_source(source_root, source_sha, payload / 'product', work / 'source-composition.json')
     inputs = json.loads((payload / 'product/packaging/windows/provider-free-inputs.json').read_text())
 
-    desktop_identity = _require_publish_evidence(desktop, executable='AutoTrade.Desktop.exe',
+    desktop_publish_snapshot = _capture_publish(desktop)
+    host_publish_snapshot = _capture_publish(host)
+    desktop_identity = _require_publish_snapshot_evidence(
+        desktop_publish_snapshot, executable='AutoTrade.Desktop.exe',
         evidence_name='desktop-build-evidence.json', source_sha=source_sha, label='Desktop')
-    host_identity = _require_publish_evidence(host, executable='AutoTrade.Host.exe',
+    host_identity = _require_publish_snapshot_evidence(
+        host_publish_snapshot, executable='AutoTrade.Host.exe',
         evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
 
-    desktop_snapshot = _copy_publish(desktop, payload)
-    host_snapshot = _copy_publish(host, payload / 'host')
+    desktop_snapshot = _copy_publish_snapshot(desktop_publish_snapshot, payload)
+    host_snapshot = _copy_publish_snapshot(host_publish_snapshot, payload / 'host')
     _require_copied_executable(desktop_identity, desktop_snapshot, label='Desktop')
     _require_copied_executable(host_identity, host_snapshot, label='Host')
 

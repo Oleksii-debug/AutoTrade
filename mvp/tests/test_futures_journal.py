@@ -1,10 +1,12 @@
 from dataclasses import replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -30,6 +32,7 @@ from mvp.autotrade_mvp.futures_journal import (
     variation_margin_aggregate_id,
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.settlement_convention import SettlementConvention
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -73,6 +76,16 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             delivery_cutoff=utc(30, 20),
             settlement_method="CASH",
             margin_model_id="TEST_FUTURES_MARGIN_V1",
+            settlement_convention=(SettlementConvention(
+                provider_id="TEST_CLEARER", instrument_id="55555555-5555-4555-8555-555555555555",
+                instrument_version=1, settlement_currency="BTC", quantum="0.00000001",
+                rounding="HALF_EVEN", evidence_artifact_id="00000000-0000-0000-0000-000000000303",
+                evidence_sha256="sha256:" + sha256(b"test inverse contract economics v1").hexdigest(),
+            ) if payoff == "INVERSE" else None),
+            metadata_evidence=({"artifact_id":"00000000-0000-0000-0000-000000000303",
+                "sha256":"sha256:" + sha256(b"test inverse contract economics v1").hexdigest(), "observed_at":"2026-09-01T00:00:00Z"},)
+                if payoff == "INVERSE" else (),
+
         )
 
     def _contract(self, *, payoff="LINEAR"):
@@ -119,6 +132,16 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         )
 
     def _bind_provider_evidence(self, artifacts, settlement):
+        if settlement.settlement_currency == "BTC":
+            version = self._version(payoff="INVERSE")
+            artifacts.publish_bytes(
+                artifact_id=version.settlement_convention.evidence_artifact_id,
+                data=b"test inverse contract economics v1",
+                media_type="application/vnd.autotrade.instrument-metadata+json",
+                rights={"storage":True,"export":False},
+                metadata={"kind":"instrument-metadata",
+                    "instrument_version_binding":InstrumentVersion.metadata_evidence_binding(version)},
+            )
         receipt = provider_settlement_evidence_receipt(settlement)
         artifact_id = str(
             uuid5(
@@ -333,6 +356,71 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 Decimal("105"),
             )
 
+    def test_inverse_replay_requires_durable_settlement_convention_identity(self):
+        contract = self._contract(payoff="INVERSE")
+        opening = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "inverse-convention-id", "11000", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(path)
+            commit_inverse_variation_margin(
+                store,
+                opening,
+                settlement,
+                evidence_artifact_store=artifacts,
+                evidence_artifact_root=artifact_root,
+            )
+            aggregate_id = variation_margin_aggregate_id(opening)
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT event_id, payload, payload_hash
+                    FROM events
+                    WHERE aggregate_type = ? AND aggregate_id = ?
+                    ORDER BY aggregate_version
+                    """,
+                    ("FUTURES_VARIATION_MARGIN", aggregate_id),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                payload = json.loads(row[1])
+                payload.pop("settlement_convention_id", None)
+                connection.execute(
+                    """
+                    UPDATE events
+                    SET payload = ?, payload_hash = ?
+                    WHERE event_id = ?
+                    """,
+                    (
+                        canonical_json(payload),
+                        payload_digest(payload),
+                        row[0],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "durable inverse settlement economics do not reproduce",
+            ):
+                restore_inverse_variation_margin(
+                    JournalStore(path),
+                    opening,
+                    evidence_artifact_store=artifacts,
+                    evidence_artifact_root=artifact_root,
+                )
+
     def test_inverse_restart_retry_and_correction_preserve_exact_fraction(self):
         contract = self._contract(payoff="INVERSE")
         opening = InverseVariationMarginState(
@@ -355,7 +443,6 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     first,
                     evidence_artifact_store=artifacts,
                     evidence_artifact_root=Path(directory) / "artifacts",
-                    settlement_quantum=Decimal("0.00000001"),
                 )
             )
             self.assertTrue(inserted)
@@ -379,7 +466,6 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     first,
                     evidence_artifact_store=artifacts,
                     evidence_artifact_root=Path(directory) / "artifacts",
-                    settlement_quantum=Decimal("0.00000001"),
                 )
             )
             self.assertFalse(retry_inserted)
@@ -405,7 +491,6 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     correction,
                     evidence_artifact_store=artifacts,
                     evidence_artifact_root=Path(directory) / "artifacts",
-                    settlement_quantum=Decimal("0.00000001"),
                 )
             )
             self.assertTrue(correction_inserted)
@@ -665,7 +750,6 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                         settlement,
                         evidence_artifact_root=artifact_root,
                         evidence_artifact_store=artifacts,
-                        settlement_quantum=Decimal("0.00000001"),
                     )
 
             self.assertEqual(

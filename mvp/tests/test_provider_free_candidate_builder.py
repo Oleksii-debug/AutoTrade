@@ -11,6 +11,28 @@ import zipfile
 from tools import build_provider_free_candidate as candidate
 
 
+def publish_evidence(source_sha, suite='provider-free-host-publish', *, result='PASS',
+                     runner_os='Windows', workflow='provider-free-product'):
+    return {
+        'schema_version': '1.0.0',
+        'source_sha': source_sha,
+        'checked_out_sha': source_sha,
+        'suite': suite,
+        'command': 'test publish',
+        'result': result,
+        'runner_os': runner_os,
+        'python_version': '3.12.10',
+        'github': {
+            'event_name': 'pull_request',
+            'run_id': '1',
+            'run_attempt': '1',
+            'workflow': workflow,
+        },
+        'generated_at': '2026-10-05T10:00:00+00:00',
+        'contains_secrets': False,
+    }
+
+
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
@@ -83,7 +105,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
     def test_host_publish_requires_exact_executable_and_exact_head_evidence(self):
         with TemporaryDirectory() as directory:
             publish = Path(directory); source_sha = 'a' * 40
-            evidence = {'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'PASS'}
+            evidence = publish_evidence(source_sha)
             (publish / 'host-build-evidence.json').write_text(json.dumps(evidence), encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'Host publish is missing AutoTrade.Host.exe'):
                 candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
@@ -94,12 +116,37 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             self.assertEqual(identity['sha256'], 'sha256:' + sha256(host_bytes).hexdigest())
             self.assertEqual(identity['bytes'], len(host_bytes))
 
+    def test_publish_evidence_rejects_same_sha_wrong_suite_or_workflow(self):
+        with TemporaryDirectory() as directory:
+            publish = Path(directory)
+            source_sha = 'a' * 40
+            (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-host')
+            for evidence in (
+                publish_evidence(source_sha, suite='provider-free-desktop-publish'),
+                publish_evidence(source_sha, workflow='Verify AutoTrade'),
+                publish_evidence(source_sha, runner_os='Linux'),
+            ):
+                (publish / 'host-build-evidence.json').write_text(
+                    json.dumps(evidence), encoding='utf-8')
+                with self.assertRaisesRegex(
+                    ValueError,
+                    'selected exact-head build authority',
+                ):
+                    candidate._require_publish_evidence(
+                        publish,
+                        executable='AutoTrade.Host.exe',
+                        evidence_name='host-build-evidence.json',
+                        source_sha=source_sha,
+                        label='Host',
+                    )
+
+
     def test_host_publish_rejects_stale_or_nonpassing_evidence(self):
         with TemporaryDirectory() as directory:
             publish = Path(directory); (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-host'); source_sha = 'a' * 40
             for evidence in (
-                {'source_sha': 'b' * 40, 'checked_out_sha': 'b' * 40, 'result': 'PASS'},
-                {'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'FAIL'},
+                publish_evidence('b' * 40),
+                publish_evidence(source_sha, result='FAIL'),
             ):
                 (publish / 'host-build-evidence.json').write_text(json.dumps(evidence), encoding='utf-8')
                 with self.assertRaisesRegex(ValueError, 'Host publish evidence differs'):
@@ -111,8 +158,8 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             root = Path(directory); publish = root / 'publish'; publish.mkdir(); destination = root / 'payload'
             source_sha = 'a' * 40
             (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-admitted-host')
-            (publish / 'host-build-evidence.json').write_text(json.dumps({
-                'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'PASS'}), encoding='utf-8')
+            (publish / 'host-build-evidence.json').write_text(
+                json.dumps(publish_evidence(source_sha)), encoding='utf-8')
             admitted = candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
                 evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
             (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-replaced-host')
@@ -131,11 +178,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             source_sha = 'a' * 40
             host_bytes = b'MZ-admitted-host'
             runtime_bytes = b'admitted-runtime-dependency'
-            evidence = {
-                'source_sha': source_sha,
-                'checked_out_sha': source_sha,
-                'result': 'PASS',
-            }
+            evidence = publish_evidence(source_sha)
             (publish / 'AutoTrade.Host.exe').write_bytes(host_bytes)
             (publish / 'host-build-evidence.json').write_text(
                 json.dumps(evidence), encoding='utf-8')
@@ -153,11 +196,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             (publish / 'AutoTrade.Host.runtimeconfig.json').write_bytes(
                 b'foreign-runtime-after-admission')
             (publish / 'host-build-evidence.json').write_text(
-                json.dumps({
-                    'source_sha': source_sha,
-                    'checked_out_sha': source_sha,
-                    'result': 'FAIL',
-                }),
+                json.dumps(publish_evidence(source_sha, result='FAIL')),
                 encoding='utf-8',
             )
 

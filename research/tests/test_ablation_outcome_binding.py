@@ -9,6 +9,7 @@ from research.autotrade_research.evaluation.ablation import (
     CanonicalAblationOutcomeEvidence,
 )
 from research.autotrade_research.evaluation.ablation_outcome_binding import (
+    BoundReconciledAblationOutcome,
     bind_ablation_outcome_to_reconciled_fact,
 )
 from research.autotrade_research.memory.episodes import (
@@ -237,6 +238,40 @@ class AblationOutcomeBindingTests(unittest.TestCase):
                     granted_permissions={"research"},
                     task="wp63-ablation",
                     instrument_family="equity",
+                )
+
+    def test_direct_bound_value_rejects_noncanonical_artifact_digest(self):
+        with TemporaryDirectory() as directory:
+            store = self._memory(Path(directory) / "memory.sqlite3")
+            fact = self._fact(store)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "ablation_artifact_digest must be a sha256 digest",
+            ):
+                BoundReconciledAblationOutcome(
+                    case_id="case-63",
+                    variant="FULL",
+                    population_unit_id=EPISODE_ID,
+                    ablation_artifact_digest="caller-digest",
+                    reconciled_fact=fact,
+                    effective_outcome_available_utc=BASE,
+                )
+
+    def test_direct_bound_value_rejects_availability_after_fact_cutoff(self):
+        with TemporaryDirectory() as directory:
+            store = self._memory(Path(directory) / "memory.sqlite3")
+            fact = self._fact(store)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "availability cannot follow reconciled fact cutoff",
+            ):
+                BoundReconciledAblationOutcome(
+                    case_id="case-63",
+                    variant="FULL",
+                    population_unit_id=EPISODE_ID,
+                    ablation_artifact_digest=DIGEST,
+                    reconciled_fact=fact,
+                    effective_outcome_available_utc=BASE + timedelta(days=2),
                 )
 
 

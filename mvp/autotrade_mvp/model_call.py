@@ -36,6 +36,7 @@ from .model_gateway import (
     route_model,
 )
 from .persistence import (
+    JournalStore,
     canonical_json,
     payload_digest,
     require_exact_journal_store_authority,
@@ -53,6 +54,69 @@ class ModelCallError(RuntimeError):
 
 class ModelCallNotSent(ModelCallError):
     """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
+
+
+# Model-call callbacks execute in-process and can reach the JournalStore class
+# through a retained budget reference.  Instance-state sealing alone therefore
+# does not freeze transitive durable dispatch: rebinding JournalStore._connect,
+# commit_command, load_events, or one of their helpers can redirect subsequent
+# release/settlement even when the exact store object and its __dict__ survive.
+#
+# Capture the exact project-owned class dictionaries at trusted module import.
+# MappingProxyType makes each expected dictionary read-only, while the helper's
+# default argument retains this tuple even if callback code later rebinds the
+# module-level name.
+_MODEL_JOURNAL_CLASS_AUTHORITY = tuple(
+    (cls, MappingProxyType(dict(vars(cls))))
+    for cls in JournalStore.__mro__
+    if cls is not object
+)
+
+
+def _model_journal_class_authority_changes(
+    *,
+    restore: bool,
+    authority=_MODEL_JOURNAL_CLASS_AUTHORITY,
+) -> list[str]:
+    """Detect and optionally restore callback mutation of journal class dispatch."""
+
+    changes: list[str] = []
+    for cls, expected_state in authority:
+        current_state = vars(cls)
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            raise ModelCallError("journal class authority state keys are invalid")
+        names = set(current_keys) | set(expected_state)
+        for name in sorted(names):
+            label = f"budget.journal.class.{cls.__name__}.{name}"
+            if name not in expected_state:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__delattr__(cls, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+                continue
+            expected = expected_state[name]
+            if name not in current_state or current_state[name] is not expected:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__setattr__(cls, name, expected)
+                    except TypeError as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+
+        if restore:
+            restored = vars(cls)
+            if set(restored) != set(expected_state):
+                raise ModelCallError("journal class authority restore is incomplete")
+            if any(restored[name] is not expected_state[name] for name in expected_state):
+                raise ModelCallError("journal class authority restore is incomplete")
+    return changes
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -536,8 +600,13 @@ class DurableModelCallOrchestrator:
 
         DurableModelBudget and JournalStore both have instance dictionaries.
         Callback code retaining either object can otherwise install method
-        shadows without replacing the object reference itself.
+        shadows without replacing the object reference itself.  JournalStore
+        class dispatch is also part of the transitive durable authority.
         """
+        if _model_journal_class_authority_changes(restore=False):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
         state = object.__getattribute__(budget, "__dict__")
         if type(state) is not dict:
             raise ModelCallError("durable model budget authority state is invalid")
@@ -583,13 +652,13 @@ class DurableModelCallOrchestrator:
     ) -> list[str]:
         """Restore budget/store state and remove callback-installed shadows."""
         budget, expected_state, journal, expected_journal_state = snapshot
+        changes = _model_journal_class_authority_changes(restore=True)
         current_journal_state = object.__getattribute__(journal, "__dict__")
         if type(current_journal_state) is not dict:
             raise ModelCallError(
                 "durable model budget journal authority state is invalid"
             )
 
-        changes: list[str] = []
         current_journal_keys = tuple(current_journal_state)
         if any(type(name) is not str for name in current_journal_keys):
             changes.append("budget.journal.<invalid-state-key>")

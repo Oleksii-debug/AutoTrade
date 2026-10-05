@@ -321,15 +321,25 @@ class VerticalSliceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)
             checkpoint_path = Path(directory) / "checkpoint.json"
-            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            original = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+            checkpoint = dict(original)
             checkpoint["schema_version"] = 1
             checkpoint.pop("financial_configuration", None)
             checkpoint.pop("financial_configuration_hash", None)
             checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
-
             with self.assertRaisesRegex(
                 ValueError,
                 "Legacy checkpoint schema 1",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            checkpoint = dict(original)
+            checkpoint["schema_version"] = 2
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsupported or corrupt checkpoint schema",
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
 

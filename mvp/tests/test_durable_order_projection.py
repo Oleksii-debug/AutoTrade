@@ -103,6 +103,27 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertIsNone(book_ref())
             self.assertIsNone(store_ref())
 
+    def test_projection_gc_releases_registry_evidence_store_binding_without_second_oms(self):
+        with TemporaryDirectory() as directory:
+            def build():
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                evidence_store = ArtifactStore(f"{directory}/evidence")
+                book = durable(store, evidence_artifact_store=evidence_store)
+                return (
+                    weakref.ref(book),
+                    weakref.ref(store),
+                    weakref.ref(evidence_store),
+                    book,
+                )
+
+            book_ref, store_ref, evidence_ref, book = build()
+            del book
+            gc.collect()
+
+            self.assertIsNone(book_ref())
+            self.assertIsNone(store_ref())
+            self.assertIsNone(evidence_ref())
+
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

@@ -223,8 +223,6 @@ class JournalTransaction:
 
 
 _TRANSACTION_DIGEST_CACHE_LIMIT = 2048
-_transaction_digest_cache: dict[tuple[object, ...], str] = {}
-_transaction_digest_cache_lock = RLock()
 
 
 def _require_exact_transaction_graph(transaction: JournalTransaction) -> None:
@@ -309,8 +307,21 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     }
 
 
-def transaction_digest(transaction: JournalTransaction) -> str:
-    return payload_digest(canonical_transaction(transaction))
+def _make_transaction_digest(
+    *,
+    _canonicalize=canonical_transaction,
+    _digest_payload=payload_digest,
+):
+    """Bind the canonicalizer and digest primitive outside module rebinding."""
+
+    def digest(transaction: JournalTransaction) -> str:
+        return _digest_payload(_canonicalize(transaction))
+
+    return digest
+
+
+transaction_digest = _make_transaction_digest()
+del _make_transaction_digest
 
 
 def _transaction_digest_fingerprint(
@@ -351,22 +362,43 @@ def _transaction_digest_fingerprint(
     return (*text_values, tuple(posting_values))
 
 
-def _cached_transaction_digest(transaction: JournalTransaction) -> str:
-    fingerprint = _transaction_digest_fingerprint(transaction)
-    if fingerprint is None:
-        return transaction_digest(transaction)
-    with _transaction_digest_cache_lock:
-        cached = _transaction_digest_cache.get(fingerprint)
-    if cached is not None:
-        return cached
+def _make_cached_transaction_digest(
+    *,
+    _fingerprint=_transaction_digest_fingerprint,
+    _digest=transaction_digest,
+    _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
+    _lock_factory=RLock,
+):
+    """Bind digest memoization state outside mutable module-global authority."""
 
-    digest = transaction_digest(transaction)
-    if _transaction_digest_fingerprint(transaction) != fingerprint:
-        return digest
-    with _transaction_digest_cache_lock:
-        if len(_transaction_digest_cache) >= _TRANSACTION_DIGEST_CACHE_LIMIT:
-            _transaction_digest_cache.clear()
-        return _transaction_digest_cache.setdefault(fingerprint, digest)
+    cache: dict[tuple[object, ...], str] = {}
+    lock = _lock_factory()
+
+    def cached(transaction: JournalTransaction) -> str:
+        fingerprint = _fingerprint(transaction)
+        if fingerprint is None:
+            return _digest(transaction)
+        with lock:
+            value = cache.get(fingerprint)
+        if value is not None:
+            return value
+
+        digest = _digest(transaction)
+        # Direct frozen-dataclass tampering remains possible through
+        # object.__setattr__. Never publish a digest if the graph changed
+        # while canonical validation/digesting was in progress.
+        if _fingerprint(transaction) != fingerprint:
+            return digest
+        with lock:
+            if len(cache) >= _limit:
+                cache.clear()
+            return cache.setdefault(fingerprint, digest)
+
+    return cached
+
+
+_cached_transaction_digest = _make_cached_transaction_digest()
+del _make_cached_transaction_digest
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -423,6 +455,37 @@ def validate_transaction(transaction: JournalTransaction) -> None:
             unbalanced[asset] = total
     if unbalanced:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
+
+
+def _make_economic_book_audit_digest(
+    digest_transaction,
+    *,
+    _digest_payload=payload_digest,
+    _normalize_name=_name,
+):
+    """Bind audit-digest dependencies outside mutable module-global authority."""
+
+    def audit_digest(self) -> str:
+        if type(self._transactions) is not list:
+            raise TypeError("economic transactions must use an exact list")
+        transactions = tuple(self._transactions)
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "transactions": [
+                    {
+                        "transaction_id": _normalize_name(
+                            transaction.transaction_id,
+                            field="transaction_id",
+                        ),
+                        "digest": digest_transaction(transaction),
+                    }
+                    for transaction in transactions
+                ],
+            }
+        )
+
+    return audit_digest
 
 
 class EconomicBook:
@@ -578,25 +641,16 @@ class EconomicBook:
         value = _name(currency, field="currency")
         return self.balance(f"FEE_EXPENSE:{value}", value)
 
-    def audit_digest(self) -> str:
-        if type(self._transactions) is not list:
-            raise TypeError("economic transactions must use an exact list")
-        transactions = tuple(self._transactions)
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "transactions": [
-                    {
-                        "transaction_id": _name(
-                            transaction.transaction_id,
-                            field="transaction_id",
-                        ),
-                        "digest": _cached_transaction_digest(transaction),
-                    }
-                    for transaction in transactions
-                ],
-            }
-        )
+    audit_digest = _make_economic_book_audit_digest(
+        _cached_transaction_digest
+    )
+
+
+# EconomicBook.audit_digest owns the selected memoizer through its function
+# closure. Same-named module bindings created after import are not audit
+# authority.
+del _make_economic_book_audit_digest
+del _cached_transaction_digest
 
 
 def _scoped_economic_owner_operations():

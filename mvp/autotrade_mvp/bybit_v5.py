@@ -386,6 +386,10 @@ def build_order_payload(
         category = _CATEGORY_BY_FAMILY[family]
     except KeyError as error:
         raise ProviderCoreError("unsupported Bybit product family") from error
+    if family == "OPTIONS":
+        raise ProviderCoreError(
+            "Bybit option payload serialization requires dedicated option semantics"
+        )
 
     provider_symbol = _text(symbol, name="symbol")
     if provider_symbol != provider_symbol.upper():
@@ -996,49 +1000,77 @@ _unissued_prepare_order_submission = prepare_order_submission
 del _unissued_prepare_order_submission
 del _install_bybit_prepared_submission_authority
 
-_CANONICAL_PREPARED_SUBMISSION_VERIFIER = (
+def _install_guarded_order_projection(verifier):
+    """Capture the final prepared-request projection TCB outside module aliases."""
+
+    verifier_code = verifier.__code__
+    prepared_type = BybitPreparedSubmission
+    error_type = ProviderCoreError
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_dict = dict
+    mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
+
+    def guarded_order_projection(
+        prepared_request: BybitPreparedSubmission,
+    ) -> Mapping[str, object]:
+        """Project one canonical preparation without late-bound caller callbacks."""
+
+        if (
+            require_canonical_bybit_prepared_submission is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+            or BybitPreparedSubmission is not prepared_type
+            or ProviderCoreError is not error_type
+            or object is not canonical_object
+            or dict is not canonical_dict
+            or MappingProxyType is not mapping_proxy_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type("Bybit guarded projection authority changed")
+
+        verifier(prepared_request)
+        endpoint = object_getattribute(prepared_request, "endpoint")
+        body = object_getattribute(prepared_request, "body")
+        account_id = object_getattribute(prepared_request, "account_id")
+        environment = object_getattribute(prepared_request, "environment")
+        provider_environment = object_getattribute(
+            prepared_request,
+            "provider_environment",
+        )
+        capability_snapshot_id = object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        )
+        entity_id = object_getattribute(prepared_request, "entity_id")
+        instrument_version = object_getattribute(
+            prepared_request,
+            "instrument_version",
+        )
+        body_sha256 = object_getattribute(prepared_request, "body_sha256")
+
+        return mapping_proxy_type(
+            {
+                "endpoint": endpoint,
+                "body": canonical_dict(body),
+                "account_id": account_id,
+                "environment": environment,
+                "provider_environment": provider_environment,
+                "capability_snapshot_id": capability_snapshot_id,
+                "entity_id": entity_id,
+                "capability_snapshot_ids": [capability_snapshot_id],
+                "instrument_versions": [instrument_version],
+                "body_sha256": body_sha256,
+            }
+        )
+
+    return guarded_order_projection
+
+
+guarded_order_projection = _install_guarded_order_projection(
     require_canonical_bybit_prepared_submission
 )
-_CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE = (
-    require_canonical_bybit_prepared_submission.__code__
-)
-
-
-def guarded_order_projection(
-    prepared_request: BybitPreparedSubmission,
-) -> Mapping[str, object]:
-    """Project canonical Bybit preparation into the shared guarded transport seam."""
-
-    if (
-        require_canonical_bybit_prepared_submission
-        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER
-        or getattr(
-            _CANONICAL_PREPARED_SUBMISSION_VERIFIER,
-            "__code__",
-            None,
-        )
-        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE
-    ):
-        raise ProviderCoreError(
-            "Bybit prepared submission verifier authority changed"
-        )
-    _CANONICAL_PREPARED_SUBMISSION_VERIFIER(prepared_request)
-    return MappingProxyType(
-        {
-            "endpoint": prepared_request.endpoint,
-            "body": dict(prepared_request.body),
-            "account_id": prepared_request.account_id,
-            "environment": prepared_request.environment,
-            "provider_environment": prepared_request.provider_environment,
-            "capability_snapshot_id": prepared_request.capability_snapshot_id,
-            "entity_id": prepared_request.entity_id,
-            "capability_snapshot_ids": list(
-                prepared_request.capability_snapshot_ids
-            ),
-            "instrument_versions": list(prepared_request.instrument_versions),
-            "body_sha256": prepared_request.body_sha256,
-        }
-    )
+del _install_guarded_order_projection
 
 
 def _submission_evidence(

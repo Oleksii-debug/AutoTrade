@@ -242,6 +242,22 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
 
+    def test_raw_option_payload_fails_closed_without_option_semantics(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option semantics",
+        ):
+            build_order_payload(
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-payload-unqualified",
+                time_in_force="GTC",
+            )
+
     def test_canonical_preparation_rejects_cross_provider_environment_capability(self):
         capability = submission_write_capability(
             environment="PAPER",
@@ -888,6 +904,66 @@ class BybitV5AdapterTests(unittest.TestCase):
                             time_in_force="IOC",
                         )
                 self.assertEqual(callbacks, [])
+
+    def test_guarded_projection_rejects_runtime_shadowing_before_callback(self):
+        prepared = prepare_order_submission(
+            capability=submission_write_capability(),
+            at=READ_AT,
+            provider_environment="MAINNET",
+            product_family="SPOT",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.01",
+            client_order_id="projection-shadow",
+            time_in_force="IOC",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "require_canonical_bybit_prepared_submission",
+            "BybitPreparedSubmission",
+            "ProviderCoreError",
+            "object",
+            "dict",
+            "MappingProxyType",
+            "getattr",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "guarded projection authority changed",
+                    ):
+                        bybit_module.guarded_order_projection(prepared)
+                self.assertEqual(callbacks, [])
+
+        with patch.object(
+            BybitPreparedSubmission,
+            "__getattribute__",
+            forged,
+        ):
+            projected = bybit_module.guarded_order_projection(prepared)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(projected["endpoint"], "/v5/order/create")
+        self.assertEqual(projected["body"]["category"], "spot")
+        self.assertEqual(
+            projected["capability_snapshot_ids"],
+            [prepared.capability_snapshot_id],
+        )
+        self.assertEqual(
+            projected["instrument_versions"],
+            [prepared.instrument_version],
+        )
 
     def test_submission_response_rejects_unissued_exact_prepared_clone(self):
         issued = prepare_order_submission(

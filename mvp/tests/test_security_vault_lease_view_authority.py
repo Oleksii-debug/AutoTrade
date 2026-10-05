@@ -98,6 +98,23 @@ class SecurityVaultLeaseViewAuthorityTests(unittest.TestCase):
                 self.assertEqual(plaintext, "canonical-secret")
             self.assertEqual(hostile.unprotect_calls, 0)
 
+    def test_post_composition_protector_method_rebinding_cannot_substitute_plaintext(self):
+        with TemporaryDirectory() as root:
+            vault, handle = self._vault(Path(root) / "canonical.json", "canonical-secret")
+            boundary, token = self._boundary(vault)
+            hostile_calls = []
+
+            def hostile_unprotect(_self, _ciphertext, *, entropy):
+                _ = entropy
+                hostile_calls.append(True)
+                return b"hostile-secret"
+
+            with patch.object(DeterministicProtector, "unprotect", hostile_unprotect):
+                with self._lease(boundary, token, handle) as plaintext:
+                    self.assertEqual(plaintext, "canonical-secret")
+
+            self.assertEqual(hostile_calls, [])
+
     def test_post_composition_load_rebinding_cannot_substitute_other_vault_state(self):
         with TemporaryDirectory() as root:
             canonical, handle = self._vault(
@@ -132,6 +149,33 @@ class SecurityVaultLeaseViewAuthorityTests(unittest.TestCase):
                 return handle
 
             with patch.object(ProtectedCredentialVault, "_handle", staticmethod(hostile_handle)):
+                with self._lease(boundary, token, handle) as plaintext:
+                    self.assertEqual(plaintext, "canonical-secret")
+
+            self.assertEqual(calls, [])
+
+    def test_post_composition_scope_normalizer_rebinding_cannot_change_lease_scope(self):
+        with TemporaryDirectory() as root:
+            vault, handle = self._vault(Path(root) / "canonical.json", "canonical-secret")
+            boundary, token = self._boundary(vault)
+            calls = []
+
+            def hostile_normalize_scope(**_kwargs):
+                calls.append(True)
+                return (
+                    "host-a",
+                    "account-1",
+                    "BYBIT",
+                    "PAPER",
+                    "TESTNET",
+                    "TRADE",
+                )
+
+            with patch.object(
+                ProtectedCredentialVault,
+                "_normalize_scope",
+                staticmethod(hostile_normalize_scope),
+            ):
                 with self._lease(boundary, token, handle) as plaintext:
                     self.assertEqual(plaintext, "canonical-secret")
 

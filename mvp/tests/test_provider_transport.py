@@ -42,6 +42,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
+    DirectAuthenticatedReadExecutionReceipt,
     AlpacaTradingHttpTransport,
     BinanceSpotAuthenticatedReadSigner,
     BinanceSpotAuthenticatedReadTransport,
@@ -53,6 +54,11 @@ from mvp.autotrade_mvp.provider_transport import (
     TradingWireResponse,
     SignedHttpRequest,
     UrllibJsonWireClient,
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+    provider_observation_direct_execution_material,
+    require_direct_authenticated_read_client,
+    _validated_authenticated_read_wire_semantics_digest,
     _exact_trading_response,
     _binance_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
@@ -3330,6 +3336,45 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.payload["balances"][0]["asset"], "USD")
         self.assertNotIn("SECRET", observation.evidence_ref)
 
+    def test_terminal_read_request_on_injected_wire_cannot_mint_direct_receipt(self):
+        events = []
+        wire = RecordingWire(events, response=b'{"balances":[]}')
+        transport, _resolver = self.make_read_transport(
+            events=events,
+            wire=wire,
+        )
+        proof = object()
+
+        def terminal_factory(binding):
+            events.append("terminal-cq")
+            self.assertIs(binding, authenticated_read_binding())
+            return proof
+
+        # Use the exact prepared binding object so identity is deterministic.
+        binding = authenticated_read_binding()
+        def exact_terminal_factory(received):
+            events.append("terminal-cq")
+            self.assertIs(received, binding)
+            return proof
+
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "canonical direct authenticated-read execution receipt is required",
+        ):
+            transport(
+                binding,
+                terminal_authority_factory=exact_terminal_factory,
+            )
+        self.assertEqual(
+            events,
+            ["capability", "resolve", "capability", "terminal-cq", "wire"],
+        )
+        self.assertEqual(len(wire.requests), 1)
+        self.assertIs(
+            getattr(wire.requests[0], "_terminal_qualified_read_authority"),
+            proof,
+        )
+
     def test_read_credential_generation_lease_covers_final_currentness_and_wire(self):
         events = []
         resolver = FakeSecretResolver(events)
@@ -4449,6 +4494,176 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             self.assertEqual(len(selected), 1)
             self.assertEqual(selected[0].proxies, {})
         self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_direct_authenticated_read_authority_rejects_https_handler_method_patch(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        https_handler = next(
+            handler
+            for handler in client._opener.handlers
+            if type(handler).__name__ == "HTTPSHandler"
+        )
+        with patch.object(
+            type(https_handler),
+            "https_open",
+            lambda *_args, **_kwargs: None,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_authenticated_read_client(client)
+
+    def test_direct_authenticated_read_authority_rejects_proxy_policy_mutation(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        proxy = next(
+            handler
+            for handler in client._opener.handlers
+            if type(handler) is ProxyHandler
+        )
+        proxy.proxies["https"] = "http://127.0.0.1:9"
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_authenticated_read_client(client)
+
+    def test_direct_authenticated_read_authority_rejects_handler_topology_mutation(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener.handlers.append(object())
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            require_direct_authenticated_read_client(client)
+
+    def test_instance_shadowed_opener_cannot_mint_direct_authenticated_read_receipt(self):
+        class Stream(BytesIO):
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        captured = []
+
+        def fake_open(request, *, timeout):
+            captured.append((request, timeout))
+            return Stream(b'{"ok":true}')
+
+        client._opener.open = fake_open
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(request, "_terminal_qualified_read_authority", object())
+        object.__setattr__(request, "_terminal_authenticated_read_query_binding", binding)
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            client.send(request)
+        self.assertEqual(captured, [])
+
+    def test_forged_receipt_attached_to_local_response_has_no_execution_authority(self):
+        response = AuthenticatedReadWireResponse(
+            http_status=200,
+            body=b'{"ok":true}',
+        )
+        forged_receipt = object.__new__(DirectAuthenticatedReadExecutionReceipt)
+        object.__setattr__(
+            response,
+            "_direct_authenticated_read_execution_receipt",
+            forged_receipt,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            direct_authenticated_read_execution_receipt(response)
+
+    def test_caller_assembled_observation_has_no_direct_execution_authority(self):
+        binding = authenticated_read_binding()
+        caller_observation = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=b'{"ok":true}',
+            observed_at=READ_NOW,
+        )
+        object.__setattr__(
+            caller_observation,
+            "_direct_authenticated_read_execution_receipt",
+            object.__new__(DirectAuthenticatedReadExecutionReceipt),
+        )
+        object.__setattr__(
+            caller_observation,
+            "_direct_authenticated_read_response_bytes",
+            b'{"ok":true}',
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "construction authority is unavailable",
+        ):
+            provider_observation_direct_execution_material(caller_observation)
+
+    def test_direct_wire_semantics_reject_terminal_proof_relabelled_to_other_endpoint(self):
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(
+            request,
+            "url",
+            request.url.replace("/api/v3/account?", "/api/v3/myTrades?"),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "transmitted endpoint differs",
+        ):
+            _validated_authenticated_read_wire_semantics_digest(
+                request,
+                binding,
+                provider_environment="TESTNET",
+            )
+
+    def test_replaced_urllib_opener_cannot_mint_direct_authenticated_read_receipt(self):
+        class InjectedOpener:
+            def open(self, *_args, **_kwargs):
+                raise AssertionError("injected opener must not be reached")
+
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        client._opener = InjectedOpener()
+        binding = authenticated_read_binding()
+        request = BinanceSpotAuthenticatedReadSigner.sign(
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            query_binding=binding,
+            credential_plaintext='{"api_key":"SYNTHETIC-KEY","api_secret":"SYNTHETIC-SECRET"}',
+            timestamp_ms=1700000000000,
+        )
+        object.__setattr__(request, "_terminal_qualified_read_authority", object())
+        object.__setattr__(request, "_terminal_authenticated_read_query_binding", binding)
+        object.__setattr__(
+            request,
+            "_terminal_authenticated_read_provider_environment",
+            "TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "network authority changed",
+        ):
+            client.send(request)
 
     def test_signed_write_requires_exactly_one_payload_channel(self):
         body_request = SignedHttpRequest(

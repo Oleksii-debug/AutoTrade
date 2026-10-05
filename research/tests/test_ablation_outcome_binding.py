@@ -220,6 +220,25 @@ class AblationOutcomeBindingTests(unittest.TestCase):
                     instrument_family="equity",
                 )
 
+    def test_causal_cutoff_requires_exact_utc_datetime(self):
+        with TemporaryDirectory() as directory:
+            store = self._memory(Path(directory) / "memory.sqlite3")
+            fact = self._fact(store)
+            outcome = self._outcome(fact.evidence_digest)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "causal_cutoff must use exact UTC timezone",
+            ):
+                bind_ablation_outcome_to_reconciled_fact(
+                    store,
+                    outcome,
+                    causal_cutoff=datetime(2026, 1, 2),
+                    granted_permissions={"research"},
+                    task="wp63-ablation",
+                    instrument_family="equity",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

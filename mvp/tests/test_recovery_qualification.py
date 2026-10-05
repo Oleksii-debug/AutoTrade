@@ -1,6 +1,7 @@
 from hashlib import sha256
 import inspect
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
@@ -785,6 +786,34 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 protocol_id=PROTOCOL_ID,
                 max_downtime_ms=limits,
                 required_tests=dict(REQUIRED_TESTS),
+            )
+
+        proxied_limits = MappingProxyType(limits)
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            RecoveryQualificationPolicy(
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                max_downtime_ms=proxied_limits,
+                required_tests=dict(REQUIRED_TESTS),
+            )
+
+        proxied_measured = MappingProxyType(
+            HostileDict({scenario: 10 for scenario in RecoveryScenario})
+        )
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                blockers=(),
+                measured_downtime_ms=proxied_measured,
             )
 
         with self.assertRaisesRegex(TypeError, "exact list or tuple"):

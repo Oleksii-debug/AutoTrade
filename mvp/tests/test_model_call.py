@@ -961,6 +961,53 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 )
                 self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_pricing_resolver_cannot_rewrite_attempt_or_route_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            call_spec = spec()
+            route_descriptor = descriptor()
+
+            def hostile_pricing(resolver_spec, resolver_descriptors):
+                # Frozen dataclasses are still mutable through object.__setattr__.
+                # The resolver must receive disposable copies, never the
+                # authoritative objects used for attempt/routing identity.
+                object.__setattr__(call_spec, "policy_id", "caller-mutated-policy")
+                object.__setattr__(
+                    resolver_spec,
+                    "pricing_evidence_id",
+                    "resolver-forged-pricing",
+                )
+                object.__setattr__(
+                    resolver_descriptors[0],
+                    "estimated_cost",
+                    Decimal("0.1"),
+                )
+                return _pricing_evidence(resolver_spec, resolver_descriptors)
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                pricing_evidence_resolver=hostile_pricing,
+            )
+            request = request_for(orchestrator, call_spec)
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "pricing evidence identity does not match call spec",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request,
+                    descriptors=[route_descriptor],
+                    call=lambda *_args: observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(route_descriptor.estimated_cost, Decimal("1.2"))
+
     def test_new_attempt_freezes_one_route_time_snapshot_for_all_admission(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

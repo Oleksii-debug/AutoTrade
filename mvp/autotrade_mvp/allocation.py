@@ -2966,8 +2966,33 @@ def revalidate_evidence_bound_allocation(
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
-    if not isinstance(result, EvidenceBoundObjectiveAllocationResult):
-        raise TypeError("result must be EvidenceBoundObjectiveAllocationResult")
+    def snapshot_mapping(value, *, name: str):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        snapshot = dict(value)
+        for key in dict.keys(snapshot):
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be exact built-in strings")
+        return snapshot
+
+    # Freeze every callback-capable authority input before checking the result.
+    resolved_evidence = snapshot_mapping(
+        resolved_evidence,
+        name="resolved_evidence",
+    )
+    current_instrument_versions = snapshot_mapping(
+        current_instrument_versions,
+        name="current_instrument_versions",
+    )
+    current_capability_snapshot_ids = snapshot_mapping(
+        current_capability_snapshot_ids,
+        name="current_capability_snapshot_ids",
+    )
+
+    if type(result) is not EvidenceBoundObjectiveAllocationResult:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    if type(current_policy) is not AllocationPolicy:
+        raise TypeError("current_policy must be exact AllocationPolicy")
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment != result.environment:
         raise ValueError("allocation result environment does not match authority environment")
@@ -3029,8 +3054,8 @@ def revalidate_evidence_bound_allocation(
             result.reservation_state_version,
         ),
     ):
-        if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
-            raise ValueError(f"current {name} must be a non-negative integer")
+        if type(actual) is not int or actual < 0:
+            raise ValueError(f"current {name} must be a non-negative exact integer")
         if actual != expected:
             raise ValueError(f"{name} advanced after allocation proposal")
 

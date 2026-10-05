@@ -109,9 +109,11 @@ def _artifact_id(value: object) -> str:
 
 
 def _normalize_host_identity(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise RuntimeTargetHostInventoryError("host identity must be a mapping")
-    identity = dict(value)
+    if type(value) is not dict:
+        raise RuntimeTargetHostInventoryError(
+            "host identity must be an exact detached dict"
+        )
+    identity = value
     if set(identity) != _HOST_IDENTITY_KEYS:
         raise RuntimeTargetHostInventoryError(
             "host identity fields do not match the canonical runtime identity"
@@ -151,19 +153,23 @@ class RuntimeTargetHostInventory:
     evidence_type: str = EVIDENCE_TYPE
 
     def __post_init__(self) -> None:
-        if self.schema_version != SCHEMA_VERSION:
+        schema_version = _text(self.schema_version, name="schema_version")
+        evidence_type = _text(self.evidence_type, name="evidence_type")
+        collector_id = _text(self.collector_id, name="collector_id")
+        collector_version = _text(self.collector_version, name="collector_version")
+        if schema_version != SCHEMA_VERSION:
             raise RuntimeTargetHostInventoryError(
                 "unsupported target-host inventory schema_version"
             )
-        if self.evidence_type != EVIDENCE_TYPE:
+        if evidence_type != EVIDENCE_TYPE:
             raise RuntimeTargetHostInventoryError(
                 "unsupported target-host inventory evidence_type"
             )
-        if self.collector_id != COLLECTOR_ID:
+        if collector_id != COLLECTOR_ID:
             raise RuntimeTargetHostInventoryError(
                 "target-host inventory collector_id is not canonical"
             )
-        if self.collector_version != COLLECTOR_VERSION:
+        if collector_version != COLLECTOR_VERSION:
             raise RuntimeTargetHostInventoryError(
                 "target-host inventory collector_version is not canonical"
             )
@@ -179,6 +185,10 @@ class RuntimeTargetHostInventory:
             )
         object.__setattr__(self, "host_identity", MappingProxyType(normalized))
         object.__setattr__(self, "host_fingerprint", fingerprint)
+        object.__setattr__(self, "schema_version", schema_version)
+        object.__setattr__(self, "evidence_type", evidence_type)
+        object.__setattr__(self, "collector_id", collector_id)
+        object.__setattr__(self, "collector_version", collector_version)
 
     def canonical_payload(self) -> dict[str, object]:
         return {

@@ -122,5 +122,71 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             self.assertEqual((destination / 'AutoTrade.Host.exe').read_bytes(), b'MZ-replaced-host')
 
 
+    def test_held_host_publish_snapshot_prevents_post_admission_runtime_replacement(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            publish = root / 'publish'
+            publish.mkdir()
+            destination = root / 'payload'
+            source_sha = 'a' * 40
+            host_bytes = b'MZ-admitted-host'
+            runtime_bytes = b'admitted-runtime-dependency'
+            evidence = {
+                'source_sha': source_sha,
+                'checked_out_sha': source_sha,
+                'result': 'PASS',
+            }
+            (publish / 'AutoTrade.Host.exe').write_bytes(host_bytes)
+            (publish / 'host-build-evidence.json').write_text(
+                json.dumps(evidence), encoding='utf-8')
+            (publish / 'AutoTrade.Host.runtimeconfig.json').write_bytes(runtime_bytes)
+
+            held = candidate._capture_publish(publish)
+            identity = candidate._require_publish_snapshot_evidence(
+                held,
+                executable='AutoTrade.Host.exe',
+                evidence_name='host-build-evidence.json',
+                source_sha=source_sha,
+                label='Host',
+            )
+
+            (publish / 'AutoTrade.Host.runtimeconfig.json').write_bytes(
+                b'foreign-runtime-after-admission')
+            (publish / 'host-build-evidence.json').write_text(
+                json.dumps({
+                    'source_sha': source_sha,
+                    'checked_out_sha': source_sha,
+                    'result': 'FAIL',
+                }),
+                encoding='utf-8',
+            )
+
+            copied = candidate._copy_publish_snapshot(held, destination)
+            candidate._require_copied_executable(identity, copied, label='Host')
+            self.assertEqual(
+                (destination / 'AutoTrade.Host.runtimeconfig.json').read_bytes(),
+                runtime_bytes,
+            )
+            self.assertEqual(
+                json.loads((destination / 'host-build-evidence.json').read_text(encoding='utf-8')),
+                evidence,
+            )
+
+    def test_publish_snapshot_evidence_rejects_malformed_held_bytes(self):
+        source_sha = 'a' * 40
+        snapshot = {
+            'AutoTrade.Host.exe': b'MZ-host',
+            'host-build-evidence.json': b'not-json',
+        }
+        with self.assertRaisesRegex(ValueError, 'not canonical JSON'):
+            candidate._require_publish_snapshot_evidence(
+                snapshot,
+                executable='AutoTrade.Host.exe',
+                evidence_name='host-build-evidence.json',
+                source_sha=source_sha,
+                label='Host',
+            )
+
+
 if __name__ == '__main__':
     unittest.main()

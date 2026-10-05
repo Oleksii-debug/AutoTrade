@@ -304,23 +304,80 @@ def _runtime_scope_snapshot(
     return cut, loop_events, authority_events
 
 
+def _autonomous_publication_owned(
+    item: Mapping[str, object],
+    *,
+    run_id: str,
+) -> bool:
+    """Return whether one pending publication belongs to ZERO runtime authority."""
+
+    envelope = item.get("payload")
+    if type(envelope) is not dict:
+        raise AutonomousRuntimeCheckpointError(
+            "pending outbox payload is not a canonical event envelope"
+        )
+    aggregate_type = envelope.get("aggregate_type")
+    aggregate_id = envelope.get("aggregate_id")
+    if aggregate_type == "canonical_autonomous_simulation":
+        return aggregate_id == run_id
+
+    event_payload = envelope.get("payload")
+    event_payload = event_payload if type(event_payload) is dict else {}
+    environment = envelope.get("environment", event_payload.get("environment"))
+    host_id = envelope.get("host_id", event_payload.get("host_id"))
+    return (
+        aggregate_type in _COMPONENT_AGGREGATE_TYPES
+        and environment == "SIMULATION"
+        and host_id == "local-simulation"
+    )
+
+
+def _autonomous_owned_pending_publications(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> tuple[dict[str, object], ...]:
+    pending = JournalStore.pending_outbox(store, limit=1000)
+    count = JournalStore.pending_outbox_count(store)
+    if len(pending) == 1000 and count > len(pending):
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint publication ownership scan exceeded bounded outbox window"
+        )
+    if len(pending) != count:
+        raise AutonomousRuntimeCheckpointError(
+            "runtime checkpoint pending outbox changed during ownership preflight"
+        )
+    return tuple(
+        item
+        for item in pending
+        if _autonomous_publication_owned(item, run_id=run_id)
+    )
+
+
+def deliver_autonomous_owned_publications(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> None:
+    """Acknowledge only publications owned by the closed ZERO authority scope."""
+
+    for item in _autonomous_owned_pending_publications(store, run_id=run_id):
+        JournalStore.mark_outbox_delivered(
+            store,
+            item["outbox_id"],
+            expected_envelope_hash=item["envelope_hash"],
+        )
+
+
 def _require_checkpoint_outbox_state(
     store: JournalStore,
     *,
+    run_id: str,
     completion_event_id: str | None,
 ) -> None:
-    """Require no undelivered publication outside an authorized terminal event."""
+    """Require ZERO-owned publication completion; ignore foreign Host/UI backlog."""
 
-    count = JournalStore.pending_outbox_count(store)
-    if count > 1000:
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint pending outbox exceeds bounded preflight"
-        )
-    pending = JournalStore.pending_outbox(store, limit=1000)
-    if len(pending) != count:
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint pending outbox changed during preflight"
-        )
+    pending = _autonomous_owned_pending_publications(store, run_id=run_id)
     if not pending:
         return
     if (
@@ -331,7 +388,7 @@ def _require_checkpoint_outbox_state(
     ):
         return
     raise AutonomousRuntimeCheckpointError(
-        "runtime checkpoint requires independently delivered foreign publications"
+        "runtime checkpoint requires all ZERO-owned publications delivered"
     )
 
 
@@ -360,6 +417,7 @@ def _stable_runtime_components(
     }
     _require_checkpoint_outbox_state(
         store,
+        run_id=run_id,
         completion_event_id=completion_preimage,
     )
     captured_cut, loop_events, authority_events = _runtime_scope_snapshot(
@@ -518,6 +576,7 @@ def _stable_runtime_components(
     )
     _require_checkpoint_outbox_state(
         store,
+        run_id=run_id,
         completion_event_id=completion_preimage,
     )
     if after_cut != captured_cut:

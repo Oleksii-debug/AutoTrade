@@ -1,4 +1,5 @@
 import json
+from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -151,6 +152,30 @@ class VerticalSliceTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), TemporaryDirectory() as directory:
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
+
+    def test_financial_outputs_ignore_ambient_decimal_context(self):
+        prices = ["100.12345678", "101.23456789", "102.34567891", "103.45678912"]
+        kwargs = {
+            "order_quantity": "3.14159265",
+            "max_abs_position": "10",
+            "max_notional": "1000",
+            "fee_rate": "0.00123456",
+        }
+        with TemporaryDirectory() as reference_dir, TemporaryDirectory() as hostile_dir:
+            reference = run_vertical_slice(prices, reference_dir, **kwargs)
+            with localcontext() as context:
+                context.prec = 2
+                context.rounding = ROUND_CEILING
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                hostile = run_vertical_slice(prices, hostile_dir, **kwargs)
+
+        self.assertEqual(hostile.status, reference.status)
+        self.assertEqual(hostile.decision, reference.decision)
+        self.assertEqual(hostile.cash, reference.cash)
+        self.assertEqual(hostile.position, reference.position)
+        self.assertEqual(hostile.equity, reference.equity)
+        self.assertEqual(hostile.reconciled, reference.reconciled)
 
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:

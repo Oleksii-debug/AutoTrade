@@ -1938,6 +1938,108 @@ class JournalStore:
             )
         return pending
 
+    def outbox_delivery_state(
+        self,
+        event_id: str,
+        *,
+        topic: str,
+    ) -> dict[str, Any] | None:
+        """Read one exact outbox row after canonical event-envelope checks."""
+
+        event_id = self._require_text(event_id, "event_id")
+        topic = self._require_text(topic, "topic")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    outbox.outbox_id,
+                    outbox.event_id,
+                    outbox.topic,
+                    outbox.payload_json AS outbox_payload_json,
+                    outbox.created_at,
+                    outbox.envelope_hash,
+                    outbox.delivered_at,
+                    events.event_type,
+                    events.aggregate_type,
+                    events.aggregate_id,
+                    events.aggregate_version,
+                    events.payload_json AS event_payload_json,
+                    events.payload_hash,
+                    events.committed_at,
+                    events.envelope_json AS event_envelope_json,
+                    events.envelope_hash AS event_envelope_hash
+                FROM outbox
+                JOIN events ON events.event_id = outbox.event_id
+                WHERE outbox.event_id = ? AND outbox.topic = ?
+                """,
+                (event_id, topic),
+            ).fetchone()
+        if row is None:
+            return None
+
+        raw_outbox_payload = str(row["outbox_payload_json"])
+        actual_outbox_hash = _outbox_envelope_digest(
+            str(row["topic"]), raw_outbox_payload
+        )
+        if row["envelope_hash"] != actual_outbox_hash:
+            raise ValueError("outbox envelope hash does not match stored payload")
+        event_row = {
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "aggregate_type": row["aggregate_type"],
+            "aggregate_id": row["aggregate_id"],
+            "aggregate_version": row["aggregate_version"],
+            "payload_json": row["event_payload_json"],
+            "payload_hash": row["payload_hash"],
+            "committed_at": row["committed_at"],
+            "envelope_json": row["event_envelope_json"],
+            "envelope_hash": row["event_envelope_hash"],
+        }
+        event = self._decode_event_row(event_row)
+        try:
+            outbox_payload = json.loads(raw_outbox_payload)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("outbox payload is not valid JSON") from error
+        if canonical_json(outbox_payload) != raw_outbox_payload:
+            raise ValueError("outbox payload is not canonical JSON")
+        raw_authoritative_envelope = row["event_envelope_json"]
+        if not isinstance(raw_authoritative_envelope, str):
+            raise ValueError("journal event envelope authority is missing")
+        try:
+            authoritative_envelope = json.loads(raw_authoritative_envelope)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("journal event envelope is not valid JSON") from error
+        if canonical_json(authoritative_envelope) != raw_authoritative_envelope:
+            raise ValueError("journal event envelope is not canonical JSON")
+        core_envelope = {
+            "event_id": event["event_id"],
+            "event_type": event["event_type"],
+            "aggregate_type": event["aggregate_type"],
+            "aggregate_id": event["aggregate_id"],
+            "aggregate_version": str(event["aggregate_version"]),
+            "payload": event["payload"],
+            "payload_hash": event["payload_hash"],
+            "committed_at": event["committed_at"],
+        }
+        for key, expected in core_envelope.items():
+            if authoritative_envelope.get(key) != expected:
+                raise ValueError(
+                    "journal event envelope conflicts with core journal event"
+                )
+        if raw_outbox_payload != raw_authoritative_envelope:
+            raise ValueError(
+                "outbox payload does not match authoritative journal event envelope"
+            )
+        return {
+            "outbox_id": row["outbox_id"],
+            "event_id": row["event_id"],
+            "topic": row["topic"],
+            "payload": outbox_payload,
+            "created_at": row["created_at"],
+            "envelope_hash": row["envelope_hash"],
+            "delivered": row["delivered_at"] is not None,
+        }
+
     def mark_outbox_delivered(
         self,
         outbox_id: str,

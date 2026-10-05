@@ -621,6 +621,60 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                             composer.compose(request, prepared)
                     self.assertEqual(callbacks, [])
 
+    def test_product_authority_global_rebinding_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+
+            replacements = (
+                ("ProductRiskPriceSemanticsError", RuntimeError),
+                ("_REQUEST_TYPE", object()),
+                ("_PREPARED_TYPE", object()),
+                ("_REGISTRY_TYPE", object()),
+                ("_ARTIFACT_STORE_TYPE", object()),
+                ("_FACTORY_TOKEN", object()),
+                ("_bybit_module", object()),
+                ("_instruments_module", object()),
+                ("datetime", object()),
+                ("timezone", object()),
+                ("Decimal", object()),
+                ("InvalidOperation", RuntimeError),
+            )
+            for name, replacement in replacements:
+                with self.subTest(name=name):
+                    with patch.object(
+                        price_semantics_module,
+                        name,
+                        replacement,
+                    ):
+                        with self.assertRaisesRegex(
+                            ProductRiskPriceSemanticsError,
+                            "binding authority changed",
+                        ):
+                            composer.compose(request, prepared)
+
+    def test_snapshot_type_authority_rebinding_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+
+            with patch.object(
+                price_semantics_module,
+                "_SNAPSHOT_TYPE",
+                object(),
+            ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "binding authority changed",
+                ):
+                    composer.bind_snapshot(request, base, binding, prepared)
+
     def test_snapshot_replace_rebinding_fails_before_forged_execution(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)

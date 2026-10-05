@@ -425,6 +425,15 @@ def _canonical_scenario_digest_mapping(
 
 RISK_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RISK_INTENT_HASH_RE = re.compile(r"^risk-intent:sha256:[0-9a-f]{64}$")
+
+
+def _canonical_risk_intent_hash(value: str, *, name: str) -> str:
+    if type(value) is not str or _RISK_INTENT_HASH_RE.fullmatch(value) is None:
+        raise ValueError(
+            f"{name} must be canonical lowercase risk-intent:sha256:<64-hex>"
+        )
+    return value
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
@@ -1312,6 +1321,7 @@ class RiskDecision:
     input_fingerprint: str
     rules: tuple[RiskRuleResult, ...]
     arithmetic_policy_id: str | None = None
+    evaluated_intent_hash: str | None = None
     decision_id: str | None = None
     intent_hash: str | None = None
     state_version: int | None = None
@@ -1343,6 +1353,34 @@ def _fingerprint_value(value):
     raise TypeError(
         f"Unsupported normalized risk fingerprint value: {type(value).__name__}"
     )
+
+
+def risk_intent_hash(intent: RiskIntent) -> str:
+    """Content-derived identity of the exact normalized economics evaluated by risk."""
+
+    if type(intent) is not RiskIntent:
+        raise TypeError("intent must be RiskIntent; exact RiskIntent type required")
+    sealed = RiskIntent.create(
+        symbol=intent.symbol,
+        side=intent.side,
+        quantity=intent.quantity,
+        price=intent.price,
+        expected_state_version=intent.expected_state_version,
+        reduce_only=intent.reduce_only,
+        action=intent.action,
+        instrument_type=intent.instrument_type,
+    )
+    payload = {
+        "schema_version": 1,
+        "risk_intent": _fingerprint_value(vars(sealed)),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return "risk-intent:sha256:" + sha256(encoded).hexdigest()
 
 
 def _risk_input_fingerprint(
@@ -1397,6 +1435,7 @@ def _validate_risk_decision_shape(decision: RiskDecision) -> None:
             raise TypeError("risk decision rule fields must use exact scalar types")
     for name in (
         "arithmetic_policy_id",
+        "evaluated_intent_hash",
         "decision_id",
         "intent_hash",
         "capability_snapshot_id",
@@ -1440,6 +1479,11 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
             for item in decision.rules
         ],
     }
+    if decision.evaluated_intent_hash is not None:
+        payload["evaluated_intent_hash"] = _canonical_risk_intent_hash(
+            decision.evaluated_intent_hash,
+            name="evaluated_intent_hash",
+        )
     if decision.arithmetic_policy_id is not None:
         if (
             type(decision.arithmetic_policy_id) is not str
@@ -1460,8 +1504,14 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     if any(value is not None for value in binding_values):
         if any(value is None for value in binding_values):
             raise ValueError("risk decision binding must be complete")
+        bound_intent_hash = _risk_binding_text(
+            decision.intent_hash,
+            name="intent_hash",
+        )
+        if decision.evaluated_intent_hash is None:
+            raise ValueError("bound risk decision lacks evaluated intent identity")
         payload["binding"] = {
-            "intent_hash": decision.intent_hash,
+            "intent_hash": bound_intent_hash,
             "state_version": decision.state_version,
             "policy_version": decision.policy_version,
             "reservation_version": decision.reservation_version,
@@ -1529,6 +1579,11 @@ def bind_risk_decision(
     if decision.arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID:
         raise ValueError("risk decision must use the current exact arithmetic policy")
     ihash = _risk_binding_text(intent_hash, name="intent_hash")
+    evaluated_intent_hash = decision.evaluated_intent_hash
+    if evaluated_intent_hash is None:
+        raise ValueError("risk decision lacks evaluated intent identity")
+    if _RISK_INTENT_HASH_RE.fullmatch(evaluated_intent_hash) is None:
+        raise ValueError("risk decision evaluated intent identity is malformed")
     capability = _risk_binding_text(
         capability_snapshot_id, name="capability_snapshot_id"
     )
@@ -2680,4 +2735,5 @@ def evaluate_risk(
         input_fingerprint=_risk_input_fingerprint(intent, context, policy),
         rules=tuple(rules),
         arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
+        evaluated_intent_hash=risk_intent_hash(intent),
     )

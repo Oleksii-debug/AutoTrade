@@ -3390,6 +3390,83 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
 
+    def test_orchestrator_rejects_preinstalled_journal_facade_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            had_connect = "_connect" in JournalStore.__dict__
+            original_connect = vars(JournalStore).get("_connect")
+            try:
+                type.__setattr__(
+                    JournalStore,
+                    "_connect",
+                    lambda *_args, **_kwargs: self.fail(
+                        "preinstalled JournalStore._connect must not become authority"
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    orchestrator_for(
+                        budget=budget,
+                        clock=MutableClock(),
+                    )
+            finally:
+                if had_connect:
+                    type.__setattr__(JournalStore, "_connect", original_connect)
+                elif "_connect" in JournalStore.__dict__:
+                    type.__delattr__(JournalStore, "_connect")
+
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_execute_rejects_journal_base_dispatch_tampered_after_construction(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            journal_base = JournalStore.__mro__[1]
+            had_get_event = "get_event" in journal_base.__dict__
+            original_get_event = vars(journal_base).get("get_event")
+            try:
+                type.__setattr__(
+                    journal_base,
+                    "get_event",
+                    lambda *_args, **_kwargs: self.fail(
+                        "pre-callback base get_event mutation must not become authority"
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=fixed_policy(),
+                        request=request_for(orchestrator, call_spec),
+                        descriptors=[descriptor()],
+                        call=lambda *_args: self.fail(
+                            "preinstalled journal dispatch crossed inference boundary"
+                        ),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                    )
+            finally:
+                if had_get_event:
+                    type.__setattr__(
+                        journal_base,
+                        "get_event",
+                        original_get_event,
+                    )
+                elif "get_event" in journal_base.__dict__:
+                    type.__delattr__(journal_base, "get_event")
+
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("0"))
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
     def test_cancellation_probe_cannot_redirect_orchestrator_authority(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

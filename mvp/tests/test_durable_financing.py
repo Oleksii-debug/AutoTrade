@@ -14,6 +14,7 @@ from typing import Mapping
 from mvp.autotrade_mvp.durable_financing import (
     DurableFinancingBook,
     _event_payload,
+    _milliseconds_instant,
     _revision_book_digest,
     authenticated_financing_event,
 )
@@ -239,6 +240,45 @@ class RejectingArtifactStore:
 
 
 class DurableFinancingTests(unittest.TestCase):
+    def test_provider_epoch_milliseconds_are_platform_independent(self):
+        class HostileDateTime:
+            calls = 0
+
+            @classmethod
+            def fromtimestamp(cls, *_args, **_kwargs):
+                cls.calls += 1
+                raise AssertionError("host time_t conversion executed")
+
+        with patch(
+            "mvp.autotrade_mvp.durable_financing.datetime",
+            HostileDateTime,
+        ):
+            self.assertEqual(
+                _milliseconds_instant("0", name="transactionTime"),
+                datetime(1970, 1, 1, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
+                _milliseconds_instant(1_000, name="transactionTime"),
+                datetime(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+            )
+        self.assertEqual(HostileDateTime.calls, 0)
+
+    def test_provider_epoch_milliseconds_preserve_exact_upper_utc_boundary(self):
+        self.assertEqual(
+            _milliseconds_instant(
+                "253402300799999",
+                name="transactionTime",
+            ),
+            datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(FinancingError, "outside supported UTC range"):
+            _milliseconds_instant(
+                "253402300800000",
+                name="transactionTime",
+            )
+        with self.assertRaisesRegex(FinancingError, "must be non-negative"):
+            _milliseconds_instant("-1", name="transactionTime")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = JournalStore(Path(self.temp.name) / "journal.sqlite3")

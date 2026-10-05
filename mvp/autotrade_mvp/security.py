@@ -20,6 +20,7 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
+from . import provider_domain as _provider_domain
 from . import windows_secrets as _windows_secrets
 from .host_actions import required_roles_for_host_action
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
@@ -800,11 +801,66 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     original_init = boundary_type.__init__
     original_init_code = getattr(original_init, "__code__", None)
 
+    retained_provider_domain_text = _retain_function_globals(
+        _provider_domain._environment_text
+    )
+    retained_normalize_provider_environment = _retain_function_globals(
+        _provider_domain.normalize_provider_environment,
+        globals_override={
+            "_environment_text": retained_provider_domain_text,
+            "_NORMALIZER_RUNTIME_ENVIRONMENTS": frozenset(
+                _provider_domain._NORMALIZER_RUNTIME_ENVIRONMENTS
+            ),
+            "_BYBIT_PROVIDER_ENVIRONMENTS": frozenset(
+                _provider_domain._BYBIT_PROVIDER_ENVIRONMENTS
+            ),
+        },
+    )
     retained_text = _retain_function_globals(_windows_secrets._text)
     retained_provider_environment = _retain_function_globals(
         _windows_secrets._provider_environment,
-        globals_override={"_text": retained_text},
+        globals_override={
+            "_text": retained_text,
+            "normalize_provider_environment": retained_normalize_provider_environment,
+        },
     )
+    retained_handle_post_init = _retain_function_globals(
+        PersistentCredentialHandle.__post_init__,
+        globals_override={
+            "_text": retained_text,
+            "_provider_environment": retained_provider_environment,
+            "_ALLOWED_ENVIRONMENTS": frozenset(
+                _windows_secrets._ALLOWED_ENVIRONMENTS
+            ),
+            "_ALLOWED_PURPOSES": frozenset(_windows_secrets._ALLOWED_PURPOSES),
+        },
+    )
+    handle_type = PersistentCredentialHandle
+    handle_post_init_code = getattr(retained_handle_post_init, "__code__", None)
+
+    def retained_handle_factory(
+        *,
+        handle_id,
+        account_id,
+        provider,
+        environment,
+        purpose,
+        generation,
+        provider_environment=None,
+    ):
+        if getattr(retained_handle_post_init, "__code__", None) is not handle_post_init_code:
+            raise PermissionError("Credential handle validation code changed")
+        handle = object.__new__(handle_type)
+        object.__setattr__(handle, "handle_id", handle_id)
+        object.__setattr__(handle, "account_id", account_id)
+        object.__setattr__(handle, "provider", provider)
+        object.__setattr__(handle, "environment", environment)
+        object.__setattr__(handle, "purpose", purpose)
+        object.__setattr__(handle, "generation", generation)
+        object.__setattr__(handle, "provider_environment", provider_environment)
+        retained_handle_post_init(handle)
+        return handle
+
     retained_vault_leaf = _retain_function_globals(
         _windows_secrets._require_vault_leaf
     )
@@ -837,13 +893,13 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
         globals_override={
             "_require_vault_leaf": retained_vault_leaf,
             "_text": retained_text,
-            "PersistentCredentialHandle": PersistentCredentialHandle,
+            "PersistentCredentialHandle": retained_handle_factory,
             "b64decode": retained_b64decode,
         },
     )
     vault_handle = _retain_function_globals(
         ProtectedCredentialVault._handle,
-        globals_override={"PersistentCredentialHandle": PersistentCredentialHandle},
+        globals_override={"PersistentCredentialHandle": retained_handle_factory},
     )
     vault_lease_generator = getattr(
         ProtectedCredentialVault.lease,
@@ -853,7 +909,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     retained_vault_lease_generator = _retain_function_globals(
         vault_lease_generator,
         globals_override={
-            "PersistentCredentialHandle": PersistentCredentialHandle,
+            "PersistentCredentialHandle": handle_type,
             "_exclusive_file_lock": retained_file_lock,
             "_scope_entropy": retained_scope_entropy,
             "b64decode": retained_b64decode,
@@ -863,6 +919,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     vault_format_version = ProtectedCredentialVault.FORMAT_VERSION
     if (
         original_init_code is None
+        or handle_post_init_code is None
         or getattr(vault_normalize_scope, "__code__", None) is None
         or getattr(vault_load, "__code__", None) is None
         or getattr(vault_handle, "__code__", None) is None
@@ -909,7 +966,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
         vault_lease=retained_vault_lease,
         vault_for_boundary=vault_for_boundary,
         credential_text=_credential_text,
-        handle_type=PersistentCredentialHandle,
+        handle_type=handle_type,
         execution_roles=boundary_type._EXECUTION_ROLES,
     )
 

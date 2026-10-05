@@ -1277,7 +1277,11 @@ def _whitebit_exact_trading_response(
 
     exact = _exact_trading_response(value)
     if exact.http_status is None:
-        return exact
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_http_status_unavailable_execution_unknown",
+        )
     decision = classify_whitebit_http_retry(
         status_code=exact.http_status,
         attempt=1,

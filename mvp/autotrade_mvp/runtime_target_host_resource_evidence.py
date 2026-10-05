@@ -1347,12 +1347,17 @@ def run_declared_target_host_campaign_with_resources(
     )
     require_callable(runner, runner_state, name="canonical target-host runner")
 
+    # Preserve the inherited resource-measurement boundary: the second
+    # process/disk cut closes immediately after the caller workload and authority
+    # revalidation. Durable backlog replay is qualification work and may perform
+    # SQLite reads proportional to the campaign transition count; including that
+    # replay before this cut would contaminate elapsed/CPU/I/O resource metrics.
+    after = capture_snapshot(evidence_root=evidence_store.root)
     backlog_evidence = outbox_backlog_high_water(
         journal,
         start_transition_sequence=backlog_start["transition_sequence"],
         start_pending_count=backlog_start["pending_count"],
     )
-    after = capture_snapshot(evidence_root=evidence_store.root)
     evidence = issue_evidence(
         run,
         before=before,

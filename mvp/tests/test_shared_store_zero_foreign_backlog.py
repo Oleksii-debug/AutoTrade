@@ -19,9 +19,17 @@ _HOST_TIME = "2026-10-05T00:00:00Z"
 _ZERO_TIME = "2026-10-05T00:00:01Z"
 
 
-def _event(*, aggregate_type: str, aggregate_id: str, event_type: str, committed_at: str):
+def _event(
+    *,
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    committed_at: str,
+    environment: str | None = None,
+    host_id: str | None = None,
+):
     payload = {}
-    return {
+    event = {
         "event_id": str(uuid4()),
         "event_type": event_type,
         "aggregate_type": aggregate_type,
@@ -31,6 +39,11 @@ def _event(*, aggregate_type: str, aggregate_id: str, event_type: str, committed
         "payload_hash": payload_digest(payload),
         "committed_at": committed_at,
     }
+    if environment is not None:
+        event["environment"] = environment
+    if host_id is not None:
+        event["host_id"] = host_id
+    return event
 
 
 class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
@@ -80,6 +93,62 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
                 all(
                     item["topic"] == "ui.host-events"
                     for item in store.pending_outbox(limit=1000)
+                )
+            )
+
+
+    def test_foreign_same_component_type_backlog_cannot_consume_zero_scan_budget(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+
+            # These rows deliberately use a ZERO-relevant aggregate type, so an
+            # aggregate-type-only SQL filter still fails. PAPER + production-host
+            # makes them foreign to the exact local SIMULATION authority.
+            store._now = lambda: _HOST_TIME
+            for index in range(1000):
+                foreign = _event(
+                    aggregate_type="submission_attempt",
+                    aggregate_id=f"foreign-paper-submission-{index}",
+                    event_type="SubmissionPrepared",
+                    committed_at=_HOST_TIME,
+                    environment="PAPER",
+                    host_id="production-host",
+                )
+                store.append_event(
+                    foreign,
+                    outbox_topic="autotrade.submission.events",
+                )
+
+            run_id = "zero-after-same-type-backlog"
+            store._now = lambda: _ZERO_TIME
+            zero_event = _event(
+                aggregate_type="canonical_autonomous_simulation",
+                aggregate_id=run_id,
+                event_type="AutonomousEpisodeProgressed",
+                committed_at=_ZERO_TIME,
+                environment="SIMULATION",
+                host_id="local-simulation",
+            )
+            store.append_event(
+                zero_event,
+                outbox_topic="autotrade.simulation.events",
+            )
+
+            deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            zero_state = store.outbox_delivery_state(zero_event["event_id"])
+            self.assertIsNotNone(zero_state)
+            self.assertTrue(zero_state["delivered"])
+            self.assertEqual(store.pending_outbox_count(), 1000)
+            pending = store.pending_outbox(limit=1000)
+            self.assertTrue(
+                all(item["topic"] == "autotrade.submission.events" for item in pending)
+            )
+            self.assertTrue(
+                all(
+                    item["payload"].get("environment") == "PAPER"
+                    and item["payload"].get("host_id") == "production-host"
+                    for item in pending
                 )
             )
 

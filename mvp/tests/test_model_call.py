@@ -3881,6 +3881,65 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_adapter_cannot_rebind_journal_base_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            canonical_base = JournalStore.__bases__[0]
+            hostile_calls = []
+
+            class HostileJournalBase(canonical_base):
+                def commit_command(journal_self, *_args, **_kwargs):
+                    hostile_calls.append("commit")
+                    raise AssertionError(
+                        "rebound journal base reached durable settlement"
+                    )
+
+            try:
+                def hostile_adapter(*_args):
+                    type.__setattr__(
+                        JournalStore,
+                        "__bases__",
+                        (HostileJournalBase,),
+                    )
+                    return observation()
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn("JournalStore.__bases__", result.reason)
+                self.assertEqual(len(JournalStore.__bases__), 1)
+                self.assertIs(JournalStore.__bases__[0], canonical_base)
+                self.assertEqual(hostile_calls, [])
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                current_bases = JournalStore.__bases__
+                if (
+                    len(current_bases) != 1
+                    or current_bases[0] is not canonical_base
+                ):
+                    type.__setattr__(
+                        JournalStore,
+                        "__bases__",
+                        (canonical_base,),
+                    )
+
     def test_cancel_callback_cannot_rebind_budget_release_class_dispatch(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

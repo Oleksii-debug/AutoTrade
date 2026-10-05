@@ -43,6 +43,7 @@ from .futures import (
     inverse_settlement_convention,
     settlement_identity_digest,
 )
+from .instruments import _detached_instrument_version
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
@@ -407,6 +408,42 @@ def _capture_journal_replay_cut(
     )
 
 
+def _detached_durable_contract(contract: FuturesContract) -> FuturesContract:
+    """Revalidate and detach the contract/instrument graph used by durable economics."""
+
+    if type(contract) is not FuturesContract:
+        raise FuturesError("durable settlement requires exact FuturesContract")
+    if type(contract.multiplier) is not Decimal:
+        raise FuturesError("durable futures multiplier must be exact Decimal")
+    version = contract.canonical_instrument
+    if version is None:
+        raise FuturesError("durable settlement requires canonical InstrumentVersion")
+    try:
+        detached_version = _detached_instrument_version(version)
+        detached = FuturesContract(
+            instrument=contract.instrument,
+            payoff=contract.payoff,
+            multiplier=contract.multiplier,
+            quote_currency=contract.quote_currency,
+            settlement_currency=contract.settlement_currency,
+            last_trade_at=contract.last_trade_at,
+            delivery_cutoff=contract.delivery_cutoff,
+            expiry=contract.expiry,
+            settlement_method=contract.settlement_method,
+            price_base_currency=contract.price_base_currency,
+            canonical_instrument=detached_version,
+        )
+    except (TypeError, ValueError) as error:
+        raise FuturesError(
+            "durable settlement contract conflicts with canonical InstrumentVersion"
+        ) from error
+    if detached != contract:
+        raise FuturesError(
+            "durable settlement contract conflicts with canonical InstrumentVersion"
+        )
+    return detached
+
+
 def _durable_scope(
     state: VariationMarginState | InverseVariationMarginState,
 ) -> tuple[str, str]:
@@ -414,21 +451,8 @@ def _durable_scope(
         raise TypeError(
             "state must be exact VariationMarginState or InverseVariationMarginState"
         )
-    contract = state.contract
-    if type(contract) is not FuturesContract:
-        raise FuturesError("durable settlement requires exact FuturesContract")
+    contract = _detached_durable_contract(state.contract)
     version = contract.canonical_instrument
-    if version is None:
-        raise FuturesError("durable settlement requires canonical InstrumentVersion")
-    try:
-        canonical_contract = FuturesContract.from_instrument_version(version)
-    except (TypeError, ValueError) as error:
-        raise FuturesError("durable settlement contract authority is invalid") from error
-    if canonical_contract != contract:
-        raise FuturesError(
-            "durable settlement contract conflicts with canonical InstrumentVersion"
-        )
-    version = canonical_contract.canonical_instrument
     scope = state.settlement_scope
     if type(scope) is not FuturesSettlementScope:
         raise FuturesError("durable settlement requires exact FuturesSettlementScope")
@@ -612,8 +636,9 @@ def _replay_linear_events(
         raise TypeError("opening_state must be exact VariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
+    detached_contract = _detached_durable_contract(opening_state.contract)
     detached = VariationMarginState(
-        contract=opening_state.contract,
+        contract=detached_contract,
         signed_contracts=opening_state.signed_contracts,
         last_settlement_price=opening_state.last_settlement_price,
         settlement_scope=opening_state.settlement_scope,
@@ -792,8 +817,9 @@ def _replay_inverse_events(
         raise TypeError("opening_state must be exact InverseVariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
+    detached_contract = _detached_durable_contract(opening_state.contract)
     detached = InverseVariationMarginState(
-        contract=opening_state.contract,
+        contract=detached_contract,
         signed_contracts=opening_state.signed_contracts,
         last_settlement_price=opening_state.last_settlement_price,
         settlement_scope=opening_state.settlement_scope,

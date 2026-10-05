@@ -610,7 +610,7 @@ class SecurityBoundary:
         if isinstance(value, tuple):
             return tuple(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, set):
-            return {SecurityBoundary.redact(item) for item in value]
+            return {SecurityBoundary.redact(item) for item in value}
         if isinstance(value, frozenset):
             return frozenset(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, str) and _REDACT_RE.search(value):

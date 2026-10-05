@@ -1,15 +1,21 @@
 from hashlib import sha256
+import inspect
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.qualification_attestation import (
+    AcceptedQualificationAttestation,
     EvidenceArtifactRef,
     QualificationScope,
+    QualificationTrustError,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
 )
+import mvp.autotrade_mvp.recovery_qualification as recovery_qualification_module
 from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
     RecoveryQualificationDecision,
@@ -145,6 +151,7 @@ def qualify(
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    canonical_error=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -175,7 +182,6 @@ def qualify(
             manifest = store.load_manifest(corrupt_evidence_id)
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
-        trust_kwargs = {}
         if trusted:
             trust_root = attestation_root(
                 scopes=(QualificationScope("RECOVERY", "RELEASE"),)
@@ -206,20 +212,58 @@ def qualify(
                 release_artifact_sha256=policy.release_artifact_sha256,
                 result="PASS",
             )
-            trust_kwargs = {
-                "qualification_receipt": SignedQualificationAttestation(
-                    signed, sign(signed)
-                ),
-                "qualification_policy": trust_policy,
-                "expected_policy_id": trust_policy.policy_id,
-                "expected_policy_version": trust_policy.policy_version,
+            receipt = SignedQualificationAttestation(signed, sign(signed))
+            accepted = AcceptedQualificationAttestation(
+                attestation_id=signed.attestation_id,
+                attestation_digest=signed.content_digest,
+                policy_id=trust_policy.policy_id,
+                policy_version=trust_policy.policy_version,
+                trust_root_id=trust_root.root_id,
+                result="PASS",
+                source_sha=policy.source_sha,
+                domain="RECOVERY",
+                gate="RELEASE",
+                package_id="WP-59",
+                protocol_id=policy.protocol_id,
+                protocol_version=policy.evidence_schema_version,
+                requirement_id="recovery-release-qualification",
+                release_artifact_id=policy.release_artifact_id,
+                release_artifact_sha256=policy.release_artifact_sha256,
+            )
+            verifier_kwargs = (
+                {"return_value": accepted}
+                if canonical_error is None
+                else {"side_effect": canonical_error}
+            )
+            with patch.object(
+                recovery_qualification_module,
+                "verify_canonical_qualification_attestation",
+                **verifier_kwargs,
+            ) as verify_canonical:
+                decision = qualify_recovery_release(
+                    policy=policy,
+                    evidence=evidence,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+            verify_canonical.assert_called_once()
+            call = verify_canonical.call_args
+            self_selected = {
+                "policy",
+                "expected_policy_id",
+                "expected_policy_version",
             }
+            if self_selected & set(call.kwargs):
+                raise AssertionError(
+                    "recovery qualification forwarded caller-selected trust authority"
+                )
+            return decision
         return qualify_recovery_release(
             policy=policy,
             evidence=evidence,
             evidence_store=store,
             evidence_root=directory,
-            **trust_kwargs,
         )
 
 
@@ -248,6 +292,12 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence=complete_evidence(),
                 evidence_store=lambda _item: True,
             )
+
+    def test_caller_cannot_select_recovery_qualification_trust_policy(self):
+        parameters = inspect.signature(qualify_recovery_release).parameters
+        self.assertNotIn("qualification_policy", parameters)
+        self.assertNotIn("expected_policy_id", parameters)
+        self.assertNotIn("expected_policy_version", parameters)
 
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()
@@ -305,7 +355,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             set(RecoveryScenario),
         )
 
-    def test_signed_attestation_allows_terminal_recovery_pass(self):
+    def test_canonical_accepted_attestation_allows_terminal_recovery_pass(self):
         decision = qualify(
             policy=policy(),
             evidence=complete_evidence(),
@@ -322,6 +372,38 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             decision.qualification_trust_root_id.startswith("sha256:")
         )
         self.assertFalse(decision.authorizes_trading)
+
+    def test_canonical_trust_unavailable_remains_inconclusive(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            canonical_error=QualificationTrustUnavailable(
+                "canonical policy unavailable"
+            ),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            decision.blockers,
+        )
+        self.assertIsNone(decision.qualification_attestation_id)
+
+    def test_invalid_canonical_trust_remains_inconclusive_without_fallback(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            canonical_error=QualificationTrustError(
+                "attestation is not authorized by canonical trust root"
+            ),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            decision.blockers,
+        )
+        self.assertIsNone(decision.qualification_policy_id)
 
     def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):
         decision = qualify(

@@ -1,0 +1,87 @@
+name: WP31 deterministic provider epoch milliseconds
+
+on:
+  push:
+    branches:
+      - "wp31/deterministic-provider-epoch-ms-20261005-sol56-g91"
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply deterministic provider epoch conversion
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("mvp/autotrade_mvp/durable_financing.py")
+          source = source_path.read_text(encoding="utf-8")
+          source = source.replace(
+              "from datetime import datetime, timezone\n",
+              "from datetime import datetime, timedelta, timezone\n",
+              1,
+          )
+          constants = '''_EVIDENCE_SCHEMA_VERSION = "1.0.0"\n'''
+          constants_new = '''_EVIDENCE_SCHEMA_VERSION = "1.0.0"\n_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)\n'''
+          if constants_new not in source:
+              if source.count(constants) != 1:
+                  raise SystemExit("unexpected durable financing constant block")
+              source = source.replace(constants, constants_new, 1)
+
+          old = '''def _milliseconds_instant(value: object, *, name: str) -> datetime:\n    if type(value) is int:\n        token = str(value)\n    elif type(value) is str:\n        token = value\n    else:\n        raise FinancingError(f"{name} must be epoch milliseconds")\n    try:\n        milliseconds = parse_bounded_json_integer_token(token)\n    except (ExactDecimalError, TypeError, ValueError) as error:\n        raise FinancingError(f"{name} must be bounded epoch milliseconds") from error\n    if milliseconds < 0:\n        raise FinancingError(f"{name} must be non-negative")\n    seconds, remainder = divmod(milliseconds, 1000)\n    try:\n        return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(\n            microsecond=remainder * 1000\n        )\n    except (OverflowError, OSError, ValueError) as error:\n        raise FinancingError(f"{name} is outside supported UTC range") from error\n'''
+          new = '''def _milliseconds_instant(value: object, *, name: str) -> datetime:\n    if type(value) is int:\n        token = str(value)\n    elif type(value) is str:\n        token = value\n    else:\n        raise FinancingError(f"{name} must be epoch milliseconds")\n    try:\n        milliseconds = parse_bounded_json_integer_token(token)\n    except (ExactDecimalError, TypeError, ValueError) as error:\n        raise FinancingError(f"{name} must be bounded epoch milliseconds") from error\n    if milliseconds < 0:\n        raise FinancingError(f"{name} must be non-negative")\n    # Provider chronology is product authority, not host C-library authority.\n    # Fixed-epoch timedelta arithmetic is deterministic across supported hosts\n    # and preserves exact millisecond identity without time_t conversion.\n    try:\n        return _UTC_EPOCH + timedelta(milliseconds=milliseconds)\n    except (OverflowError, ValueError) as error:\n        raise FinancingError(f"{name} is outside supported UTC range") from error\n'''
+          if new not in source:
+              if source.count(old) != 1:
+                  raise SystemExit("unexpected _milliseconds_instant implementation")
+              source = source.replace(old, new, 1)
+          source_path.write_text(source, encoding="utf-8")
+
+          test_path = Path("mvp/tests/test_durable_financing.py")
+          tests = test_path.read_text(encoding="utf-8")
+          old_import = '''    DurableFinancingBook,\n    _event_payload,\n    _revision_book_digest,\n    authenticated_financing_event,\n)\n'''
+          new_import = '''    DurableFinancingBook,\n    _event_payload,\n    _milliseconds_instant,\n    _revision_book_digest,\n    authenticated_financing_event,\n)\n'''
+          if new_import not in tests:
+              if tests.count(old_import) != 1:
+                  raise SystemExit("unexpected durable financing test import block")
+              tests = tests.replace(old_import, new_import, 1)
+
+          class_marker = '''class DurableFinancingTests(unittest.TestCase):\n'''
+          additions = '''class DurableFinancingTests(unittest.TestCase):\n    def test_provider_epoch_milliseconds_are_platform_independent(self):\n        class HostileDateTime:\n            calls = 0\n\n            @classmethod\n            def fromtimestamp(cls, *_args, **_kwargs):\n                cls.calls += 1\n                raise AssertionError("host time_t conversion executed")\n\n        with patch(\n            "mvp.autotrade_mvp.durable_financing.datetime",\n            HostileDateTime,\n        ):\n            self.assertEqual(\n                _milliseconds_instant("0", name="transactionTime"),\n                datetime(1970, 1, 1, tzinfo=timezone.utc),\n            )\n            self.assertEqual(\n                _milliseconds_instant(1_000, name="transactionTime"),\n                datetime(1970, 1, 1, 0, 0, 1, tzinfo=timezone.utc),\n            )\n        self.assertEqual(HostileDateTime.calls, 0)\n\n    def test_provider_epoch_milliseconds_preserve_exact_upper_utc_boundary(self):\n        self.assertEqual(\n            _milliseconds_instant(\n                "253402300799999",\n                name="transactionTime",\n            ),\n            datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=timezone.utc),\n        )\n        with self.assertRaisesRegex(FinancingError, "outside supported UTC range"):\n            _milliseconds_instant(\n                "253402300800000",\n                name="transactionTime",\n            )\n        with self.assertRaisesRegex(FinancingError, "must be non-negative"):\n            _milliseconds_instant("-1", name="transactionTime")\n\n'''
+          if "test_provider_epoch_milliseconds_are_platform_independent" not in tests:
+              if tests.count(class_marker) != 1:
+                  raise SystemExit("DurableFinancingTests marker not found exactly once")
+              tests = tests.replace(class_marker, additions, 1)
+          test_path.write_text(tests, encoding="utf-8")
+          PY
+
+      - name: Focused verification
+        shell: bash
+        run: |
+          python -m py_compile \
+            mvp/autotrade_mvp/durable_financing.py \
+            mvp/tests/test_durable_financing.py
+          python -m unittest \
+            mvp.tests.test_durable_financing \
+            mvp.tests.test_durable_financing_restart_conservation
+
+      - name: Commit verified repair and remove bootstrap workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            mvp/autotrade_mvp/durable_financing.py \
+            mvp/tests/test_durable_financing.py
+          git rm .github/workflows/wp31-deterministic-provider-epoch-ms.yml
+          git commit -m "fix: make provider financing epoch conversion deterministic"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

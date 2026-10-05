@@ -668,6 +668,65 @@ class DurableModelBudget:
                 member,
             )
         )
+
+        # Class functions may execute in modules other than this adapter. Their
+        # own global bindings are executable authority too: restoring only a
+        # JournalStore method's code still permits its _persistence_impl globals
+        # to remain poisoned for the first post-clock durable write. Traverse
+        # referenced Python helper functions recursively and freeze every binding
+        # in the function's actual __globals__ dictionary before yielding control.
+        protected_function_states_list = [
+            *runtime_function_states,
+            *class_function_states,
+        ]
+        seen_function_ids = {
+            id(function)
+            for _label, function, _state in protected_function_states_list
+        }
+        transitive_binding_states_list = []
+        seen_binding_keys = {
+            (id(module_globals), name)
+            for name, _expected in runtime_bindings
+        }
+        function_index = 0
+        while function_index < len(protected_function_states_list):
+            function_label, function, function_state = protected_function_states_list[
+                function_index
+            ]
+            function_index += 1
+            function_globals = object_getattribute(function, "__globals__")
+            if type(function_globals) is not dict:
+                continue
+            raw_module_name = dict_get(function_globals, "__name__", None)
+            module_name = (
+                raw_module_name
+                if type(raw_module_name) is str
+                else "<authority-module>"
+            )
+            for name in referenced_names(function_state[0][1]):
+                binding_key = (id(function_globals), name)
+                if binding_key in seen_binding_keys:
+                    continue
+                seen_binding_keys.add(binding_key)
+                expected = dict_get(function_globals, name, missing_binding)
+                binding_label = "global." + module_name + "." + name
+                transitive_binding_states_list.append(
+                    (
+                        function_globals,
+                        name,
+                        expected,
+                        binding_label,
+                    )
+                )
+                if type(expected) is function_type and id(expected) not in seen_function_ids:
+                    seen_function_ids.add(id(expected))
+                    protected_function_states_list.append(
+                        freeze_function(binding_label, expected)
+                    )
+
+        protected_function_states = tuple(protected_function_states_list)
+        transitive_binding_states = tuple(transitive_binding_states_list)
+
         clock = snapshot[1].get("_clock")
         if not callable(clock):
             raise ValueError("model budget clock authority is invalid")
@@ -681,10 +740,7 @@ class DurableModelBudget:
             clock_error = error
         finally:
             try:
-                for function_label, function, function_state in (
-                    *runtime_function_states,
-                    *class_function_states,
-                ):
+                for function_label, function, function_state in protected_function_states:
                     for attribute, expected in function_state:
                         current = object_getattribute(function, attribute)
                         if current is expected:
@@ -693,6 +749,24 @@ class DurableModelBudget:
                             "function." + function_label + "." + attribute
                         )
                         object_setattr(function, attribute, expected)
+
+                for (
+                    binding_globals,
+                    name,
+                    expected,
+                    binding_label,
+                ) in transitive_binding_states:
+                    current = dict_get(binding_globals, name, missing_binding)
+                    if expected is missing_binding:
+                        if current is missing_binding:
+                            continue
+                        changes.append(binding_label)
+                        dict_delitem(binding_globals, name)
+                        continue
+                    if current is expected:
+                        continue
+                    changes.append(binding_label)
+                    dict_setitem(binding_globals, name, expected)
 
                 for attribute, expected in restore_function_state:
                     current = object_getattribute(restore_clock_authority, attribute)
@@ -725,6 +799,34 @@ class DurableModelBudget:
                     )
                 )
             finally:
+                for function_label, function, function_state in protected_function_states:
+                    for attribute, expected in function_state:
+                        current = object_getattribute(function, attribute)
+                        if current is expected:
+                            continue
+                        changes.append(
+                            "function." + function_label + "." + attribute
+                        )
+                        object_setattr(function, attribute, expected)
+
+                for (
+                    binding_globals,
+                    name,
+                    expected,
+                    binding_label,
+                ) in transitive_binding_states:
+                    current = dict_get(binding_globals, name, missing_binding)
+                    if expected is missing_binding:
+                        if current is missing_binding:
+                            continue
+                        changes.append(binding_label)
+                        dict_delitem(binding_globals, name)
+                        continue
+                    if current is expected:
+                        continue
+                    changes.append(binding_label)
+                    dict_setitem(binding_globals, name, expected)
+
                 for attribute, expected in clock_text_function_state:
                     current = object_getattribute(clock_text, attribute)
                     if current is expected:

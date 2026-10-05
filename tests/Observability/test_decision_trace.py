@@ -587,6 +587,26 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 backlog.record("queue.delay", 1.0, diagnostic=invalid)
         self.assertEqual(backlog.snapshot(), ())
 
+    def test_metric_value_rejects_integer_outside_strict_json_resource_domain(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        huge_value = int("9" * 641)
+
+        with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+            backlog.record("queue.delay", huge_value)
+
+        self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_labels_reject_excessive_strict_json_nesting(self):
+        nested = 0
+        for _ in range(129):
+            nested = [nested]
+
+        backlog = BoundedMetricBacklog(max_items=2)
+        with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+            backlog.record("queue.delay", 1.0, diagnostic=nested)
+
+        self.assertEqual(backlog.snapshot(), ())
+
     def test_metric_snapshot_is_detached_from_internal_redacted_state(self):
         backlog = BoundedMetricBacklog(max_items=2)
         backlog.record(

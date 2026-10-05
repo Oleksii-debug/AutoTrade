@@ -403,6 +403,41 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     submission_scope={**scope, "extra": malformed},
                 )
 
+    def test_cyclic_exact_json_is_rejected_before_digest_recursion(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            cyclic_dict = {}
+            cyclic_dict["self"] = cyclic_dict
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "acyclic JSON value",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "extra": cyclic_dict},
+                    submission_scope=scope,
+                )
+
+            cyclic_list = []
+            cyclic_list.append(cyclic_list)
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "acyclic JSON value",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": cyclic_list},
+                )
+
     def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
         parameters = inspect.signature(
             AdmittedFinancialRequestAuthorityIssuer.issue

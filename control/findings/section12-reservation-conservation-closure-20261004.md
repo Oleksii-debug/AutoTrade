@@ -2,7 +2,7 @@
 
 Date: 2026-10-04; current-main/public-surface reconvergence updated 2026-10-05
 Current-main source base: `60e7c95b3b572810dcfb6c4ab34e0b338b0ace02`
-Implementation readback before this finding update: `df90f5e755a0b0144265272c3acc71eb8c701c99`
+Implementation readback before this finding update: `e7b054f0e626468e314bde1b551a880c0b2abc8d`
 
 Current main already contains the canonical reservation authority, exact restart binding and atomic provider-free fill/financial consumption. This candidate carries the current-main reservation-bust lineage into the Section 12 closure lane without claiming provider/PAPER/LIVE qualification.
 
@@ -35,6 +35,17 @@ The candidate therefore restores the existing bounded public fences without repl
 The regression sequence commits a canonical provider fill with 100 units of cash reservation consumption, constructs a 1.0→1.1 correction, proves the public generic correction fails with no economic/settlement/reservation mutation, then proves the canonical reservation-aware correction consumes exactly the additional 10 once. A separate facade test proves a caller-supplied provider-fill binding cannot dispatch through the generic batch barrier, while an unbound legacy generic batch retains its historical behavior.
 
 These fences add no provider qualification or economic authority; they only prevent weaker compatibility surfaces from bypassing the already-selected WP-15 authority.
+
+## Expected-fill identity and product-flow reachability
+
+The admitted/expected provider-fill path now requires an exact non-null client-order identity on both the projected fill and independently observed provider fill before accounting derives any economic effect. Equality is unconditional once both identities exist. A provider execution without authenticated order linkage therefore cannot be relabeled as an admitted expected fill by supplying only intent/reservation-compatible economics; it remains on the separate unexpected/manual reconciliation authority. The negative regression exercises both provider-null and both-null client-order cases and requires zero economic mutation.
+
+The credential-free product flows represented by this candidate also exercise the same WP-15 authority rather than only its isolated unit tests:
+- the canonical single-session SIMULATION path constructs exact provider and projected fill evidence from the observed simulated execution, derives its settlement obligation from the canonical provider-fill financial plan, and commits through `commit_provider_fill_with_reservation_consumption()`; orchestration no longer supplies its own reservation usage or economic transaction to the atomic mutation barrier;
+- its restart test requires one durable `provider_fill_financial_binding`, exact reservation/intent/provider-execution identities, exact `CASH:USD=103.103` derived usage, a canonical `provider-fill:` transaction identity, and a reopened reservation cut with consumed `103.103` and zero remaining;
+- the whole-simulator qualification flow likewise constructs provider/projected evidence and calls the canonical provider-fill entrypoint instead of publishing caller-authored `usage={CASH:USD:200.2}` plus a caller-built equity transaction. It checks the durable binding, exact `200.2` consumption and restart projection.
+
+These changes strengthen reachability and classification correctness in SIMULATION only. They do not qualify any external provider, enable PAPER/LIVE order authority, or establish economic edge.
 
 ## Production full-fill reservation terminalization
 

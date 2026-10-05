@@ -71,6 +71,7 @@ def _scope_entropy(
     provider_environment: str,
     purpose: str,
     generation: int,
+    _json_dumps=json.dumps,
 ) -> bytes:
     payload = {
         "handle_id": handle_id,
@@ -83,7 +84,7 @@ def _scope_entropy(
         "generation": generation,
     }
     return sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        _json_dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).digest()
 
 
@@ -226,7 +227,7 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
             )
         with os.fdopen(descriptor, "a+b", closefd=False) as stream:
             if stream.tell() == 0:
-                stream.write(b"\\0")
+                stream.write(b"\0")
                 stream.flush()
                 os.fsync(stream.fileno())
             stream.seek(0)
@@ -422,11 +423,16 @@ class ProtectedCredentialVault:
             else:
                 self._load()
 
-    def _load(self) -> dict[str, object]:
+    def _load(
+        self,
+        *,
+        _json_loads=json.loads,
+        _json_decode_error=json.JSONDecodeError,
+    ) -> dict[str, object]:
         _require_vault_leaf(self.path)
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            raw = _json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, _json_decode_error) as error:
             raise SecretVaultError("credential vault is corrupt or unreadable") from error
         if not isinstance(raw, dict):
             raise SecretVaultError("credential vault version is unsupported")
@@ -486,8 +492,13 @@ class ProtectedCredentialVault:
             _ = owner_identity
         return raw
 
-    def _write(self, value: dict[str, object]) -> None:
-        encoded = json.dumps(
+    def _write(
+        self,
+        value: dict[str, object],
+        *,
+        _json_dumps=json.dumps,
+    ) -> None:
+        encoded = _json_dumps(
             value,
             sort_keys=True,
             separators=(",", ":"),

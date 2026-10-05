@@ -4963,6 +4963,116 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             )
 
 
+    def test_bybit_additional_ambiguous_results_persist_unknown_and_never_resend(self):
+        from mvp.tests.test_bybit_transport import (
+            BybitV5SharedTransportTests,
+            prepared,
+        )
+        from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection
+
+        cases = (
+            (
+                "http-429",
+                429,
+                b'{"retCode":10006,"retMsg":"rate limit","result":{}}',
+                "bybit_http_non_2xx_execution_unknown",
+            ),
+            (
+                "retcode-10000",
+                200,
+                b'{"retCode":10000,"retMsg":"server timeout","result":{}}',
+                "bybit_ambiguous_ret_code_execution_unknown",
+            ),
+        )
+        for label, http_status, response, terminal_reason in cases:
+            with self.subTest(case=label), TemporaryDirectory() as directory:
+                events = []
+                wire = RecordingWire(
+                    events,
+                    response=response,
+                    http_status=http_status,
+                )
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="PAPER",
+                    account_id="bybit-account",
+                    owner_token=f"owner-bybit-{label}",
+                )
+                intent_id = f"intent-bybit-{label}"
+                attempt_id = f"attempt-bybit-{label}"
+                client_id = stable_client_order_id(
+                    "BYBIT",
+                    intent_id,
+                    environment="PAPER",
+                    account_id="bybit-account",
+                )
+                capability, prepared_request = prepared(client_id)
+                transport, _resolver = BybitV5SharedTransportTests().make_transport(
+                    capability=capability,
+                    events=events,
+                    wire=wire,
+                )
+                projected = guarded_order_projection(prepared_request)
+                scope = {
+                    "capability_snapshot_id": capability.snapshot_id,
+                    "provider": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "TESTNET",
+                }
+
+                result = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-hash-bybit-{label}",
+                    provider="BYBIT",
+                    request=projected,
+                    now="2026-09-25T10:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                    submission_scope=scope,
+                )
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(result.reason, terminal_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+                repeated = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-hash-bybit-{label}",
+                    provider="BYBIT",
+                    request=projected,
+                    now="2026-09-25T10:00:02Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope=scope,
+                )
+                self.assertEqual(repeated.status, "UNKNOWN")
+                self.assertEqual(repeated.reason, terminal_reason)
+                self.assertEqual(events.count("wire"), 1)
+
+                durable = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(attempt_id),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in durable],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+                terminal = durable[-1]["payload"]
+                self.assertEqual(terminal["http_status"], http_status)
+                self.assertEqual(terminal["reason"], terminal_reason)
+                self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+
+
     def test_typed_wire_status_rejects_int_subclasses_before_comparison_callbacks(self):
         # Exact response CLASS is not enough: a malicious subclass nested
         # in http_status can override comparisons during construction.

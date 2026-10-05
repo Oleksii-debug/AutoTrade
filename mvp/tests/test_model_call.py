@@ -3422,6 +3422,73 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0"))
 
+    def test_cancel_callback_cannot_shadow_budget_release_method(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            calls = []
+
+            def hostile_cancel():
+                budget.release = lambda *_args, **_kwargs: Decimal("777")
+                return False
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_: calls.append("called") or observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=hostile_cancel,
+            )
+
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertIn("budget.release", result.reason)
+            self.assertEqual(calls, [])
+            self.assertNotIn("release", budget.__dict__)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0"))
+
+    def test_adapter_cannot_shadow_budget_settle_method(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_adapter(*_args):
+                budget.settle = lambda *_args, **_kwargs: self.fail(
+                    "shadowed budget settle reached durable authority"
+                )
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:budget.settle",
+                result.reason,
+            )
+            self.assertNotIn("settle", budget.__dict__)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_adapter_cannot_redirect_nested_budget_journal(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

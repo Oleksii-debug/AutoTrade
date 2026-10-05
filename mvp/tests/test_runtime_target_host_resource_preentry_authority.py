@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.runtime_target_host_measurement import (
     TargetHostFinancialSample,
     TargetHostResearchSample,
@@ -24,9 +25,13 @@ RUN_RECEIPT_ARTIFACT_ID = "00000000-0000-4000-8000-000000000074"
 RESOURCE_ARTIFACT_ID = "00000000-0000-4000-8000-000000000075"
 
 
-def _invoke(store: ArtifactStore):
+def _journal(root: str) -> JournalStore:
+    return JournalStore(Path(root) / "journal.sqlite3")
+
+
+def _invoke(store: ArtifactStore, journal: JournalStore):
     return run_declared_target_host_campaign_with_resources(
-        journal=object(),
+        journal=journal,
         evidence_store=store,
         spec=object(),
         authority_id="resource-authority",
@@ -69,7 +74,7 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                         RuntimeTargetHostResourceEvidenceError,
                         "class descriptor changed before target-host run.*authority_id",
                     ):
-                        _invoke(store)
+                        _invoke(store, _journal(root))
                 capture.assert_not_called()
                 runner.assert_not_called()
         finally:
@@ -103,7 +108,7 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                         RuntimeTargetHostResourceEvidenceError,
                         "class descriptor changed before target-host run.*measurement",
                     ):
-                        _invoke(store)
+                        _invoke(store, _journal(root))
                 capture.assert_not_called()
                 runner.assert_not_called()
         finally:
@@ -135,7 +140,7 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                         RuntimeTargetHostResourceEvidenceError,
                         "class descriptor changed during target-host run.*elapsed_monotonic_ns",
                     ):
-                        _invoke(store)
+                        _invoke(store, _journal(root))
                 self.assertEqual(capture.call_count, 1)
         finally:
             RuntimeTargetHostResourceEvidence.elapsed_monotonic_ns = original
@@ -166,7 +171,7 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                         RuntimeTargetHostResourceEvidenceError,
                         "class descriptor changed during target-host run.*TargetHostResearchSample.payload",
                     ):
-                        _invoke(store)
+                        _invoke(store, _journal(root))
                 self.assertEqual(capture.call_count, 1)
         finally:
             TargetHostResearchSample.payload = original
@@ -199,7 +204,7 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                         RuntimeTargetHostResourceEvidenceError,
                         "class executable changed during target-host run.*TargetHostFinancialSample.from_durable",
                     ):
-                        _invoke(store)
+                        _invoke(store, _journal(root))
                 self.assertEqual(capture.call_count, 1)
         finally:
             descriptor.__func__.__code__ = original_code

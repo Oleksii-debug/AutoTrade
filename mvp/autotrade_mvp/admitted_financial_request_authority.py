@@ -51,14 +51,6 @@ class AdmittedFinancialRequestIdentity:
     submission_scope_digest: str
 
 
-def _exact_text(value: object, *, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
-        raise AdmittedFinancialRequestAuthorityError(
-            f"{name} must be exact canonical non-empty text"
-        )
-    return value
-
-
 def _exact_utf8_text(value: object, *, name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{name} must be exact text")
@@ -69,6 +61,15 @@ def _exact_utf8_text(value: object, *, name: str) -> str:
             f"{name} must be valid canonical UTF-8 text"
         ) from error
     return value
+
+
+def _exact_text(value: object, *, name: str) -> str:
+    text = _exact_utf8_text(value, name=name)
+    if not text or text != text.strip():
+        raise AdmittedFinancialRequestAuthorityError(
+            f"{name} must be exact canonical non-empty text"
+        )
+    return text
 
 
 def _exact_json_value(value: object, *, name: str) -> object:

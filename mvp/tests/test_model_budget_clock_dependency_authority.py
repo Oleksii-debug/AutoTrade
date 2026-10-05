@@ -11,6 +11,13 @@ NOW_TEXT = "2026-09-25T10:00:00+00:00"
 ORIGINAL_DATETIME = budget_module.datetime
 ORIGINAL_TIMEDELTA = budget_module.timedelta
 ORIGINAL_TIMEZONE = budget_module.timezone
+PERSISTENCE_CANONICAL_JSON_DECOY_CALLS = 0
+
+
+def _poisoned_persistence_canonical_json(_value):
+    global PERSISTENCE_CANONICAL_JSON_DECOY_CALLS
+    PERSISTENCE_CANONICAL_JSON_DECOY_CALLS += 1
+    return '{"poisoned":true}'
 
 
 class ModelBudgetClockDependencyAuthorityTests(unittest.TestCase):
@@ -316,6 +323,54 @@ class ModelBudgetClockDependencyAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(len(follow_up), 1)
             self.assertEqual(follow_up[0]["committed_at"], NOW_TEXT)
+
+    def test_clock_cannot_poison_transitive_journal_helper_code(self):
+        global PERSISTENCE_CANONICAL_JSON_DECOY_CALLS
+        PERSISTENCE_CANONICAL_JSON_DECOY_CALLS = 0
+        canonical_json = persistence_impl.canonical_json
+        original_code = canonical_json.__code__
+        original_defaults = canonical_json.__defaults__
+        original_kwdefaults = canonical_json.__kwdefaults__
+        restored_before_test_cleanup = False
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                canonical_json.__code__ = _poisoned_persistence_canonical_json.__code__
+                return NOW_TEXT
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "model budget clock mutated authority",
+                ):
+                    budget_module.DurableModelBudget(
+                        journal=journal,
+                        budget_id="clock-transitive-journal-helper-code-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+                restored_before_test_cleanup = (
+                    canonical_json.__code__ is original_code
+                    and canonical_json.__defaults__ is original_defaults
+                    and canonical_json.__kwdefaults__ is original_kwdefaults
+                )
+            finally:
+                canonical_json.__code__ = original_code
+                canonical_json.__defaults__ = original_defaults
+                canonical_json.__kwdefaults__ = original_kwdefaults
+
+            self.assertTrue(restored_before_test_cleanup)
+            self.assertEqual(PERSISTENCE_CANONICAL_JSON_DECOY_CALLS, 0)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "clock-transitive-journal-helper-code-budget",
+                ),
+                [],
+            )
 
 
 if __name__ == "__main__":

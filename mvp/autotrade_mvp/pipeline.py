@@ -645,15 +645,53 @@ def verify_replay(state_dir: str | Path) -> bool:
         events = store.load_events("simulation_portfolio", symbol)
         if not events:
             return False
+        journal_evidence_ids = set()
         for event in events:
             if type(event) is not dict:
                 return False
-            if event.get("event_type") != "SimulationEpisodeRecorded":
+            if (
+                event.get("event_type") != "SimulationEpisodeRecorded"
+                or event.get("aggregate_type") != "simulation_portfolio"
+                or event.get("aggregate_id") != symbol
+                or event.get("environment") != "SIMULATION"
+                or event.get("schema_version") != "1.0.0"
+            ):
                 return False
             payload = event.get("payload")
+            if type(payload) is not dict:
+                return False
+            evidence_id = payload.get("evidence_id")
+            if type(evidence_id) is not str or evidence_id in journal_evidence_ids:
+                return False
+            journal_evidence_ids.add(evidence_id)
+            record = observed.get(evidence_id)
+            if type(record) is not dict:
+                return False
+            expected_payload = {
+                "evidence_id": evidence_id,
+                "input_hash": record.get("input_hash"),
+                "decision": record.get("decision"),
+                "decision_reason": record.get("decision_reason"),
+                "risk_outcome": record.get("risk_outcome"),
+                "order_id": record.get("order_id"),
+                "fill_id": record.get("fill_id"),
+                "cash": record.get("cash"),
+                "position": record.get("position"),
+                "equity": record.get("equity"),
+                "reconciled": record.get("reconciled"),
+                "financial_configuration_hash": configuration_hash,
+            }
+            if payload != expected_payload:
+                return False
+            if event.get("event_id") != _event_uuid("simulation-episode", evidence_id):
+                return False
+            expected_timestamp = _utc_z(record["recorded_at"])
             if (
-                type(payload) is not dict
-                or payload.get("financial_configuration_hash") != configuration_hash
+                event.get("occurred_at") != expected_timestamp
+                or event.get("observed_at") != expected_timestamp
+                or event.get("committed_at") != expected_timestamp
+                or event.get("correlation_id")
+                != _event_uuid("correlation", evidence_id)
             ):
                 return False
         return True

@@ -669,14 +669,27 @@ def _scoped_economic_owner_operations(
             raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
         if type(book) is not book_type:
             raise TypeError("ScopedEconomicBook must own an exact EconomicBook")
+        key = id(value)
+
+        def release(reference):
+            with lock:
+                current = owners.get(key)
+                if current is not None and current[0] is reference:
+                    owners.pop(key, None)
+
         with lock:
-            for key, (reference, *_rest) in tuple(owners.items()):
+            for stale_key, (reference, *_rest) in tuple(owners.items()):
                 if reference() is None:
-                    owners.pop(key)
-            current = owners.get(id(value))
+                    owners.pop(stale_key)
+            current = owners.get(key)
             if current is not None and current[0]() is value:
                 raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (_weakref_ref(value), environment, account_id, book)
+            owners[key] = (
+                _weakref_ref(value, release),
+                environment,
+                account_id,
+                book,
+            )
 
     def require(value):
         if type(value) is not scoped_type:

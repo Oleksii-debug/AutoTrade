@@ -1,0 +1,51 @@
+name: repair-pr1736-zero-wire
+
+on:
+  push:
+    branches:
+      - fix/simulation-expired-prepared-zero-wire-20261005-sol56
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'chore: one-shot exact repair for PR 1736 source'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Apply exact bounded source repair
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('mvp/autotrade_mvp/simulation_session.py')
+          text = path.read_text(encoding='utf-8')
+
+          broken_call = '''    ) = _zero_wire_blocked_projection(\n            store,\n            root,\n            episode_id=episode_id,\n            required_reservation_state="WORKING",\n        )\n    )\n    terminal_cut = JournalStore.whole_store_state_cut(store)'''
+          fixed_call = '''    ) = _zero_wire_blocked_projection(\n            store,\n            root,\n            episode_id=episode_id,\n            required_reservation_state="WORKING",\n        )\n    terminal_cut = JournalStore.whole_store_state_cut(store)'''
+          if text.count(broken_call) != 1:
+              raise SystemExit('expected exactly one malformed terminal projection call')
+          text = text.replace(broken_call, fixed_call, 1)
+
+          broken_unpack = '                expected, _, _, _ = _zero_wire_blocked_projection(\n'
+          fixed_unpack = '                expected, _, _, _, _ = _zero_wire_blocked_projection(\n'
+          if text.count(broken_unpack) != 1:
+              raise SystemExit('expected exactly one stale four-value BLOCKED replay unpack')
+          text = text.replace(broken_unpack, fixed_unpack, 1)
+
+          path.write_text(text, encoding='utf-8', newline='\n')
+      - name: Compile repaired module
+        run: python -m py_compile mvp/autotrade_mvp/simulation_session.py
+      - name: Run focused expired-Prepared recovery regression
+        run: python -m unittest mvp.tests.test_simulation_expired_prepared_recovery
+      - name: Commit source repair and remove one-shot workflow
+        run: |
+          git config user.name "autotrade-repair-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/repair-pr1736-zero-wire.yml
+          git add mvp/autotrade_mvp/simulation_session.py
+          git diff --cached --check
+          git commit -m "Recovery: repair BLOCKED terminal projection replay"
+          git push origin HEAD:fix/simulation-expired-prepared-zero-wire-20261005-sol56

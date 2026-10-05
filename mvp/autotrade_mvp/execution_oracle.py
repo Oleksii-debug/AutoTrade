@@ -107,9 +107,13 @@ def assert_conservative_execution(
             raise ExecutionOracleError("fee cannot be negative")
 
         if order.order_type == "MARKET":
-            if model.price_quantum is None:
+            if (
+                model.price_quantum is None
+                or model.price_projection_policy_id is None
+                or model.price_projection_policy_version is None
+            ):
                 raise ExecutionOracleError(
-                    "MARKET execution requires an authoritative price_quantum"
+                    "MARKET execution requires complete price projection policy evidence"
                 )
             if model.data_fidelity == "BAR":
                 if observation.bar_high is None or observation.bar_low is None:

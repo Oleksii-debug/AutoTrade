@@ -20,6 +20,7 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .exact_decimal import (
+    ExactDecimalError,
     as_fraction, bounded_fraction, exact_abs, exact_add, exact_multiply,
     exact_subtract, exact_sum, parse_bounded_exact_decimal,
     round_fraction_to_quantum, terminating_decimal,
@@ -41,6 +42,22 @@ def _money(value: Decimal | str | int) -> Decimal:
         as_fraction(_exact_decimal(value, name="money")),
         MONEY_QUANTUM, mode="HALF_EVEN",
     )
+
+
+def _checkpoint_decimal(value: object, *, name: str) -> Decimal:
+    """Parse one exact decimal emitted by the durable checkpoint.
+
+    Checkpoints are JSON and canonical writers emit these financial scalars as
+    strings.  Reject alternate JSON scalar types and numerically unbounded text
+    before any recovered value can participate in risk or ledger arithmetic.
+    """
+
+    if type(value) is not str:
+        raise ValueError(f"Corrupt checkpoint {name}: expected decimal text")
+    try:
+        return parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise ValueError(f"Corrupt checkpoint {name}: invalid exact decimal") from error
 
 
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
@@ -341,7 +358,10 @@ class EconomicLedger:
     def cash(self) -> Decimal:
         return _money(
             exact_sum(
-                (Decimal(row["cash_delta"]) for row in self.postings),
+                (
+                    _checkpoint_decimal(row["cash_delta"], name="cash_delta")
+                    for row in self.postings
+                ),
                 start=self.initial_cash,
             )
         )
@@ -349,7 +369,10 @@ class EconomicLedger:
     @property
     def position(self) -> Decimal:
         return exact_sum(
-            (Decimal(row["position_delta"]) for row in self.postings),
+            (
+                _checkpoint_decimal(row["position_delta"], name="position_delta")
+                for row in self.postings
+            ),
             start=Decimal("0"),
         )
 
@@ -442,7 +465,11 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
                 fill.fee,
             )
         )
-        if row is None or Decimal(row["position_delta"]) != signed or _money(row["cash_delta"]) != expected_cash:
+        if (
+            row is None
+            or _checkpoint_decimal(row["position_delta"], name="position_delta") != signed
+            or _money(_checkpoint_decimal(row["cash_delta"], name="cash_delta")) != expected_cash
+        ):
             raise ValueError("Fill and economic ledger do not reconcile")
     return True
 
@@ -498,12 +525,17 @@ def run_vertical_slice(
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed and state.get("symbol", symbol) != symbol:
         raise ValueError("Checkpoint belongs to another symbol")
-    ledger = EconomicLedger(Decimal(state["initial_cash"]), list(state.get("postings", [])))
+    ledger = EconomicLedger(
+        _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
+        list(state.get("postings", [])),
+    )
     restored_fills = {
         key: Fill(
             fill_id=value["fill_id"], client_order_id=value["client_order_id"], symbol=value["symbol"],
-            side=value["side"], quantity=Decimal(value["quantity"]), price=Decimal(value["price"]),
-            fee=Decimal(value["fee"]),
+            side=value["side"],
+            quantity=_checkpoint_decimal(value["quantity"], name="fill quantity"),
+            price=_checkpoint_decimal(value["price"], name="fill price"),
+            fee=_checkpoint_decimal(value["fee"], name="fill fee"),
         )
         for key, value in state.get("fills", {}).items()
     }

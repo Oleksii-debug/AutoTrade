@@ -1507,8 +1507,11 @@ class DurableModelCallOrchestrator:
             descriptor=descriptor,
             pricing_evidence_digest=pricing_evidence_digest,
         )
+        adapter_binding = ModelCallBinding(
+            **{field.name: getattr(binding, field.name) for field in fields(ModelCallBinding)}
+        )
         try:
-            observation = call(binding, cancelled)
+            observation = call(adapter_binding, cancelled)
         except ModelCallNotSent:
             # Once ModelCallStarted is durable, the injected adapter is inside
             # the possibly-billed boundary. Its own exception type is not an

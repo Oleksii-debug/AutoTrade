@@ -143,6 +143,78 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.deletion_count, 0)
 
+    def test_parser_rejects_unsupported_git_status_and_malformed_paths(self):
+        for record in (
+            "U100\tfile.py",
+            "Z\tfile.py",
+            "M\t../file.py",
+            "M\t/control/file.py",
+            "M\tcontrol\\\\file.py",
+            "M\tcontrol//file.py",
+        ):
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    parse_name_status([record])
+
+    def test_assessment_rejects_synthetic_unsupported_change(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["README.md"],
+                changes=[Change(status="Z", path="README.md")],
+                protected_sentinels=frozenset(),
+            )
+
+    def test_assessment_rejects_synthetic_missing_or_spurious_previous_path(self):
+        cases = (
+            Change(status="R100", path="new.py"),
+            Change(status="M", path="file.py", previous_path="old.py"),
+        )
+        for change in cases:
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=["new.py", "file.py"],
+                        changes=[change],
+                        protected_sentinels=frozenset(),
+                    )
+
+    def test_protected_rename_to_sentinel_is_blocked(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "other.py"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path="other.py",
+                    path=sentinel,
+                )
+            ],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn(
+            "other.py -> control/INDEX.json (rename)",
+            result.protected_violations,
+        )
+
+    def test_copy_or_add_to_protected_sentinel_is_blocked(self):
+        sentinel = "control/INDEX.json"
+        for change in (
+            Change(status="A", path=sentinel),
+            Change(status="C100", previous_path="other.py", path=sentinel),
+        ):
+            with self.subTest(change=change):
+                result = assess_reconvergence(
+                    base_paths=[sentinel, "other.py"],
+                    changes=[change],
+                )
+
+                self.assertFalse(result.allowed)
+                self.assertIn(
+                    f"{sentinel} (addition/copy)",
+                    result.protected_violations,
+                )
+
     def test_parser_rejects_malformed_records(self):
         with self.assertRaises(ValueError):
             parse_name_status(["R100\tonly-old-path"])

@@ -215,7 +215,8 @@ class _IssuerStub:
         self.runtime = runtime
         self.before_guard = before_guard
 
-    def _dispatch_material_for(self, _authority):
+    def _dispatch_material_for(self, _authority, *, attempt_id=None):
+        del attempt_id
         if self.before_guard is not None:
             self.before_guard()
         return (

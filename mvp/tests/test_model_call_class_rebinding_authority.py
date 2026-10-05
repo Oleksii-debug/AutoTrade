@@ -225,5 +225,167 @@ class ModelCallClassRebindingAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_adapter_restores_rebound_restore_and_budget_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            restore_descriptor = vars(DurableModelCallOrchestrator)[
+                "_restore_callback_shape"
+            ]
+            settle_descriptor = vars(DurableModelBudget)["settle"]
+            try:
+                def hostile_adapter(*_args):
+                    DurableModelCallOrchestrator._restore_callback_shape = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound restore intercepted callback recovery"
+                        )
+                    )
+                    DurableModelBudget.settle = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound settle reached durable UNKNOWN accounting"
+                        )
+                    )
+                    return None
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=_policy(),
+                    request=_request(orchestrator, call_spec),
+                    descriptors=[_descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn(
+                    "DurableModelCallOrchestrator._restore_callback_shape",
+                    result.reason,
+                )
+                self.assertIn("DurableModelBudget.settle", result.reason)
+                self.assertIs(
+                    vars(DurableModelCallOrchestrator)["_restore_callback_shape"],
+                    restore_descriptor,
+                )
+                self.assertIs(vars(DurableModelBudget)["settle"], settle_descriptor)
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                type.__setattr__(
+                    DurableModelCallOrchestrator,
+                    "_restore_callback_shape",
+                    restore_descriptor,
+                )
+                type.__setattr__(DurableModelBudget, "settle", settle_descriptor)
+
+    def test_cancel_restores_rebound_budget_release_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            release_descriptor = vars(DurableModelBudget)["release"]
+            calls = []
+            try:
+                def hostile_cancel():
+                    DurableModelBudget.release = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound release reached cancellation recovery"
+                        )
+                    )
+                    return False
+
+                with self.assertRaises(ModelCallError) as caught:
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: calls.append("inference"),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                        cancel_requested=hostile_cancel,
+                    )
+
+                self.assertIn("DurableModelBudget.release", str(caught.exception))
+                self.assertEqual(calls, [])
+                self.assertIs(
+                    vars(DurableModelBudget)["release"],
+                    release_descriptor,
+                )
+                self.assertEqual(
+                    budget.active_reservation(attempt_id),
+                    Decimal("1.2"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in orchestrator._events(attempt_id)],
+                    ["ModelCallPrepared"],
+                )
+            finally:
+                type.__setattr__(DurableModelBudget, "release", release_descriptor)
+
+    def test_budget_clock_restores_rebound_recovery_and_journal_dispatch(self):
+        armed = False
+        restore_descriptor = vars(DurableModelBudget)["_restore_clock_authority"]
+        canonical_load_events = JournalStore.load_events
+
+        def hostile_clock():
+            nonlocal armed
+            if armed:
+                DurableModelBudget._restore_clock_authority = (
+                    lambda *_args, **_kwargs: self.fail(
+                        "rebound budget-clock restore intercepted recovery"
+                    )
+                )
+                JournalStore.load_events = (
+                    lambda *_args, **_kwargs: self.fail(
+                        "rebound journal load reached durable budget authority"
+                    )
+                )
+            return NOW_TEXT
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="clock-class-rebinding-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=hostile_clock,
+            )
+            armed = True
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "model budget clock mutated authority",
+                ) as caught:
+                    budget.reserve("clock-rebind-request", "0.2")
+
+                self.assertIn(
+                    "DurableModelBudget._restore_clock_authority",
+                    str(caught.exception),
+                )
+                self.assertIn("JournalStore.load_events", str(caught.exception))
+                self.assertIs(
+                    vars(DurableModelBudget)["_restore_clock_authority"],
+                    restore_descriptor,
+                )
+                self.assertIs(JournalStore.load_events, canonical_load_events)
+                self.assertNotIn("load_events", JournalStore.__dict__)
+                self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            finally:
+                type.__setattr__(
+                    DurableModelBudget,
+                    "_restore_clock_authority",
+                    restore_descriptor,
+                )
+                if "load_events" in JournalStore.__dict__:
+                    type.__delattr__(JournalStore, "load_events")
+
+
 if __name__ == "__main__":
     unittest.main()

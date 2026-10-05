@@ -58,6 +58,19 @@ class CredentialTransitionReceiptError(PermissionError):
     """Raised when a transition receipt is not current vault-issued evidence."""
 
 
+# Retain the installed vault transition primitives once. Public or class-level
+# rebinding after module import must not retarget credential transition authority.
+_CANONICAL_EXCLUSIVE_FILE_LOCK = _exclusive_file_lock
+_CANONICAL_VAULT_LOAD = ProtectedCredentialVault._load
+_CANONICAL_VAULT_HANDLE = ProtectedCredentialVault._handle
+_CANONICAL_VAULT_PROVE_CURRENT_IDENTITY = (
+    ProtectedCredentialVault._prove_current_identity_can_decrypt
+)
+_CANONICAL_VAULT_WRITE = ProtectedCredentialVault._write
+_CANONICAL_SCOPE_ENTROPY = _scope_entropy
+_CANONICAL_TEXT = _text
+
+
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -240,7 +253,11 @@ def _receipt_id_from_subject(subject: dict[str, object]) -> str:
     return "credential-transition/" + _digest(_canonical_bytes(subject))
 
 
-def _parse_receipt(value: object) -> CredentialTransitionReceipt:
+def _parse_receipt(
+    value: object,
+    *,
+    _receipt_id_from_subject_fn=_receipt_id_from_subject,
+) -> CredentialTransitionReceipt:
     if type(value) is not dict or set(value) != _RECEIPT_FIELDS:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt shape is invalid"
@@ -254,7 +271,7 @@ def _parse_receipt(value: object) -> CredentialTransitionReceipt:
     subject = dict(value)
     subject.pop("receipt_id")
     try:
-        expected_id = _receipt_id_from_subject(subject)
+        expected_id = _receipt_id_from_subject_fn(subject)
     except (TypeError, ValueError, OverflowError, UnicodeError) as error:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt content identity is invalid"
@@ -276,6 +293,7 @@ def _authority_section(
     state: dict[str, object],
     *,
     create: bool,
+    _parse_receipt_fn=_parse_receipt,
 ) -> dict[str, object]:
     section = state.get(_AUTHORITY_KEY)
     if section is None:
@@ -315,7 +333,7 @@ def _authority_section(
             raise CredentialTransitionReceiptError(
                 "credential transition receipt storage is invalid"
             )
-        parsed = _parse_receipt(item["receipt"])
+        parsed = _parse_receipt_fn(item["receipt"])
         if parsed.handle_id != handle_id:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt handle index mismatches receipt"
@@ -347,8 +365,12 @@ def _vault_authority_digest(
     )
 
 
-def _record_state_digest(record: dict[str, object]) -> str:
-    handle = ProtectedCredentialVault._handle(record)
+def _record_state_digest(
+    record: dict[str, object],
+    *,
+    _vault_handle=_CANONICAL_VAULT_HANDLE,
+) -> str:
+    handle = _vault_handle(record)
     try:
         ciphertext = b64decode(record["ciphertext"], validate=True)
     except Exception as error:
@@ -398,18 +420,23 @@ def _next_sequence(
     section: dict[str, object],
     *,
     handle: PersistentCredentialHandle,
+    _parse_receipt_fn=_parse_receipt,
+    _receipt_id_from_subject_fn=_receipt_id_from_subject,
+    _receipt_subject_fn=_receipt_subject,
+    _vault_authority_digest_fn=_vault_authority_digest,
+    _seal_entropy_fn=_seal_entropy,
 ) -> tuple[int, str | None]:
     previous = section["latest_by_handle"].get(handle.handle_id)
     if previous is None:
         return 1, None
 
-    parsed = _parse_receipt(previous["receipt"])
-    expected_id = _receipt_id_from_subject(_receipt_subject(parsed))
+    parsed = _parse_receipt_fn(previous["receipt"])
+    expected_id = _receipt_id_from_subject_fn(_receipt_subject_fn(parsed))
     if parsed.receipt_id != expected_id:
         raise CredentialTransitionReceiptError(
             "prior credential transition receipt content identity is invalid"
         )
-    expected_authority = _vault_authority_digest(
+    expected_authority = _vault_authority_digest_fn(
         vault,
         instance_id=section["instance_id"],
     )
@@ -432,7 +459,7 @@ def _next_sequence(
         sealed = b64decode(previous["seal_b64"], validate=True)
         unsealed = vault._protector.unprotect(
             sealed,
-            entropy=_seal_entropy(parsed),
+            entropy=_seal_entropy_fn(parsed),
         )
     except Exception as error:
         raise CredentialTransitionReceiptError(
@@ -452,6 +479,13 @@ def _issue_locked(
     prior_handle: PersistentCredentialHandle,
     current_handle: PersistentCredentialHandle,
     operation: str,
+    _authority_section_fn=_authority_section,
+    _vault_authority_digest_fn=_vault_authority_digest,
+    _next_sequence_fn=_next_sequence,
+    _record_state_digest_fn=_record_state_digest,
+    _receipt_id_from_subject_fn=_receipt_id_from_subject,
+    _seal_entropy_fn=_seal_entropy,
+    _clock=time_ns,
 ) -> CredentialTransitionReceipt:
     if prior_handle.purpose != "TRADE" or current_handle.purpose != "TRADE":
         raise CredentialTransitionReceiptError(
@@ -466,13 +500,13 @@ def _issue_locked(
         raise CredentialTransitionReceiptError(
             "credential transition record disappeared before receipt issuance"
         )
-    section = _authority_section(state, create=True)
+    section = _authority_section_fn(state, create=True)
     owner_identity = record["owner_identity"]
-    authority_digest = _vault_authority_digest(
+    authority_digest = _vault_authority_digest_fn(
         vault,
         instance_id=section["instance_id"],
     )
-    sequence, previous_receipt_id = _next_sequence(
+    sequence, previous_receipt_id = _next_sequence_fn(
         vault,
         section,
         handle=current_handle,
@@ -493,19 +527,19 @@ def _issue_locked(
         "active_after": bool(record["active"]),
         "owner_identity_sha256": _text_digest(owner_identity),
         "vault_authority_sha256": authority_digest,
-        "record_state_sha256": _record_state_digest(record),
+        "record_state_sha256": _record_state_digest_fn(record),
         "previous_receipt_id": previous_receipt_id,
         "transition_sequence": sequence,
-        "completed_time_ns": time_ns(),
+        "completed_time_ns": _clock(),
     }
     receipt = CredentialTransitionReceipt(
-        receipt_id=_receipt_id_from_subject(subject),
+        receipt_id=_receipt_id_from_subject_fn(subject),
         **subject,
     )
     try:
         seal = vault._protector.protect(
             receipt.receipt_id.encode("utf-8"),
-            entropy=_seal_entropy(receipt),
+            entropy=_seal_entropy_fn(receipt),
         )
     except Exception as error:
         raise CredentialTransitionReceiptError(
@@ -528,6 +562,14 @@ def rotate_trade_credential_with_receipt(
     *,
     execution_identity: str,
     new_secret_value: str,
+    _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
+    _vault_load=_CANONICAL_VAULT_LOAD,
+    _vault_handle=_CANONICAL_VAULT_HANDLE,
+    _prove_identity=_CANONICAL_VAULT_PROVE_CURRENT_IDENTITY,
+    _vault_write=_CANONICAL_VAULT_WRITE,
+    _scope_entropy_fn=_CANONICAL_SCOPE_ENTROPY,
+    _text_fn=_CANONICAL_TEXT,
+    _issue_locked_fn=_issue_locked,
 ) -> tuple[PersistentCredentialHandle, CredentialTransitionReceipt]:
     """Rotate one exact TRADE generation and atomically retain its receipt."""
 
@@ -541,14 +583,14 @@ def rotate_trade_credential_with_receipt(
         )
     if type(new_secret_value) is not str or not new_secret_value:
         raise SecretVaultError("new_secret_value must not be empty")
-    owner = _text(execution_identity, name="execution_identity")
+    owner = _text_fn(execution_identity, name="execution_identity")
 
-    with _exclusive_file_lock(vault.lock_path, vault_path=vault.path):
-        state = ProtectedCredentialVault._load(vault)
+    with _file_lock(vault.lock_path, vault_path=vault.path):
+        state = _vault_load(vault)
         record = state["records"].get(handle.handle_id)
         if record is None or record["active"] is not True:
             raise PermissionError("Credential is unavailable")
-        current = ProtectedCredentialVault._handle(record)
+        current = _vault_handle(record)
         if current != handle:
             raise PermissionError("Credential handle generation is stale")
         if current.purpose != "TRADE":
@@ -557,7 +599,7 @@ def rotate_trade_credential_with_receipt(
             )
         if record["owner_identity"] != owner:
             raise PermissionError("Secret identity mismatch")
-        ProtectedCredentialVault._prove_current_identity_can_decrypt(
+        _prove_identity(
             vault,
             record,
             current,
@@ -572,7 +614,7 @@ def rotate_trade_credential_with_receipt(
             purpose=current.purpose,
             generation=current.generation + 1,
         )
-        entropy = _scope_entropy(
+        entropy = _scope_entropy_fn(
             handle_id=next_handle.handle_id,
             owner_identity=owner,
             account_id=next_handle.account_id,
@@ -589,14 +631,14 @@ def rotate_trade_credential_with_receipt(
                 entropy=entropy,
             )
         ).decode("ascii")
-        receipt = _issue_locked(
+        receipt = _issue_locked_fn(
             vault,
             state,
             prior_handle=current,
             current_handle=next_handle,
             operation="ROTATED",
         )
-        ProtectedCredentialVault._write(vault, state)
+        _vault_write(vault, state)
         return next_handle, receipt
 
 
@@ -605,6 +647,13 @@ def revoke_trade_credential_with_receipt(
     handle: PersistentCredentialHandle,
     *,
     execution_identity: str,
+    _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
+    _vault_load=_CANONICAL_VAULT_LOAD,
+    _vault_handle=_CANONICAL_VAULT_HANDLE,
+    _prove_identity=_CANONICAL_VAULT_PROVE_CURRENT_IDENTITY,
+    _vault_write=_CANONICAL_VAULT_WRITE,
+    _text_fn=_CANONICAL_TEXT,
+    _issue_locked_fn=_issue_locked,
 ) -> CredentialTransitionReceipt:
     """Revoke one exact TRADE generation and atomically retain its receipt."""
 
@@ -616,14 +665,14 @@ def revoke_trade_credential_with_receipt(
         raise CredentialTransitionReceiptError(
             "READ credentials cannot issue sender-fence transition receipts"
         )
-    owner = _text(execution_identity, name="execution_identity")
+    owner = _text_fn(execution_identity, name="execution_identity")
 
-    with _exclusive_file_lock(vault.lock_path, vault_path=vault.path):
-        state = ProtectedCredentialVault._load(vault)
+    with _file_lock(vault.lock_path, vault_path=vault.path):
+        state = _vault_load(vault)
         record = state["records"].get(handle.handle_id)
         if record is None or record["active"] is not True:
             raise PermissionError("Credential is unavailable")
-        current = ProtectedCredentialVault._handle(record)
+        current = _vault_handle(record)
         if current != handle:
             raise PermissionError("Credential handle generation is stale")
         if current.purpose != "TRADE":
@@ -632,7 +681,7 @@ def revoke_trade_credential_with_receipt(
             )
         if record["owner_identity"] != owner:
             raise PermissionError("Secret identity mismatch")
-        ProtectedCredentialVault._prove_current_identity_can_decrypt(
+        _prove_identity(
             vault,
             record,
             current,
@@ -640,20 +689,32 @@ def revoke_trade_credential_with_receipt(
         )
         record["active"] = False
         record["ciphertext"] = b64encode(os.urandom(32)).decode("ascii")
-        receipt = _issue_locked(
+        receipt = _issue_locked_fn(
             vault,
             state,
             prior_handle=current,
             current_handle=current,
             operation="REVOKED",
         )
-        ProtectedCredentialVault._write(vault, state)
+        _vault_write(vault, state)
         return receipt
 
 
 def verify_trade_credential_transition_receipt(
     vault: ProtectedCredentialVault,
     receipt: CredentialTransitionReceipt,
+    *,
+    _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
+    _vault_load=_CANONICAL_VAULT_LOAD,
+    _vault_handle=_CANONICAL_VAULT_HANDLE,
+    _authority_section_fn=_authority_section,
+    _parse_receipt_fn=_parse_receipt,
+    _receipt_id_from_subject_fn=_receipt_id_from_subject,
+    _receipt_subject_fn=_receipt_subject,
+    _vault_authority_digest_fn=_vault_authority_digest,
+    _text_digest_fn=_text_digest,
+    _record_state_digest_fn=_record_state_digest,
+    _seal_entropy_fn=_seal_entropy,
 ) -> CredentialTransitionReceipt:
     """Revalidate one receipt against the exact current canonical vault state."""
 
@@ -662,25 +723,25 @@ def verify_trade_credential_transition_receipt(
     if type(receipt) is not CredentialTransitionReceipt:
         raise TypeError("receipt must be an exact CredentialTransitionReceipt")
 
-    with _exclusive_file_lock(vault.lock_path, vault_path=vault.path):
-        state = ProtectedCredentialVault._load(vault)
-        section = _authority_section(state, create=False)
+    with _file_lock(vault.lock_path, vault_path=vault.path):
+        state = _vault_load(vault)
+        section = _authority_section_fn(state, create=False)
         stored = section["latest_by_handle"].get(receipt.handle_id)
         if stored is None:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt is not vault-issued current evidence"
             )
-        stored_receipt = _parse_receipt(stored["receipt"])
+        stored_receipt = _parse_receipt_fn(stored["receipt"])
         if stored_receipt != receipt:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt is stale or not vault-issued"
             )
-        expected_id = _receipt_id_from_subject(_receipt_subject(receipt))
+        expected_id = _receipt_id_from_subject_fn(_receipt_subject_fn(receipt))
         if receipt.receipt_id != expected_id:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt content identity mismatch"
             )
-        expected_authority = _vault_authority_digest(
+        expected_authority = _vault_authority_digest_fn(
             vault,
             instance_id=section["instance_id"],
         )
@@ -694,7 +755,7 @@ def verify_trade_credential_transition_receipt(
             raise CredentialTransitionReceiptError(
                 "credential transition current record is missing"
             )
-        current = ProtectedCredentialVault._handle(record)
+        current = _vault_handle(record)
         if (
             current.handle_id != receipt.handle_id
             or current.account_id != receipt.account_id
@@ -723,11 +784,11 @@ def verify_trade_credential_transition_receipt(
                     "credential revocation receipt is no longer current"
                 )
         owner_identity = record["owner_identity"]
-        if _text_digest(owner_identity) != receipt.owner_identity_sha256:
+        if _text_digest_fn(owner_identity) != receipt.owner_identity_sha256:
             raise CredentialTransitionReceiptError(
                 "credential transition owner identity digest mismatch"
             )
-        if _record_state_digest(record) != receipt.record_state_sha256:
+        if _record_state_digest_fn(record) != receipt.record_state_sha256:
             raise CredentialTransitionReceiptError(
                 "credential transition current record state changed"
             )
@@ -736,7 +797,7 @@ def verify_trade_credential_transition_receipt(
             sealed = b64decode(stored["seal_b64"], validate=True)
             unsealed = vault._protector.unprotect(
                 sealed,
-                entropy=_seal_entropy(receipt),
+                entropy=_seal_entropy_fn(receipt),
             )
         except Exception as error:
             raise CredentialTransitionReceiptError(
@@ -747,3 +808,67 @@ def verify_trade_credential_transition_receipt(
                 "credential transition receipt issuer seal payload mismatch"
             )
         return receipt
+
+
+def _bind_rotate_entrypoint(implementation):
+    def rotate_trade_credential_with_receipt(
+        vault: ProtectedCredentialVault,
+        handle: PersistentCredentialHandle,
+        *,
+        execution_identity: str,
+        new_secret_value: str,
+    ) -> tuple[PersistentCredentialHandle, CredentialTransitionReceipt]:
+        return implementation(
+            vault,
+            handle,
+            execution_identity=execution_identity,
+            new_secret_value=new_secret_value,
+        )
+
+    rotate_trade_credential_with_receipt.__doc__ = implementation.__doc__
+    return rotate_trade_credential_with_receipt
+
+
+def _bind_revoke_entrypoint(implementation):
+    def revoke_trade_credential_with_receipt(
+        vault: ProtectedCredentialVault,
+        handle: PersistentCredentialHandle,
+        *,
+        execution_identity: str,
+    ) -> CredentialTransitionReceipt:
+        return implementation(
+            vault,
+            handle,
+            execution_identity=execution_identity,
+        )
+
+    revoke_trade_credential_with_receipt.__doc__ = implementation.__doc__
+    return revoke_trade_credential_with_receipt
+
+
+def _bind_verify_entrypoint(implementation):
+    def verify_trade_credential_transition_receipt(
+        vault: ProtectedCredentialVault,
+        receipt: CredentialTransitionReceipt,
+    ) -> CredentialTransitionReceipt:
+        return implementation(vault, receipt)
+
+    verify_trade_credential_transition_receipt.__doc__ = implementation.__doc__
+    return verify_trade_credential_transition_receipt
+
+
+_rotate_trade_credential_with_receipt_impl = rotate_trade_credential_with_receipt
+_revoke_trade_credential_with_receipt_impl = revoke_trade_credential_with_receipt
+_verify_trade_credential_transition_receipt_impl = (
+    verify_trade_credential_transition_receipt
+)
+
+rotate_trade_credential_with_receipt = _bind_rotate_entrypoint(
+    _rotate_trade_credential_with_receipt_impl
+)
+revoke_trade_credential_with_receipt = _bind_revoke_entrypoint(
+    _revoke_trade_credential_with_receipt_impl
+)
+verify_trade_credential_transition_receipt = _bind_verify_entrypoint(
+    _verify_trade_credential_transition_receipt_impl
+)

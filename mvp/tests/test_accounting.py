@@ -486,14 +486,17 @@ class AccountingFoundationTests(unittest.TestCase):
         # authority over the audit result. A same-named hostile module binding
         # must be irrelevant to the cache selected by product construction.
         self.assertFalse(hasattr(accounting_module, "_transaction_digest_cache"))
+        self.assertFalse(hasattr(accounting_module, "_cached_transaction_digest"))
         accounting_module._transaction_digest_cache = {fingerprint: forged}
         accounting_module._transaction_digest_cache_lock = object()
+        accounting_module._cached_transaction_digest = lambda _transaction: forged
         try:
             self.assertEqual(book.audit_digest(), expected)
             self.assertNotEqual(book.audit_digest(), forged)
         finally:
             del accounting_module._transaction_digest_cache
             del accounting_module._transaction_digest_cache_lock
+            del accounting_module._cached_transaction_digest
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

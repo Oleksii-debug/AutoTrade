@@ -416,12 +416,13 @@ def load_latest_reconciliation_checkpoint(
     if not events:
         return None
     event = events[-1]
-    _require_checkpoint_scope(
+    payload = _require_checkpoint_scope(
         event,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     return event
 
 

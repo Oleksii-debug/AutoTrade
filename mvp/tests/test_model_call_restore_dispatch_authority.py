@@ -24,6 +24,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 NOW = datetime(2026, 9, 25, 10, 0, 0, tzinfo=timezone.utc)
 NOW_TEXT = "2026-09-25T10:00:00Z"
 ORIGINAL_ORCHESTRATOR_CLASS = model_call_module.DurableModelCallOrchestrator
+ORIGINAL_BUDGET_CLASS = DurableModelBudget
 
 
 def _open_budget(directory):
@@ -113,6 +114,54 @@ def _request(orchestrator, call_spec):
 
 
 class ModelCallRestoreDispatchAuthorityTests(unittest.TestCase):
+    def test_cancel_callback_cannot_poison_model_budget_module_alias(self):
+        class DecoyBudget:
+            pass
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            inference_calls = []
+
+            def hostile_cancel():
+                model_call_module.DurableModelBudget = DecoyBudget
+                return False
+
+            try:
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    r"cancellation probe mutated orchestrator authority:.*"
+                    r"module\.DurableModelBudget",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: inference_calls.append("inference"),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                        cancel_requested=hostile_cancel,
+                    )
+            finally:
+                model_call_module.DurableModelBudget = ORIGINAL_BUDGET_CLASS
+
+            self.assertIs(
+                model_call_module.DurableModelBudget,
+                ORIGINAL_BUDGET_CLASS,
+            )
+            self.assertEqual(inference_calls, [])
+            self.assertEqual(
+                budget.active_reservation(attempt_id),
+                Decimal("1.2"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
     def test_cancel_callback_cannot_redirect_restore_dispatch_through_module_class_alias(self):
         class DecoyOrchestrator:
             restore_calls = 0

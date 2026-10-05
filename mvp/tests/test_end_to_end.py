@@ -178,6 +178,77 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_restored_fill_must_match_bound_provider_and_intent_semantics(self):
+        cases = (
+            ("symbol", "OTHER"),
+            ("side", "BROKEN"),
+            ("fee", "999.00000000"),
+            ("fill_id", "fill-" + "0" * 20),
+            ("client_order_id", "intent-" + "0" * 20),
+        )
+        for field, value in cases:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                run_vertical_slice([100, 101, 102, 103], directory)
+                root = Path(directory)
+                checkpoint_path = root / "checkpoint.json"
+                checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                fill = next(iter(checkpoint["fills"].values()))
+                fill[field] = value
+                checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+                durable_before = {
+                    "checkpoint": checkpoint_path.read_bytes(),
+                    "evidence": (root / "learning-evidence.jsonl").read_bytes(),
+                    "journal": (root / "journal.sqlite3").read_bytes(),
+                    "intents": {
+                        path.name: path.read_bytes()
+                        for path in (root / "order-intents").glob("*.json")
+                    },
+                }
+
+                with self.assertRaisesRegex(ValueError, "checkpoint fill"):
+                    run_vertical_slice([100, 101, 102, 103], directory)
+
+                self.assertEqual(checkpoint_path.read_bytes(), durable_before["checkpoint"])
+                self.assertEqual(
+                    (root / "learning-evidence.jsonl").read_bytes(),
+                    durable_before["evidence"],
+                )
+                self.assertEqual(
+                    (root / "journal.sqlite3").read_bytes(),
+                    durable_before["journal"],
+                )
+                self.assertEqual(
+                    {
+                        path.name: path.read_bytes()
+                        for path in (root / "order-intents").glob("*.json")
+                    },
+                    durable_before["intents"],
+                )
+
+    def test_restored_fill_requires_its_durable_order_intent(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            intent_path = next((root / "order-intents").glob("*.json"))
+            intent_path.unlink()
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Durable order intent missing for checkpoint fill",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_bytes(),
+                evidence_before,
+            )
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertFalse(intent_path.exists())
+
     def test_market_data_rejects_oversized_text_before_decimal_construction(self):
         import mvp.autotrade_mvp.pipeline as pipeline_module
 

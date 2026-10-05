@@ -655,6 +655,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         provider_environment="MAINNET",
         intent_id="bybit-write-intent",
         attempt_id=None,
+        http_status=200,
     ):
         runtime_environment = (
             "LIVE" if provider_environment == "MAINNET" else "PAPER"
@@ -713,7 +714,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
-                    ExactJsonTransportResponse(raw),
+                    ExactJsonTransportResponse(raw, http_status=http_status),
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
@@ -768,6 +769,68 @@ class BybitV5AdapterTests(unittest.TestCase):
             result["evidence"][0]["sha256"],
             observation.response_sha256,
         )
+
+    def test_non_2xx_success_body_is_unknown_and_requires_reconciliation(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-http-error",
+                    "orderLinkId": "__CLIENT__",
+                },
+            },
+            http_status=503,
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "BYBIT_HTTP_NON_2XX")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertNotIn("provider_order_id", result)
+        self.assertEqual(result["evidence"][0]["http_status"], 503)
+        self.assertEqual(
+            result["evidence"][0]["sha256"],
+            observation.response_sha256,
+        )
+
+    def test_non_2xx_status_gates_body_semantics(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {},
+            http_status=502,
+            intent_id="bybit-http-gates-body",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "BYBIT_HTTP_NON_2XX")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(result["evidence"][0]["http_status"], 502)
+
+    def test_non_2xx_rejection_body_is_also_unknown(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 10001,
+                "retMsg": "rejected",
+                "result": {},
+            },
+            http_status=429,
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "BYBIT_HTTP_NON_2XX")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(result["evidence"][0]["http_status"], 429)
 
     def test_response_evidence_is_bound_to_provider_environment(self):
         base = {

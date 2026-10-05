@@ -1,5 +1,6 @@
 import json
 from decimal import Inexact, Rounded, ROUND_CEILING, localcontext
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -262,6 +263,27 @@ class VerticalSliceTests(unittest.TestCase):
                 sorted(path.name for path in (root / "order-intents").glob("*.json")),
                 intents_before,
             )
+
+    def test_rehashed_checkpoint_configuration_cannot_redefine_resume_policy(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["financial_configuration"]["max_notional"] = "999"
+            checkpoint["financial_configuration_hash"] = sha256(
+                json.dumps(
+                    checkpoint["financial_configuration"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "financial configuration changed",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
 
     def test_legacy_checkpoint_without_financial_identity_fails_closed(self):
         with TemporaryDirectory() as directory:

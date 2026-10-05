@@ -633,5 +633,32 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
             )
 
 
+    def test_spot_raw_provider_object_rejects_text_key_subclass_before_equality_callback(self):
+        callbacks = []
+
+        class HostileKey(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                callbacks.append(other)
+                raise AssertionError("hostile provider-key equality executed")
+
+        payload = {
+            HostileKey("symbol"): "BTCUSDT",
+            "referencePrice": "100",
+            "timestamp": 1791187200123,
+        }
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "keys must be exact decoded strings",
+        ):
+            BinanceSpotReferencePrice.from_reference_price_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload=payload,
+            )
+        self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

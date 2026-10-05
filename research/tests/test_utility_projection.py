@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.evaluation.utility_projection import (
     UTILITY_OWNER_AUTHORITY,
     UTILITY_PROJECTION_KIND,

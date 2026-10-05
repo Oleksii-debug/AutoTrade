@@ -208,6 +208,74 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 receipt_manifest["metadata"]["terminal_qualification_eligible"]
             )
 
+    def test_artifact_store_instance_method_shadow_cannot_replace_runner_io(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            evidence_store = ArtifactStore(Path(root) / "evidence")
+            expected, financial, research = self._plans(store)
+            authority = self._authority(store, financial)
+            forged_calls = []
+
+            def forged_publish(**_kwargs):
+                forged_calls.append("publish")
+                raise AssertionError("instance-shadowed publisher executed")
+
+            def forged_read(_artifact_id):
+                forged_calls.append("read")
+                raise AssertionError("instance-shadowed reader executed")
+
+            evidence_store.publish_bytes = forged_publish
+            evidence_store.read_authenticated_snapshot = forged_read
+
+            def financial_operation() -> str:
+                _append_financial(store, expected)
+                return "financial-done"
+
+            def research_operation() -> str:
+                return "research-done"
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                    return_value=dict(HOST_IDENTITY),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                    side_effect=(1_000_000, 1_080_000),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_measurement.perf_counter_ns",
+                    side_effect=(2_000_000, 2_125_000),
+                ),
+            ):
+                result = run_declared_target_host_campaign(
+                    journal=store,
+                    evidence_store=evidence_store,
+                    spec=_spec(),
+                    authority_id=authority.authority_id,
+                    research_plan_id=research.plan_id,
+                    financial_operations={expected.event_id: financial_operation},
+                    research_operations={
+                        research.expected_sample_ids[0]: research_operation
+                    },
+                    inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                    measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                    run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                )
+
+            self.assertEqual(forged_calls, [])
+            self.assertFalse(result.terminal_qualification_eligible)
+            for artifact_id in (
+                INVENTORY_ARTIFACT_ID,
+                MEASUREMENT_ARTIFACT_ID,
+                RUN_RECEIPT_ARTIFACT_ID,
+            ):
+                manifest, _raw = ArtifactStore.read_authenticated_snapshot(
+                    evidence_store,
+                    artifact_id,
+                )
+                self.assertEqual(manifest["artifact_id"], artifact_id)
+
     def test_research_plan_declared_after_authority_is_rejected_before_callbacks(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)
@@ -282,6 +350,147 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                     run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
                 )
             self.assertEqual(list(evidence_store.manifests.iterdir()), [])
+
+    def test_later_callback_code_mutation_is_rejected_before_financial_operation(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            evidence_store = ArtifactStore(Path(root) / "evidence")
+            expected, financial, research = self._plans(store)
+            authority = self._authority(store, financial)
+
+            def financial_operation() -> None:
+                _append_financial(store, expected)
+
+            def replacement_operation() -> None:
+                if store is None or expected is None:
+                    raise AssertionError("unreachable")
+                raise AssertionError("mutated financial callback must not execute")
+
+            def research_operation() -> None:
+                financial_operation.__code__ = replacement_operation.__code__
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                    return_value=dict(HOST_IDENTITY),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                    side_effect=(1_000_000, 1_080_000),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "financial operation runner-financial-1 executable authority changed",
+                ),
+            ):
+                run_declared_target_host_campaign(
+                    journal=store,
+                    evidence_store=evidence_store,
+                    spec=_spec(),
+                    authority_id=authority.authority_id,
+                    research_plan_id=research.plan_id,
+                    financial_operations={expected.event_id: financial_operation},
+                    research_operations={research.expected_sample_ids[0]: research_operation},
+                    inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                    measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                    run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                )
+
+            self.assertIsNone(store.get_event(expected.event_id))
+
+    def test_artifact_store_namespace_redirect_is_rejected_after_callback(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            evidence_store = ArtifactStore(Path(root) / "evidence")
+            redirected_store = ArtifactStore(Path(root) / "redirected-evidence")
+            expected, financial, research = self._plans(store)
+            authority = self._authority(store, financial)
+
+            def financial_operation() -> None:
+                _append_financial(store, expected)
+
+            def research_operation() -> None:
+                evidence_store.root = redirected_store.root
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                    return_value=dict(HOST_IDENTITY),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                    side_effect=(1_000_000, 1_080_000),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeTargetHostRunnerError,
+                    "ArtifactStore root authority changed",
+                ),
+            ):
+                run_declared_target_host_campaign(
+                    journal=store,
+                    evidence_store=evidence_store,
+                    spec=_spec(),
+                    authority_id=authority.authority_id,
+                    research_plan_id=research.plan_id,
+                    financial_operations={expected.event_id: financial_operation},
+                    research_operations={research.expected_sample_ids[0]: research_operation},
+                    inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                    measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                    run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                )
+
+            self.assertIsNone(store.get_event(expected.event_id))
+
+    def test_artifact_store_class_publisher_mutation_is_rejected_after_callback(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            evidence_store = ArtifactStore(Path(root) / "evidence")
+            expected, financial, research = self._plans(store)
+            authority = self._authority(store, financial)
+            original_publish = ArtifactStore.publish_bytes
+
+            def financial_operation() -> None:
+                _append_financial(store, expected)
+
+            def forged_publish(self, **_kwargs):
+                raise AssertionError("mutated class publisher must not execute")
+
+            def research_operation() -> None:
+                ArtifactStore.publish_bytes = forged_publish
+
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_inventory.capture_runtime_host_identity",
+                        return_value=dict(HOST_IDENTITY),
+                    ),
+                    patch(
+                        "mvp.autotrade_mvp.runtime_load_research_measurement.perf_counter_ns",
+                        side_effect=(1_000_000, 1_080_000),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeTargetHostRunnerError,
+                        "ArtifactStore publisher authority changed",
+                    ),
+                ):
+                    run_declared_target_host_campaign(
+                        journal=store,
+                        evidence_store=evidence_store,
+                        spec=_spec(),
+                        authority_id=authority.authority_id,
+                        research_plan_id=research.plan_id,
+                        financial_operations={expected.event_id: financial_operation},
+                        research_operations={
+                            research.expected_sample_ids[0]: research_operation
+                        },
+                        inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                        measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                        run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                    )
+            finally:
+                ArtifactStore.publish_bytes = original_publish
+
+            self.assertIsNone(store.get_event(expected.event_id))
 
     def test_evidence_artifact_ids_must_be_distinct_before_any_work(self):
         with tempfile.TemporaryDirectory() as root:

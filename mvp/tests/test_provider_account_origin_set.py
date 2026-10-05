@@ -293,6 +293,55 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
                     at=NOW,
                 )
 
+    def test_issued_origin_set_rejects_qualification_store_rebinding(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            first_fixture = self._fixture(first)
+            second_fixture = self._fixture(second)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = first_fixture
+            second_qualifications = second_fixture[3]
+            response = self._direct_binding(
+                first_fixture,
+                first,
+                marker="currentness-cross-store",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+
+            original_store = qualifications.store
+            try:
+                qualifications.store = second_qualifications.store
+                with self.assertRaisesRegex(
+                    ProviderAccountOriginSetError,
+                    "JournalStore generation changed",
+                ):
+                    require_current_provider_account_origin_set_authority(
+                        issued,
+                        at=NOW,
+                    )
+            finally:
+                qualifications.store = original_store
+
+            self.assertIs(
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                ),
+                issued,
+            )
+
     def test_issued_origin_set_is_not_current_after_q_expiry(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)

@@ -11,9 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Literal
+
+from .exact_decimal import as_fraction, exact_multiply, round_fraction_to_quantum
 
 
 class ExecutionRealismError(ValueError):
@@ -705,6 +708,20 @@ def simulate_execution(
             "liquidity instrument_version must exactly match order instrument_version"
         )
 
+    if order.order_type == "MARKET" and (
+        model.price_quantum is None
+        or model.price_projection_policy_id is None
+        or model.price_projection_policy_version is None
+        or model.price_grid_instrument_version is None
+    ):
+        raise ExecutionRealismError(
+            "MARKET execution requires complete price projection policy evidence"
+        )
+    if order.order_type == "MARKET" and model.price_grid_instrument_version != order.instrument_version:
+        raise ExecutionRealismError(
+            "MARKET price grid is not bound to the order instrument_version"
+        )
+
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)
     market_time = _instant(observation.market_time, name="market_time")
@@ -881,28 +898,37 @@ def simulate_execution(
             observation,
             model,
         )
-        participation = (
-            capacity / observation.available_volume
-            if observation.available_volume > 0
-            else Decimal("0")
-        )
-        impact_fraction = (
-            participation / model.max_participation
-            if model.max_participation > 0
-            else Decimal("0")
+        # Keep all MARKET price arithmetic exact until the explicit instrument
+        # price-grid projection. The ambient Decimal context must not affect it.
+        participation = as_fraction(capacity) / as_fraction(observation.available_volume)
+        max_participation = as_fraction(model.max_participation)
+        impact_fraction = min(
+            participation / max_participation,
+            Fraction(1, 1),
         )
         impact_bps = (
-            model.impact_bps_at_max_participation
-            * min(impact_fraction, Decimal("1"))
+            as_fraction(model.impact_bps_at_max_participation) * impact_fraction
         )
         total_bps = (
-            additional_spread_bps + model.slippage_bps + impact_bps
-        ) * model.scenario_cost_multiplier
-        price_delta = base_price * total_bps / Decimal("10000")
-        fill_price = (
-            base_price + price_delta
+            as_fraction(additional_spread_bps)
+            + as_fraction(model.slippage_bps)
+            + impact_bps
+        ) * as_fraction(model.scenario_cost_multiplier)
+        reference = as_fraction(base_price)
+        price_delta = reference * total_bps / 10000
+        target = (
+            reference + price_delta
             if order.side == "BUY"
-            else base_price - price_delta
+            else reference - price_delta
+        )
+        if target <= 0:
+            raise ExecutionRealismError(
+                "configured adverse costs produce non-positive execution price"
+            )
+        fill_price = round_fraction_to_quantum(
+            target,
+            model.price_quantum,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
         )
         if fill_price <= 0:
             raise ExecutionRealismError(

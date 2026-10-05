@@ -18,7 +18,12 @@ import re
 from types import MappingProxyType
 import weakref
 
-from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+)
 from .persistence import canonical_json
 from .provider_core import ProviderResponseObservation, Surface
 from .provider_origin import (
@@ -46,6 +51,7 @@ _BYBIT_FUNDING_PARSER_IDENTITY = "BYBIT_V5_TRANSACTION_LOG_FUNDING_V1"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ORIGIN_RE = re.compile(r"^provider-origin:sha256:[0-9a-f]{64}$")
 _QUALIFIED_RE = re.compile(r"^qualified-provider-read:sha256:[0-9a-f]{64}$")
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -69,28 +75,32 @@ def _epoch_millis(value: object, *, name: str) -> int:
         raise ProviderFundingIncomeError(
             f"{name} must be exact epoch-millisecond text"
         )
-    try:
-        millis = int(text)
-    except ValueError as error:
-        raise ProviderFundingIncomeError(
-            f"{name} must be exact epoch-millisecond text"
-        ) from error
-    if millis <= 0:
-        raise ProviderFundingIncomeError(f"{name} must be positive")
-    if str(millis) != text:
+    if len(text) > 1 and text.startswith("0"):
         raise ProviderFundingIncomeError(
             f"{name} must use canonical epoch-millisecond text"
         )
+    try:
+        millis = parse_bounded_json_integer_token(text)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise ProviderFundingIncomeError(
+            f"{name} must be bounded epoch-millisecond text"
+        ) from error
+    if millis <= 0:
+        raise ProviderFundingIncomeError(f"{name} must be positive")
     return millis
 
 
 def _datetime_from_epoch_millis(millis: int, *, name: str) -> datetime:
-    seconds, remainder_millis = divmod(millis, 1000)
-    try:
-        return datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(
-            milliseconds=remainder_millis
+    if type(millis) is not int or millis < 0:
+        raise ProviderFundingIncomeError(
+            f"{name} must be a non-negative exact epoch-millisecond integer"
         )
-    except (OverflowError, OSError, ValueError) as error:
+    # Provider chronology is product evidence, not host C-library/time_t
+    # authority. Fixed epoch arithmetic is deterministic across supported
+    # platforms and preserves exact millisecond identity.
+    try:
+        return _UTC_EPOCH + timedelta(milliseconds=millis)
+    except (OverflowError, ValueError) as error:
         raise ProviderFundingIncomeError(
             f"{name} is outside supported UTC range"
         ) from error

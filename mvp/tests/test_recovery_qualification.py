@@ -732,6 +732,68 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         )
         self.assertFalse(decision.matches_policy(other_release))
 
+    def test_polymorphic_qualification_inputs_fail_closed_before_callbacks(self):
+        calls = []
+
+        class HostileStr(str):
+            def strip(self):
+                calls.append("strip")
+                raise AssertionError("caller string callback must not execute")
+
+            def lower(self):
+                calls.append("lower")
+                raise AssertionError("caller string callback must not execute")
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                calls.append("tuple-iter")
+                raise AssertionError("caller tuple iterator must not execute")
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("dict-items")
+                raise AssertionError("caller mapping callback must not execute")
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("list-iter")
+                raise AssertionError("caller evidence iterator must not execute")
+
+        with self.assertRaisesRegex(ValueError, "canonical lowercase"):
+            policy(source_sha=HostileStr(SOURCE_SHA))
+        with self.assertRaisesRegex(ValueError, "canonical sha256"):
+            policy(artifact=HostileStr(ARTIFACT_SHA))
+        with self.assertRaisesRegex(ValueError, "protocol_id"):
+            policy(protocol_id=HostileStr(PROTOCOL_ID))
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            evidence(
+                RecoveryScenario.NETWORK_LOSS,
+                tests_run=HostileTuple(
+                    REQUIRED_TESTS[RecoveryScenario.NETWORK_LOSS]
+                ),
+            )
+
+        limits = HostileDict(
+            {scenario: 60_000 for scenario in RecoveryScenario}
+        )
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            RecoveryQualificationPolicy(
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                max_downtime_ms=limits,
+                required_tests=dict(REQUIRED_TESTS),
+            )
+
+        with self.assertRaisesRegex(TypeError, "exact list or tuple"):
+            qualify_recovery_release(
+                policy=policy(),
+                evidence=HostileList(complete_evidence()),
+            )
+        self.assertEqual(calls, [])
+
     def test_recovery_identity_rejects_whitespace_and_accepts_git_sha256(self):
         sha256_policy = policy(source_sha="d" * 64)
         self.assertEqual(sha256_policy.source_sha, "d" * 64)

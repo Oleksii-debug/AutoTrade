@@ -840,10 +840,19 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
                 _windows_secrets._ALLOWED_ENVIRONMENTS
             ),
             "_ALLOWED_PURPOSES": frozenset(_windows_secrets._ALLOWED_PURPOSES),
+            "object": object,
         },
     )
     handle_type = PersistentCredentialHandle
     handle_post_init_code = getattr(retained_handle_post_init, "__code__", None)
+    retained_handle_getattribute = object.__getattribute__
+    retained_handle_setattr = object.__setattr__
+    if handle_type.__getattribute__ is not retained_handle_getattribute:
+        raise TypeError("credential handle attribute authority is not canonical")
+
+    class _TerminalHandleValidationView:
+        pass
+
     terminal_handle_type = namedtuple(
         "_TerminalCredentialHandle",
         (
@@ -869,36 +878,43 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     ):
         if getattr(retained_handle_post_init, "__code__", None) is not handle_post_init_code:
             raise PermissionError("Credential handle validation code changed")
-        validated = object.__new__(handle_type)
-        object.__setattr__(validated, "handle_id", handle_id)
-        object.__setattr__(validated, "account_id", account_id)
-        object.__setattr__(validated, "provider", provider)
-        object.__setattr__(validated, "environment", environment)
-        object.__setattr__(validated, "purpose", purpose)
-        object.__setattr__(validated, "generation", generation)
-        object.__setattr__(validated, "provider_environment", provider_environment)
+        validated = _TerminalHandleValidationView()
+        retained_handle_setattr(validated, "handle_id", handle_id)
+        retained_handle_setattr(validated, "account_id", account_id)
+        retained_handle_setattr(validated, "provider", provider)
+        retained_handle_setattr(validated, "environment", environment)
+        retained_handle_setattr(validated, "purpose", purpose)
+        retained_handle_setattr(validated, "generation", generation)
+        retained_handle_setattr(
+            validated,
+            "provider_environment",
+            provider_environment,
+        )
         retained_handle_post_init(validated)
         return terminal_handle_type(
-            validated.handle_id,
-            validated.account_id,
-            validated.provider,
-            validated.environment,
-            validated.purpose,
-            validated.generation,
-            validated.provider_environment,
+            retained_handle_getattribute(validated, "handle_id"),
+            retained_handle_getattribute(validated, "account_id"),
+            retained_handle_getattribute(validated, "provider"),
+            retained_handle_getattribute(validated, "environment"),
+            retained_handle_getattribute(validated, "purpose"),
+            retained_handle_getattribute(validated, "generation"),
+            retained_handle_getattribute(validated, "provider_environment"),
         )
 
     def terminal_handle_for_public(handle):
         if type(handle) is not handle_type:
             raise PermissionError("Credential handle must use the canonical exact type")
         return retained_handle_factory(
-            handle_id=handle.handle_id,
-            account_id=handle.account_id,
-            provider=handle.provider,
-            environment=handle.environment,
-            purpose=handle.purpose,
-            generation=handle.generation,
-            provider_environment=handle.provider_environment,
+            handle_id=retained_handle_getattribute(handle, "handle_id"),
+            account_id=retained_handle_getattribute(handle, "account_id"),
+            provider=retained_handle_getattribute(handle, "provider"),
+            environment=retained_handle_getattribute(handle, "environment"),
+            purpose=retained_handle_getattribute(handle, "purpose"),
+            generation=retained_handle_getattribute(handle, "generation"),
+            provider_environment=retained_handle_getattribute(
+                handle,
+                "provider_environment",
+            ),
         )
 
     retained_os = SimpleNamespace(

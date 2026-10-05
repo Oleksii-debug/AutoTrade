@@ -1609,7 +1609,7 @@ class DurableModelBudget:
             if (
                 existing.get("event_type") != "ModelCostReleased"
                 or existing.get("aggregate_type") != _AGGREGATE_TYPE
-                or existing.get("aggregate_id") != self.budget_id
+                or existing.get("aggregate_id") != budget_id
                 or not isinstance(payload, dict)
                 or payload.get("request_id") != request_id
             ):

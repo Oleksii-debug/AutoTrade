@@ -1,10 +1,14 @@
 from hashlib import sha256
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.windows_secrets as windows_secrets
+
+
+LEGACY_JSON_DUMPS = json.dumps
 
 
 class DeterministicProtector:
@@ -70,6 +74,50 @@ class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
             environment="PAPER",
             purpose="TRADE",
         )
+
+    def test_direct_encoder_preserves_legacy_entropy_and_vault_bytes(self):
+        scope = {
+            "handle_id": "cred-json-compatibility",
+            "owner_identity": "windows-user-1",
+            "account_id": "paper-1",
+            "provider": "SIMULATED",
+            "environment": "PAPER",
+            "provider_environment": "PAPER",
+            "purpose": "TRADE",
+            "generation": 1,
+        }
+        legacy_scope = LEGACY_JSON_DUMPS(
+            scope,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            windows_secrets._scope_entropy(**scope),
+            sha256(legacy_scope).digest(),
+        )
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials.json"
+            vault = self._vault(path)
+            vault.register(
+                handle_id=scope["handle_id"],
+                owner_identity=scope["owner_identity"],
+                account_id=scope["account_id"],
+                provider=scope["provider"],
+                environment=scope["environment"],
+                provider_environment=scope["provider_environment"],
+                purpose=scope["purpose"],
+                secret_value="compatibility-π-secret",
+            )
+            state = vault._load()
+            legacy_vault = LEGACY_JSON_DUMPS(
+                state,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            self.assertEqual(path.read_text(encoding="utf-8"), legacy_vault)
 
     def test_json_module_rebinding_cannot_change_scope_load_or_write_authority(self):
         with TemporaryDirectory() as directory:

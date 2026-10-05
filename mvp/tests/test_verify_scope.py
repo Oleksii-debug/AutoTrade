@@ -65,7 +65,6 @@ class VerifyScopeTests(unittest.TestCase):
         self.assertIn("tests/Integration/LeanAdoption", text)
         self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
 
-
     def test_recovery_qualification_has_dedicated_exact_head_workflow(self):
         workflow = verify.ROOT / ".github" / "workflows" / "recovery-qualification.yml"
         text = workflow.read_text(encoding="utf-8")

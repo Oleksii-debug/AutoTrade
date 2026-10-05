@@ -4,11 +4,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from research.autotrade_research.memory.episodes import (
-    ExperienceMemory,
-    MemoryIntegrityError,
-)
-from research.autotrade_research.memory.reconciled_outcome import (
+import autotrade_research.memory.reconciled_outcome as reconciled_module
+from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
+from autotrade_research.memory.reconciled_outcome import (
     ReconciledOutcomeFactEvidence,
     resolve_reconciled_outcome_fact,
     reverify_reconciled_outcome_fact,
@@ -42,7 +40,7 @@ def memory(path: Path) -> ExperienceMemory:
 class ReconciledOutcomeEvidenceTests(unittest.TestCase):
     def _append_episode(self, store: ExperienceMemory) -> str:
         with patch(
-            "research.autotrade_research.memory.episodes._utc_now",
+            "autotrade_research.memory.episodes._utc_now",
             return_value=BASE,
         ):
             episode_id, inserted = store.append_episode(
@@ -73,6 +71,12 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
             instrument_family="equity",
         )
 
+    def test_module_uses_canonical_standalone_package(self):
+        self.assertEqual(
+            reconciled_module.__package__,
+            "autotrade_research.memory",
+        )
+
     def test_fact_binds_exact_population_cut_and_contains_no_numeric_utility(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")
@@ -88,7 +92,7 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
             self.assertTrue(evidence.evidence_digest.startswith("sha256:"))
             self.assertFalse(hasattr(evidence, "utility"))
             self.assertFalse(hasattr(evidence, "score"))
-            evidence.verify_integrity()
+            ReconciledOutcomeFactEvidence.verify_integrity(evidence)
 
     def test_post_cut_correction_cannot_rewrite_frozen_fact(self):
         with TemporaryDirectory() as directory:
@@ -98,7 +102,7 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
             frozen = self._resolve(store, cutoff=BASE + timedelta(days=1))
 
             with patch(
-                "research.autotrade_research.memory.episodes._utc_now",
+                "autotrade_research.memory.episodes._utc_now",
                 return_value=BASE + timedelta(seconds=1),
             ):
                 store.append_correction(
@@ -176,7 +180,7 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
             other_path = Path(directory) / "other.sqlite3"
             other = memory(other_path)
             with patch(
-                "research.autotrade_research.memory.episodes._utc_now",
+                "autotrade_research.memory.episodes._utc_now",
                 return_value=BASE,
             ):
                 other.append_episode(
@@ -200,7 +204,7 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
             store = memory(Path(directory) / "memory.sqlite3")
             self._append_episode(store)
             with patch(
-                "research.autotrade_research.memory.episodes._utc_now",
+                "autotrade_research.memory.episodes._utc_now",
                 return_value=BASE + timedelta(days=1),
             ):
                 store.tombstone(EPISODE_ID, reason="superseded source")
@@ -223,6 +227,119 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
                 "evidence digest does not match",
             ):
                 reverify_reconciled_outcome_fact(store, evidence)
+
+    def test_memory_subclass_is_rejected_before_virtual_population_read(self):
+        calls: list[str] = []
+
+        class HostileMemory(ExperienceMemory):
+            def coverage_population_snapshot(self, *args, **kwargs):
+                calls.append("coverage")
+                raise AssertionError("hostile memory callback executed")
+
+        with TemporaryDirectory() as directory:
+            hostile = HostileMemory(Path(directory) / "memory.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact ExperienceMemory"):
+                resolve_reconciled_outcome_fact(
+                    hostile,
+                    episode_id=EPISODE_ID,
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                )
+        self.assertEqual(calls, [])
+
+    def test_instance_shadowed_population_reader_is_not_authority(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            self._append_episode(store)
+
+            def hostile(*args, **kwargs):
+                calls.append("coverage")
+                raise AssertionError("instance shadow executed")
+
+            store.coverage_population_snapshot = hostile
+            evidence = self._resolve(store, cutoff=BASE + timedelta(days=1))
+            self.assertEqual(evidence.episode_id, EPISODE_ID)
+            self.assertEqual(calls, [])
+
+    def test_non_utc_cut_is_rejected_without_normalization(self):
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            self._append_episode(store)
+            non_utc = datetime(
+                2026,
+                1,
+                2,
+                tzinfo=timezone(timedelta(hours=1)),
+            )
+            with self.assertRaisesRegex(ValueError, "exact UTC timezone"):
+                self._resolve(store, cutoff=non_utc)
+
+    def test_hostile_episode_text_is_rejected_before_text_callbacks(self):
+        calls: list[str] = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("hostile strip executed")
+
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "episode_id must be exact built-in text",
+            ):
+                resolve_reconciled_outcome_fact(
+                    store,
+                    episode_id=HostileText(EPISODE_ID),
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                )
+        self.assertEqual(calls, [])
+
+    def test_hostile_outcome_mapping_is_rejected_before_mapping_callbacks(self):
+        calls: list[str] = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("hostile mapping callback executed")
+
+        with self.assertRaisesRegex(
+            MemoryIntegrityError,
+            "non-canonical JSON value",
+        ):
+            ReconciledOutcomeFactEvidence(
+                causal_cutoff=(BASE + timedelta(days=1)).isoformat(),
+                permission_classes=("research",),
+                task="wp63-ablation",
+                instrument_family="equity",
+                population_root_hash="sha256:" + "1" * 64,
+                episode_id=EPISODE_ID,
+                episode_hash="sha256:" + "2" * 64,
+                effective_outcome=HostileDict(label="caller"),
+                correction_lineage=(),
+                evidence_digest="sha256:" + "3" * 64,
+            )
+        self.assertEqual(calls, [])
+
+    def test_reverification_ignores_instance_shadowed_integrity_method(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            store = memory(Path(directory) / "memory.sqlite3")
+            self._append_episode(store)
+            evidence = self._resolve(store, cutoff=BASE + timedelta(days=1))
+
+            def hostile():
+                calls.append("verify")
+                raise AssertionError("instance integrity shadow executed")
+
+            object.__setattr__(evidence, "verify_integrity", hostile)
+            self.assertEqual(
+                reverify_reconciled_outcome_fact(store, evidence).episode_id,
+                EPISODE_ID,
+            )
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

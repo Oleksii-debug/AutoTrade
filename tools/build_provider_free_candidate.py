@@ -88,6 +88,25 @@ def _publish_payload_digest(snapshot, *, evidence_name):
     return 'sha256:' + sha256(encoded).hexdigest()
 
 
+def _rewrite_existing_publish_evidence(path, evidence):
+    """Replace one already-created CI evidence leaf without persistent lock metadata."""
+    if type(path) is not Path or type(evidence) is not dict:
+        raise TypeError('publish evidence rewrite requires exact Path and dict')
+    payload = (
+        json.dumps(evidence, indent=2, sort_keys=True, ensure_ascii=False) + '\n'
+    ).encode('utf-8')
+    try:
+        info = path.stat(follow_symlinks=False)
+    except (FileNotFoundError, OSError) as error:
+        raise ValueError('publish evidence leaf is unavailable for binding') from error
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError('publish evidence leaf must be one ordinary unaliased file')
+    with path.open('wb') as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def bind_publish_evidence(publish, *, executable, evidence_name):
     """Bind CI PASS evidence to the exact publish payload it is meant to attest.
 
@@ -121,7 +140,7 @@ def bind_publish_evidence(publish, *, executable, evidence_name):
         snapshot,
         evidence_name=evidence_name,
     )
-    atomic_write_json(publish / evidence_name, evidence)
+    _rewrite_existing_publish_evidence(publish / evidence_name, evidence)
     return evidence
 
 

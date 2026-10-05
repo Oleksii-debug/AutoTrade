@@ -20,7 +20,7 @@ from mvp.autotrade_mvp.durable_financing import (
 )
 from mvp.autotrade_mvp.financing import FinancingConflict, FinancingError
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -377,6 +377,75 @@ class DurableFinancingTests(unittest.TestCase):
             )
         self.assertIs(self.financing.store, self.store)
         self.assertIs(self.financing.economic_book, self.economic)
+
+    def _append_unrelated_race_event(self, ordinal: int) -> None:
+        payload = {"marker": f"stable-cut-race-{ordinal}"}
+        self.store.append_event(
+            {
+                "event_id": f"stable-cut-race-event-{ordinal}",
+                "event_type": "IndependentStableCutRace.v1",
+                "aggregate_type": "independent_stable_cut_race",
+                "aggregate_id": f"stable-cut-race-{ordinal}",
+                "aggregate_version": "1",
+                "committed_at": (BASE + timedelta(seconds=ordinal)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+            }
+        )
+
+    def test_stable_replay_cut_does_not_refresh_mutable_economic_facade(self):
+        with patch.object(
+            DurableProviderEconomicBook,
+            "refresh",
+            side_effect=AssertionError("mutable economic refresh must not be used by stable cut"),
+        ):
+            self.assertIsNone(self.financing.latest("stable-cut-missing-charge"))
+
+    def test_stable_replay_cut_retries_after_journal_mutation_between_reads(self):
+        original_events = DurableFinancingBook._events
+        calls = {"count": 0}
+
+        def raced_events(book, charge_id):
+            result = original_events(book, charge_id)
+            if calls["count"] == 0:
+                calls["count"] += 1
+                self._append_unrelated_race_event(1)
+            return result
+
+        with patch.object(DurableFinancingBook, "_events", raced_events):
+            self.assertIsNone(self.financing.latest("stable-cut-race-retry"))
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(
+            self.store.current_journal_sequence(),
+            1,
+            "only the deliberate unrelated race event should have been committed",
+        )
+
+    def test_stable_replay_cut_fails_closed_when_global_cursor_never_stabilizes(self):
+        original_events = DurableFinancingBook._events
+        calls = {"count": 0}
+
+        def constantly_raced_events(book, charge_id):
+            result = original_events(book, charge_id)
+            calls["count"] += 1
+            self._append_unrelated_race_event(calls["count"])
+            return result
+
+        with patch.object(DurableFinancingBook, "_events", constantly_raced_events):
+            with self.assertRaisesRegex(
+                FinancingConflict,
+                "could not obtain a stable JournalStore cut",
+            ):
+                self.financing.latest("stable-cut-never-stable")
+
+        self.assertEqual(calls["count"], 4)
+        self.assertEqual(
+            self.store.current_journal_sequence(),
+            4,
+            "the fail-closed test must not mutate financing/economic aggregates",
+        )
 
     def test_final_revision_and_economics_commit_atomically_and_restart(self):
         self.artifacts.put("00000000-0000-0000-0000-000000000001", revision=1)

@@ -401,20 +401,23 @@ class AuthenticatedHostApplication:
             raise ValueError(
                 "UiSnapshot permission_summary does not match the canonical contract"
             )
-        if permission.get("actor") != principal.actor:
+        actor = permission.get("actor")
+        if type(actor) is not str or actor != principal.actor:
             raise ValueError("UiSnapshot actor does not match authenticated principal")
-        if permission.get("session") != principal.session:
+        session = permission.get("session")
+        if type(session) is not str or session != principal.session:
             raise ValueError("UiSnapshot session does not match authenticated principal")
-        if permission.get("role") != authenticated_role:
+        role = permission.get("role")
+        if type(role) is not str or role != authenticated_role:
             raise ValueError("UiSnapshot role does not match authenticated session")
         capabilities = permission.get("capabilities")
         if capabilities is not None:
             if (
                 not isinstance(capabilities, list)
                 or any(
-                    not isinstance(item, str)
+                    type(item) is not str
                     or not item
-                    or item != item.strip()
+                    or item != str.strip(item)
                     for item in capabilities
                 )
                 or len(capabilities) != len(set(capabilities))
@@ -428,12 +431,12 @@ class AuthenticatedHostApplication:
             raise ValueError("UiSnapshot jobs must be an array of objects")
         reasons = payload["reason_codes"]
         if not isinstance(reasons, list) or any(
-            not isinstance(item, str) or not item for item in reasons
+            type(item) is not str or not item for item in reasons
         ):
             raise ValueError("UiSnapshot reason_codes must be non-empty strings")
         server_time = payload["server_time"]
         if (
-            not isinstance(server_time, str)
+            type(server_time) is not str
             or re.fullmatch(
                 r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z",
                 server_time,

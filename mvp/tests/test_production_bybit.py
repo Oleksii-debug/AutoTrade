@@ -13,6 +13,12 @@ from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
+from mvp.autotrade_mvp.durable_financial_bybit_sender import (
+    DurableFinanciallyBoundBybitOrderSender,
+)
+from mvp.autotrade_mvp.durable_financial_request_binding import (
+    DurableFinancialRequestBindingRegistry,
+)
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.financial_send_authority import (
@@ -180,6 +186,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 build_production_bybit_order_sender(
                     runtime,
                     financial_issuer=issuer,
+                    financial_binding_registry=DurableFinancialRequestBindingRegistry(runtime.journal),
                     provider_environment="TESTNET",
                     capability_snapshot_id="capability-1",
                     capability_registry=CapabilityRegistry(),
@@ -199,6 +206,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 build_production_bybit_order_sender(
                     runtime,
                     financial_issuer=object(),
+                    financial_binding_registry=DurableFinancialRequestBindingRegistry(runtime.journal),
                     provider_environment="TESTNET",
                     capability_snapshot_id="capability-1",
                     capability_registry=CapabilityRegistry(),
@@ -232,15 +240,23 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             )
         ]
         self.assertIn("financial_issuer", public_arguments)
+        self.assertIn("financial_binding_registry", public_arguments)
+        self.assertNotIn("authority", public_arguments)
+        self.assertNotIn("binding", public_arguments)
         self.assertNotIn("authority_check", public_arguments)
 
-        bound_arguments = FinanciallyBoundBybitOrderSender.dispatch.__code__.co_varnames[
-            : (
-                FinanciallyBoundBybitOrderSender.dispatch.__code__.co_argcount
-                + FinanciallyBoundBybitOrderSender.dispatch.__code__.co_kwonlyargcount
-            )
-        ]
-        self.assertIn("authority", bound_arguments)
+        bound_arguments = (
+            DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_varnames[
+                : (
+                    DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_argcount
+                    + DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_kwonlyargcount
+                )
+            ]
+        )
+        self.assertIn("admission_id", bound_arguments)
+        self.assertIn("action", bound_arguments)
+        self.assertNotIn("authority", bound_arguments)
+        self.assertNotIn("binding", bound_arguments)
         self.assertNotIn("authority_check", bound_arguments)
         self.assertNotIn("final_barrier_clock", bound_arguments)
 

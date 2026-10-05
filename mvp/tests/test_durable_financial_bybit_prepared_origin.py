@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.durable_financial_request_binding import (
     _BINDING_PAYLOAD_PRODUCTION_FIELDS,
     _binding_payload,
     _production_request_origin_receipt,
+    _require_admitted_price_semantics,
     _require_bybit_prepared_request_origin,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
@@ -72,6 +73,42 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         self.assertEqual(receipt, _production_request_origin_receipt(material))
         self.assertEqual(receipt["schema_version"], "bybit-prepared-origin.v1")
         self.assertEqual(receipt["request_sha256"], material.request_sha256)
+
+    def test_paper_live_price_semantics_must_be_admitted_not_caller_carried(self):
+        material, _prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "requires authoritative price-semantics identity",
+        ):
+            _require_admitted_price_semantics({}, material)
+
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price semantics differ from admitted authority",
+        ):
+            _require_admitted_price_semantics(
+                {"price_semantics_digest": D8},
+                material,
+            )
+
+        self.assertEqual(
+            _require_admitted_price_semantics(
+                {"price_semantics_digest": material.price_semantics_digest},
+                material,
+            ),
+            material.price_semantics_digest,
+        )
+
+    def test_simulation_price_semantics_remains_diagnostic_only(self):
+        material = replace(
+            financial_binding(),
+            runtime_environment="SIMULATION",
+            provider_environment="SIMULATION",
+        )
+        self.assertEqual(
+            _require_admitted_price_semantics({}, material),
+            material.price_semantics_digest,
+        )
 
     def test_paper_live_bind_cannot_bypass_prepared_origin(self):
         registry = object.__new__(DurableFinancialRequestBindingRegistry)

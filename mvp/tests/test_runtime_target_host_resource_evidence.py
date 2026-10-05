@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
+import mvp.autotrade_mvp.runtime_target_host_resource_evidence as resource_evidence_module
 from mvp.autotrade_mvp.runtime_target_host_resource_evidence import (
     RuntimeTargetHostResourceEvidence,
     RuntimeTargetHostResourceEvidenceError,
@@ -95,12 +96,26 @@ def _run_result() -> RuntimeTargetHostRunResult:
     )
 
 
+def _issue_for_test(
+    run: RuntimeTargetHostRunResult,
+    *,
+    before: RuntimeTargetHostResourceSnapshot,
+    after: RuntimeTargetHostResourceSnapshot,
+) -> RuntimeTargetHostResourceEvidence:
+    return issue_runtime_target_host_resource_evidence(
+        run,
+        before=before,
+        after=after,
+        _issuer_token=resource_evidence_module._ISSUER_TOKEN,
+    )
+
+
 class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
     def test_snapshot_collects_process_io_memory_disk_without_wall_clock(self):
         with tempfile.TemporaryDirectory() as root:
             with (
                 patch(
-                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.os.getpid",
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence._getpid",
                     return_value=4242,
                 ),
                 patch(
@@ -124,7 +139,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                     return_value=4,
                 ),
                 patch(
-                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.shutil.disk_usage",
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence._disk_usage",
                     return_value=SimpleNamespace(
                         total=50_000,
                         used=20_000,
@@ -147,6 +162,17 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         self.assertEqual(observed.thread_count, 4)
         self.assertNotIn("observed_at", observed.payload)
         self.assertNotIn("timestamp", observed.payload)
+
+    def test_issue_helper_rejects_caller_forged_run_without_wrapper_token(self):
+        with self.assertRaisesRegex(
+            RuntimeTargetHostResourceEvidenceError,
+            "canonical campaign wrapper",
+        ):
+            issue_runtime_target_host_resource_evidence(
+                _run_result(),
+                before=_snapshot(monotonic_ns=1, process_cpu_ns=1),
+                after=_snapshot(monotonic_ns=2, process_cpu_ns=2),
+            )
 
     def test_public_constructor_cannot_mint_resource_evidence(self):
         before = _snapshot(monotonic_ns=1, process_cpu_ns=1)
@@ -186,7 +212,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             disk_free_bytes=7_999_000,
             thread_count=5,
         )
-        evidence = issue_runtime_target_host_resource_evidence(
+        evidence = _issue_for_test(
             _run_result(),
             before=before,
             after=after,
@@ -223,7 +249,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             RuntimeTargetHostResourceEvidenceError,
             "monotonic cut moved backwards",
         ):
-            issue_runtime_target_host_resource_evidence(
+            _issue_for_test(
                 _run_result(),
                 before=before,
                 after=after,
@@ -244,7 +270,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             RuntimeTargetHostResourceEvidenceError,
             "process identity changed",
         ):
-            issue_runtime_target_host_resource_evidence(
+            _issue_for_test(
                 _run_result(),
                 before=before,
                 after=after,
@@ -257,14 +283,14 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             RuntimeTargetHostResourceEvidenceError,
             "measurement digest does not match",
         ):
-            issue_runtime_target_host_resource_evidence(
+            _issue_for_test(
                 run,
                 before=_snapshot(monotonic_ns=1, process_cpu_ns=1),
                 after=_snapshot(monotonic_ns=2, process_cpu_ns=2),
             )
 
     def test_publication_retains_exact_canonical_resource_bytes(self):
-        evidence = issue_runtime_target_host_resource_evidence(
+        evidence = _issue_for_test(
             _run_result(),
             before=_snapshot(monotonic_ns=1, process_cpu_ns=1),
             after=_snapshot(

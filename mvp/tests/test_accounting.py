@@ -871,6 +871,58 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertEqual(scoped.cash("USD"), Decimal("40"))
         self.assertEqual(scoped.audit_digest(), before_digest)
 
+    def test_scoped_economic_book_builtin_dispatch_is_frozen(self):
+        touched = []
+
+        def hostile_builtin(*_args, **_kwargs):
+            touched.append("builtin")
+            raise AssertionError("rebound builtin must not execute")
+
+        class HostileObject:
+            @staticmethod
+            def __setattr__(*args, **kwargs):
+                touched.append("setattr")
+                raise AssertionError("rebound object.__setattr__ must not execute")
+
+            @staticmethod
+            def __getattribute__(*args, **kwargs):
+                touched.append("getattribute")
+                raise AssertionError(
+                    "rebound object.__getattribute__ must not execute"
+                )
+
+        injected = {
+            "type": hostile_builtin,
+            "id": hostile_builtin,
+            "object": HostileObject,
+            "str": object,
+            "TypeError": hostile_builtin,
+            "ValueError": hostile_builtin,
+        }
+        for name in injected:
+            self.assertFalse(hasattr(accounting_module, name))
+        for name, value in injected.items():
+            setattr(accounting_module, name, value)
+        try:
+            scoped = ScopedEconomicBook(
+                environment=" paper ",
+                account_id=" acct-builtins ",
+            )
+            self.assertEqual(scoped.environment, "PAPER")
+            self.assertEqual(scoped.account_id, "acct-builtins")
+            self.assertEqual(scoped.cash("USD"), Decimal("0"))
+            self.assertEqual(touched, [])
+
+            with self.assertRaises(ValueError):
+                ScopedEconomicBook(
+                    environment=" ",
+                    account_id="acct-invalid",
+                )
+            self.assertEqual(touched, [])
+        finally:
+            for name in injected:
+                delattr(accounting_module, name)
+
     def test_scoped_economic_book_subclass_rejected_before_virtual_dispatch(self):
         touched = []
 

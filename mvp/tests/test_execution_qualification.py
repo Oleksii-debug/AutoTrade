@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.execution_qualification import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    MARKET_PRICE_PROJECTION_POLICY_V1,
     LiquidityObservation,
     SimulatedOrder,
 )
@@ -24,6 +25,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 CALIBRATION = "a" * 64
 PROTOCOL = "b" * 64
+PRICE_GRID_EVIDENCE = "c" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
@@ -43,6 +45,10 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_tick="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256=PRICE_GRID_EVIDENCE,
+        price_projection_policy=MARKET_PRICE_PROJECTION_POLICY_V1,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

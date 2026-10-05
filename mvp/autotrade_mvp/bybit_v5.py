@@ -1212,6 +1212,7 @@ def _install_submission_response_parser(
                 )
             ),
             "sha256": observed["response_sha256"],
+            "http_status": observed["http_status"],
             "source_uri": source_uri,
             "observed_at": observed["sent_at"],
             "rights_id": "provider-observation-bybit",
@@ -1269,6 +1270,18 @@ def _install_submission_response_parser(
             raise error_type("provider-write provenance scope mismatch")
 
         evidence = [evidence_from_projection(observed, prepared)]
+        http_status = observed["http_status"]
+        if canonical_type(http_status) is not canonical_int:
+            raise error_type("Bybit submission response HTTP status is invalid")
+        if http_status < 200 or http_status > 299:
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "BYBIT_HTTP_NON_2XX",
+                "evidence": evidence,
+                "retry_disposition": "RECONCILE_FIRST",
+            }
         envelope = exact_mapping(observed["payload"], "response")
         code = exact_integer(envelope.get("retCode"), "retCode")
         response_time = envelope.get("time")

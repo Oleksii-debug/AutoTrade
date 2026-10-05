@@ -44,7 +44,7 @@ _REQUIRED_SURFACES = (
     "ORDER_HISTORY",
 )
 _RULE_ID_RE = re.compile(r"^[A-Z][A-Z0-9._:/+-]{0,127}$")
-_ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!_ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,255}$")'()*+,;=:@/-]{1,255}$")
+_ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]{1,255}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

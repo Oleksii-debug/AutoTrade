@@ -4,7 +4,7 @@ Generated from contracts/jsonschema/common.schema.json by
 tools/generate_common_scalar_bindings.py.
 """
 
-CONTRACT_VERSION = "5.0.0"
+CONTRACT_VERSION = "6.0.0"
 MAX_DECIMAL_TEXT_LENGTH = 259
 MAX_SIGNIFICANT_DIGITS = 256
 MAX_SCALE = 256

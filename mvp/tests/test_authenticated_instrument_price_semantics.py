@@ -362,6 +362,153 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
             finally:
                 target.__code__ = original_code
 
+    def test_transitive_serializer_rebinding_fails_before_metadata_binding(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged serializer executed")
+
+            for name in ("_decimal_text", "_utc_text", "_thaw_jsonish"):
+                with self.subTest(name=name):
+                    with patch.object(instruments_module, name, forged):
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+            self.assertEqual(callbacks, [])
+
+    def test_detachment_field_dispatch_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged dataclass field dispatch executed")
+
+            with patch.object(instruments_module, "fields", forged):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertEqual(callbacks, [])
+
+    def test_instrument_contract_serializer_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(_self):
+                callbacks.append(True)
+                raise AssertionError("forged InstrumentVersion serializer executed")
+
+            with patch.object(
+                instruments_module.InstrumentVersion,
+                "to_contract_dict",
+                forged,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertEqual(callbacks, [])
+
+    def test_instrument_version_class_rebinding_fails_before_causal_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            original = instruments_module.InstrumentVersion
+
+            class ForgedInstrumentVersion:
+                validate_price = original.validate_price
+                metadata_evidence_binding = original.metadata_evidence_binding
+                to_contract_dict = original.to_contract_dict
+                __init__ = original.__init__
+
+            with patch.object(
+                instruments_module,
+                "InstrumentVersion",
+                ForgedInstrumentVersion,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertIs(instruments_module.InstrumentVersion, original)
+
+    def test_instrument_version_constructor_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+            original_init = instruments_module.InstrumentVersion.__init__
+
+            def forged_init(_self, *_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged InstrumentVersion constructor executed")
+
+            with patch.object(
+                instruments_module.InstrumentVersion,
+                "__init__",
+                forged_init,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertEqual(callbacks, [])
+            self.assertIs(
+                instruments_module.InstrumentVersion.__init__,
+                original_init,
+            )
+
+    def test_settlement_convention_class_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            original = instruments_module.SettlementConvention
+
+            class ForgedSettlementConvention:
+                payload = original.payload
+
+            with patch.object(
+                instruments_module,
+                "SettlementConvention",
+                ForgedSettlementConvention,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertIs(instruments_module.SettlementConvention, original)
+
+    def test_settlement_payload_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(_self):
+                callbacks.append(True)
+                raise AssertionError("forged settlement payload executed")
+
+            with patch.object(
+                instruments_module.SettlementConvention,
+                "payload",
+                forged,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertEqual(callbacks, [])
+
     def test_snapshot_binds_price_semantics_without_putting_it_in_request(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

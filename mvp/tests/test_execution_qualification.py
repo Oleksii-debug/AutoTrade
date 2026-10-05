@@ -156,6 +156,24 @@ class ExecutionQualificationTests(unittest.TestCase):
                 )
             )
 
+    def test_price_grid_change_invalidates_frozen_qualification(self):
+        qualified = model(price_tick="0.01")
+        changed_tick = model(price_tick="0.05")
+        changed_evidence = model(price_grid_evidence_sha256="d" * 64)
+
+        for changed in (changed_tick, changed_evidence):
+            with self.subTest(fingerprint=changed.fingerprint):
+                with self.assertRaisesRegex(
+                    ExecutionQualificationError,
+                    "model_fingerprint",
+                ):
+                    validate_execution_qualification(
+                        **self.validation_kwargs(
+                            changed,
+                            qualification=qualification(qualified),
+                        )
+                    )
+
     def test_calibration_change_invalidates_qualification(self):
         exec_model = model(calibration_sha256="d" * 64)
         stale = qualification(exec_model, calibration_sha256="a" * 64)

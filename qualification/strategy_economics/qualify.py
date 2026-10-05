@@ -6,11 +6,13 @@ referenced costs, capacity, FX/borrow/funding evidence, or after-cost values
 came from independent canonical owners.
 
 This qualification composition creates a separate issued assessment.  Current
-main can re-run the structural join, resolve the exact product instrument
-version, and optionally reverify a durable provider-economic cut from canonical
-replay.  It deliberately remains INCONCLUSIVE until the remaining WP-33 owner
-graph is independently available.  No green software test from this module is
-economic-edge evidence.
+main can re-run the structural join, resolve an exact caller-selected product
+instrument version, and optionally reverify a durable provider-economic cut
+from a caller-selected sealed book.  Structural replay of caller-selected
+sources is not proof that product composition selected those owner authorities.
+The assessment deliberately remains INCONCLUSIVE until the remaining WP-33
+owner graph is independently available.  No green software test from this
+module is economic-edge evidence.
 """
 
 from __future__ import annotations
@@ -38,12 +40,20 @@ class StrategyEconomicsAuthorityError(ValueError):
     """Terminal strategy-economics authority is unavailable or inconsistent."""
 
 
+# Retain installed structural/replay primitives.  Later public module/class
+# rebinding must not redirect which implementation this composition uses.
+_BIND_STRATEGY_ECONOMICS = bind_strategy_economics
+_INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
+_REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
+
 _BASE_REQUIRED_OWNERS = (
     "registered_strategy_run_receipt",
     "execution_calibration_authority",
     "capacity_evidence_authority",
     "after_cost_projection_authority",
+    "instrument_registry_authority",
     "provider_economic_cut",
+    "provider_scope_binding",
 )
 
 _ASSET_REQUIRED_OWNERS = {
@@ -128,9 +138,9 @@ class StrategyEconomicsAuthorityAssessment:
             raise StrategyEconomicsAuthorityError(
                 "strategy economics assessment must be issued canonically"
             )
-        if self.status not in {"INCONCLUSIVE", "QUALIFIED"}:
+        if self.status != "INCONCLUSIVE":
             raise StrategyEconomicsAuthorityError(
-                "strategy economics assessment status is invalid"
+                "positive strategy economics issuance is unavailable on current main"
             )
         for name in (
             "binding_fingerprint",
@@ -154,10 +164,6 @@ class StrategyEconomicsAuthorityAssessment:
         if set(verified) & set(unresolved):
             raise StrategyEconomicsAuthorityError(
                 "an economics owner cannot be both verified and unresolved"
-            )
-        if self.status == "QUALIFIED" and unresolved:
-            raise StrategyEconomicsAuthorityError(
-                "QUALIFIED strategy economics cannot retain unresolved owners"
             )
         object.__setattr__(self, "verified_owners", verified)
         object.__setattr__(self, "unresolved_owners", unresolved)
@@ -268,11 +274,13 @@ def assess_strategy_economics_authority(
     expected_visibility_journal_sequence: int | None = None,
     additional_required_owners: tuple[str, ...] = (),
 ) -> StrategyEconomicsAuthorityAssessment:
-    """Reverify owners available on main and preserve every missing owner.
+    """Reverify structural/durable facts and preserve missing owner authority.
 
-    No caller-supplied verifier/callback is accepted.  Provider economics counts
-    as verified only when exact durable replay reproduces the supplied cut from
-    an independently selected book and visibility sequence.
+    No caller-supplied verifier/callback is accepted.  Provider economics replay
+    can verify that a supplied exact cut is reproduced by a supplied sealed book
+    at one visibility sequence.  Because this API does not select/authenticate
+    that book as the product's economic owner, replay is recorded separately and
+    does not satisfy the unresolved ``provider_economic_cut`` owner.
     """
 
     proposal = _snapshot_proposal(proposal)
@@ -282,18 +290,18 @@ def assess_strategy_economics_authority(
             "instrument_registry must be exact InstrumentRegistry"
         )
 
-    bound = bind_strategy_economics(
+    bound = _BIND_STRATEGY_ECONOMICS(
         proposal,
         economics_binding,
         instrument_version=economics_binding.instrument_version,
     )
-    instrument = InstrumentRegistry.exact(
+    instrument = _INSTRUMENT_REGISTRY_EXACT(
         instrument_registry,
         economics_binding.instrument_version,
     )
 
     verified = {
-        "instrument_registry",
+        "instrument_registry_shape",
         "structural_economics_binding",
     }
     unresolved = set(_BASE_REQUIRED_OWNERS)
@@ -340,7 +348,7 @@ def assess_strategy_economics_authority(
             raise StrategyEconomicsAuthorityError(
                 "expected_visibility_journal_sequence must be a positive integer"
             )
-        verified_cut = reverify_provider_economic_cut(
+        verified_cut = _REVERIFY_PROVIDER_ECONOMIC_CUT(
             provider_economic_book,
             provider_economic_cut,
             expected_visibility_journal_sequence=(
@@ -351,8 +359,7 @@ def assess_strategy_economics_authority(
             raise StrategyEconomicsAuthorityError(
                 "provider economic cut does not match instrument provider"
             )
-        verified.add("provider_economic_cut")
-        unresolved.discard("provider_economic_cut")
+        verified.add("provider_economic_cut_replay")
         cut_digest = verified_cut.cut_digest
 
     assessment = StrategyEconomicsAuthorityAssessment(
@@ -372,17 +379,20 @@ def assess_strategy_economics_authority(
 def require_qualified_strategy_economics(
     value: object,
 ) -> StrategyEconomicsAuthorityAssessment:
-    """Fail closed until every independent WP-33 owner is composed."""
+    """Fail closed until a non-caller-forgeable positive issuer exists.
+
+    Current main deliberately has no terminal positive WP-33 issuer.  The
+    in-process issuance registry is useful for detecting accidental mutation of
+    diagnostic INCONCLUSIVE assessments, but Python module-private objects are
+    not a security boundary: a same-process caller can import private symbols,
+    mutate an object and attempt to re-register a matching seal.  Therefore no
+    registry state can promote an assessment to terminal financial authority.
+    """
 
     assessment = require_strategy_economics_assessment(value)
-    if assessment.status != "QUALIFIED":
-        missing = ", ".join(assessment.unresolved_owners)
-        raise StrategyEconomicsAuthorityError(
-            "terminal strategy economics is INCONCLUSIVE; unresolved owners: "
-            + missing
-        )
-    if assessment.unresolved_owners:
-        raise StrategyEconomicsAuthorityError(
-            "qualified strategy economics retained unresolved owners"
-        )
-    return assessment
+    missing = ", ".join(assessment.unresolved_owners)
+    raise StrategyEconomicsAuthorityError(
+        "positive strategy economics issuance is unavailable on current main; "
+        "terminal strategy economics is INCONCLUSIVE"
+        + (f"; unresolved owners: {missing}" if missing else "")
+    )

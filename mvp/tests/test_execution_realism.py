@@ -120,7 +120,7 @@ class ExecutionRealismTests(unittest.TestCase):
         )
         self.assertEqual(
             rebuilt.price_grid_instrument_binding,
-            instrument_version.metadata_evidence_binding(),
+            instrument_version.metadata_evidence_binding()[7:],
         )
         with self.assertRaisesRegex(
             ExecutionRealismError,

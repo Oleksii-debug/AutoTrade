@@ -172,10 +172,11 @@ def _validate_income(value: ProviderFundingIncomeObservation) -> None:
         raise ProviderFundingIncomeError("funding income side is not canonical Bybit")
     if (
         type(value.provider_transaction_at) is not datetime
-        or value.provider_transaction_at.tzinfo is None
-        or value.provider_transaction_at.utcoffset() is None
+        or value.provider_transaction_at.tzinfo is not timezone.utc
     ):
-        raise ProviderFundingIncomeError("provider transaction time must be timezone-aware")
+        raise ProviderFundingIncomeError(
+            "provider transaction time must use the exact built-in UTC timezone"
+        )
     if type(value.funding_amount) is not Decimal:
         raise ProviderFundingIncomeError("funding amount must use exact Decimal")
     if _ORIGIN_RE.fullmatch(value.origin_ref) is None:

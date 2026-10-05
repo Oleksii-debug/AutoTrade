@@ -89,7 +89,13 @@ def _publish_payload_digest(snapshot, *, evidence_name):
 
 
 def _rewrite_existing_publish_evidence(path, evidence):
-    """Replace one already-created CI evidence leaf without persistent lock metadata."""
+    """Atomically replace one existing CI evidence leaf without lock metadata.
+
+    Never reopen the admitted pathname for destructive in-place writing. A
+    namespace race after the no-follow leaf check can therefore replace only a
+    directory entry; it cannot redirect binder bytes through a substituted
+    symlink or hardlink into another authority-owned file.
+    """
     if type(path) is not Path or type(evidence) is not dict:
         raise TypeError('publish evidence rewrite requires exact Path and dict')
     payload = (
@@ -101,10 +107,29 @@ def _rewrite_existing_publish_evidence(path, evidence):
         raise ValueError('publish evidence leaf is unavailable for binding') from error
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise ValueError('publish evidence leaf must be one ordinary unaliased file')
-    with path.open('wb') as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
+
+    temporary = path.with_name(
+        '.' + path.name + '.' + sha256(payload).hexdigest()[:16] + '.binding.tmp'
+    )
+    try:
+        _write_new_payload_bytes(temporary, payload)
+        try:
+            # Namespace replacement is atomic and never opens the raced target
+            # for writing, so a substituted alias cannot redirect the bytes.
+            os.replace(temporary, path)
+        except OSError as error:
+            raise ValueError(
+                'publish evidence leaf could not be atomically replaced'
+            ) from error
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise ValueError(
+                'publish evidence temporary leaf could not be removed'
+            ) from error
 
 
 def bind_publish_evidence(publish, *, executable, evidence_name):

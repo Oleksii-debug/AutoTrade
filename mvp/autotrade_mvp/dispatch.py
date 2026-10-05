@@ -873,13 +873,18 @@ class GuardedDispatcher:
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "clock_before_prepared_timestamp")
         if age < self.prepared_lease_seconds:
             return DispatchOutcome("IN_PROGRESS", client_order_id, None, "prepared_owner_lease_active")
+        # SubmissionPrepared is durably before the irreversible boundary. If its
+        # lease expires while no SubmissionSending exists, zero wire is proven by
+        # the same journal chronology that would have recorded the send barrier.
+        # Fence the stale owner as BLOCKED; UNKNOWN is reserved for states that may
+        # actually have crossed the provider boundary.
         self._append(
             attempt_id=attempt_id,
-            event_type="SubmissionUnknown",
+            event_type="SubmissionBlocked",
             version=last["aggregate_version"] + 1,
             payload={
                 "client_order_id": client_order_id,
-                "reason": "prepared_owner_lease_expired_without_send_evidence",
+                "reason": "prepared_owner_lease_expired_before_send",
             },
             now=now,
         )

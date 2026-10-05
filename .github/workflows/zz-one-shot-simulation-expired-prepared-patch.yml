@@ -1,0 +1,161 @@
+name: one-shot simulation expired Prepared composition patch
+
+on:
+  push:
+    branches:
+      - fix/simulation-expired-prepared-zero-wire-20261005-sol56
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact composition patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          source_path = Path("mvp/autotrade_mvp/simulation_session.py")
+          source = source_path.read_text(encoding="utf-8")
+          source_needle = '''                    if recovery.status != "UNKNOWN":
+                        raise ValueError(
+                            "incomplete submission recovery produced invalid status"
+                        )
+                    return {
+'''
+          source_replacement = '''                    if recovery.status == "BLOCKED":
+                        return _finalize_zero_wire_blocked(
+                            store,
+                            root,
+                            episode_id=episode_id,
+                            timestamp=timestamp,
+                            resumed=True,
+                        )
+                    if recovery.status != "UNKNOWN":
+                        raise ValueError(
+                            "incomplete submission recovery produced invalid status"
+                        )
+                    return {
+'''
+          if source.count(source_needle) != 1:
+              raise SystemExit("simulation recovery composition seam did not match exactly once")
+          source_path.write_text(
+              source.replace(source_needle, source_replacement),
+              encoding="utf-8",
+          )
+
+          test_path = Path("mvp/tests/test_simulation_zero_wire_terminal.py")
+          tests = test_path.read_text(encoding="utf-8")
+          test_needle = '''    def test_blocked_is_atomic_terminal_and_releases_reservation(self):
+'''
+          test_replacement = '''    def test_expired_prepared_restart_terminalizes_zero_wire_blocked(self):
+        class ProcessDeath(BaseException):
+            pass
+
+        def crash_before_final_guard(
+            _provider,
+            _client_order_id,
+            _request,
+            _final_guard,
+        ):
+            raise ProcessDeath("crash-before-final-send-guard")
+
+        episode_id = "prepared-expiry-zero-wire"
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                simulation_session.SimulatedProvider,
+                "transport_send",
+                new=crash_before_final_guard,
+            ):
+                with self.assertRaisesRegex(
+                    ProcessDeath,
+                    "crash-before-final-send-guard",
+                ):
+                    run_canonical_simulation(
+                        BUY,
+                        directory,
+                        episode_id=episode_id,
+                        now=NOW,
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared"],
+            )
+            before = self._reservations(directory)
+            self.assertEqual(len(before.active()), 1)
+            self.assertEqual(before.active()[0].state, "WORKING")
+
+            recovered = run_canonical_simulation(
+                BUY,
+                directory,
+                episode_id=episode_id,
+                now="2026-10-03T17:51:01Z",
+            )
+
+            self.assertEqual(recovered["status"], "BLOCKED")
+            self.assertEqual(
+                recovered["reason"],
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertTrue(recovered["resumed"])
+            self.assertTrue(recovered["reconciled"])
+            self.assertEqual(recovered["new_outbound_requests"], 0)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events_by_aggregate_type(
+                        "submission_attempt"
+                    )
+                ],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in store.load_events(
+                        "canonical_simulation_session",
+                        "single-episode",
+                    )
+                ],
+                ["SimulationSessionStarted", "SimulationSessionCompleted"],
+            )
+            after = self._reservations(directory)
+            self.assertEqual(after.active(), ())
+            self.assertEqual(
+                after.get(
+                    simulation_session._uuid("reservation", episode_id)
+                ).state,
+                "REJECTED",
+            )
+
+    def test_blocked_is_atomic_terminal_and_releases_reservation(self):
+'''
+          if tests.count(test_needle) != 1:
+              raise SystemExit("zero-wire regression insertion point did not match exactly once")
+          test_path.write_text(
+              tests.replace(test_needle, test_replacement),
+              encoding="utf-8",
+          )
+      - name: Commit source and regression, remove one-shot scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/zz-one-shot-simulation-expired-prepared-patch.yml
+          git add mvp/autotrade_mvp/simulation_session.py mvp/tests/test_simulation_zero_wire_terminal.py
+          git commit -m "Recovery: terminalize expired Prepared simulation as zero-wire BLOCKED"
+          git push origin HEAD:${GITHUB_REF_NAME}

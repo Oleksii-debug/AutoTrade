@@ -1,5 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+import gc
 import unittest
+import weakref
 
 import mvp.autotrade_mvp.accounting as accounting_module
 from mvp.autotrade_mvp.accounting import (
@@ -653,6 +655,28 @@ class AccountingFoundationTests(unittest.TestCase):
             forged.cash("USD")
         with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
             forged.audit_digest()
+
+    def test_scoped_economic_book_owner_releases_dead_book_immediately(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-release",
+            transactions=(
+                book_external_cash_flow(
+                    transaction_id="release-seed",
+                    cause_event_id="release-seed-cause",
+                    currency="USD",
+                    amount="25",
+                ),
+            ),
+        )
+        book_reference = weakref.ref(object.__getattribute__(scoped, "_book"))
+        scoped_reference = weakref.ref(scoped)
+
+        del scoped
+        gc.collect()
+
+        self.assertIsNone(scoped_reference())
+        self.assertIsNone(book_reference())
 
     def test_scoped_economic_book_subclass_rejected_before_virtual_dispatch(self):
         touched = []

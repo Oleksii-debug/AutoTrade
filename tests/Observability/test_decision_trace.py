@@ -9,6 +9,7 @@ from unittest.mock import patch
 from autotrade_runtime.artifacts.durable_publish import (
     DurablePublishLockError,
     durable_path_lock,
+    validate_publication_destination,
 )
 from mvp.autotrade_mvp.decision_trace import BoundedMetricBacklog, DecisionTraceStore
 
@@ -342,6 +343,43 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(
                 [item["trace_id"] for item in store.records()],
                 ["decision-before-failure"],
+            )
+
+    def test_reader_rejects_validation_to_open_path_swap(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            original_backup = root / "decision-traces-original.jsonl"
+            attacker_path = root / "decision-traces-attacker.jsonl"
+
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-original"))
+
+            attacker_store = DecisionTraceStore(attacker_path)
+            attacker_store.append(evidence_trace("decision-attacker"))
+
+            swapped = False
+
+            def validate_then_swap(candidate):
+                nonlocal swapped
+                validate_publication_destination(candidate)
+                if not swapped and Path(candidate) == path:
+                    path.replace(original_backup)
+                    attacker_path.replace(path)
+                    swapped = True
+
+            with patch(
+                "mvp.autotrade_mvp.decision_trace.validate_publication_destination",
+                side_effect=validate_then_swap,
+            ):
+                with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                    store.records()
+
+            self.assertTrue(swapped)
+            self.assertTrue(original_backup.exists())
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["trace_id"],
+                "decision-attacker",
             )
 
     def test_reader_rejects_symlink_alias_instead_of_following_trace(self):

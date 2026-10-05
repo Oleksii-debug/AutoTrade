@@ -565,6 +565,12 @@ class AccountingFoundationTests(unittest.TestCase):
             def __init__(self, _transactions=()):
                 hostile_calls.append("book")
 
+        seed = book_external_cash_flow(
+            transaction_id="seed-constructor",
+            cause_event_id="seed-constructor-cause",
+            currency="USD",
+            amount="100",
+        )
         accounting_module.ScopedEconomicBook = object
         accounting_module.EconomicBook = HostileBook
         accounting_module._bind_scoped_economic_book_owner = (
@@ -577,14 +583,7 @@ class AccountingFoundationTests(unittest.TestCase):
             scoped = ScopedEconomicBook(
                 environment="paper",
                 account_id=" acct-1 ",
-                transactions=(
-                    book_external_cash_flow(
-                        transaction_id="seed-constructor",
-                        cause_event_id="seed-constructor-cause",
-                        currency="USD",
-                        amount="100",
-                    ),
-                ),
+                transactions=(seed,),
             )
             self.assertEqual(hostile_calls, [])
             self.assertEqual(scoped.environment, "PAPER")

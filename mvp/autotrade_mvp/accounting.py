@@ -307,8 +307,21 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
     }
 
 
-def transaction_digest(transaction: JournalTransaction) -> str:
-    return payload_digest(canonical_transaction(transaction))
+def _make_transaction_digest(
+    *,
+    _canonicalize=canonical_transaction,
+    _digest_payload=payload_digest,
+):
+    """Bind the canonicalizer and digest primitive outside module rebinding."""
+
+    def digest(transaction: JournalTransaction) -> str:
+        return _digest_payload(_canonicalize(transaction))
+
+    return digest
+
+
+transaction_digest = _make_transaction_digest()
+del _make_transaction_digest
 
 
 def _transaction_digest_fingerprint(
@@ -444,19 +457,24 @@ def validate_transaction(transaction: JournalTransaction) -> None:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
 
-def _make_economic_book_audit_digest(digest_transaction):
-    """Bind the memoizer into the method function, outside module rebinding."""
+def _make_economic_book_audit_digest(
+    digest_transaction,
+    *,
+    _digest_payload=payload_digest,
+    _normalize_name=_name,
+):
+    """Bind audit-digest dependencies outside mutable module-global authority."""
 
     def audit_digest(self) -> str:
         if type(self._transactions) is not list:
             raise TypeError("economic transactions must use an exact list")
         transactions = tuple(self._transactions)
-        return payload_digest(
+        return _digest_payload(
             {
                 "schema_version": "1.0.0",
                 "transactions": [
                     {
-                        "transaction_id": _name(
+                        "transaction_id": _normalize_name(
                             transaction.transaction_id,
                             field="transaction_id",
                         ),

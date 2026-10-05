@@ -1497,6 +1497,7 @@ def _install_authenticated_price_semantics_authority():
         instrument_version: str,
         evaluated_at: datetime,
         provider_id: str,
+        provider_symbol: str | None = None,
         entity_policy_id: str,
         side: str,
         order_type: str,
@@ -1523,6 +1524,13 @@ def _install_authenticated_price_semantics_authority():
             if not value or value != value.strip():
                 raise registry_error_type(
                     f"{name} must be canonical non-empty text"
+                )
+        if provider_symbol is not None:
+            if canonical_type(provider_symbol) is not canonical_str:
+                raise type_error_type("provider_symbol must be exact text")
+            if not provider_symbol or provider_symbol != provider_symbol.strip():
+                raise registry_error_type(
+                    "provider_symbol must be canonical non-empty text"
                 )
         if canonical_type(evaluated_at) is not datetime_type:
             raise type_error_type("evaluated_at must be exact datetime")
@@ -1570,6 +1578,10 @@ def _install_authenticated_price_semantics_authority():
         if version.provider_id.upper() != provider:
             raise registry_error_type(
                 "causal instrument provider differs from financial provider"
+            )
+        if provider_symbol is not None and version.provider_symbol != provider_symbol:
+            raise registry_error_type(
+                "causal instrument symbol differs from provider request"
             )
         policy = entity_policy_id
         canonical_side = side.upper()
@@ -1642,6 +1654,7 @@ def _install_authenticated_price_semantics_authority():
         instrument_version: str,
         evaluated_at: datetime,
         provider_id: str,
+        provider_symbol: str | None = None,
         entity_policy_id: str,
         side: str,
         order_type: str,
@@ -1655,6 +1668,7 @@ def _install_authenticated_price_semantics_authority():
             instrument_version=instrument_version,
             evaluated_at=evaluated_at,
             provider_id=provider_id,
+            provider_symbol=provider_symbol,
             entity_policy_id=entity_policy_id,
             side=side,
             order_type=order_type,

@@ -248,6 +248,19 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                     provider_id="BYBIT",
                 )
 
+    def test_provider_symbol_is_cross_bound_when_required(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "symbol differs from provider request",
+            ):
+                self._digest(
+                    registry,
+                    artifact_store,
+                    provider_symbol="OTHER",
+                )
+
     def test_market_has_distinct_no_wire_price_semantics(self):
         with TemporaryDirectory() as directory:
             registry, artifact_store = self._registry_with_evidence(directory)

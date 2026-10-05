@@ -21,6 +21,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    authenticated_price_semantics_digest,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -490,6 +495,9 @@ class BybitPreparedSubmission:
     capability_snapshot_id: str
     entity_id: str
     instrument_version: str
+    price_rule_instrument_id: str | None = None
+    price_rule_instrument_version: int | None = None
+    price_semantics_digest: str | None = None
     body_sha256: str = field(init=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -548,6 +556,47 @@ class BybitPreparedSubmission:
             "instrument_version",
             _text(self.instrument_version, name="instrument_version"),
         )
+        price_authority = (
+            self.price_rule_instrument_id,
+            self.price_rule_instrument_version,
+            self.price_semantics_digest,
+        )
+        if any(value is not None for value in price_authority):
+            if any(value is None for value in price_authority):
+                raise ProviderCoreError(
+                    "Bybit prepared price semantics authority must be complete"
+                )
+            raw_instrument_id = self.price_rule_instrument_id
+            try:
+                canonical_instrument_id = str(UUID(raw_instrument_id))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise ProviderCoreError(
+                    "Bybit prepared price-rule instrument_id must be a UUID"
+                ) from error
+            if raw_instrument_id != canonical_instrument_id:
+                raise ProviderCoreError(
+                    "Bybit prepared price-rule instrument_id must be canonical"
+                )
+            if (
+                type(self.price_rule_instrument_version) is not int
+                or self.price_rule_instrument_version < 1
+            ):
+                raise ProviderCoreError(
+                    "Bybit prepared price-rule instrument version must be positive"
+                )
+            if (
+                type(self.price_semantics_digest) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.price_semantics_digest)
+                is None
+            ):
+                raise ProviderCoreError(
+                    "Bybit prepared price semantics digest must be canonical SHA-256"
+                )
+            object.__setattr__(
+                self,
+                "price_rule_instrument_id",
+                canonical_instrument_id,
+            )
         object.__setattr__(
             self,
             "body_sha256",
@@ -576,6 +625,10 @@ def prepare_order_submission(
     client_order_id: str,
     time_in_force: str,
     price: object | None = None,
+    price_semantics_registry: InstrumentRegistry | None = None,
+    price_semantics_artifact_store: object | None = None,
+    price_semantics_instrument_version: str | None = None,
+    entity_policy_id: str | None = None,
     reduce_only: bool = False,
     position_side: str | None = None,
     position_idx: int | None = None,
@@ -610,26 +663,80 @@ def prepare_order_submission(
         raise ProviderCoreError("at must be timezone-aware")
     normalized_family = _text(product_family, name="product_family").upper()
     if normalized_family == "MARGIN":
-        # Bybit MARGIN maps to spot isLeverage=1 and can borrow. Generic
-        # ORDER_WRITE capability is not evidence of current spot-margin mode,
-        # collateral eligibility, leverage or borrow quota. Keep the pure
-        # payload serializer available for deterministic fixtures, but never
-        # issue a canonical executable prepared request until those financial
-        # authorities are composed explicitly.
         raise ProviderCoreError(
             "Bybit MARGIN canonical preparation requires dedicated "
             "spot-margin borrow/collateral authority"
         )
     if normalized_family == "OPTIONS":
-        # Option orders carry distinct payoff, exercise/lifecycle and protection
-        # semantics. Generic ORDER_WRITE does not prove the option-specific
-        # capability/economic authorities required for an executable request.
         raise ProviderCoreError(
             "Bybit OPTIONS canonical preparation requires dedicated "
             "option capability/payoff authority"
         )
     normalized_type = _text(order_type, name="order_type").upper()
     normalized_tif = _text(time_in_force, name="time_in_force").upper()
+    price_rule_instrument_id = None
+    price_rule_instrument_version = None
+    price_semantics_digest = None
+    price_authority_inputs = (
+        price_semantics_registry,
+        price_semantics_artifact_store,
+        price_semantics_instrument_version,
+        entity_policy_id,
+    )
+    if any(value is not None for value in price_authority_inputs):
+        if any(value is None for value in price_authority_inputs):
+            raise ProviderCoreError(
+                "Bybit authenticated price semantics authority must be complete"
+            )
+        if type(price_semantics_registry) is not InstrumentRegistry:
+            raise TypeError(
+                "price_semantics_registry must be exact InstrumentRegistry"
+            )
+        raw_instrument_version = _text(
+            price_semantics_instrument_version,
+            name="price_semantics_instrument_version",
+        )
+        parts = raw_instrument_version.split("@")
+        if len(parts) != 2:
+            raise ProviderCoreError(
+                "price_semantics_instrument_version must be canonical instrument_id@version"
+            )
+        try:
+            canonical_instrument_id = str(UUID(parts[0]))
+            canonical_version = int(parts[1])
+        except (ValueError, TypeError, AttributeError) as error:
+            raise ProviderCoreError(
+                "price_semantics_instrument_version must be canonical instrument_id@version"
+            ) from error
+        if (
+            canonical_version < 1
+            or parts[1] != str(canonical_version)
+            or raw_instrument_version
+            != f"{canonical_instrument_id}@{canonical_version}"
+        ):
+            raise ProviderCoreError(
+                "price_semantics_instrument_version must be canonical instrument_id@version"
+            )
+        provider_symbol = _text(symbol, name="symbol")
+        try:
+            price_semantics_digest = authenticated_price_semantics_digest(
+                price_semantics_registry,
+                price_semantics_artifact_store,
+                instrument_version=raw_instrument_version,
+                evaluated_at=point,
+                provider_id="BYBIT",
+                provider_symbol=provider_symbol,
+                entity_policy_id=entity_policy_id,
+                side=side,
+                order_type=normalized_type,
+                price=price,
+            )
+        except (InstrumentRegistryError, TypeError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit order violates authenticated instrument price semantics"
+            ) from error
+        price_rule_instrument_id = canonical_instrument_id
+        price_rule_instrument_version = canonical_version
     if not capability.admits(
         at=point,
         order_type=normalized_type,
@@ -666,6 +773,9 @@ def prepare_order_submission(
         capability_snapshot_id=capability.snapshot_id,
         entity_id=capability.entity_id,
         instrument_version=capability.instrument_version,
+        price_rule_instrument_id=price_rule_instrument_id,
+        price_rule_instrument_version=price_rule_instrument_version,
+        price_semantics_digest=price_semantics_digest,
         _factory_token=_BYBIT_PREPARED_SUBMISSION_TOKEN,
     )
 
@@ -679,6 +789,9 @@ def _install_bybit_prepared_submission_authority(
     capability_type = CapabilitySnapshot
     datetime_type = datetime
     timezone_type = timezone
+    instrument_registry_type = InstrumentRegistry
+    price_semantics_authority = authenticated_price_semantics_digest
+    price_semantics_authority_code = price_semantics_authority.__code__
     prepared_ref = weakref_ref
     prepared_init = prepared_type.__init__
     prepared_init_code = prepared_init.__code__
@@ -697,90 +810,35 @@ def _install_bybit_prepared_submission_authority(
     canonical_position_idx_code = _position_idx_from_capability.__code__
     canonical_capability_admits = capability_type.admits
     canonical_capability_admits_code = capability_type.admits.__code__
-    error_type = ProviderCoreError
-    canonical_type = type
-    canonical_id = id
-    canonical_tuple = tuple
-    canonical_getattr = getattr
-    canonical_isinstance = isinstance
-    canonical_object = object
-    object_getattribute = canonical_object.__getattribute__
-    attribute_error_type = AttributeError
-    mapping_proxy_type = MappingProxyType
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def authority_changed():
-        raise error_type("Bybit prepared submission authority changed")
-
-    def implementation_changed():
-        if (
-            ProviderCoreError is not error_type
-            or type is not canonical_type
-            or id is not canonical_id
-            or tuple is not canonical_tuple
-            or getattr is not canonical_getattr
-            or isinstance is not canonical_isinstance
-            or object is not canonical_object
-            or AttributeError is not attribute_error_type
-            or MappingProxyType is not mapping_proxy_type
-            or datetime is not datetime_type
-            or timezone is not timezone_type
-            or CapabilitySnapshot is not capability_type
-            or BybitPreparedSubmission is not prepared_type
-            or prepared_type.__init__ is not prepared_init
-            or canonical_getattr(prepared_init, "__code__", None)
-            is not prepared_init_code
-            or prepared_type.__post_init__ is not prepared_post_init
-            or canonical_getattr(prepared_post_init, "__code__", None)
-            is not prepared_post_init_code
-            or canonical_getattr(builder, "__code__", None) is not builder_code
-            or build_order_payload is not canonical_build_order_payload
-            or canonical_getattr(
-                canonical_build_order_payload,
-                "__code__",
-                None,
-            )
-            is not canonical_build_order_payload_code
-            or _text is not canonical_text
-            or canonical_getattr(canonical_text, "__code__", None)
-            is not canonical_text_code
-            or _decimal_text is not canonical_decimal_text
-            or canonical_getattr(canonical_decimal_text, "__code__", None)
-            is not canonical_decimal_text_code
-            or _client_order_id is not canonical_client_order_id
-            or canonical_getattr(canonical_client_order_id, "__code__", None)
-            is not canonical_client_order_id_code
-            or _position_idx_from_capability is not canonical_position_idx
-            or canonical_getattr(canonical_position_idx, "__code__", None)
-            is not canonical_position_idx_code
-            or capability_type.admits is not canonical_capability_admits
-            or canonical_getattr(canonical_capability_admits, "__code__", None)
-            is not canonical_capability_admits_code
-        ):
-            authority_changed()
+        raise ProviderCoreError("Bybit prepared submission authority changed")
 
     def snapshot(value):
         try:
             return (
-                object_getattribute(value, "endpoint"),
-                object_getattribute(value, "body"),
-                object_getattribute(value, "account_id"),
-                object_getattribute(value, "environment"),
-                object_getattribute(value, "provider_environment"),
-                object_getattribute(value, "capability_snapshot_id"),
-                object_getattribute(value, "entity_id"),
-                object_getattribute(value, "instrument_version"),
-                object_getattribute(value, "body_sha256"),
+                object.__getattribute__(value, "endpoint"),
+                object.__getattribute__(value, "body"),
+                object.__getattribute__(value, "account_id"),
+                object.__getattribute__(value, "environment"),
+                object.__getattribute__(value, "provider_environment"),
+                object.__getattribute__(value, "capability_snapshot_id"),
+                object.__getattribute__(value, "entity_id"),
+                object.__getattribute__(value, "instrument_version"),
+                object.__getattribute__(value, "price_rule_instrument_id"),
+                object.__getattribute__(value, "price_rule_instrument_version"),
+                object.__getattribute__(value, "price_semantics_digest"),
+                object.__getattribute__(value, "body_sha256"),
             )
-        except attribute_error_type:
+        except AttributeError:
             authority_changed()
 
     def require_canonical_bybit_prepared_submission(value):
-        implementation_changed()
-        if canonical_type(value) is not prepared_type:
+        if type(value) is not prepared_type or BybitPreparedSubmission is not prepared_type:
             authority_changed()
-        binding = bindings.get(canonical_id(value))
+        binding = bindings.get(id(value))
         if binding is None:
             authority_changed()
         bound_ref, expected = binding
@@ -789,7 +847,7 @@ def _install_bybit_prepared_submission_authority(
         current = snapshot(value)
         if current[1] is not expected[1] or current[:1] + current[2:] != expected[:1] + expected[2:]:
             authority_changed()
-        if canonical_type(current[1]) is not mapping_proxy_type:
+        if type(current[1]) is not MappingProxyType:
             authority_changed()
         return value
 
@@ -806,21 +864,62 @@ def _install_bybit_prepared_submission_authority(
         client_order_id: str,
         time_in_force: str,
         price: object | None = None,
+        price_semantics_registry: InstrumentRegistry | None = None,
+        price_semantics_artifact_store: object | None = None,
+        price_semantics_instrument_version: str | None = None,
+        entity_policy_id: str | None = None,
         reduce_only: bool = False,
         position_side: str | None = None,
         position_idx: int | None = None,
     ) -> BybitPreparedSubmission:
-        implementation_changed()
-        if canonical_type(capability) is not capability_type:
-            raise error_type(
+        if type(capability) is not capability_type or CapabilitySnapshot is not capability_type:
+            raise ProviderCoreError(
                 "Bybit preparation requires exact CapabilitySnapshot authority"
             )
-        if canonical_type(at) is not datetime_type:
-            raise error_type("Bybit preparation time must be exact datetime")
-        if canonical_type(at.tzinfo) is not timezone_type:
-            raise error_type(
+        if type(at) is not datetime_type:
+            raise ProviderCoreError("Bybit preparation time must be exact datetime")
+        if type(at.tzinfo) is not timezone_type:
+            raise ProviderCoreError(
                 "Bybit preparation time must use exact stdlib timezone"
             )
+        if BybitPreparedSubmission is not prepared_type:
+            authority_changed()
+        if (
+            prepared_type.__init__ is not prepared_init
+            or getattr(prepared_init, "__code__", None) is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or getattr(prepared_post_init, "__code__", None) is not prepared_post_init_code
+        ):
+            authority_changed()
+        if getattr(builder, "__code__", None) is not builder_code:
+            authority_changed()
+        if InstrumentRegistry is not instrument_registry_type:
+            authority_changed()
+        if (
+            authenticated_price_semantics_digest is not price_semantics_authority
+            or getattr(price_semantics_authority, "__code__", None)
+            is not price_semantics_authority_code
+        ):
+            authority_changed()
+        function_authorities = (
+            (build_order_payload, canonical_build_order_payload, canonical_build_order_payload_code),
+            (_text, canonical_text, canonical_text_code),
+            (_decimal_text, canonical_decimal_text, canonical_decimal_text_code),
+            (_client_order_id, canonical_client_order_id, canonical_client_order_id_code),
+            (
+                _position_idx_from_capability,
+                canonical_position_idx,
+                canonical_position_idx_code,
+            ),
+            (
+                capability_type.admits,
+                canonical_capability_admits,
+                canonical_capability_admits_code,
+            ),
+        )
+        for current, expected, code in function_authorities:
+            if current is not expected or getattr(expected, "__code__", None) is not code:
+                authority_changed()
 
         prepared = builder(
             capability=capability,
@@ -834,23 +933,26 @@ def _install_bybit_prepared_submission_authority(
             client_order_id=client_order_id,
             time_in_force=time_in_force,
             price=price,
+            price_semantics_registry=price_semantics_registry,
+            price_semantics_artifact_store=price_semantics_artifact_store,
+            price_semantics_instrument_version=price_semantics_instrument_version,
+            entity_policy_id=entity_policy_id,
             reduce_only=reduce_only,
             position_side=position_side,
             position_idx=position_idx,
         )
-        implementation_changed()
-        if canonical_type(prepared) is not prepared_type:
+        if type(prepared) is not prepared_type:
             authority_changed()
 
         dead = [
             key
-            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
+            for key, (existing_ref, _snapshot) in tuple(bindings.items())
             if existing_ref() is None
         ]
         for key in dead:
             bindings.pop(key, None)
 
-        bindings[canonical_id(prepared)] = (
+        bindings[id(prepared)] = (
             prepared_ref(prepared),
             snapshot(prepared),
         )

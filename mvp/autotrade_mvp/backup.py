@@ -943,6 +943,109 @@ def _artifact_source_files(root: Path) -> list[tuple[Path, str]]:
     return files
 
 
+def _mutable_backup_sources(
+    state: Path,
+    artifacts: Path,
+) -> tuple[tuple[Path, Path, str], ...]:
+    """Freeze the mutable non-SQLite source inventory for one backup attempt."""
+
+    sources: list[tuple[Path, Path, str]] = []
+    for source in (
+        state / "checkpoint.json",
+        state / "learning-evidence.jsonl",
+    ):
+        if source.exists():
+            sources.append((source, Path("state") / source.name, "runtime-state"))
+
+    intents_root = state / "order-intents"
+    if intents_root.exists():
+        for source in sorted(intents_root.rglob("*.json")):
+            sources.append(
+                (
+                    source,
+                    Path("state") / source.relative_to(state),
+                    "order-intent",
+                )
+            )
+
+    for source, kind in _artifact_source_files(artifacts):
+        sources.append(
+            (
+                source,
+                Path("artifacts") / source.relative_to(artifacts),
+                kind,
+            )
+        )
+
+    return tuple(
+        sorted(
+            sources,
+            key=lambda item: (item[1].as_posix(), item[2]),
+        )
+    )
+
+
+def _mutable_source_inventory_identity(
+    sources: Sequence[tuple[Path, Path, str]],
+) -> tuple[tuple[str, str], ...]:
+    return tuple((relative.as_posix(), kind) for _, relative, kind in sources)
+
+
+def _snapshot_mutable_source_digests(
+    sources: Sequence[tuple[Path, Path, str]],
+) -> tuple[tuple[Path, str], ...]:
+    """Bind mutable source bytes before the SQLite snapshot begins."""
+
+    snapshots: list[tuple[Path, str]] = []
+    for source, _, _ in sources:
+        try:
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source is not a regular file: {source.name}"
+                )
+            before = _sha256_file(source)
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source changed before journal snapshot: {source.name}"
+                )
+            after = _sha256_file(source)
+        except OSError as error:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            ) from error
+        if before != after:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            )
+        snapshots.append((source, after))
+    return tuple(snapshots)
+
+
+def _assert_mutable_sources_unchanged(
+    state: Path,
+    artifacts: Path,
+    source_inventory: Sequence[tuple[str, str]],
+    source_rechecks: Sequence[tuple[Path, str]],
+) -> None:
+    """Fail closed if the frozen mutable source cut no longer matches."""
+
+    for source, expected_digest in source_rechecks:
+        try:
+            unchanged = (
+                not source.is_symlink()
+                and source.is_file()
+                and _sha256_file(source) == expected_digest
+            )
+        except OSError as error:
+            raise BackupError("Source changed before backup commit") from error
+        if not unchanged:
+            raise BackupError("Source changed before backup commit")
+
+    current_sources = _mutable_backup_sources(state, artifacts)
+    if _mutable_source_inventory_identity(current_sources) != tuple(source_inventory):
+        raise BackupError("Source inventory changed before backup commit")
+
+
 def _validate_artifact_source(root: Path) -> None:
     manifests_root = root / "manifests" / "sha256"
     objects_root = root / "objects" / "sha256"
@@ -1050,10 +1153,16 @@ def create_backup(
         raise BackupError("Backup destination must be outside source directories")
     _validate_artifact_source(artifacts)
 
+    mutable_sources = _mutable_backup_sources(state, artifacts)
+    source_inventory = _mutable_source_inventory_identity(mutable_sources)
+    # Freeze side-file bytes before SQLite establishes its backup cut. The
+    # copied files below must remain that exact generation.
+    source_rechecks = _snapshot_mutable_source_digests(mutable_sources)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
-    source_rechecks: list[tuple[Path, str]] = []
+    published = False
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
@@ -1069,33 +1178,19 @@ def create_backup(
             )
         )
 
-        for source in [
-            state / "checkpoint.json",
-            state / "learning-evidence.jsonl",
-        ]:
-            if source.exists():
-                relative = Path("state") / source.name
-                digest, size = _copy_stable_file(source, stage / relative)
-                entries.append(_entry(relative.as_posix(), digest, size, "runtime-state"))
-                source_rechecks.append((source, digest))
-
-        intents_root = state / "order-intents"
-        if intents_root.exists():
-            for source in sorted(intents_root.rglob("*.json")):
-                relative = Path("state") / source.relative_to(state)
-                digest, size = _copy_stable_file(source, stage / relative)
-                entries.append(_entry(relative.as_posix(), digest, size, "order-intent"))
-                source_rechecks.append((source, digest))
-
-        for source, kind in _artifact_source_files(artifacts):
-            relative = Path("artifacts") / source.relative_to(artifacts)
+        frozen_source_digests = dict(source_rechecks)
+        for source, relative, kind in mutable_sources:
             digest, size = _copy_stable_file(source, stage / relative)
+            if digest != frozen_source_digests[source]:
+                raise BackupError("Source changed across journal snapshot")
             entries.append(_entry(relative.as_posix(), digest, size, kind))
-            source_rechecks.append((source, digest))
 
-        for source, expected_digest in source_rechecks:
-            if not source.is_file() or _sha256_file(source) != expected_digest:
-                raise BackupError("Source changed before backup commit")
+        _assert_mutable_sources_unchanged(
+            state,
+            artifacts,
+            source_inventory,
+            source_rechecks,
+        )
 
         checkpoint_present = (stage / "state" / "checkpoint.json").is_file()
         learning_evidence_present = (
@@ -1125,11 +1220,32 @@ def create_backup(
         )
         verify_backup(stage)
         _fsync_directory_tree(stage)
+
+        # All staged validation and durability work is complete. Re-read both
+        # byte digests and the full mutable path/kind inventory at the final
+        # source cut immediately before atomic publication. A writer racing
+        # any earlier phase must abort this attempt rather than publish an
+        # already-stale bundle.
+        _assert_mutable_sources_unchanged(
+            state,
+            artifacts,
+            source_inventory,
+            source_rechecks,
+        )
         os.replace(stage, target)
+        published = True
         _fsync_directory(target.parent)
         return target
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = target if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(target.parent)
+            except Exception:
+                # Preserve the original durability failure. The best-effort
+                # cleanup sync can fail for the same underlying reason.
+                pass
         raise
 
 
@@ -1289,6 +1405,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         raise BackupError("Restore destination must be outside the backup bundle")
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-restore-", dir=destination.parent))
+    published = False
     try:
         for item in manifest["files"]:
             relative = _safe_relative_path(item["path"])
@@ -1330,10 +1447,17 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)
+        published = True
         _fsync_directory(destination.parent)
         return destination
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = destination if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(destination.parent)
+            except Exception:
+                pass
         raise
 
 

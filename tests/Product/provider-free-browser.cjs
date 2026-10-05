@@ -115,11 +115,11 @@ async function exercisePortfolioTableTools(page) {
   await page.waitForFunction(() => {
     const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
     const rows = [...document.querySelectorAll('#portfolio-body tr[data-filterable-row="true"]')];
-    return status.includes("match the current filter") && rows.some(row => !row.hidden);
+    return status.includes("matching rows") && rows.some(row => !row.hidden);
   });
   await page.waitForFunction(() =>
     (document.querySelector("#polite-status")?.textContent || "").includes(
-      "rows match the current filter."));
+      "matching rows"));
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-copy");
@@ -130,13 +130,146 @@ async function exercisePortfolioTableTools(page) {
   await page.waitForFunction(() =>
     (document.querySelector("#polite-status")?.textContent || "").includes(
       "visible portfolio rows copied."));
-  assert.match(await page.evaluate(() => navigator.clipboard.readText()), /895\.696/);
+  const copiedPortfolio = await page.evaluate(() => navigator.clipboard.readText());
+  assert.match(
+    copiedPortfolio,
+    /^Field\tHost evidence\n/,
+    "copied portfolio page is self-describing with column headings");
+  assert.match(copiedPortfolio, /895\.696/);
   await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement.id), "portfolio-filter");
   await page.keyboard.press("Control+A");
   await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => {
+    const status = document.querySelector("#portfolio-filter-status")?.textContent || "";
+    return status.includes("Page 1 of ") && status.includes("Sort: host order.");
+  });
+}
+
+async function exercisePortfolioPagingAndSort(page) {
+  stage = "portfolio paged reading and stable sort";
+  await page.evaluate(() => {
+    const body = document.querySelector("#portfolio-body");
+    for (let index = 0; index < 30; index += 1) {
+      const suffix = String(index).padStart(2, "0");
+      const row = document.createElement("tr");
+      row.dataset.filterableRow = "true";
+      row.dataset.selectionKey = "paging-fixture:" + suffix;
+      row.dataset.selectionExact = "true";
+      const header = document.createElement("th");
+      header.scope = "row";
+      header.textContent = "paging-fixture-" + suffix;
+      const cell = document.createElement("td");
+      cell.textContent = "fixture-value-" + suffix;
+      row.append(header, cell);
+      body.appendChild(row);
+    }
+    const filter = document.querySelector("#portfolio-filter");
+    filter.value = "paging-fixture-";
+    filter.dispatchEvent(new Event("input", {bubbles: true}));
+  });
   await page.waitForFunction(() =>
-    (document.querySelector("#portfolio-filter-status")?.textContent || "").endsWith(" rows shown."));
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Rows 1-25 of 30 matching rows shown. Page 1 of 2. Sort: host order."));
+  assert.equal(
+    await page.locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])').count(),
+    25,
+    "first bounded page exposes exactly 25 matching rows");
+
+  await page.locator("#portfolio-next").click();
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Rows 26-30 of 30 matching rows shown. Page 2 of 2. Sort: host order."));
+  assert.equal(
+    await page.locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])').count(),
+    5,
+    "second bounded page exposes the remaining five rows");
+
+  await page.selectOption("#portfolio-sort", "text-desc");
+  await page.waitForFunction(() =>
+    (document.querySelector("#portfolio-filter-status")?.textContent || "").includes(
+      "Page 1 of 2. Sort: rendered text descending."));
+  const firstVisible = await page
+    .locator('#portfolio-body tr[data-filterable-row="true"]:not([hidden])')
+    .first()
+    .innerText();
+  assert.match(firstVisible, /paging-fixture-29/,
+    "descending rendered-text sort is deterministic and restarts at page one");
+
+  await page.evaluate(() => {
+    const filter = document.querySelector("#portfolio-filter");
+    filter.value = "";
+    filter.dispatchEvent(new Event("input", {bubbles: true}));
+    const sort = document.querySelector("#portfolio-sort");
+    sort.value = "host";
+    sort.dispatchEvent(new Event("change", {bubbles: true}));
+    document.querySelector("#refresh-state").click();
+  });
+  await page.waitForFunction(() => document.querySelector("#refresh-state").disabled);
+  await page.waitForFunction(() => !document.querySelector("#refresh-state").disabled);
+  await page.waitForFunction(() =>
+    document.querySelector("#portfolio-body").textContent.includes("895.696") &&
+    !document.querySelector("#portfolio-body").textContent.includes("paging-fixture-"));
+}
+
+async function exerciseScopeSpeechIsolation(page) {
+  stage = "display-scope speech isolation";
+  await page.waitForTimeout(850);
+  const current = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/state", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {"Accept": "application/json"},
+    });
+    if (!response.ok) throw new Error("scope speech fixture snapshot failed");
+    return response.json();
+  });
+  const shiftedHost = current.host_id + "-speech-probe";
+  const shifted = {...current, host_id: shiftedHost};
+  const routePattern = "**/api/v1/state";
+  await page.route(routePattern, async route => {
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+      body: JSON.stringify(shifted),
+    });
+  });
+  try {
+    await page.evaluate(() => {
+      const filter = document.querySelector("#portfolio-filter");
+      filter.value = "old-context-speech-probe-no-match";
+      filter.dispatchEvent(new Event("input", {bubbles: true}));
+      document.querySelector("#refresh-state").click();
+    });
+    await page.waitForFunction(expectedHost => {
+      const host = document.querySelector("#active-host")?.textContent || "";
+      const refresh = document.querySelector("#refresh-state");
+      return host === expectedHost && refresh && !refresh.disabled;
+    }, shiftedHost);
+    await page.waitForTimeout(850);
+
+    const polite = await page.locator("#polite-status").innerText();
+    assert.doesNotMatch(
+      polite,
+      /0 of [0-9]+ rows match the current filter/,
+      "queued old-context table speech must not cross a host display-scope reset");
+    assert.match(
+      polite,
+      /reset for new account\/environment scope|Host display context changed/,
+      "new display-scope feedback remains available after stale speech is discarded");
+  } finally {
+    await page.unroute(routePattern).catch(() => {});
+    await page.evaluate(() => document.querySelector("#refresh-state").click());
+    await page.waitForFunction(expectedHost => {
+      const host = document.querySelector("#active-host")?.textContent || "";
+      const refresh = document.querySelector("#refresh-state");
+      return host === expectedHost && refresh && !refresh.disabled;
+    }, current.host_id);
+    await page.waitForTimeout(850);
+  }
 }
 
 async function exerciseSnapshotSelectionPreservation(page) {
@@ -330,7 +463,9 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await command(page, "RECOVER_SIMULATION", 3);
   assert.match(await page.locator("#portfolio-body").innerText(), /895\.696/);
   await exercisePortfolioTableTools(page);
+  await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
+  await exerciseScopeSpeechIsolation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);
   await command(page, "BACKUP_SIMULATION", 4);

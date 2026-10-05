@@ -859,6 +859,62 @@ class RiskExactArithmeticTests(unittest.TestCase):
             risk_module.risk_intent_hash(intent),
         )
 
+    def test_bind_rejects_missing_or_noncanonical_evaluated_intent_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        raw = evaluate_risk(intent, exact_context(), policy())
+        canonical = risk_module.risk_intent_hash(intent)
+
+        missing = type(raw)(
+            **{
+                **vars(raw),
+                "evaluated_intent_hash": None,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "lacks evaluated intent identity",
+        ):
+            bind_risk_decision(
+                missing,
+                intent_hash=canonical,
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
+        noncanonical = "risk-intent:sha256:" + "A" * 64
+        malformed = type(raw)(
+            **{
+                **vars(raw),
+                "evaluated_intent_hash": noncanonical,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated intent identity is malformed",
+        ):
+            bind_risk_decision(
+                malformed,
+                intent_hash=noncanonical,
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
     def test_bound_risk_rejects_caller_intent_hash_substitution(self):
         intent = RiskIntent.create(
             symbol="ABC",

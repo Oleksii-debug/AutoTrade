@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -491,6 +492,62 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                     str(root),
                 ],
                 cwd=Path.cwd(),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Reconvergence tree guard passed.", result.stdout)
+
+    def test_module_entrypoint_uses_exact_trusted_path_environment(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "control" / "tools"
+            target.mkdir(parents=True)
+            guarded = target / "reconvergence_integrity.py"
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            guarded.write_text("base\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            guarded.write_text("child\n", encoding="utf-8")
+            git("commit", "-am", "child")
+            head_sha = git("rev-parse", "HEAD")
+
+            env = os.environ.copy()
+            env["AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS"] = (
+                "control/tools/reconvergence_integrity.py"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                    "--cwd",
+                    str(root),
+                ],
+                cwd=Path.cwd(),
+                env=env,
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,

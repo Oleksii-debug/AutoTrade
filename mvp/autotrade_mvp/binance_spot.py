@@ -80,6 +80,44 @@ def _exact_json_object(value: object, *, name: str) -> dict[str, object]:
     return value
 
 
+def _exact_decoded_json_tree(value: object, *, name: str) -> object:
+    """Reject executable/aliased Python objects before provider evidence hashing."""
+
+    stack = [value]
+    seen_containers: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current is None or type(current) in (str, bool, int, float):
+            continue
+        if type(current) is dict:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceSpotAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            for key, item in current.items():
+                if type(key) is not str:
+                    raise BinanceSpotAdapterError(
+                        f"{name} keys must be exact decoded strings"
+                    )
+                stack.append(item)
+            continue
+        if type(current) is list:
+            identity = id(current)
+            if identity in seen_containers:
+                raise BinanceSpotAdapterError(
+                    f"{name} must be a decoded JSON tree without aliases or cycles"
+                )
+            seen_containers.add(identity)
+            stack.extend(current)
+            continue
+        raise BinanceSpotAdapterError(
+            f"{name} must contain only exact decoded JSON values"
+        )
+    return value
+
+
 def _text(value: object, *, name: str) -> str:
     if type(value) is not str:
         raise BinanceSpotAdapterError(f"{name} is required")
@@ -1695,8 +1733,8 @@ def parse_order_ack(
     except ValueError as error:
         raise BinanceSpotAdapterError("attempt_id must be a UUID") from error
     cid = validate_client_order_id(client_order_id)
-    if type(response) is not dict:
-        raise BinanceSpotAdapterError("response must be an exact decoded object")
+    response = _exact_json_object(response, name="order ACK response")
+    _exact_decoded_json_tree(response, name="order ACK response")
 
     echoed = validate_client_order_id(response.get("clientOrderId"))
     if echoed != cid:

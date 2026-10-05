@@ -481,6 +481,48 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
             self.assertEqual(callbacks, [])
             self.assertIs(instruments_module.SettlementConvention, original_type)
 
+    def test_transitive_serializer_global_rebinding_fails_before_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged transitive serializer global executed")
+
+            replacements = (
+                ("InstrumentRegistryError", RuntimeError, False),
+                ("canonical_decimal_text", forged, False),
+                ("ExactDecimalError", RuntimeError, False),
+                ("timezone", object(), False),
+                ("Mapping", object(), False),
+                ("MappingProxyType", object(), False),
+                ("DeliverableLeg", object(), False),
+                ("dict", forged, True),
+                ("str", forged, True),
+                ("type", forged, True),
+                ("int", forged, True),
+                ("tuple", forged, True),
+                ("getattr", forged, True),
+                ("any", forged, True),
+                ("isinstance", forged, True),
+            )
+            for name, replacement, create in replacements:
+                with self.subTest(name=name):
+                    with patch.object(
+                        instruments_module,
+                        name,
+                        replacement,
+                        create=create,
+                    ):
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+
+            self.assertEqual(callbacks, [])
+
     def test_snapshot_binds_price_semantics_without_putting_it_in_request(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

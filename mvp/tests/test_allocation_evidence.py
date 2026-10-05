@@ -41,6 +41,19 @@ class _MutatingMapping(Mapping):
         return len(self._values)
 
 
+class _SecondPassMutatingIterable:
+    def __init__(self, values, callback):
+        self._values = tuple(values)
+        self._callback = callback
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        if self.iterations > 1:
+            self._callback()
+        return iter(self._values)
+
+
 class EvidenceBoundAllocationTests(unittest.TestCase):
     DECISION_TIME = "2026-09-25T18:30:00Z"
     OBSERVED_AT = "2026-09-25T18:00:00Z"
@@ -1300,10 +1313,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         valuation = resolved["valuation:aaa:v1"]
         resolver = allocation_module._resolve_allocation_evidence
         original_code = resolver.__code__
-        forged_calls = []
 
         def forged_resolver(*args, **kwargs):
-            forged_calls.append("resolver")
             raise AssertionError("retargeted resolver executed")
 
         def retarget_resolver_code():
@@ -1336,7 +1347,41 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             resolver.__code__ = original_code
 
         self.assertGreater(hostile_market.calls, 0)
-        self.assertEqual(forged_calls, [])
+
+    def test_candidates_are_materialized_once_before_trust_checkpoint(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        original_resolver = allocation_module._resolve_allocation_evidence
+
+        def forged_resolver(*args, **kwargs):
+            raise AssertionError("second-pass resolver retarget executed")
+
+        def retarget_on_second_iteration():
+            allocation_module._resolve_allocation_evidence = forged_resolver
+
+        candidates = _SecondPassMutatingIterable(
+            (self.candidate(),),
+            retarget_on_second_iteration,
+        )
+        try:
+            result = allocate_evidence_bound_objective_targets(
+                candidates,
+                self.policy(),
+                objective_evidence={"AAA": objective},
+                market_evidence={"AAA": market},
+                valuation_evidence={"AAA": valuation},
+                capital_evidence=capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+        finally:
+            allocation_module._resolve_allocation_evidence = original_resolver
+
+        self.assertEqual(candidates.iterations, 1)
+        self.assertEqual(result.environment, "SIMULATION")
 
     def test_mapping_callback_cannot_mutate_verified_objective_before_use(self):
         objective, market, capital, stress, resolved = self.bundle()

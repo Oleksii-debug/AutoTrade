@@ -874,12 +874,20 @@ class DurableFinancialRequestBindingRegistry:
             "journal_store_identity_digest",
             "material",
         }
+        material = _material_from_payload(payload.get("material"))
+        expected_origin = _production_request_origin_receipt(material)
+        if expected_origin is not None:
+            expected_fields.add("provider_request_origin")
         if (
             set(payload) != expected_fields
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")
             != self._store_identity_digest
+            or (
+                expected_origin is not None
+                and payload.get("provider_request_origin") != expected_origin
+            )
         ):
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload is invalid"

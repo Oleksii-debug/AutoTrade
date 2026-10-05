@@ -131,6 +131,67 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             ),
         )
 
+    def test_production_origin_receipt_replays_through_durable_payload_reader(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        event = {
+            "event_id": "admitted-financial-request:admission-1",
+            "event_type": binding_module._EVENT_TYPE,
+            "aggregate_type": binding_module._AGGREGATE_TYPE,
+            "aggregate_id": "admission-1",
+            "aggregate_version": 1,
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+        }
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._store_identity_digest = D8
+        registry._require_store = lambda: object()
+        with patch.object(
+            binding_module,
+            "_CANONICAL_LOAD_EVENTS",
+            return_value=[event],
+        ):
+            self.assertEqual(
+                registry._load_payload("admission-1"),
+                payload,
+            )
+
+    def test_legacy_production_payload_without_origin_receipt_fails_replay(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        legacy = dict(payload)
+        legacy.pop("provider_request_origin")
+        event = {
+            "event_id": "admitted-financial-request:admission-1",
+            "event_type": binding_module._EVENT_TYPE,
+            "aggregate_type": binding_module._AGGREGATE_TYPE,
+            "aggregate_id": "admission-1",
+            "aggregate_version": 1,
+            "payload": legacy,
+            "payload_hash": payload_digest(legacy),
+        }
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._store_identity_digest = D8
+        registry._require_store = lambda: object()
+        with patch.object(
+            binding_module,
+            "_CANONICAL_LOAD_EVENTS",
+            return_value=[event],
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "payload is invalid",
+            ):
+                registry._load_payload("admission-1")
+
     def test_factory_product_must_be_exact_prepared_type(self):
         material, _prepared = canonical_case()
         with self.assertRaisesRegex(

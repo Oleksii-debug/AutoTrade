@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.pipeline import SimulatedProvider, run_multi_episode, run_vertical_slice, verify_replay
+from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class VerticalSliceTests(unittest.TestCase):
@@ -19,6 +20,18 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertTrue(first.reconciled)
             self.assertEqual(first.evidence_count, 1)
             self.assertFalse(first.resumed)
+
+            checkpoint = json.loads(
+                (Path(directory) / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            events = JournalStore(
+                Path(directory) / "journal.sqlite3"
+            ).load_events("simulation_portfolio", "SIM")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["financial_configuration_hash"],
+                checkpoint["financial_configuration_hash"],
+            )
 
             restarted = run_vertical_slice([100, 101, 102, 103], directory)
             self.assertTrue(restarted.resumed)

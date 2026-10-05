@@ -1,7 +1,7 @@
 import unittest
 
 from mvp.autotrade_mvp import durable_financial_bybit_sender as module
-from mvp.autotrade_mvp.bybit_v5 import BybitPreparedSubmission
+from mvp.autotrade_mvp.bybit_v5 import BybitPreparedSubmission, prepare_order_submission
 from mvp.autotrade_mvp.durable_financial_bybit_sender import (
     DurableFinancialBybitSenderError,
     DurableFinanciallyBoundBybitOrderSender,
@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.financial_send_authority import (
     FinanciallyBoundBybitOrderSender,
 )
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
+from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 
 
 _FORGED_CALLS = []
@@ -40,32 +41,26 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
 
     @staticmethod
     def _prepared_shell():
-        prepared = object.__new__(BybitPreparedSubmission)
-        values = {
-            "endpoint": "/v5/order/create",
-            "body": {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "side": "Buy",
-                "orderType": "Limit",
-                "qty": "2",
-                "timeInForce": "GTC",
-                "orderLinkId": "client-order-1",
-                "price": "30000",
-                "reduceOnly": False,
-                "positionIdx": 0,
-            },
-            "account_id": "account-1",
-            "environment": "PAPER",
-            "provider_environment": "TESTNET",
-            "capability_snapshot_id": "capability-1",
-            "entity_id": "entity-1",
-            "instrument_version": "7",
-            "body_sha256": "sha256:" + "1" * 64,
-        }
-        for name, value in values.items():
-            object.__setattr__(prepared, name, value)
-        return prepared
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        return prepare_order_submission(
+            capability=capability,
+            at=READ_AT,
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="2",
+            client_order_id="client-order-1",
+            time_in_force="GTC",
+            price="30000",
+            reduce_only=False,
+        )
 
     @staticmethod
     def _dispatch_shell():

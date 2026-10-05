@@ -94,6 +94,8 @@ class BybitRiskPriceSemanticsTests(unittest.TestCase):
         risk_side="BUY",
         wire_price="100.00",
         risk_price="100",
+        wire_quantity="2",
+        risk_quantity="2",
         symbol="BTCUSDT",
     ):
         capability = submission_write_capability(
@@ -110,7 +112,7 @@ class BybitRiskPriceSemanticsTests(unittest.TestCase):
             symbol=symbol,
             side=wire_side,
             order_type=order_type,
-            quantity="2",
+            quantity=wire_quantity,
             client_order_id="client-order-1",
             time_in_force="GTC" if order_type == "LIMIT" else "IOC",
             **({"price": wire_price} if order_type == "LIMIT" else {}),
@@ -119,7 +121,7 @@ class BybitRiskPriceSemanticsTests(unittest.TestCase):
         intent = RiskIntent.create(
             symbol="BTCUSDT",
             side=risk_side,
-            quantity="2",
+            quantity=risk_quantity,
             price=risk_price,
             expected_state_version=1,
         )
@@ -261,6 +263,37 @@ class BybitRiskPriceSemanticsTests(unittest.TestCase):
             "provider scope differs",
         ):
             self._compose(request, snapshot, prepared)
+
+    def test_already_risked_quantity_must_match_causal_instrument_grid(self):
+        request, snapshot, prepared = self._case(
+            wire_quantity="0.0005",
+            risk_quantity="0.0005",
+        )
+        with self.assertRaisesRegex(
+            BybitRiskPriceSemanticsError,
+            "quantity semantics cannot be composed",
+        ):
+            self._compose(request, snapshot, prepared)
+
+    def test_quantity_validator_rebinding_fails_before_forged_execution(self):
+        request, snapshot, prepared = self._case()
+        calls = []
+
+        def forged(*_args, **_kwargs):
+            calls.append("forged")
+            raise AssertionError("forged quantity validator executed")
+
+        with patch.object(
+            bridge_module.InstrumentVersion,
+            "validate_quantity",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                BybitRiskPriceSemanticsError,
+                "executable authority changed",
+            ):
+                self._compose(request, snapshot, prepared)
+        self.assertEqual(calls, [])
 
     def test_preexisting_instrument_binding_must_equal_authenticated_metadata(self):
         request, snapshot, prepared = self._case()

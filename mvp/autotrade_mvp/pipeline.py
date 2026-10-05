@@ -557,6 +557,8 @@ def _repair_interrupted_replay(
     records = state.get("evidence_records", {})
     if type(ids) is not list or type(records) is not dict:
         raise ValueError("Corrupt checkpoint replay authority")
+    if any(type(evidence_id) is not str or not evidence_id for evidence_id in ids):
+        raise ValueError("Corrupt checkpoint replay evidence identity")
     if len(ids) != len(set(ids)) or set(ids) != set(records):
         raise ValueError("Corrupt checkpoint replay evidence identity")
     if not ids:
@@ -620,8 +622,8 @@ def _repair_interrupted_replay(
     if missing_journal - {latest_id}:
         raise ValueError("Historical simulation journal is incomplete before latest episode")
 
-    if latest_id in missing_evidence:
-        _append_evidence(evidence_path, latest_record)
+    for _timestamp, _evidence_id, record in ordered:
+        _append_evidence(evidence_path, record)
     if latest_id in missing_journal:
         handle_journal_event(
             root,

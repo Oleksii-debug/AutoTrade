@@ -524,6 +524,27 @@ class VerticalSliceTests(unittest.TestCase):
             )
             self.assertFalse(verify_replay(directory))
 
+    def test_replay_rejects_incomplete_evidence_schema_even_when_checkpoint_matches(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_id = checkpoint["evidence_ids"][0]
+            checkpoint["evidence_records"][evidence_id].pop("risk_outcome")
+            checkpoint_path.write_text(
+                json.dumps(checkpoint),
+                encoding="utf-8",
+            )
+            evidence_path = root / "learning-evidence.jsonl"
+            row = json.loads(evidence_path.read_text(encoding="utf-8"))
+            row.pop("risk_outcome")
+            evidence_path.write_text(
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(verify_replay(directory))
+
     def test_replay_rejects_valid_event_shape_with_wrong_evidence_identity(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

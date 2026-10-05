@@ -1,0 +1,108 @@
+name: Provider Origin Composition Temp
+
+on:
+  push:
+    branches:
+      - integration/provider-origin-reconciliation-20261005-sol56
+
+permissions:
+  contents: write
+
+concurrency:
+  group: provider-origin-composition-temp
+  cancel-in-progress: false
+
+jobs:
+  compose:
+    if: ${{ !contains(github.event.head_commit.message, '[provider-origin-composed]') && !contains(github.event.head_commit.message, '[remove-provider-origin-composer]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: integration/provider-origin-reconciliation-20261005-sol56
+
+      - name: Merge exact provider-origin head and resolve only expected conflict
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags origin 347994a9ed177e525194a6dd769ff2ef215e9869
+          set +e
+          git merge --no-ff --no-commit 347994a9ed177e525194a6dd769ff2ef215e9869
+          merge_rc=$?
+          set -e
+          if [ "$merge_rc" -ne 0 ] && [ "$merge_rc" -ne 1 ]; then
+            exit "$merge_rc"
+          fi
+          mapfile -t unresolved < <(git diff --name-only --diff-filter=U)
+          if [ "${#unresolved[@]}" -ne 1 ] || [ "${unresolved[0]}" != "mvp/autotrade_mvp/provider_transport.py" ]; then
+            printf 'unexpected merge conflicts:\n'
+            printf '%s\n' "${unresolved[@]}"
+            exit 1
+          fi
+          git checkout --theirs -- mvp/autotrade_mvp/provider_transport.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("mvp/autotrade_mvp/provider_transport.py")
+          text = path.read_text(encoding="utf-8")
+
+          import_anchor = "import os\nfrom threading import Lock\n"
+          if text.count(import_anchor) != 1:
+              raise SystemExit("provider_transport import anchor changed")
+          text = text.replace(import_anchor, "import os\nimport re\nfrom threading import Lock\n", 1)
+
+          write_anchor = '''                environment=self.policy.environment,\n                instrument_version=instrument_version,\n                at=point,\n'''
+          if text.count(write_anchor) != 1:
+              raise SystemExit("Bybit write capability anchor changed")
+          text = text.replace(
+              write_anchor,
+              '''                environment=self.policy.environment,\n                provider_environment=self.provider_environment,\n                instrument_version=instrument_version,\n                at=point,\n''',
+              1,
+          )
+
+          read_anchor = '''                environment=self.policy.environment,\n                instrument_version=query_binding.instrument_version,\n                at=point,\n'''
+          if text.count(read_anchor) != 1:
+              raise SystemExit("Bybit read capability anchor changed")
+          text = text.replace(
+              read_anchor,
+              '''                environment=self.policy.environment,\n                provider_environment=self.provider_environment,\n                instrument_version=query_binding.instrument_version,\n                at=point,\n''',
+              1,
+          )
+
+          if text.count("import re\n") != 1:
+              raise SystemExit("re import invariant failed")
+          if text.count("provider_environment=self.provider_environment,") < 2:
+              raise SystemExit("Bybit exact provider-domain guards are missing")
+          if "re.fullmatch" not in text:
+              raise SystemExit("wire-semantics regex use unexpectedly absent")
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          git add mvp/autotrade_mvp/provider_transport.py
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "unresolved merge conflicts remain"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
+
+      - name: Validate composed authority seam
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q mvp/autotrade_mvp
+          python -m unittest \
+            mvp.tests.test_provider_transport \
+            mvp.tests.test_provider_route_reads \
+            mvp.tests.test_provider_origin \
+            mvp.tests.test_provider_origin_journal_rebinding_authority \
+            mvp.tests.test_provider_origin_timezone_authority
+
+      - name: Commit exact merge result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          git commit -m "integration: compose provider-origin with Bybit domain guards [provider-origin-composed]"
+          git push origin HEAD:integration/provider-origin-reconciliation-20261005-sol56

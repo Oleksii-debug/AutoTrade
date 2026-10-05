@@ -57,9 +57,12 @@ class BinanceSpotAdapterError(ProviderCoreError):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise BinanceSpotAdapterError(f"{name} is required")
-    return value.strip()
+    stripped = value.strip()
+    if not stripped:
+        raise BinanceSpotAdapterError(f"{name} is required")
+    return stripped
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
@@ -1492,12 +1495,12 @@ def prepare_order_request(
     deliberately excluded from this foundation because its economic unit differs.
     """
 
-    if not isinstance(intent, BinanceSpotOrderIntent):
-        raise TypeError("intent must be BinanceSpotOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
-    if not isinstance(symbol_rules, BinanceSpotSymbolRules):
-        raise TypeError("symbol_rules must be BinanceSpotSymbolRules")
+    if type(intent) is not BinanceSpotOrderIntent:
+        raise TypeError("intent must be exact BinanceSpotOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(symbol_rules) is not BinanceSpotSymbolRules:
+        raise TypeError("symbol_rules must be exact BinanceSpotSymbolRules")
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":

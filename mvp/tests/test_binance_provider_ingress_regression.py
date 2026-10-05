@@ -214,6 +214,24 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(fills[0].client_order_id, "spot-client-42")
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
 
+    def test_usdm_accepts_canonical_frozen_authenticated_trade_payload(self):
+        observation = _usdm_trade_observation()
+
+        self.assertIs(type(observation.payload), tuple)
+        self.assertEqual(len(observation.payload), 1)
+        self.assertIs(type(observation.payload[0]), MappingProxyType)
+        self.assertIs(type(observation.payload[0]["id"]), int)
+        self.assertIs(type(observation.payload[0]["orderId"]), int)
+
+        fills = parse_usdm_account_trades(
+            observation,
+            instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+            client_ids_by_order_id={43: "usdm-client-43"},
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].client_order_id, "usdm-client-43")
+        self.assertEqual(fills[0].provider_execution_id, "BINANCE-USDM:BTCUSDT:8")
+
     def test_spot_identity_maps_reject_mapping_subclass_before_items_callback(self):
         observation = _spot_trade_observation()
         callbacks = []

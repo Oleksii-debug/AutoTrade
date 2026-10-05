@@ -589,6 +589,44 @@ def _simulation_qualification_identity(
     return "provider-qualification:sha256:" + digest
 
 
+def _require_admitted_price_semantics(
+    snapshot: Mapping[str, object],
+    material: FinancialRequestBindingMaterial,
+) -> str:
+    """Require production price semantics to come from admitted durable authority.
+
+    PAPER/LIVE material may carry the digest only as an equality target.  The
+    authoritative value must already exist in the accepted risk snapshot,
+    where the product-owned risk/instrument composition can cross-bind the
+    canonical InstrumentVersion/provider price-rule owner.  This module does
+    not mint a fallback digest from provider wire fields.
+
+    SIMULATION keeps the material-carried value as diagnostic identity only.
+    """
+
+    if type(material) is not _MATERIAL_TYPE:
+        raise TypeError("material must be exact FinancialRequestBindingMaterial")
+    if material.runtime_environment not in {"PAPER", "LIVE"}:
+        return material.price_semantics_digest
+
+    admitted = snapshot.get("price_semantics_digest")
+    if type(admitted) is not str:
+        raise DurableFinancialRequestBindingError(
+            "PAPER/LIVE request binding requires authoritative price-semantics identity"
+        )
+    if admitted != material.price_semantics_digest:
+        raise DurableFinancialRequestBindingError(
+            "financial request price semantics differ from admitted authority"
+        )
+    return admitted
+
+
+_CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS = _require_admitted_price_semantics
+_CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS_CODE = (
+    _require_admitted_price_semantics.__code__
+)
+
+
 def _validate_material_against_admission(
     store: JournalStore,
     authority: AuthorityService,
@@ -647,6 +685,20 @@ def _validate_material_against_admission(
         raise DurableFinancialRequestBindingError(
             "admitted authoritative risk snapshot is unavailable"
         )
+    if (
+        _require_admitted_price_semantics
+        is not _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS
+        or getattr(
+            _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "price-semantics authority executable changed"
+        )
+    _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS(snapshot, material)
     provider_id = snapshot.get("provider_id")
     provider_environment = snapshot.get("provider_environment")
     entity_policy_id = snapshot.get("entity_policy_id")

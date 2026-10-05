@@ -286,6 +286,26 @@ _RESOURCE_PLATFORM_AUTHORITY = tuple(
 )
 
 
+_RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY = ()
+if type(_disk_usage) is FunctionType:
+    _disk_usage_globals = _disk_usage.__globals__
+    _disk_usage_os_module = _disk_usage_globals.get("os")
+    if (
+        "statvfs" in _disk_usage.__code__.co_names
+        and _disk_usage_os_module is not None
+    ):
+        _disk_usage_os_namespace = vars(_disk_usage_os_module)
+        if "statvfs" in _disk_usage_os_namespace:
+            _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY = (
+                (
+                    "disk usage os.statvfs",
+                    _disk_usage_os_namespace,
+                    "statvfs",
+                    dict.__getitem__(_disk_usage_os_namespace, "statvfs"),
+                ),
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
     process_id: int
@@ -955,6 +975,7 @@ def run_declared_target_host_campaign_with_resources(
 
     store_authority = _capture_artifact_store_authority(evidence_store)
     resource_platform_states = _RESOURCE_PLATFORM_AUTHORITY
+    resource_platform_attribute_states = _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY
     capture_snapshot = capture_runtime_target_host_resource_snapshot
     issue_evidence = issue_runtime_target_host_resource_evidence
     publish_evidence = publish_runtime_target_host_resource_evidence
@@ -1008,6 +1029,25 @@ def run_declared_target_host_campaign_with_resources(
                     "resource platform dependency changed "
                     f"{phase}: {dependency_name}"
                 ) from error
+        for (
+            dependency_name,
+            namespace,
+            attribute_name,
+            expected,
+        ) in resource_platform_attribute_states:
+            try:
+                current = raw_dict_getitem(namespace, attribute_name)
+            except KeyError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                ) from error
+            if current is not expected:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
+
 
     def require_resource_class_authority(*, phase: str) -> None:
         for owner, name, descriptor, function, code in descriptor_states:

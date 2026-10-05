@@ -29,6 +29,7 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -58,6 +59,51 @@ def _checkpoint_decimal(value: object, *, name: str) -> Decimal:
         return parse_bounded_exact_decimal(value)
     except (ExactDecimalError, TypeError, ValueError) as error:
         raise ValueError(f"Corrupt checkpoint {name}: invalid exact decimal") from error
+
+
+def _financial_configuration(
+    *,
+    symbol: str,
+    initial_cash: Decimal,
+    order_quantity: Decimal,
+    max_abs_position: Decimal,
+    max_notional: Decimal,
+    fee_rate: Decimal,
+) -> dict[str, object]:
+    """Return the exact effective financial configuration for one durable run."""
+
+    return {
+        "symbol": symbol,
+        "initial_cash": str(initial_cash),
+        "order_quantity": str(order_quantity),
+        "max_abs_position": str(max_abs_position),
+        "max_notional": str(max_notional),
+        "fee_rate": str(fee_rate),
+        "strategy": {
+            "kind": "MOVING_AVERAGE",
+            "fast": 2,
+            "slow": 3,
+        },
+    }
+
+
+def _require_checkpoint_configuration(
+    state: dict,
+    expected: dict[str, object],
+) -> None:
+    configuration = state.get("financial_configuration")
+    digest = state.get("financial_configuration_hash")
+    if type(configuration) is not dict or type(digest) is not str:
+        raise ValueError("Checkpoint lacks exact financial configuration identity")
+    try:
+        observed_digest = _stable_hash(configuration)
+        expected_digest = _stable_hash(expected)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Corrupt checkpoint financial configuration") from error
+    if digest != observed_digest:
+        raise ValueError("Checkpoint financial configuration digest mismatch")
+    if configuration != expected or digest != expected_digest:
+        raise ValueError("Checkpoint financial configuration changed")
 
 
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
@@ -386,7 +432,12 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         raise ValueError("Corrupt checkpoint JSON") from error
     if not isinstance(data, dict):
         raise ValueError("Corrupt checkpoint structure")
-    if data.get("schema_version") != 1:
+    schema_version = data.get("schema_version")
+    if schema_version == 1:
+        raise ValueError(
+            "Legacy checkpoint schema 1 lacks exact financial configuration identity"
+        )
+    if schema_version != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("Unsupported or corrupt checkpoint schema")
     if not isinstance(data.get("postings"), list) or not isinstance(data.get("fills"), dict):
         raise ValueError("Corrupt checkpoint ledger or fills")
@@ -522,9 +573,19 @@ def run_vertical_slice(
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
+    financial_configuration = _financial_configuration(
+        symbol=symbol,
+        initial_cash=starting_cash,
+        order_quantity=quantity,
+        max_abs_position=position_limit,
+        max_notional=notional_limit,
+        fee_rate=rate,
+    )
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
-    if resumed and state.get("symbol", symbol) != symbol:
-        raise ValueError("Checkpoint belongs to another symbol")
+    if resumed:
+        if state.get("symbol", symbol) != symbol:
+            raise ValueError("Checkpoint belongs to another symbol")
+        _require_checkpoint_configuration(state, financial_configuration)
     ledger = EconomicLedger(
         _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
         list(state.get("postings", [])),
@@ -608,8 +669,10 @@ def run_vertical_slice(
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "symbol": symbol,
+        "financial_configuration": financial_configuration,
+        "financial_configuration_hash": _stable_hash(financial_configuration),
         "initial_cash": str(ledger.initial_cash),
         "postings": ledger.postings,
         "fills": {key: {**asdict(value), "quantity": str(value.quantity), "price": str(value.price), "fee": str(value.fee)} for key, value in provider.fills.items()},

@@ -53,7 +53,10 @@ class SharedStoreZeroCheckpointOutboxTests(unittest.TestCase):
         return rows[0]
 
     def _assert_host_publication_still_pending(self, store: JournalStore, row):
-        state = store.outbox_delivery_state(row["event_id"], "ui.host-events")
+        state = store.outbox_delivery_state(
+            row["event_id"],
+            topic="ui.host-events",
+        )
         self.assertIsNotNone(state)
         self.assertFalse(state["delivered"])
         self.assertEqual(state["outbox_id"], row["outbox_id"])

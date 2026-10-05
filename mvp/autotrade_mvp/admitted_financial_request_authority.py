@@ -59,11 +59,25 @@ def _exact_text(value: object, *, name: str) -> str:
     return value
 
 
+def _exact_utf8_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as error:
+        raise AdmittedFinancialRequestAuthorityError(
+            f"{name} must be valid canonical UTF-8 text"
+        ) from error
+    return value
+
+
 def _exact_json_value(value: object, *, name: str) -> object:
     """Detach exact JSON-domain values without caller-polymorphic execution."""
 
-    if value is None or type(value) in {str, int, bool}:
+    if value is None or type(value) in {int, bool}:
         return value
+    if type(value) is str:
+        return _exact_utf8_text(value, name=name)
     if type(value) is list:
         return [
             _exact_json_value(item, name=f"{name}[{index}]")
@@ -73,6 +87,8 @@ def _exact_json_value(value: object, *, name: str) -> object:
         if any(type(key) is not str for key in value):
             raise TypeError(f"{name} keys must be exact strings")
         detached = dict.copy(value)
+        for key in detached:
+            _exact_utf8_text(key, name=f"{name} key")
         return {
             key: _exact_json_value(item, name=f"{name}.{key}")
             for key, item in detached.items()

@@ -1,19 +1,18 @@
-"""Canonical provider-Q authority for reconciliation absence semantics.
+"""Canonical provider-Q authority for provider absence semantics.
 
-This module is the positive counterpart to adapter-level fail-closed coverage.
-It never accepts a caller boolean as provider semantics authority.  A coverage
-surface can carry ``provider_semantics_exclude_execution=True`` only when:
+This module authorizes only the semantic statement that one exact qualified
+provider endpoint, when completely and correctly observed, excludes an
+unobserved execution for one reconciliation surface.
 
-* the provider response is a sealed ``QualifiedProviderResponseObservation``;
-* the durable provider-Q journal contains the exact qualification referenced by
-  that read at the same historical journal cut;
-* provider/account/runtime/provider-environment/build identity still matches;
-* the immutable Q ``route_semantics_json`` contains the exact source-owned
-  absence claim for the observed provider endpoint and reconciliation surface.
+It deliberately does NOT authorize:
+- pagination completeness;
+- the temporal coverage window;
+- consistency-horizon expiry;
+- a PROVEN_ABSENT reconciliation verdict.
 
-Pagination completeness and consistency-horizon evidence remain separate
-reconciliation predicates.  This issuer does not convert those predicates into
-provider-semantic authority and therefore does not broaden their meaning.
+Those facts require their own sealed observation/coverage authorities.  Keeping
+them separate prevents caller-authored booleans or timestamps from becoming
+financial truth for recovery of an UNKNOWN outbound submission.
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from types import MappingProxyType
+import weakref
 from typing import Mapping
 
 from .durable_provider_qualification import DurableProviderQualificationRegistry
@@ -31,7 +31,6 @@ from .provider_route_reads import (
     QualifiedProviderResponseObservation,
     _require_qualified_provider_response_authority,
 )
-from .reconciliation import CoverageSurfaceEvidence
 
 
 _SCHEMA_VERSION = "1.0.0"
@@ -95,12 +94,119 @@ class ProviderAbsenceEndpointPolicy:
         ).hexdigest()
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
+class QualifiedProviderAbsenceSemantics:
+    """Sealed provider-Q semantic capability; never complete-window evidence."""
+
+    provider_id: str
+    account_id: str
+    environment: str
+    endpoint: str
+    reconciliation_surface: str
+    data_entitlement: str
+    qualification_id: str
+    route_semantics_digest: str
+    provider_response_ref: str
+    authority_journal_sequence_cut: int
+    claim_key: str
+    claim_digest: str
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderAbsenceAuthorityError(
+            "qualified absence semantics must come from canonical provider-Q authority"
+        )
+
+    @property
+    def evidence_ref(self) -> str:
+        _require_qualified_absence_semantics_authority(self)
+        material = {
+            "provider_id": self.provider_id,
+            "account_id": self.account_id,
+            "environment": self.environment,
+            "endpoint": self.endpoint,
+            "reconciliation_surface": self.reconciliation_surface,
+            "data_entitlement": self.data_entitlement,
+            "qualification_id": self.qualification_id,
+            "route_semantics_digest": self.route_semantics_digest,
+            "provider_response_ref": self.provider_response_ref,
+            "authority_journal_sequence_cut": self.authority_journal_sequence_cut,
+            "claim_key": self.claim_key,
+            "claim_digest": self.claim_digest,
+        }
+        return "qualified-provider-absence-semantics:sha256:" + sha256(
+            canonical_json(material).encode("utf-8")
+        ).hexdigest()
+
+
+def _install_absence_semantics_authority():
+    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    fields = (
+        "provider_id",
+        "account_id",
+        "environment",
+        "endpoint",
+        "reconciliation_surface",
+        "data_entitlement",
+        "qualification_id",
+        "route_semantics_digest",
+        "provider_response_ref",
+        "authority_journal_sequence_cut",
+        "claim_key",
+        "claim_digest",
+    )
+
+    def prune() -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def issue(**material: object) -> QualifiedProviderAbsenceSemantics:
+        prune()
+        value = object.__new__(QualifiedProviderAbsenceSemantics)
+        for field_name in fields:
+            object.__setattr__(value, field_name, material[field_name])
+        states[id(value)] = (
+            weakref.ref(value),
+            tuple(material[field_name] for field_name in fields),
+        )
+        return value
+
+    def require(value: object) -> None:
+        if type(value) is not QualifiedProviderAbsenceSemantics:
+            raise ProviderAbsenceAuthorityError(
+                "absence semantics authority requires exact sealed value"
+            )
+        prune()
+        state = states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderAbsenceAuthorityError(
+                "absence semantics construction authority is unavailable"
+            )
+        current = tuple(getattr(value, field_name) for field_name in fields)
+        if current != state[1]:
+            raise ProviderAbsenceAuthorityError(
+                "absence semantics authority changed after issuance"
+            )
+
+    return issue, require
+
+
+(
+    _issue_qualified_absence_semantics,
+    _require_qualified_absence_semantics_authority,
+) = _install_absence_semantics_authority()
+del _install_absence_semantics_authority
+
+
 def _token(value: object, *, name: str, upper: bool = False) -> str:
     if type(value) is not str or not value or value != value.strip():
-        raise ProviderAbsenceAuthorityError(f"{name} must be canonical non-empty text")
+        raise ProviderAbsenceAuthorityError(
+            f"{name} must be canonical non-empty text"
+        )
     result = value.upper() if upper else value
     if len(result) > 128 or any(
-        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/+-"
+        character
+        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/+-"
         for character in result
     ):
         raise ProviderAbsenceAuthorityError(f"{name} is not canonical")
@@ -109,8 +215,14 @@ def _token(value: object, *, name: str, upper: bool = False) -> str:
 
 def _endpoint(value: object) -> str:
     endpoint = _token(value, name="endpoint")
-    if not endpoint.startswith("/") or endpoint.startswith("//") or "://" in endpoint:
-        raise ProviderAbsenceAuthorityError("endpoint must be a canonical provider-relative path")
+    if (
+        not endpoint.startswith("/")
+        or endpoint.startswith("//")
+        or "://" in endpoint
+    ):
+        raise ProviderAbsenceAuthorityError(
+            "endpoint must be a canonical provider-relative path"
+        )
     return endpoint
 
 
@@ -123,13 +235,9 @@ def _environment(value: object) -> str:
     return environment
 
 
-def _bool(value: object, *, name: str) -> bool:
-    if type(value) is not bool:
-        raise ProviderAbsenceAuthorityError(f"{name} must be an exact boolean")
-    return value
-
-
-_POLICIES: Mapping[tuple[str, str], ProviderAbsenceEndpointPolicy] = MappingProxyType(
+_POLICIES: Mapping[
+    tuple[str, str], ProviderAbsenceEndpointPolicy
+] = MappingProxyType(
     {
         ("BYBIT", "/v5/order/realtime"): ProviderAbsenceEndpointPolicy(
             provider_id="BYBIT",
@@ -197,7 +305,10 @@ def _route_semantics(record: object) -> dict[str, str]:
     if (
         type(semantics) is not dict
         or not semantics
-        or any(type(key) is not str or type(value) is not str for key, value in semantics.items())
+        or any(
+            type(key) is not str or type(value) is not str
+            for key, value in semantics.items()
+        )
         or canonical_json(semantics) != raw
     ):
         raise ProviderAbsenceAuthorityError(
@@ -217,24 +328,18 @@ def _route_semantics(record: object) -> dict[str, str]:
     return semantics
 
 
-def issue_qualified_absence_coverage(
+def require_qualified_absence_semantics(
     observation: QualifiedProviderResponseObservation,
     qualification_registry: DurableProviderQualificationRegistry,
     *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-    surface: str,
-    coverage_start: str,
-    coverage_end: str,
-    pagination_complete: bool,
-    consistency_horizon_satisfied: bool,
-) -> CoverageSurfaceEvidence:
-    """Issue reconciliation coverage from one sealed qualified provider read.
+    reconciliation_surface: str,
+) -> QualifiedProviderAbsenceSemantics:
+    """Issue only the semantic capability attached to one exact qualified read.
 
-    The historical journal cut is taken from the sealed provider-read binding,
-    so a Q superseded after the request does not retroactively change the
-    semantics of the exact response that was observed.
+    This function intentionally accepts no pagination, coverage-window, or
+    consistency-horizon inputs.  Those facts are not properties of one
+    qualified response and must be established by separate sealed authorities
+    before reconciliation may construct durable negative coverage.
     """
 
     if type(observation) is not QualifiedProviderResponseObservation:
@@ -247,32 +352,27 @@ def issue_qualified_absence_coverage(
         )
     try:
         _require_qualified_provider_response_authority(observation)
+        provider_response_ref = observation.evidence_ref
     except ProviderRouteReadError as error:
         raise ProviderAbsenceAuthorityError(
             "qualified provider response construction authority is unavailable"
         ) from error
 
-    expected_provider = _token(provider_id, name="provider_id", upper=True)
-    expected_account = _token(account_id, name="account_id")
-    expected_environment = _environment(environment)
-    expected_surface = _token(surface, name="surface", upper=True)
-    pagination = _bool(pagination_complete, name="pagination_complete")
-    horizon = _bool(
-        consistency_horizon_satisfied,
-        name="consistency_horizon_satisfied",
+    expected_provider = _token(
+        observation.provider_id,
+        name="provider_id",
+        upper=True,
+    )
+    expected_account = _token(observation.account_id, name="account_id")
+    expected_environment = _environment(observation.environment)
+    expected_surface = _token(
+        reconciliation_surface,
+        name="reconciliation_surface",
+        upper=True,
     )
 
     binding = observation.query_binding
     base = binding.query_binding
-    if (
-        observation.provider_id != expected_provider
-        or observation.account_id != expected_account
-        or observation.environment != expected_environment
-    ):
-        raise ProviderAbsenceAuthorityError(
-            "qualified provider response scope does not match reconciliation scope"
-        )
-
     policy = _POLICIES.get((expected_provider, base.endpoint))
     if policy is None or policy.reconciliation_surface != expected_surface:
         raise ProviderAbsenceAuthorityError(
@@ -325,14 +425,17 @@ def issue_qualified_absence_coverage(
             "provider qualification does not cover exact absence-semantics rule"
         )
 
-    return CoverageSurfaceEvidence(
+    return _issue_qualified_absence_semantics(
         provider_id=expected_provider,
         account_id=expected_account,
         environment=expected_environment,
-        surface=expected_surface,
-        coverage_start=coverage_start,
-        coverage_end=coverage_end,
-        pagination_complete=pagination,
-        consistency_horizon_satisfied=horizon,
-        provider_semantics_exclude_execution=True,
+        endpoint=base.endpoint,
+        reconciliation_surface=expected_surface,
+        data_entitlement=policy.data_entitlement,
+        qualification_id=observation.qualification_id,
+        route_semantics_digest=semantics_digest,
+        provider_response_ref=provider_response_ref,
+        authority_journal_sequence_cut=binding.authority_journal_sequence_cut,
+        claim_key=claim_key,
+        claim_digest=claim_digest,
     )

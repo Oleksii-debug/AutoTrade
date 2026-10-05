@@ -808,3 +808,67 @@ def verify_trade_credential_transition_receipt(
                 "credential transition receipt issuer seal payload mismatch"
             )
         return receipt
+
+
+def _bind_rotate_entrypoint(implementation):
+    def rotate_trade_credential_with_receipt(
+        vault: ProtectedCredentialVault,
+        handle: PersistentCredentialHandle,
+        *,
+        execution_identity: str,
+        new_secret_value: str,
+    ) -> tuple[PersistentCredentialHandle, CredentialTransitionReceipt]:
+        return implementation(
+            vault,
+            handle,
+            execution_identity=execution_identity,
+            new_secret_value=new_secret_value,
+        )
+
+    rotate_trade_credential_with_receipt.__doc__ = implementation.__doc__
+    return rotate_trade_credential_with_receipt
+
+
+def _bind_revoke_entrypoint(implementation):
+    def revoke_trade_credential_with_receipt(
+        vault: ProtectedCredentialVault,
+        handle: PersistentCredentialHandle,
+        *,
+        execution_identity: str,
+    ) -> CredentialTransitionReceipt:
+        return implementation(
+            vault,
+            handle,
+            execution_identity=execution_identity,
+        )
+
+    revoke_trade_credential_with_receipt.__doc__ = implementation.__doc__
+    return revoke_trade_credential_with_receipt
+
+
+def _bind_verify_entrypoint(implementation):
+    def verify_trade_credential_transition_receipt(
+        vault: ProtectedCredentialVault,
+        receipt: CredentialTransitionReceipt,
+    ) -> CredentialTransitionReceipt:
+        return implementation(vault, receipt)
+
+    verify_trade_credential_transition_receipt.__doc__ = implementation.__doc__
+    return verify_trade_credential_transition_receipt
+
+
+_rotate_trade_credential_with_receipt_impl = rotate_trade_credential_with_receipt
+_revoke_trade_credential_with_receipt_impl = revoke_trade_credential_with_receipt
+_verify_trade_credential_transition_receipt_impl = (
+    verify_trade_credential_transition_receipt
+)
+
+rotate_trade_credential_with_receipt = _bind_rotate_entrypoint(
+    _rotate_trade_credential_with_receipt_impl
+)
+revoke_trade_credential_with_receipt = _bind_revoke_entrypoint(
+    _revoke_trade_credential_with_receipt_impl
+)
+verify_trade_credential_transition_receipt = _bind_verify_entrypoint(
+    _verify_trade_credential_transition_receipt_impl
+)

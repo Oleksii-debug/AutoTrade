@@ -650,6 +650,10 @@ def _install_bybit_prepared_submission_authority(
     prepared_type = BybitPreparedSubmission
     capability_type = CapabilitySnapshot
     prepared_ref = weakref_ref
+    prepared_init = prepared_type.__init__
+    prepared_init_code = prepared_init.__code__
+    prepared_post_init = prepared_type.__post_init__
+    prepared_post_init_code = prepared_post_init.__code__
     builder_code = builder.__code__
     canonical_build_order_payload = build_order_payload
     canonical_build_order_payload_code = build_order_payload.__code__
@@ -724,6 +728,15 @@ def _install_bybit_prepared_submission_authority(
             )
         if type(at) is not datetime:
             raise ProviderCoreError("Bybit preparation time must be exact datetime")
+        if BybitPreparedSubmission is not prepared_type:
+            authority_changed()
+        if (
+            prepared_type.__init__ is not prepared_init
+            or getattr(prepared_init, "__code__", None) is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or getattr(prepared_post_init, "__code__", None) is not prepared_post_init_code
+        ):
+            authority_changed()
         if getattr(builder, "__code__", None) is not builder_code:
             authority_changed()
         function_authorities = (

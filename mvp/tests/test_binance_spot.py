@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.market_data import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -2690,6 +2691,49 @@ class BinanceSpotTemporalIngressTests(unittest.TestCase):
                 symbol_rules=hostile,
                 at=NOW,
             )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_timestamp_rejects_coercible_object_before_callbacks(self):
+        callbacks = []
+
+        class HostileMillis:
+            def __int__(self):
+                callbacks.append("__int__")
+                raise AssertionError("hostile integer callback executed")
+
+            def __str__(self):
+                callbacks.append("__str__")
+                raise AssertionError("hostile string callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError, "integer millisecond timestamp"
+        ):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-hostile-millis",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 42,
+                    "clientOrderId": "at-hostile-millis",
+                    "transactTime": HostileMillis(),
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_trade_parser_rejects_observation_subclass_before_scope_callback(self):
+        callbacks = []
+        trusted = execution_observation([])
+
+        class HostileObservation(ProviderResponseObservation):
+            def require_scope(self, *args, **kwargs):
+                callbacks.append("require_scope")
+
+        hostile = object.__new__(HostileObservation)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderResponseObservation"):
+            parse_account_trades(hostile, instrument_versions={})
         self.assertEqual(callbacks, [])
 
     def test_order_admission_keeps_builtin_fixed_offset_supported(self):

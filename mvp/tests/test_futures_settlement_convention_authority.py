@@ -6,6 +6,7 @@ from inspect import signature
 import unittest
 from uuid import UUID
 
+from mvp.autotrade_mvp import futures as futures_module
 from mvp.autotrade_mvp.futures import (FuturesContract, FuturesError, inverse_settlement_convention,
     settle_and_book_inverse_variation_margin, settle_fraction)
 from mvp.autotrade_mvp.instruments import (
@@ -201,6 +202,21 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
                     "settlement convention changed after contract admission",
                 ):
                     inverse_settlement_convention(fresh)
+
+    def test_terminal_policy_authority_does_not_resolve_module_tuple(self):
+        contract = FuturesContract.from_instrument_version(
+            inverse_future(settlement_convention=settlement_convention())
+        )
+        calls = []
+
+        def forged(*_args, **_kwargs):
+            calls.append("tuple")
+            raise AssertionError("module tuple callback executed")
+
+        with unittest.mock.patch.object(futures_module, "tuple", forged, create=True):
+            policy = inverse_settlement_convention(contract)
+        self.assertEqual(policy.quantum, "0.00000001")
+        self.assertEqual(calls, [])
 
     def test_inverse_booking_does_not_accept_free_caller_quantization_policy(self):
         parameters = signature(settle_and_book_inverse_variation_margin).parameters

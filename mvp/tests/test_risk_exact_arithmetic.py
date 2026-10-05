@@ -743,6 +743,154 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 borrow_available=True,
             )
 
+    def test_risk_intent_hash_is_content_derived_for_financial_dimensions(self):
+        intents = (
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="XYZ",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1.1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2.1",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=8,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+                reduce_only=True,
+                action="REDUCE",
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+                instrument_type="FUTURE",
+            ),
+        )
+        digests = {risk_module.risk_intent_hash(intent) for intent in intents}
+        self.assertEqual(len(digests), len(intents))
+        for digest in digests:
+            self.assertRegex(digest, r"^risk-intent:sha256:[0-9a-f]{64}$")
+
+    def test_bind_rejects_hash_from_different_evaluated_risk_intent(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        raw = evaluate_risk(intent, exact_context(), policy())
+        other = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.2",
+            price="1",
+            expected_state_version=7,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "intent_hash does not match the evaluated risk intent",
+        ):
+            bind_risk_decision(
+                raw,
+                intent_hash=risk_module.risk_intent_hash(other),
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
+        bound = bind_risk_decision(
+            raw,
+            intent_hash=risk_module.risk_intent_hash(intent),
+            state_version=7,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        self.assertEqual(bound.intent_hash, raw.evaluated_intent_hash)
+        self.assertEqual(
+            bound.intent_hash,
+            risk_module.risk_intent_hash(intent),
+        )
+
+    def test_bound_risk_rejects_caller_intent_hash_substitution(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        substituted = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "intent_hash does not match the evaluated risk intent",
+        ):
+            risk_module.evaluate_bound_risk(
+                intent,
+                exact_context(),
+                policy(),
+                intent_hash=risk_module.risk_intent_hash(substituted),
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"POSITION:ABC": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
     def test_bound_risk_uses_the_same_resealed_state_version_after_evaluation(self):
         original_context = exact_context()
         intent = RiskIntent.create(
@@ -780,7 +928,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 intent,
                 original_context,
                 policy(),
-                intent_hash="intent",
+                intent_hash=risk_module.risk_intent_hash(intent),
                 policy_version=1,
                 reservation_version=0,
                 reservation_requirements=reservation_requirements,

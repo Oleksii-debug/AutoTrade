@@ -111,9 +111,14 @@ def assert_conservative_execution(
                 model.price_quantum is None
                 or model.price_projection_policy_id is None
                 or model.price_projection_policy_version is None
+                or model.price_grid_instrument_version is None
             ):
                 raise ExecutionOracleError(
                     "MARKET execution requires complete price projection policy evidence"
+                )
+            if model.price_grid_instrument_version != order.instrument_version:
+                raise ExecutionOracleError(
+                    "MARKET price grid is not bound to the order instrument_version"
                 )
             if model.data_fidelity == "BAR":
                 if observation.bar_high is None or observation.bar_low is None:

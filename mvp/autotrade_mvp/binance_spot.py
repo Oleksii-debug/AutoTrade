@@ -59,6 +59,21 @@ class BinanceSpotAdapterError(ProviderCoreError):
     pass
 
 
+def _exact_json_object(value: object, *, name: str) -> dict[str, object]:
+    """Admit one raw decoded JSON object without caller mapping/key callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceSpotAdapterError(f"{name} must be an exact decoded object")
+    # Exact dict iteration is non-polymorphic. Reject key subclasses before any
+    # string lookup/equality or canonical JSON hashing can consult them.
+    for key in value:
+        if type(key) is not str:
+            raise BinanceSpotAdapterError(
+                f"{name} keys must be exact decoded strings"
+            )
+    return value
+
+
 def _text(value: object, *, name: str) -> str:
     if type(value) is not str:
         raise BinanceSpotAdapterError(f"{name} is required")
@@ -179,8 +194,7 @@ class BinanceSpotDepthRange:
         cls,
         payload: Mapping[str, object],
     ) -> "BinanceSpotDepthRange":
-        if not isinstance(payload, Mapping):
-            raise TypeError("diff-depth payload must be a mapping")
+        payload = _exact_json_object(payload, name="diff-depth payload")
         event_type = payload.get("e")
         if type(event_type) is not str or event_type != "depthUpdate":
             raise BinanceSpotAdapterError(
@@ -228,8 +242,7 @@ class BinanceSpotDepthCursor:
         symbol: str,
         payload: Mapping[str, object],
     ) -> "BinanceSpotDepthCursor":
-        if not isinstance(payload, Mapping):
-            raise TypeError("depth snapshot payload must be a mapping")
+        payload = _exact_json_object(payload, name="depth snapshot payload")
         return cls(
             symbol=_depth_symbol(symbol),
             update_id=_depth_update_id(
@@ -856,8 +869,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse GET /api/v3/referencePrice without inventing null fallback."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("reference-price payload must be a mapping")
+        payload = _exact_json_object(payload, name="reference-price payload")
         if set(payload) != {"symbol", "referencePrice", "timestamp"}:
             raise BinanceSpotAdapterError(
                 "reference-price payload fields are not canonical"
@@ -920,8 +932,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse the documented GET /api/v3/avgPrice response."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("average-price payload must be a mapping")
+        payload = _exact_json_object(payload, name="average-price payload")
         provider_symbol = _text(symbol, name="average-price symbol")
         if provider_symbol != provider_symbol.upper():
             raise BinanceSpotAdapterError("average-price symbol must be uppercase")
@@ -966,8 +977,7 @@ class BinanceSpotReferencePrice:
     ) -> "BinanceSpotReferencePrice":
         """Parse one documented recent-trade row as last-price evidence."""
 
-        if not isinstance(payload, Mapping):
-            raise TypeError("last-trade payload must be a mapping")
+        payload = _exact_json_object(payload, name="last-trade payload")
         provider_symbol = _text(symbol, name="last-price symbol")
         if provider_symbol != provider_symbol.upper():
             raise BinanceSpotAdapterError("last-price symbol must be uppercase")
@@ -1094,19 +1104,25 @@ class BinanceSpotSymbolRules:
         instrument_version: str,
         symbol_payload: Mapping[str, object],
     ) -> "BinanceSpotSymbolRules":
-        if not isinstance(symbol_payload, Mapping):
-            raise TypeError("symbol_payload must be a mapping")
+        symbol_payload = _exact_json_object(
+            symbol_payload,
+            name="exchangeInfo symbol payload",
+        )
         instrument = _text(instrument_version, name="instrument_version")
         symbol = _text(symbol_payload.get("symbol"), name="symbol")
         if symbol != symbol.upper():
             raise BinanceSpotAdapterError("exchangeInfo symbol must be uppercase")
         filters = symbol_payload.get("filters")
-        if isinstance(filters, (str, bytes)) or not isinstance(filters, list):
-            raise BinanceSpotAdapterError("exchangeInfo filters must be an array")
-        by_type: dict[str, Mapping[str, object]] = {}
-        for item in filters:
-            if not isinstance(item, Mapping):
-                raise BinanceSpotAdapterError("exchangeInfo filter must be an object")
+        if type(filters) is not list:
+            raise BinanceSpotAdapterError(
+                "exchangeInfo filters must be an exact decoded array"
+            )
+        by_type: dict[str, dict[str, object]] = {}
+        for index, item in enumerate(filters):
+            item = _exact_json_object(
+                item,
+                name=f"exchangeInfo filter[{index}]",
+            )
             kind = _text(item.get("filterType"), name="filterType")
             if kind in by_type:
                 raise BinanceSpotAdapterError(f"duplicate exchangeInfo filter: {kind}")

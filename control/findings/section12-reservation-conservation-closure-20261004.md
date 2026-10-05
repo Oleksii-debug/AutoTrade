@@ -1,8 +1,8 @@
 # Section 12 reservations and admission-to-fill conservation closure candidate
 
-Date: 2026-10-04
-Current-main source base: `cc0b7fa5cee4597dc8039f0b0a5fd622e8b12a29`
-Implementation readback before this finding update: `1301ca962b4d8165bd2bdcdd988710fb0ef42002`
+Date: 2026-10-04; current-main/public-surface reconvergence updated 2026-10-05
+Current-main source base: `60e7c95b3b572810dcfb6c4ab34e0b338b0ace02`
+Implementation readback before this finding update: `df90f5e755a0b0144265272c3acc71eb8c701c99`
 
 Current main already contains the canonical reservation authority, exact restart binding and atomic provider-free fill/financial consumption. This candidate carries the current-main reservation-bust lineage into the Section 12 closure lane without claiming provider/PAPER/LIVE qualification.
 
@@ -20,6 +20,21 @@ The selected lineage preserves:
 - settled-source busts remain blocked without distinct settlement-compensation authority;
 - current-main recovery sequence fencing;
 - polymorphic text/snapshot/fill/plan/prepared-binding ingress fails before financial mutation.
+
+## Public provider-fill mutation fences
+
+Current-main reconvergence exposed a public-surface regression outside the core atomic writer: the compatibility facade again re-exported lower-level generic financial primitives that retain historical no-reservation shapes.
+
+The candidate therefore restores the existing bounded public fences without replacing the atomic implementation:
+- a caller cannot present a `PreparedProviderFillBinding` to the generic economic/reservation batch function and choose independent `usage` or transactions; provider-fill-bound publication must enter through the evidence-derived canonical provider-fill entrypoint;
+- durable provider-fill financial-binding events are the authority for transaction ownership; no transaction-id naming heuristic is used;
+- a fresh generic economics+settlement correction of a provider-fill-owned source transaction fails closed unless the reservation-aware correction path supplies the canonical correction binding;
+- the legacy no-reservation correction shape remains available only when both the economic correction and replacement settlement are already durable, preserving exact upgrade/retry readback without permitting fresh publication;
+- ownership resolution is bound to the current durable economic-book provider/account/environment scope and verifies event type, version, payload hash, request digest and transaction identity before granting provider-fill ownership meaning.
+
+The regression sequence commits a canonical provider fill with 100 units of cash reservation consumption, constructs a 1.0→1.1 correction, proves the public generic correction fails with no economic/settlement/reservation mutation, then proves the canonical reservation-aware correction consumes exactly the additional 10 once. A separate facade test proves a caller-supplied provider-fill binding cannot dispatch through the generic batch barrier, while an unbound legacy generic batch retains its historical behavior.
+
+These fences add no provider qualification or economic authority; they only prevent weaker compatibility surfaces from bypassing the already-selected WP-15 authority.
 
 ## Production full-fill reservation terminalization
 

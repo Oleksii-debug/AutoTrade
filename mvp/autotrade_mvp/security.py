@@ -44,6 +44,100 @@ def _credential_text(value: object, *, name: str, uppercase: bool = False) -> st
     return normalized.upper() if uppercase else normalized
 
 
+def _build_execution_lease_authority(
+    *,
+    validate_session,
+    vault_lease,
+    credential_text,
+    handle_type,
+    execution_roles,
+):
+    """Install the terminal credential-use path over retained executables.
+
+    The returned public method deliberately exposes no callback/override parameters.
+    It retains the exact session validator, scope normalizer and vault lease selected
+    when this module is constructed, while the retained vault lease continues to
+    read current durable credential state on every use.
+    """
+
+    validate_session_code = getattr(validate_session, "__code__", None)
+    credential_text_code = getattr(credential_text, "__code__", None)
+    vault_lease_code = getattr(vault_lease, "__code__", None)
+    vault_lease_generator = getattr(vault_lease, "__wrapped__", None)
+    vault_lease_generator_code = getattr(vault_lease_generator, "__code__", None)
+    if (
+        validate_session_code is None
+        or credential_text_code is None
+        or vault_lease_code is None
+        or not callable(vault_lease_generator)
+        or vault_lease_generator_code is None
+    ):
+        raise TypeError("credential lease authority is not canonical")
+    retained_roles = frozenset(execution_roles)
+
+    @contextmanager
+    def lease_for_execution(
+        self,
+        token: str,
+        *,
+        origin: str,
+        handle: CredentialHandle,
+        execution_identity: str,
+        account_id: str,
+        provider: str,
+        environment: str,
+        purpose: str,
+        provider_environment: str | None = None,
+    ):
+        """Authorize and hold one exact credential generation for terminal use."""
+        if getattr(validate_session, "__code__", None) is not validate_session_code:
+            raise PermissionError("Session validation authority code changed")
+        if getattr(credential_text, "__code__", None) is not credential_text_code:
+            raise PermissionError("Credential scope authority code changed")
+        if getattr(vault_lease, "__code__", None) is not vault_lease_code:
+            raise PermissionError("Credential vault lease authority code changed")
+        if getattr(vault_lease, "__wrapped__", None) is not vault_lease_generator:
+            raise PermissionError("Credential vault lease implementation changed")
+        if (
+            getattr(vault_lease_generator, "__code__", None)
+            is not vault_lease_generator_code
+        ):
+            raise PermissionError("Credential vault lease implementation code changed")
+
+        validate_session(
+            self,
+            token,
+            required_roles=set(retained_roles),
+            origin=origin,
+        )
+        if not isinstance(handle, handle_type):
+            raise PermissionError("Credential handle is invalid")
+        with vault_lease(
+            self._credential_vault,
+            handle,
+            execution_identity=credential_text(
+                execution_identity,
+                name="execution_identity",
+            ),
+            account_id=credential_text(account_id, name="account_id"),
+            provider=credential_text(provider, name="provider"),
+            environment=credential_text(
+                environment,
+                name="environment",
+                uppercase=True,
+            ),
+            purpose=credential_text(
+                purpose,
+                name="purpose",
+                uppercase=True,
+            ),
+            provider_environment=provider_environment,
+        ) as plaintext:
+            yield plaintext
+
+    return lease_for_execution
+
+
 def _authenticated_origin(value: object) -> str:
     origin = _required_text(value, name="origin")
     parsed = urlsplit(origin)
@@ -490,47 +584,6 @@ class SecurityBoundary:
             provider_environment=provider_environment,
         )
 
-
-    @contextmanager
-    def lease_for_execution(
-        self,
-        token: str,
-        *,
-        origin: str,
-        handle: CredentialHandle,
-        execution_identity: str,
-        account_id: str,
-        provider: str,
-        environment: str,
-        purpose: str,
-        provider_environment: str | None = None,
-    ):
-        """Authorize and hold one exact credential generation for terminal use."""
-        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
-        if not isinstance(handle, CredentialHandle):
-            raise PermissionError("Credential handle is invalid")
-        with self._credential_vault.lease(
-            handle,
-            execution_identity=_credential_text(
-                execution_identity,
-                name="execution_identity",
-            ),
-            account_id=_credential_text(account_id, name="account_id"),
-            provider=_credential_text(provider, name="provider"),
-            environment=_credential_text(
-                environment,
-                name="environment",
-                uppercase=True,
-            ),
-            purpose=_credential_text(
-                purpose,
-                name="purpose",
-                uppercase=True,
-            ),
-            provider_environment=provider_environment,
-        ) as plaintext:
-            yield plaintext
-
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:
         return self._credential_vault.describe(
             _credential_text(handle_id, name="handle_id")
@@ -597,3 +650,12 @@ class SecurityBoundary:
             return item
 
         return scrub(keyed)
+
+
+SecurityBoundary.lease_for_execution = _build_execution_lease_authority(
+    validate_session=SecurityBoundary.validate_session,
+    vault_lease=ProtectedCredentialVault.lease,
+    credential_text=_credential_text,
+    handle_type=PersistentCredentialHandle,
+    execution_roles=SecurityBoundary._EXECUTION_ROLES,
+)

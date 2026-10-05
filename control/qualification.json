@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-10-05T12:34:00Z",
+  "evidence_as_of": "2026-10-05T15:20:48Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_PROVIDER_FREE_ZERO_RUNTIME_ACCEPTED_ON_MAIN",
   "gates": {
     "engineering_baseline": "CURRENT_MAIN_PROVIDER_FREE_ZERO_COMPOSITION_ACCEPTED_SECTION_CLOSURES_PENDING",
     "repository_bootstrap": "TRANSFER_BASELINE_COMPLETE",
     "reusable_code_migration": "IN_PROGRESS_NEUTRAL_RUNTIME_CURRENT_PRODUCT_STACK_CANDIDATE_UNMERGED",
-    "financial_runtime": "ACCEPTED_PROVIDER_FREE_ZERO_SETTLEMENT_CAPITAL_PARTIAL_FILL_AND_CRASH_RECOVERY_WITH_OPEN_FULL_FILL_RESERVATION_SEAM",
+    "financial_runtime": "SOURCE_INTEGRATED_PROVIDER_FREE_ZERO_SETTLEMENT_CAPITAL_PARTIAL_AND_FULL_FILL_CONSERVATION_EXACT_HEAD_QUALIFICATION_PENDING",
     "providers": "NOT_QUALIFIED_REAL_PROVIDER_CAMPAIGNS_AND_PAPER_LIVE_AUTHORITY_OPEN",
     "economic_edge": "UNPROVEN_INCONCLUSIVE",
     "learning": "IN_PROGRESS_CAUSAL_LEARNING_AND_SCIENCE_LINEAGES_UNMERGED_NO_PROMOTION_AUTHORITY",
@@ -22,7 +22,7 @@
     "command_surface": "IN_PROGRESS_RUNNABLE_PROVIDER_FREE_WEB_DESKTOP_CANDIDATE_UNMERGED",
     "persistence": "ACCEPTED_JOURNAL_USED_BY_MAIN_WITH_SECTION4_HARDENING_AND_EXACT_HEAD_QUALIFICATION_PENDING",
     "artifact_store": "IN_PROGRESS_NEUTRAL_SEALED_RUNTIME_CURRENT_PRODUCT_STACK_CANDIDATE_UNMERGED",
-    "reservations": "ACCEPTED_PROVIDER_FREE_PARTIAL_FILL_CONSERVATION_WITH_DURABLE_FULL_FILL_TERMINALIZATION_GAP_EXPOSED"
+    "reservations": "SOURCE_INTEGRATED_PROVIDER_FREE_PARTIAL_AND_DURABLE_FULL_FILL_TERMINALIZATION_EXACT_HEAD_QUALIFICATION_PENDING"
   },
   "evidence_notes": [
     "Live main at this audit cut is 60e7c95b3b572810dcfb6c4ab34e0b338b0ace02. Open integration descendants are not accepted main state until merged and post-merge read back.",
@@ -35,6 +35,7 @@
     "Economic edge remains unproven and INCONCLUSIVE. Simulation, backtests, software CI and qualification infrastructure are not profitability or causal forward-edge evidence.",
     "Physical Windows 11 + NVDA delivered-artifact qualification, signed release, target-host acceptance, clean install/update/interrupted-update/rollback/uninstall evidence and final release authority remain open.",
     "The main branch reports protected=false with no enforced required status checks at this audit cut. Source-level reconvergence integrity hardening does not substitute for deployed repository protection.",
-    "No real credentials, provider orders, PAPER/LIVE campaign, real-money deployment, signed release, physical NVDA acceptance, target-host performance PASS, or economic-edge PASS was established by this audit."
+    "No real credentials, provider orders, PAPER/LIVE campaign, real-money deployment, signed release, physical NVDA acceptance, target-host performance PASS, or economic-edge PASS was established by this audit.",
+    "WP-15 / Section 12 full-fill reservation conservation source is integrated into active #1848 via #1872 merge 41cf1993d23093fdbd4c207ef3593ae3a2cdf3da. The non-loss merge tree retained current durable JournalStore/evidence authority and ZERO checkpoint/outbox authority while adding exact full-fill terminalization/provider-derived fill/replay/bust/public-entrypoint fences. Exact-head workflows remain nonterminal, so this is SOURCE_INTEGRATED / QUALIFICATION_PENDING, not an accepted qualification result."
   ]
 }

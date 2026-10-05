@@ -486,6 +486,13 @@ class DurableModelBudget:
 
     def _clock_now(self) -> str:
         restore_clock_authority = DurableModelBudget._restore_clock_authority
+        clock_text = _clock_text
+        module_globals = globals()
+        clock_dependencies = (
+            ("datetime", datetime),
+            ("timedelta", timedelta),
+            ("timezone", timezone),
+        )
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -493,15 +500,33 @@ class DurableModelBudget:
 
         clock_error: Exception | None = None
         clock_value: object = None
+        changes: list[str] = []
         try:
             clock_value = clock()
         except Exception as error:
             clock_error = error
         finally:
-            changes = restore_clock_authority(
-                self,
-                snapshot,
-            )
+            try:
+                changes.extend(
+                    restore_clock_authority(
+                        self,
+                        snapshot,
+                    )
+                )
+            finally:
+                for name, expected in (
+                    ("_clock_text", clock_text),
+                    *clock_dependencies,
+                ):
+                    current = dict.get(module_globals, name)
+                    if current is expected:
+                        continue
+                    changes.append("module." + name)
+                    dict.__setitem__(
+                        module_globals,
+                        name,
+                        expected,
+                    )
 
         if changes:
             error = ValueError(
@@ -513,7 +538,7 @@ class DurableModelBudget:
             raise error
         if clock_error is not None:
             raise clock_error
-        return _clock_text(clock_value)
+        return clock_text(clock_value)
 
     def _envelope(
         self,

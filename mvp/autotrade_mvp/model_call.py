@@ -620,6 +620,8 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         """Capture injected chronology without allowing authority redirection."""
         restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        utc_text = _utc_text
+        module_globals = globals()
         callback_shape = DurableModelCallOrchestrator._callback_shape_snapshot(self)
         clock = callback_shape[1].get("clock")
         if not callable(clock):
@@ -627,15 +629,28 @@ class DurableModelCallOrchestrator:
 
         clock_error: Exception | None = None
         clock_value: object = None
+        clock_changes: list[str] = []
         try:
             clock_value = clock()
         except Exception as error:
             clock_error = error
         finally:
-            clock_changes = restore_callback_shape(
-                self,
-                callback_shape,
-            )
+            try:
+                clock_changes.extend(
+                    restore_callback_shape(
+                        self,
+                        callback_shape,
+                    )
+                )
+            finally:
+                current_utc_text = dict.get(module_globals, "_utc_text")
+                if current_utc_text is not utc_text:
+                    clock_changes.append("module._utc_text")
+                    dict.__setitem__(
+                        module_globals,
+                        "_utc_text",
+                        utc_text,
+                    )
 
         if clock_changes:
             error = ModelCallError(
@@ -647,7 +662,7 @@ class DurableModelCallOrchestrator:
             raise error
         if clock_error is not None:
             raise clock_error
-        return _utc_text(clock_value, name="clock")
+        return utc_text(clock_value, name="clock")
 
     @staticmethod
     def _safe_instance_snapshot(
@@ -831,6 +846,11 @@ class DurableModelCallOrchestrator:
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
         module_globals=globals(),
+        dataclass_fields=fields,
+        json_module=json,
+        json_loads=json.loads,
+        journal_class_authority_changes=_model_journal_class_authority_changes,
+        journal_authority_guard=require_exact_journal_store_authority,
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
         (
@@ -860,10 +880,72 @@ class DurableModelCallOrchestrator:
                 orchestrator_class,
             )
 
+        current_budget_alias = dict.get(
+            module_globals,
+            "DurableModelBudget",
+        )
+        if current_budget_alias is not budget_class:
+            changes.append("module.DurableModelBudget")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelBudget",
+                budget_class,
+            )
+
+        current_fields = dict.get(module_globals, "fields")
+        if current_fields is not dataclass_fields:
+            changes.append("module.fields")
+            dict.__setitem__(
+                module_globals,
+                "fields",
+                dataclass_fields,
+            )
+
+        current_json = dict.get(module_globals, "json")
+        if current_json is not json_module:
+            changes.append("module.json")
+            dict.__setitem__(
+                module_globals,
+                "json",
+                json_module,
+            )
+        current_json_loads = dict.get(vars(json_module), "loads")
+        if current_json_loads is not json_loads:
+            changes.append("module.json.loads")
+            dict.__setitem__(
+                vars(json_module),
+                "loads",
+                json_loads,
+            )
+
+        current_journal_helper = dict.get(
+            module_globals,
+            "_model_journal_class_authority_changes",
+        )
+        if current_journal_helper is not journal_class_authority_changes:
+            changes.append("module._model_journal_class_authority_changes")
+            dict.__setitem__(
+                module_globals,
+                "_model_journal_class_authority_changes",
+                journal_class_authority_changes,
+            )
+
+        current_journal_guard = dict.get(
+            module_globals,
+            "require_exact_journal_store_authority",
+        )
+        if current_journal_guard is not journal_authority_guard:
+            changes.append("module.require_exact_journal_store_authority")
+            dict.__setitem__(
+                module_globals,
+                "require_exact_journal_store_authority",
+                journal_authority_guard,
+            )
+
         # Restore the trusted JournalStore class topology before any generic
         # class-dictionary or instance recovery.  In particular, inherited
         # dispatch must not execute through a callback-injected base class.
-        changes.extend(_model_journal_class_authority_changes(restore=True))
+        changes.extend(journal_class_authority_changes(restore=True))
 
         # Restore raw class dictionaries first. Descriptor identity comparison
         # avoids invoking attacker-defined equality during recovery.
@@ -992,7 +1074,7 @@ class DurableModelCallOrchestrator:
             )
 
         try:
-            require_exact_journal_store_authority(
+            journal_authority_guard(
                 journal,
                 subject="model budget journal",
             )

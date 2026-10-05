@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
+from autotrade_runtime.resource_lock import ResourceLock
+
 
 GENESIS_HASH = "0" * 64
 REQUIRED_FIELDS = (
@@ -167,18 +169,30 @@ def _redact_embedded_secret_text(value: str) -> str:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, str):
+    """Redact exact built-in diagnostic structures without caller callbacks."""
+
+    if type(value) is str:
         return _redact_embedded_secret_text(value)
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         result: dict[str, Any] = {}
         for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("diagnostic object keys must be exact strings")
             normalized = _normalized_key(key)
-            result[str(key)] = "[REDACTED]" if normalized in _SENSITIVE_KEYS else _redact(item)
+            result[key] = (
+                "[REDACTED]"
+                if normalized in _SENSITIVE_KEYS
+                else _redact(item)
+            )
         return result
-    if isinstance(value, list):
+    if type(value) is list:
         return [_redact(item) for item in value]
-    if isinstance(value, tuple):
+    if type(value) is tuple:
         return tuple(_redact(item) for item in value)
+    if isinstance(value, (str, Mapping, list, tuple)):
+        raise ValueError(
+            "diagnostic structured values must use exact built-in containers and strings"
+        )
     return value
 
 
@@ -209,7 +223,10 @@ class DecisionTraceStore:
     """Durable JSONL trace store with idempotent append and hash-chain verification."""
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        # Freeze the selected durable location at composition time. A later
+        # process-wide CWD change must not retarget either the trace file or
+        # its sibling canonical writer lock.
+        self.path = Path(os.path.abspath(os.fspath(path)))
 
     def _load(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -231,8 +248,8 @@ class DecisionTraceStore:
     def _validate_input(trace: dict[str, Any]) -> None:
         """Validate the durable row shape, including legacy evidence-unbound rows."""
 
-        if not isinstance(trace, dict):
-            raise ValueError("Decision trace must be an object")
+        if type(trace) is not dict:
+            raise ValueError("Decision trace must be an exact object")
         for field in REQUIRED_FIELDS:
             if field not in trace:
                 raise ValueError(f"Missing decision trace field: {field}")
@@ -245,7 +262,7 @@ class DecisionTraceStore:
             "risk_outcome",
         ):
             value = trace[field]
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{field} must be a non-empty string")
         input_hash = trace["input_hash"]
         if (
@@ -256,8 +273,8 @@ class DecisionTraceStore:
             raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
 
         refs = trace["evidence_refs"]
-        if not isinstance(refs, list) or any(
-            not isinstance(item, str)
+        if type(refs) is not list or any(
+            type(item) is not str
             or not item.strip()
             or item != item.strip()
             for item in refs
@@ -268,17 +285,17 @@ class DecisionTraceStore:
 
         correlation_id = trace.get("correlation_id")
         if correlation_id is not None and (
-            not isinstance(correlation_id, str) or not correlation_id.strip()
+            type(correlation_id) is not str or not correlation_id.strip()
         ):
             raise ValueError("correlation_id must be a non-empty string")
 
         event_ids = trace.get("event_ids")
         if event_ids is not None:
             if (
-                not isinstance(event_ids, list)
+                type(event_ids) is not list
                 or not event_ids
                 or any(
-                    not isinstance(item, str)
+                    type(item) is not str
                     or not item.strip()
                     or item != item.strip()
                     for item in event_ids
@@ -289,48 +306,52 @@ class DecisionTraceStore:
                 raise ValueError("event_ids must not contain duplicates")
 
         attributes = trace.get("attributes")
-        if attributes is not None and not isinstance(attributes, dict):
-            raise ValueError("attributes must be an object")
+        if attributes is not None and type(attributes) is not dict:
+            raise ValueError("attributes must be an exact object")
 
     @staticmethod
     def _require_linked_evidence(trace: Mapping[str, Any]) -> None:
         refs = trace.get("evidence_refs")
-        if not isinstance(refs, list) or not refs:
+        if type(refs) is not list or not refs:
             raise ValueError(
                 "evidence_refs must contain at least one canonical non-empty string"
             )
 
     def append(self, trace: dict[str, Any]) -> bool:
-        """Append a trace once; identical retry is a no-op, conflicting retry fails closed."""
+        """Append one trace under the canonical cross-process writer lock."""
 
         prepared = _redact(trace)
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
-        records = self._load()
-        # Integrity verification must precede idempotency handling. Otherwise an
-        # identical retry could silently succeed against a tampered hash chain.
-        if records and not self.verify():
-            raise ValueError("Existing decision trace chain is corrupt")
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with ResourceLock(lock_path, blocking=True):
+            records = self._load()
+            # Integrity verification must precede idempotency handling. Otherwise
+            # an identical retry could silently succeed against a tampered chain.
+            if records and not self.verify():
+                raise ValueError("Existing decision trace chain is corrupt")
 
-        trace_id = prepared["trace_id"]
-        for existing in records:
-            if existing.get("trace_id") == trace_id:
-                if _semantic_payload(existing) != prepared:
-                    raise ValueError("trace_id already exists with different decision content")
-                return False
+            trace_id = prepared["trace_id"]
+            for existing in records:
+                if existing.get("trace_id") == trace_id:
+                    if _semantic_payload(existing) != prepared:
+                        raise ValueError(
+                            "trace_id already exists with different decision content"
+                        )
+                    return False
 
-        previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
-        record = dict(prepared)
-        record["recorded_at"] = datetime.now(timezone.utc).isoformat()
-        record["previous_hash"] = previous_hash
-        record["record_hash"] = _hash_record(record)
+            previous_hash = records[-1]["record_hash"] if records else GENESIS_HASH
+            record = dict(prepared)
+            record["recorded_at"] = datetime.now(timezone.utc).isoformat()
+            record["previous_hash"] = previous_hash
+            record["record_hash"] = _hash_record(record)
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(canonical_json(record) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return True
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(canonical_json(record) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return True
 
     def records(self) -> list[dict[str, Any]]:
         records = self._load()

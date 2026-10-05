@@ -173,6 +173,63 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             "every checked-in workflow authority must be a protected sentinel",
         )
 
+    def test_protected_sentinel_modification_fails_closed_by_default(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{sentinel} (modification)",),
+        )
+
+    def test_trusted_protected_sentinel_modification_requires_explicit_authorization(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allow_protected_sentinel_modification=True,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
+    def test_protected_structure_remains_blocked_with_modification_authorization(self):
+        sentinel = "control/INDEX.json"
+        changes = (
+            Change(status="D", path=sentinel),
+            Change(
+                status="R100",
+                previous_path=sentinel,
+                path="control/INDEX.old.json",
+            ),
+            Change(status="T", path="control/qualification.json"),
+        )
+
+        result = assess_reconvergence(
+            base_paths=[
+                "control/INDEX.json",
+                "control/qualification.json",
+                "README.md",
+            ],
+            changes=changes,
+            allow_protected_sentinel_modification=True,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("control/INDEX.json", result.protected_violations)
+        self.assertIn(
+            "control/INDEX.json -> control/INDEX.old.json (rename)",
+            result.protected_violations,
+        )
+        self.assertIn(
+            "control/qualification.json (type change)",
+            result.protected_violations,
+        )
+
     def test_protected_sentinel_rename_away_fails_closed(self):
         sentinel = "control/INDEX.json"
         result = assess_reconvergence(
@@ -302,6 +359,20 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 protected_sentinels=frozenset(),
                 allowed_scopes=("web/*",),
             )
+
+    def test_canonical_workflow_authorizes_protected_sentinel_changes_only_for_repo_owner(self):
+        workflow = Path(
+            ".github/workflows/reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("github.repository_owner", workflow)
+        self.assertIn("github.event.pull_request.user.login", workflow)
+        self.assertIn(
+            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION",
+            workflow,
+        )
+        self.assertIn("--allow-protected-sentinel-modification", workflow)
+        self.assertNotIn("github.event.pull_request.body", workflow)
+        self.assertNotIn("github.event.pull_request.title", workflow)
 
     def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):
         workflow = Path(

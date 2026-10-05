@@ -200,6 +200,33 @@ class VerticalSliceTests(unittest.TestCase):
         self.assertEqual(hostile.equity, reference.equity)
         self.assertEqual(hostile.reconciled, reference.reconciled)
 
+    def test_buy_sell_cycle_ignores_ambient_decimal_context(self):
+        episodes = [
+            ["100.12345678", "101.23456789", "102.34567891", "103.45678912"],
+            ["103.45678912", "102.34567891", "101.23456789", "100.12345678"],
+        ]
+        kwargs = {
+            "order_quantity": "3.14159265",
+            "max_abs_position": "10",
+            "max_notional": "1000",
+            "fee_rate": "0.00123456",
+        }
+        with TemporaryDirectory() as reference_dir, TemporaryDirectory() as hostile_dir:
+            reference = run_multi_episode(episodes, reference_dir, **kwargs)
+            with localcontext() as context:
+                context.prec = 2
+                context.rounding = ROUND_CEILING
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                hostile = run_multi_episode(episodes, hostile_dir, **kwargs)
+
+        self.assertEqual([item.decision for item in hostile], ["BUY", "SELL"])
+        self.assertEqual(
+            [(item.cash, item.position, item.equity, item.reconciled) for item in hostile],
+            [(item.cash, item.position, item.equity, item.reconciled) for item in reference],
+        )
+        self.assertEqual(hostile[-1].position, reference[-1].position)
+
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode([[100, 101, 102, 103], [103, 102, 101, 100]], directory)

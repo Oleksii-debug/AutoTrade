@@ -1381,7 +1381,7 @@ def run_declared_target_host_campaign_with_resources(
 
     # Preserve the inherited resource-measurement boundary: the second
     # process/disk cut closes after the caller workload, authority revalidation,
-    # and the O(1) durable backlog endpoint cut. Full backlog replay is
+    # and the indexed durable backlog tail cut. Full backlog replay is
     # qualification work and may perform SQLite reads proportional to the
     # campaign transition count, so it remains outside elapsed/CPU/I/O metrics.
     after = capture_snapshot(evidence_root=evidence_store.root)

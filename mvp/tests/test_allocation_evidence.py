@@ -1586,6 +1586,46 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 policy_version="risk-policy:12",
             )
 
+    def test_revalidation_ignores_result_class_attribute_dispatch(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        result_type = type(result)
+        result_type_dict = type.__getattribute__(result_type, "__dict__")
+        self.assertNotIn("__getattribute__", result_type_dict)
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged allocation result attribute dispatch executed")
+
+        result_type.__getattribute__ = forged_getattribute
+        try:
+            self.assertTrue(
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=bundle[-1],
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+            )
+        finally:
+            del result_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
     def test_same_policy_version_cannot_hide_policy_configuration_change(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)
@@ -1732,6 +1772,44 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_reservation_state_version=9,
                 current_reservation_state_digest="3" * 64,
             )
+
+
+    def test_revalidation_reverifies_sealed_payload_provenance(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        resolved = dict(bundle[-1])
+        valuation = resolved["valuation:aaa:v1"]
+        original_payload = object.__getattribute__(valuation, "payload")
+        object.__setattr__(
+            valuation,
+            "payload",
+            allocation_module.MappingProxyType({"symbol": "FORGED"}),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "payload provenance is not sealed",
+            ):
+                revalidate_evidence_bound_allocation(
+                    result,
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    as_of="2026-09-25T18:40:00Z",
+                    current_policy_version="risk-policy:12",
+                    current_policy=self.policy(),
+                    current_max_candidate_sets=64,
+                    current_provider_id="SIMULATED",
+                    current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                    current_capability_snapshot_ids={"AAA": "capability:1"},
+                    current_account_id="acct:paper:1",
+                    current_account_snapshot_id="snapshot:acct:1:v5",
+                    current_reconciliation_run_id="reconciliation:acct:1:v5",
+                    current_account_state_version=5,
+                    current_reservation_state_version=9,
+                    current_reservation_state_digest="3" * 64,
+                )
+        finally:
+            object.__setattr__(valuation, "payload", original_payload)
 
 
     def test_valuation_evidence_identity_is_part_of_decision_digest(self):

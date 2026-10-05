@@ -1979,7 +1979,62 @@ class DurableModelCallOrchestrator:
         })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
-        recovery_fence()
+
+        recovery_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        recovery_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        recovery_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        recovery_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        recovery_error: Exception | None = None
+        authority_changes: list[str] = []
+        try:
+            try:
+                recovery_fence()
+            except Exception as error:
+                recovery_error = error
+        finally:
+            for name, expected in recovery_refs.items():
+                if getattr(self, name, None) is not expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in recovery_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in recovery_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in recovery_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if authority_changes:
+            raise ModelCallError(
+                "recovery fence mutated orchestrator authority:"
+                + ",".join(sorted(authority_changes))
+            )
+        if recovery_error is not None:
+            raise ModelCallError("recovery fence failed") from recovery_error
+
         attempt_id = self.attempt_id(spec)
         events = self._events(attempt_id)
         if events:

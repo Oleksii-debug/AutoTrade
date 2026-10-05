@@ -10,8 +10,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from threading import RLock
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
+import weakref
 from zoneinfo import ZoneInfo
 
 from mvp.autotrade_mvp.model_gateway import (
@@ -24,13 +26,200 @@ from mvp.autotrade_mvp.model_gateway import (
     RoutingPolicy,
     route_model,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .exact_decimal import parse_bounded_exact_decimal
 
 
 _AGGREGATE_TYPE = "model_budget"
 _COMMAND_ACTOR = "autotrade-model-budget"
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
+# DurableModelBudget executes caller-owned clock callbacks while JournalStore
+# carries inherited financial persistence dispatch. A live per-call snapshot
+# cannot treat an already-rebound JournalStore.__bases__ chain as canonical.
+# Retain the exact project-owned topology and descriptors from trusted import.
+_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY = tuple(
+    (
+        cls,
+        tuple(cls.__bases__),
+        MappingProxyType(dict(vars(cls))),
+    )
+    for cls in JournalStore.__mro__
+    if cls is not object
+)
+
+
+def _collect_model_budget_journal_executable_authority():
+    """Freeze trusted Python executable state behind JournalStore dispatch."""
+    function_type = type(_collect_model_budget_journal_executable_authority)
+    collected = []
+    for cls, _expected_bases, expected_state in _MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY:
+        class_label = cls.__module__ + "." + cls.__qualname__
+        for member_name, member in expected_state.items():
+            functions = []
+            if type(member) is function_type:
+                functions.append((member_name, member))
+            elif type(member) in (staticmethod, classmethod):
+                functions.append((member_name + ".__func__", member.__func__))
+            elif type(member) is property:
+                for suffix in ("fget", "fset", "fdel"):
+                    function = getattr(member, suffix)
+                    if type(function) is function_type:
+                        functions.append((member_name + "." + suffix, function))
+            for member_label, function in functions:
+                collected.append(
+                    (
+                        class_label,
+                        member_label,
+                        function,
+                        function.__code__,
+                        function.__defaults__,
+                        function.__kwdefaults__,
+                    )
+                )
+    return tuple(collected)
+
+
+_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY = (
+    _collect_model_budget_journal_executable_authority()
+)
+del _collect_model_budget_journal_executable_authority
+
+
+def _model_budget_journal_class_authority_changes(
+    *,
+    restore: bool,
+    authority=_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY,
+    executable_authority=_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY,
+) -> list[str]:
+    """Detect and optionally restore trusted JournalStore class topology."""
+    changes: list[str] = []
+    for cls, expected_bases, expected_state in authority:
+        current_bases = tuple(cls.__bases__)
+        bases_changed = (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        )
+        if bases_changed:
+            changes.append(f"journal.class.{cls.__name__}.__bases__")
+            if restore:
+                try:
+                    type.__setattr__(cls, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ValueError(
+                        "model budget journal class base authority could not be restored"
+                    ) from error
+        current_state = vars(cls)
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            raise ValueError("model budget journal class authority state keys are invalid")
+        names = set(current_keys) | set(expected_state)
+        for name in sorted(names):
+            label = f"journal.class.{cls.__name__}.{name}"
+            if name not in expected_state:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__delattr__(cls, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ValueError(
+                            "model budget journal class authority could not be restored"
+                        ) from error
+                continue
+            expected = expected_state[name]
+            if name not in current_state or current_state[name] is not expected:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__setattr__(cls, name, expected)
+                    except TypeError as error:
+                        raise ValueError(
+                            "model budget journal class authority could not be restored"
+                        ) from error
+        if restore:
+            restored_bases = tuple(cls.__bases__)
+            if len(restored_bases) != len(expected_bases) or any(
+                current is not expected
+                for current, expected in zip(restored_bases, expected_bases)
+            ):
+                raise ValueError(
+                    "model budget journal class base authority restore is incomplete"
+                )
+            restored_state = vars(cls)
+            if set(restored_state) != set(expected_state) or any(
+                restored_state[name] is not expected_state[name]
+                for name in expected_state
+            ):
+                raise ValueError(
+                    "model budget journal class authority restore is incomplete"
+                )
+
+    for (
+        class_label,
+        member_label,
+        function,
+        expected_code,
+        expected_defaults,
+        expected_kwdefaults,
+    ) in executable_authority:
+        for attribute, expected in (
+            ("__code__", expected_code),
+            ("__defaults__", expected_defaults),
+            ("__kwdefaults__", expected_kwdefaults),
+        ):
+            current = object.__getattribute__(function, attribute)
+            if current is expected:
+                continue
+            label = (
+                "journal.function."
+                + class_label
+                + "."
+                + member_label
+                + "."
+                + attribute
+            )
+            changes.append(label)
+            if restore:
+                object.__setattr__(function, attribute, expected)
+        if restore:
+            if (
+                object.__getattribute__(function, "__code__") is not expected_code
+                or object.__getattribute__(function, "__defaults__")
+                is not expected_defaults
+                or object.__getattribute__(function, "__kwdefaults__")
+                is not expected_kwdefaults
+            ):
+                raise ValueError(
+                    "model budget journal executable authority restore is incomplete"
+                )
+    return changes
+
+
+def _require_model_budget_journal_class_authority() -> None:
+    changes = _model_budget_journal_class_authority_changes(restore=True)
+    if changes:
+        raise ValueError(
+            "model budget journal class authority is invalid:"
+            + ",".join(sorted(set(changes)))
+        )
+
+
+def _require_model_budget_journal_authority(value: object) -> None:
+    """Require the exact canonical JournalStore before financial dispatch."""
+
+    _require_model_budget_journal_class_authority()
+    require_exact_journal_store_authority(
+        value,
+        subject="model budget journal",
+    )
 
 
 def _text(value: str, *, name: str) -> str:
@@ -157,6 +346,154 @@ def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
     )
 
 
+def _build_model_budget_journal_authority_accessors():
+    """Retain one exact JournalStore generation outside caller-mutable budget state."""
+
+    bindings: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            object,
+            str,
+            str,
+            Decimal,
+            object,
+        ],
+    ] = {}
+    lock = RLock()
+
+    def is_registered(value: object) -> bool:
+        if type(value) is not DurableModelBudget:
+            return False
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return False
+            current = entry[0]()
+            if current is value:
+                return True
+            if current is None:
+                bindings.pop(object_id, None)
+                return False
+            raise ValueError("model budget authority identity collision")
+
+    def initialize(value: object, journal: object) -> None:
+        if type(value) is not DurableModelBudget:
+            raise TypeError("model budget must be exact DurableModelBudget")
+        _require_model_budget_journal_authority(journal)
+        identity = require_exact_journal_store_authority(
+            journal,
+            subject="model budget journal",
+        )
+        object_id = id(value)
+
+        def cleanup(value_ref, *, object_id=object_id) -> None:
+            with lock:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0] is value_ref:
+                    bindings.pop(object_id, None)
+
+        state = object.__getattribute__(value, "__dict__")
+        expected_budget_id = state.get("budget_id")
+        expected_environment = state.get("environment")
+        expected_ceiling = state.get("_ceiling")
+        expected_clock = state.get("_clock")
+        if type(expected_budget_id) is not str or not expected_budget_id:
+            raise ValueError("model budget id authority is invalid")
+        if type(expected_environment) is not str or expected_environment not in _ENVIRONMENTS:
+            raise ValueError("model budget environment authority is invalid")
+        if type(expected_ceiling) is not Decimal or not expected_ceiling.is_finite():
+            raise ValueError("model budget ceiling authority is invalid")
+        if not callable(expected_clock):
+            raise ValueError("model budget clock authority is invalid")
+
+        value_ref = weakref.ref(value, cleanup)
+        journal_ref = weakref.ref(journal)
+        with lock:
+            existing = bindings.get(object_id)
+            if existing is not None and existing[0]() is value:
+                raise ValueError("model budget journal authority is already established")
+            bindings[object_id] = (
+                value_ref,
+                journal_ref,
+                identity,
+                expected_budget_id,
+                expected_environment,
+                expected_ceiling,
+                expected_clock,
+            )
+
+    def require(value: object):
+        if type(value) is not DurableModelBudget:
+            raise TypeError("model budget must be exact DurableModelBudget")
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None or entry[0]() is not value:
+                raise ValueError("model budget journal authority is not established")
+            (
+                _value_ref,
+                journal_ref,
+                expected_identity,
+                expected_budget_id,
+                expected_environment,
+                expected_ceiling,
+                expected_clock,
+            ) = entry
+        journal = journal_ref()
+        if journal is None:
+            raise ValueError("model budget journal authority was released")
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict or state.get("journal") is not journal:
+            raise ValueError("model budget journal authority changed after construction")
+        if (
+            type(state.get("budget_id")) is not str
+            or state.get("budget_id") != expected_budget_id
+            or type(state.get("environment")) is not str
+            or state.get("environment") != expected_environment
+            or type(state.get("_ceiling")) is not Decimal
+            or state.get("_ceiling") != expected_ceiling
+            or state.get("_clock") is not expected_clock
+        ):
+            raise ValueError("model budget scope authority changed after construction")
+        _require_model_budget_journal_authority(journal)
+        current_identity = require_exact_journal_store_authority(
+            journal,
+            subject="model budget journal",
+        )
+        if current_identity != expected_identity:
+            raise ValueError("model budget JournalStore generation changed")
+        return journal
+
+    def scope(value: object):
+        journal = require(value)
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None or entry[0]() is not value:
+                raise ValueError("model budget journal authority is not established")
+            (
+                _value_ref,
+                _journal_ref,
+                _expected_identity,
+                expected_budget_id,
+                expected_environment,
+                expected_ceiling,
+                expected_clock,
+            ) = entry
+        return (
+            journal,
+            expected_budget_id,
+            expected_environment,
+            expected_ceiling,
+            expected_clock,
+        )
+
+    return is_registered, initialize, require, scope
+
+
 class DurableModelBudget:
     """Durable adapter over the canonical model-cost BudgetLedger.
 
@@ -174,8 +511,9 @@ class DurableModelBudget:
         environment: str,
         clock: Callable[[], str] | None = None,
     ) -> None:
-        if not isinstance(journal, JournalStore):
-            raise TypeError("journal must be JournalStore")
+        if _model_budget_authority_is_registered(self):
+            raise ValueError("model budget journal authority is already established")
+        _require_model_budget_journal_authority(journal)
         self.journal = journal
         self.budget_id = _text(budget_id, name="budget_id")
         self.environment = _environment(environment)
@@ -185,7 +523,9 @@ class DurableModelBudget:
 
         candidate = BudgetLedger(ceiling)
         self._ceiling = candidate.snapshot().ceiling
-        existing = self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
+        _initialize_model_budget_journal_authority(self, journal)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.load_events(_AGGREGATE_TYPE, self.budget_id)
         if not existing:
             payload = {
                 "ceiling": str(self._ceiling),
@@ -198,9 +538,11 @@ class DurableModelBudget:
                 event_id=_event_id(self.budget_id, "initialize"),
             )
             try:
-                self.journal.append_event(envelope)
+                journal = _require_model_budget_bound_journal(self)
+                journal.append_event(envelope)
             except ValueError:
-                concurrent = self.journal.get_event(envelope["event_id"])
+                journal = _require_model_budget_bound_journal(self)
+                concurrent = journal.get_event(envelope["event_id"])
                 if (
                     concurrent is None
                     or concurrent["event_type"] != "ModelBudgetInitialized"
@@ -216,7 +558,10 @@ class DurableModelBudget:
             raise ValueError("budget ceiling conflicts with durable model budget")
 
     def _events(self) -> list[dict[str, Any]]:
-        return self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
+        journal, budget_id, _environment_value, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
+        return journal.load_events(_AGGREGATE_TYPE, budget_id)
 
     @staticmethod
     def _safe_authority_state(
@@ -249,14 +594,14 @@ class DurableModelBudget:
         tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
     ]:
         """Freeze budget/journal authority before executing the injected clock."""
+        journal = _require_model_budget_bound_journal(self)
         budget_class = object.__getattribute__(self, "__class__")
         budget_state = DurableModelBudget._safe_authority_state(
             self,
             subject="model budget",
         )
-        journal = budget_state.get("journal")
-        if not isinstance(journal, JournalStore):
-            raise ValueError("model budget journal authority is invalid")
+        if budget_state.get("journal") is not journal:
+            raise ValueError("model budget journal authority changed after construction")
         journal_class = object.__getattribute__(journal, "__class__")
         journal_state = DurableModelBudget._safe_authority_state(
             journal,
@@ -278,7 +623,17 @@ class DurableModelBudget:
         )
         authority_classes: list[type] = []
         seen_class_ids: set[int] = set()
-        for selected_class in (budget_class, journal_class, identity_class):
+        for selected_class in (
+            budget_class,
+            journal_class,
+            identity_class,
+            BudgetLedger,
+            BudgetSnapshot,
+            ModelDescriptor,
+            ModelRequest,
+            RouteDecision,
+            RoutingPolicy,
+        ):
             if selected_class is None:
                 continue
             for candidate_class in selected_class.__mro__:
@@ -339,6 +694,7 @@ class DurableModelBudget:
             class_authority,
         ) = snapshot
         changes: list[str] = []
+        changes.extend(_model_budget_journal_class_authority_changes(restore=True))
         current_module_alias = dict.get(
             module_globals,
             "DurableModelBudget",
@@ -528,11 +884,78 @@ class DurableModelBudget:
             dict.fromkeys(
                 (
                     "DurableModelBudget",
+                    "JournalStore",
                     "_clock_text",
                     "Exception",
+                    "AttributeError",
+                    "KeyError",
+                    "TypeError",
                     "ValueError",
+                    # Python builtins are normally resolved only after module globals.
+                    # A hostile clock can create a same-named module binding and leave
+                    # later replay/commit code executing the shadow unless absence is
+                    # frozen as part of the authority graph.
+                    "all",
+                    "any",
+                    "callable",
+                    "dict",
+                    "enumerate",
+                    "getattr",
+                    "int",
+                    "isinstance",
+                    "len",
+                    "list",
+                    "min",
+                    "object",
                     "set",
                     "sorted",
+                    "str",
+                    "tuple",
+                    "type",
+                    "vars",
+                    "zip",
+                    # Financial/routing authority consulted after the clock returns.
+                    # A caller-owned clock must not leave any of these rebound for
+                    # this commit or for a later durable budget operation.
+                    "Decimal",
+                    "sha256",
+                    "MappingProxyType",
+                    "Mapping",
+                    "ZoneInfo",
+                    "BudgetLedger",
+                    "BudgetSnapshot",
+                    "ModelDescriptor",
+                    "ModelRequest",
+                    "RouteDecision",
+                    "RouteStatus",
+                    "RoutingPolicy",
+                    "route_model",
+                    "canonical_json",
+                    "payload_digest",
+                    "parse_bounded_exact_decimal",
+                    "_AGGREGATE_TYPE",
+                    "_COMMAND_ACTOR",
+                    "_ENVIRONMENTS",
+                    "_text",
+                    "_environment",
+                    "_now",
+                    "_route_now",
+                    "_reservation_context",
+                    "_identity_digest",
+                    "_event_id",
+                    "_command_id",
+                    "_rehydrate_committed_event",
+                    "_idempotency_key",
+                    "_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY",
+                    "_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY",
+                    "_model_budget_journal_class_authority_changes",
+                    "_require_model_budget_journal_class_authority",
+                    "_require_model_budget_journal_authority",
+                    "require_exact_journal_store_authority",
+                    "_model_budget_authority_is_registered",
+                    "_initialize_model_budget_journal_authority",
+                    "_require_model_budget_bound_journal",
+                    "_model_budget_authority_scope",
                     *referenced_names(restore_function_state[0][1]),
                     *referenced_names(clock_text_function_state[0][1]),
                 )
@@ -543,7 +966,65 @@ class DurableModelBudget:
             for name in runtime_names
         )
 
+        # Module-binding identity alone does not detect in-place Python
+        # function poisoning. Freeze executable state for every trusted
+        # module helper already in the runtime graph.
+        function_type = type(clock_text)
+        staticmethod_type = staticmethod
+        classmethod_type = classmethod
+        property_type = property
+
+        def freeze_function(label: str, function):
+            return (
+                label,
+                function,
+                (
+                    ("__code__", object_getattribute(function, "__code__")),
+                    ("__defaults__", object_getattribute(function, "__defaults__")),
+                    ("__kwdefaults__", object_getattribute(function, "__kwdefaults__")),
+                ),
+            )
+
+        runtime_function_states = tuple(
+            freeze_function("module." + name, expected)
+            for name, expected in runtime_bindings
+            if type(expected) is function_type
+        )
+
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
+
+        def class_member_functions(name: str, member):
+            if type(member) is function_type:
+                return ((name, member),)
+            if type(member) in (staticmethod_type, classmethod_type):
+                function = object_getattribute(member, "__func__")
+                return ((name + ".__func__", function),)
+            if type(member) is property_type:
+                targets = []
+                for suffix in ("fget", "fset", "fdel"):
+                    function = object_getattribute(member, suffix)
+                    if type(function) is function_type:
+                        targets.append((name + "." + suffix, function))
+                return tuple(targets)
+            return ()
+
+        class_function_states = tuple(
+            freeze_function(
+                "class." + class_label + "." + member_label,
+                function,
+            )
+            for (
+                _authority_class,
+                class_label,
+                _expected_bases,
+                expected_class_state,
+            ) in snapshot[-1]
+            for member_name, member in expected_class_state.items()
+            for member_label, function in class_member_functions(
+                member_name,
+                member,
+            )
+        )
         clock = snapshot[1].get("_clock")
         if not callable(clock):
             raise ValueError("model budget clock authority is invalid")
@@ -557,6 +1038,19 @@ class DurableModelBudget:
             clock_error = error
         finally:
             try:
+                for function_label, function, function_state in (
+                    *runtime_function_states,
+                    *class_function_states,
+                ):
+                    for attribute, expected in function_state:
+                        current = object_getattribute(function, attribute)
+                        if current is expected:
+                            continue
+                        changes.append(
+                            "function." + function_label + "." + attribute
+                        )
+                        object_setattr(function, attribute, expected)
+
                 for attribute, expected in restore_function_state:
                     current = object_getattribute(restore_clock_authority, attribute)
                     if current is expected:
@@ -629,11 +1123,14 @@ class DurableModelBudget:
         payload: dict[str, Any],
         event_id: str,
     ) -> dict[str, Any]:
+        _journal, budget_id, _environment_value, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         return {
             "event_id": event_id,
             "event_type": event_type,
             "aggregate_type": _AGGREGATE_TYPE,
-            "aggregate_id": self.budget_id,
+            "aggregate_id": budget_id,
             "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
@@ -674,6 +1171,9 @@ class DurableModelBudget:
         return self._replay_events(self._events())
 
     def _replay_events(self, events: list[dict[str, Any]]) -> BudgetLedger:
+        _journal, _budget_id, environment, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         if not events or events[0]["event_type"] != "ModelBudgetInitialized":
             raise ValueError("durable model budget initialization is missing")
         initialization = events[0].get("payload")
@@ -684,7 +1184,7 @@ class DurableModelBudget:
             raise ValueError(
                 "legacy model budget lacks durable environment binding"
             )
-        if _environment(durable_environment) != self.environment:
+        if _environment(durable_environment) != environment:
             raise ValueError(
                 "budget environment conflicts with durable model budget"
             )
@@ -697,9 +1197,11 @@ class DurableModelBudget:
         return ledger
 
     def snapshot(self) -> BudgetSnapshot:
+        _require_model_budget_bound_journal(self)
         return self._replay().snapshot()
 
     def active_reservation(self, request_id: str) -> Decimal | None:
+        _require_model_budget_bound_journal(self)
         request = _text(request_id, name="request_id")
         active: Decimal | None = None
         for event in self._events():
@@ -734,31 +1236,36 @@ class DurableModelBudget:
         result: dict[str, Any],
         validate: Callable[[BudgetLedger], None],
     ) -> bool:
+        journal, budget_id, environment, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         identity = _text(identity, name="identity")
         idempotency_key = _idempotency_key(
-            budget_id=self.budget_id,
+            budget_id=budget_id,
             action=action,
             identity=identity,
         )
-        command_id = _command_id(self.budget_id, idempotency_key)
-        event_id = _event_id(self.budget_id, idempotency_key)
+        command_id = _command_id(budget_id, idempotency_key)
+        event_id = _event_id(budget_id, idempotency_key)
 
-        existing = self.journal.get_event(event_id)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(event_id)
         if existing is not None:
             if (
                 existing["event_type"] != event_type
                 or existing["aggregate_type"] != _AGGREGATE_TYPE
-                or existing["aggregate_id"] != self.budget_id
+                or existing["aggregate_id"] != budget_id
                 or existing["payload"] != payload
             ):
                 raise ValueError(
                     "model budget idempotency identity conflicts with durable event"
                 )
             original_envelope = _rehydrate_committed_event(existing)
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
-                environment=self.environment,
+                environment=environment,
                 idempotency_key=idempotency_key,
                 request=request,
                 result=result,
@@ -789,10 +1296,11 @@ class DurableModelBudget:
             event_id=event_id,
         )
         try:
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
-                environment=self.environment,
+                environment=environment,
                 idempotency_key=idempotency_key,
                 request=request,
                 result=result,
@@ -817,10 +1325,11 @@ class DurableModelBudget:
                 payload=payload,
                 event_id=event_id,
             )
-            saved_result, inserted, _ = self.journal.commit_command(
+            journal = _require_model_budget_bound_journal(self)
+            saved_result, inserted, _ = journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
-                environment=self.environment,
+                environment=environment,
                 idempotency_key=idempotency_key,
                 request=request,
                 result=result,
@@ -912,6 +1421,9 @@ class DurableModelBudget:
         now_utc: datetime | None = None,
         reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
+        _journal, budget_id, _environment_value, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         if type(policy) is not RoutingPolicy:
             raise TypeError("policy must be exact RoutingPolicy")
         if type(request) is not ModelRequest:
@@ -970,12 +1482,13 @@ class DurableModelBudget:
             reservation_context=reservation_context,
         )
         idempotency_key = _idempotency_key(
-            budget_id=self.budget_id,
+            budget_id=budget_id,
             action="route_reserve",
             identity=request.request_id,
         )
-        event_id = _event_id(self.budget_id, idempotency_key)
-        existing = self.journal.get_event(event_id)
+        event_id = _event_id(budget_id, idempotency_key)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(event_id)
         if existing is not None:
             payload = existing.get("payload")
             if (
@@ -1073,8 +1586,11 @@ class DurableModelBudget:
         )
 
     def reserve(self, request_id: str, amount) -> bool:
+        _journal, _budget_id, _environment_value, ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         request_id = _text(request_id, name="request_id")
-        probe = BudgetLedger(self._ceiling)
+        probe = BudgetLedger(ceiling)
         probe.reserve("probe", amount)
         normalized_amount = probe.snapshot().reserved
         request = {"request_id": request_id, "amount": str(normalized_amount)}
@@ -1093,22 +1609,26 @@ class DurableModelBudget:
         )
 
     def release(self, request_id: str) -> bool:
+        _journal, budget_id, _environment_value, _ceiling, _clock = (
+            _model_budget_authority_scope(self)
+        )
         request_id = _text(request_id, name="request_id")
         request = {"request_id": request_id}
         idempotency_key = _idempotency_key(
-            budget_id=self.budget_id,
+            budget_id=budget_id,
             action="release",
             identity=request_id,
         )
-        existing = self.journal.get_event(
-            _event_id(self.budget_id, idempotency_key)
+        journal = _require_model_budget_bound_journal(self)
+        existing = journal.get_event(
+            _event_id(budget_id, idempotency_key)
         )
         if existing is not None:
             payload = existing.get("payload")
             if (
                 existing.get("event_type") != "ModelCostReleased"
                 or existing.get("aggregate_type") != _AGGREGATE_TYPE
-                or existing.get("aggregate_id") != self.budget_id
+                or existing.get("aggregate_id") != budget_id
                 or not isinstance(payload, dict)
                 or payload.get("request_id") != request_id
             ):
@@ -1163,6 +1683,7 @@ class DurableModelBudget:
         )
 
     def settle(self, request_id: str, *, incurred, estimated_unbilled="0") -> bool:
+        _model_budget_authority_scope(self)
         request_id = _text(request_id, name="request_id")
         normalized_incurred = BudgetLedger(incurred).snapshot().ceiling
         normalized_unbilled = BudgetLedger(estimated_unbilled).snapshot().ceiling
@@ -1196,6 +1717,7 @@ class DurableModelBudget:
         request_id: str,
         billed,
     ) -> bool:
+        _model_budget_authority_scope(self)
         billing_id = _text(billing_id, name="billing_id")
         request_id = _text(request_id, name="request_id")
         normalized = BudgetLedger(billed).snapshot().ceiling
@@ -1221,3 +1743,13 @@ class DurableModelBudget:
             result={"reconciled": True, **request},
             validate=validate,
         )
+
+
+
+(
+    _model_budget_authority_is_registered,
+    _initialize_model_budget_journal_authority,
+    _require_model_budget_bound_journal,
+    _model_budget_authority_scope,
+) = _build_model_budget_journal_authority_accessors()
+del _build_model_budget_journal_authority_accessors

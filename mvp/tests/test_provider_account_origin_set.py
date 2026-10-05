@@ -6,6 +6,7 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 import mvp.autotrade_mvp.provider_origin as provider_origin_module
+import mvp.autotrade_mvp.provider_account_origin_set as origin_set_module
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
@@ -22,6 +23,14 @@ from mvp.tests.test_provider_selection import NOW
 
 
 class ProviderAccountOriginSetTests(unittest.TestCase):
+    def test_origin_set_registrar_is_not_module_global(self):
+        self.assertFalse(
+            hasattr(
+                origin_set_module,
+                "_register_provider_account_origin_set_authority",
+            )
+        )
+
     def _fixture(self, directory: str):
         origin_tests = ProviderOriginJournalTests(
             methodName="test_direct_wire_claim_is_single_use_and_restart_verifiable"

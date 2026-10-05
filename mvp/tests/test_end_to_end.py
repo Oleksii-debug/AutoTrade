@@ -105,7 +105,7 @@ class VerticalSliceTests(unittest.TestCase):
             checkpoint_path = Path(directory) / "checkpoint.json"
             self.assertTrue(checkpoint_path.exists())
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-            self.assertEqual(checkpoint["schema_version"], 2)
+            self.assertEqual(checkpoint["schema_version"], 3)
             self.assertEqual(checkpoint["postings"], [])
             self.assertEqual(checkpoint["fills"], {})
             self.assertEqual(checkpoint["evidence_ids"], [])

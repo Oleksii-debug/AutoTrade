@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
     submission_attempt_aggregate_id,
 )
+import mvp.autotrade_mvp.provider_account_absence_coverage as absence_coverage_module
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_absence_coverage import (
@@ -539,6 +540,60 @@ class ProviderAccountAbsenceCoverageTests(unittest.TestCase):
                     qualification_registry=qualifications,
                     at=NOW,
                 )
+
+    def test_current_surface_coverage_ignores_rebound_page_currentness_helper(self):
+        with TemporaryDirectory() as directory:
+            (
+                journal,
+                qualifications,
+                absence,
+                page_chain,
+                historical,
+                *_rest,
+            ) = self._fixture(directory)
+            value = issue_provider_account_surface_coverage(
+                absence_semantics=absence,
+                page_chain=page_chain,
+                historical_submission=historical,
+                qualification_registry=qualifications,
+                at=NOW,
+            )
+            provider_scope = qualifications.qualification(
+                page_chain.qualification_id
+            ).scope.provider_scope
+            DurableProviderAccountAcquisitionAuthority(journal).issue_serialized(
+                provider_scope=provider_scope,
+                account_id=page_chain.account_id,
+                acquisition_request_id="absence-coverage-rebound-helper",
+                committed_at=NOW,
+            )
+
+            forged_calls = []
+            original = (
+                absence_coverage_module.require_current_provider_account_page_chain_authority
+            )
+
+            def forged_current_page_chain_authority(value, *, at):
+                forged_calls.append((value, at))
+                return value
+
+            absence_coverage_module.require_current_provider_account_page_chain_authority = (
+                forged_current_page_chain_authority
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProviderAccountAbsenceCoverageError,
+                    "not exact current authority",
+                ):
+                    require_current_provider_account_surface_coverage_authority(
+                        value,
+                        at=NOW,
+                    )
+            finally:
+                absence_coverage_module.require_current_provider_account_page_chain_authority = (
+                    original
+                )
+            self.assertEqual(forged_calls, [])
 
     def test_surface_issuer_has_no_caller_completeness_or_horizon_flags(self):
         parameters = inspect.signature(

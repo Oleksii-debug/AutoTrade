@@ -127,19 +127,21 @@ class ModelBudgetClockFunctionAuthorityTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")
+            armed = False
+
+            def hostile_clock():
+                if armed:
+                    commit.__code__ = _poisoned_commit_command.__code__
+                return NOW_TEXT
+
             budget = budget_module.DurableModelBudget(
                 journal=journal,
                 budget_id="clock-journal-commit-function-budget",
                 ceiling="5",
                 environment="PAPER",
-                clock=lambda: NOW_TEXT,
+                clock=hostile_clock,
             )
-
-            def hostile_clock():
-                commit.__code__ = _poisoned_commit_command.__code__
-                return NOW_TEXT
-
-            budget._clock = hostile_clock
+            armed = True
             try:
                 with self.assertRaisesRegex(
                     ValueError,

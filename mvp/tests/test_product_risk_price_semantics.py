@@ -89,6 +89,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
     def _prepared(
         self,
         *,
+        symbol="BTCUSDT",
         side="BUY",
         quantity="1",
         order_type="LIMIT",
@@ -106,7 +107,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             at=READ_AT,
             provider_environment=cap.provider_environment,
             product_family="SPOT",
-            symbol="BTCUSDT",
+            symbol=symbol,
             side=side,
             order_type=order_type,
             quantity=quantity,
@@ -120,6 +121,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
         resolved,
         capability,
         *,
+        symbol="BTCUSDT",
         side="BUY",
         quantity="1",
         price="100.00",
@@ -127,7 +129,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
     ):
         return RiskAuthorityRequest(
             risk_intent=RiskIntent.create(
-                symbol="BTCUSDT",
+                symbol=symbol,
                 side=side,
                 quantity=quantity,
                 price=price,
@@ -285,33 +287,19 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
     def test_prepared_symbol_must_match_causal_instrument_symbol(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)
-            capability, prepared = self._prepared()
-            forged_intent = RiskIntent.create(
+            capability, prepared = self._prepared(symbol="ETHUSDT")
+            request = self._request(
+                resolved,
+                capability,
                 symbol="ETHUSDT",
-                side="BUY",
-                quantity="1",
-                price="100.00",
-                expected_state_version=1,
             )
-            request = replace(
-                self._request(resolved, capability),
-                risk_intent=forged_intent,
-            )
-            forged_prepared = replace(
-                prepared,
-                body={**dict(prepared.body), "symbol": "ETHUSDT"},
-            )
-            # Dataclass replacement cannot mint canonical prepared-request
-            # provenance. The product boundary must reject that before trusting
-            # the symbol substitution.
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+
             with self.assertRaisesRegex(
-                Exception,
-                "prepared submission authority changed",
+                ProductRiskPriceSemanticsError,
+                "causal instrument authority",
             ):
-                ProductRiskPriceSemanticsComposer(
-                    registry,
-                    artifacts,
-                ).compose(request, forged_prepared)
+                composer.compose(request, prepared)
 
     def test_provider_domain_capability_and_instrument_are_cross_bound(self):
         with TemporaryDirectory() as directory:

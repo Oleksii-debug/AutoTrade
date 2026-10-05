@@ -14,6 +14,8 @@ from fractions import Fraction
 from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, round_fraction_to_quantum
 
 from .execution_realism import (
+    MARKET_PRICE_PROJECTION_POLICY_ID,
+    MARKET_PRICE_PROJECTION_POLICY_VERSION,
     ExecutionModel,
     ExecutionRealismError,
     LiquidityObservation,
@@ -115,6 +117,14 @@ def assert_conservative_execution(
             ):
                 raise ExecutionOracleError(
                     "MARKET execution requires complete price projection policy evidence"
+                )
+            if (
+                model.price_projection_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+                or model.price_projection_policy_version
+                != MARKET_PRICE_PROJECTION_POLICY_VERSION
+            ):
+                raise ExecutionOracleError(
+                    "MARKET execution price projection policy identity is unsupported"
                 )
             if model.price_grid_instrument_version != order.instrument_version:
                 raise ExecutionOracleError(

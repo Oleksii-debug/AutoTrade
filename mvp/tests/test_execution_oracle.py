@@ -124,6 +124,23 @@ class ExecutionOracleTests(unittest.TestCase):
                 result=forged,
             )
 
+    def test_oracle_rejects_mutated_market_projection_policy_identity(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        changed = model()
+        object.__setattr__(changed, "price_projection_policy_version", 2)
+        forged = replace(result, model_fingerprint=changed.fingerprint)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "price projection policy identity is unsupported",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=changed,
+                result=forged,
+            )
+
     def test_oracle_rejects_market_buy_better_than_ask(self):
         o, q, m = order(), observation(), model()
         result = simulate_execution(o, q, m)

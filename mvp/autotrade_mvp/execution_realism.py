@@ -92,6 +92,10 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
+MARKET_PRICE_PROJECTION_POLICY_ID = "ADVERSE_PRICE_GRID"
+MARKET_PRICE_PROJECTION_POLICY_VERSION = 1
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     model_version: str
@@ -110,6 +114,7 @@ class ExecutionModel:
     price_projection_policy_id: str | None = None
     price_projection_policy_version: int | None = None
     price_grid_instrument_version: str | None = None
+    price_grid_instrument_binding: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -171,14 +176,15 @@ class ExecutionModel:
             as_fraction(quantum)
             object.__setattr__(self, "price_quantum", quantum)
         if self.price_projection_policy_id is not None:
-            object.__setattr__(
-                self,
-                "price_projection_policy_id",
-                _text(
-                    self.price_projection_policy_id,
-                    name="price_projection_policy_id",
-                ),
+            policy_id = _text(
+                self.price_projection_policy_id,
+                name="price_projection_policy_id",
             )
+            if policy_id != MARKET_PRICE_PROJECTION_POLICY_ID:
+                raise ExecutionRealismError(
+                    "unsupported price_projection_policy_id for implemented MARKET projection"
+                )
+            object.__setattr__(self, "price_projection_policy_id", policy_id)
         if self.price_grid_instrument_version is not None:
             object.__setattr__(
                 self,
@@ -186,6 +192,15 @@ class ExecutionModel:
                 _text(
                     self.price_grid_instrument_version,
                     name="price_grid_instrument_version",
+                ),
+            )
+        if self.price_grid_instrument_binding is not None:
+            object.__setattr__(
+                self,
+                "price_grid_instrument_binding",
+                _digest(
+                    self.price_grid_instrument_binding,
+                    name="price_grid_instrument_binding",
                 ),
             )
         if self.price_projection_policy_version is not None:
@@ -196,6 +211,10 @@ class ExecutionModel:
             ):
                 raise ExecutionRealismError(
                     "price_projection_policy_version must be a positive integer"
+                )
+            if self.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION:
+                raise ExecutionRealismError(
+                    "unsupported price_projection_policy_version for implemented MARKET projection"
                 )
 
     @classmethod
@@ -218,6 +237,7 @@ class ExecutionModel:
         price_projection_policy_id=None,
         price_projection_policy_version=None,
         price_grid_instrument_version=None,
+        price_grid_instrument_binding=None,
     ) -> "ExecutionModel":
         if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -282,6 +302,49 @@ class ExecutionModel:
                     name="price_grid_instrument_version",
                 )
             ),
+            price_grid_instrument_binding=(
+                None
+                if price_grid_instrument_binding is None
+                else _digest(
+                    price_grid_instrument_binding,
+                    name="price_grid_instrument_binding",
+                )
+            ),
+        )
+
+    @classmethod
+    def create_for_instrument_version(
+        cls,
+        *,
+        instrument_version,
+        **kwargs,
+    ) -> "ExecutionModel":
+        """Create a MARKET model with its price grid taken from canonical instrument metadata.
+
+        The exact InstrumentVersion object is the only source for price_tick and
+        instrument identity at this boundary. Callers cannot override either field.
+        """
+
+        from .instruments import InstrumentVersion
+
+        if type(instrument_version) is not InstrumentVersion:
+            raise TypeError("instrument_version must be exact InstrumentVersion")
+        if (
+            "price_quantum" in kwargs
+            or "price_grid_instrument_version" in kwargs
+            or "price_grid_instrument_binding" in kwargs
+        ):
+            raise ExecutionRealismError(
+                "price grid is authoritative from instrument_version"
+            )
+        instrument_ref = f"{instrument_version.instrument_id}@{instrument_version.version}"
+        return cls.create(
+            **kwargs,
+            price_quantum=instrument_version.price_tick,
+            price_projection_policy_id=MARKET_PRICE_PROJECTION_POLICY_ID,
+            price_projection_policy_version=MARKET_PRICE_PROJECTION_POLICY_VERSION,
+            price_grid_instrument_version=instrument_ref,
+            price_grid_instrument_binding=instrument_version.metadata_evidence_binding(),
         )
 
     @property
@@ -312,6 +375,8 @@ class ExecutionModel:
             payload["price_projection_policy_version"] = self.price_projection_policy_version
         if self.price_grid_instrument_version is not None:
             payload["price_grid_instrument_version"] = self.price_grid_instrument_version
+        if self.price_grid_instrument_binding is not None:
+            payload["price_grid_instrument_binding"] = self.price_grid_instrument_binding
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -716,6 +781,13 @@ def simulate_execution(
     ):
         raise ExecutionRealismError(
             "MARKET execution requires complete price projection policy evidence"
+        )
+    if order.order_type == "MARKET" and (
+        model.price_projection_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+        or model.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
+    ):
+        raise ExecutionRealismError(
+            "MARKET execution price projection policy identity is unsupported"
         )
     if (
         order.order_type == "MARKET"

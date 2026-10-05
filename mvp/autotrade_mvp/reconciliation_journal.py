@@ -119,6 +119,41 @@ def _checkpoint_owner(
     )
 
 
+def _require_negative_resolution_authority(
+    payload: Mapping[str, Any],
+) -> None:
+    """Reject durable real-provider absence verdicts without accepted Q authority.
+
+    Reconciliation coverage objects remain useful diagnostic state, but their
+    caller-authored booleans are not financial authority. Until WP-20 has an
+    immutable provider-Q coverage proof bound to exact source semantics, a real
+    PAPER/LIVE provider cannot durably publish or re-consume PROVEN_ABSENT.
+
+    The exact SIMULATED provider is retained only for the existing PAPER
+    vertical-slice/test path. LIVE never receives that exception.
+    """
+
+    provider = _text(payload.get("provider_id"), name="provider_id").upper()
+    environment = _text(payload.get("environment"), name="environment").upper()
+    if environment not in {"PAPER", "LIVE"}:
+        return
+    if environment == "PAPER" and provider == "SIMULATED":
+        return
+
+    resolutions = payload.get("submission_resolutions")
+    if not isinstance(resolutions, list):
+        raise ValueError("checkpoint submission_resolutions must be a list")
+    for item in resolutions:
+        if not isinstance(item, Mapping):
+            raise ValueError("submission resolution must be an object")
+        outcome = _text(item.get("outcome"), name="outcome").upper()
+        if outcome == "PROVEN_ABSENT":
+            raise ValueError(
+                "PAPER/LIVE real-provider PROVEN_ABSENT requires accepted "
+                "provider coverage authority"
+            )
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -297,6 +332,8 @@ def record_reconciliation_checkpoint(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    if type(result) is not ReconciliationResult:
+        raise TypeError("result must be exact ReconciliationResult")
     _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
@@ -306,6 +343,7 @@ def record_reconciliation_checkpoint(
         "host_id": host,
         "owner_epoch": epoch,
     }
+    _require_negative_resolution_authority(payload)
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
         provider_id=result.provider_id,
@@ -426,6 +464,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("environment") != scope
         ):
             continue
+        _require_negative_resolution_authority(payload)
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -570,6 +609,7 @@ def load_submission_resolution_evidence(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -716,6 +756,7 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
@@ -1098,6 +1139,7 @@ def load_account_resource_availability_evidence(
         )
     return evidence
 
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,
@@ -1113,6 +1155,7 @@ def unresolved_attempt_ids_from_checkpoint(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")

@@ -174,6 +174,34 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(replay.evidence_count, 1)
             self.assertEqual(len(evidence.read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_resume_repairs_latest_missing_evidence_before_new_episode(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [[100, 101, 102, 103], [100, 100, 100]],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 2)
+            evidence_path.write_text(rows[0] + "\n", encoding="utf-8")
+
+            resumed = run_vertical_slice(
+                [103, 102, 101, 100],
+                directory,
+            )
+
+            self.assertEqual(resumed.status, "filled")
+            self.assertEqual(resumed.decision, "SELL")
+            self.assertEqual(resumed.position, 0)
+            self.assertEqual(resumed.evidence_count, 3)
+            self.assertEqual(
+                len(evidence_path.read_text(encoding="utf-8").splitlines()),
+                3,
+            )
+            self.assertTrue(verify_replay(directory))
+
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

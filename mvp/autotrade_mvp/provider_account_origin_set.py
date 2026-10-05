@@ -167,7 +167,66 @@ class ProviderAccountOriginBindingSet:
         ).hexdigest()
 
 
-def _install_origin_set_authority():
+def _install_origin_set_authority(
+    *,
+    _qualification_registry_type=DurableProviderQualificationRegistry,
+    _account_acquisition_authority_type=DurableProviderAccountAcquisitionAuthority,
+    _journal_store_type=JournalStore,
+):
+    def descriptor_state(
+        owner: type,
+        names: tuple[str, ...],
+    ) -> tuple[tuple[str, object], ...]:
+        return tuple((name, getattr(owner, name)) for name in names)
+
+    descriptor_authority = (
+        (
+            _qualification_registry_type,
+            descriptor_state(
+                _qualification_registry_type,
+                (
+                    "_authenticate_record",
+                    "_history",
+                    "_resolved_cut",
+                    "current",
+                    "qualification",
+                    "require_exact_current",
+                ),
+            ),
+        ),
+        (
+            _account_acquisition_authority_type,
+            descriptor_state(
+                _account_acquisition_authority_type,
+                (
+                    "_journal_authority",
+                    "_replay",
+                    "require_current",
+                    "resolve_current",
+                ),
+            ),
+        ),
+        (
+            _journal_store_type,
+            descriptor_state(
+                _journal_store_type,
+                (
+                    "load_events_by_aggregate_type",
+                    "store_identity",
+                    "whole_store_state_cut",
+                ),
+            ),
+        ),
+    )
+
+    def require_descriptor_authority() -> None:
+        for owner, expected in descriptor_authority:
+            for name, descriptor in expected:
+                if getattr(owner, name, None) is not descriptor:
+                    raise ProviderAccountOriginSetError(
+                        "origin-set currentness class authority changed"
+                    )
+
     states: dict[
         int,
         tuple[
@@ -212,11 +271,12 @@ def _install_origin_set_authority():
         account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
         account_acquisition: SerializedProviderAccountAcquisition,
     ) -> None:
-        if type(qualification_registry) is not DurableProviderQualificationRegistry:
+        require_descriptor_authority()
+        if type(qualification_registry) is not _qualification_registry_type:
             raise TypeError(
                 "qualification_registry must be exact DurableProviderQualificationRegistry"
             )
-        if type(account_acquisition_authority) is not DurableProviderAccountAcquisitionAuthority:
+        if type(account_acquisition_authority) is not _account_acquisition_authority_type:
             raise TypeError(
                 "account_acquisition_authority must be exact "
                 "DurableProviderAccountAcquisitionAuthority"
@@ -227,7 +287,7 @@ def _install_origin_set_authority():
             )
         store = qualification_registry.store
         if (
-            type(store) is not JournalStore
+            type(store) is not _journal_store_type
             or store is not account_acquisition_authority.store
         ):
             raise ProviderAccountOriginSetError(
@@ -295,11 +355,12 @@ def _install_origin_set_authority():
         evidence_store = state[7]
         evidence_root = state[8]
         registry_state_names = state[9]
+        require_descriptor_authority()
         if (
-            type(qualification_registry) is not DurableProviderQualificationRegistry
+            type(qualification_registry) is not _qualification_registry_type
             or type(account_acquisition_authority)
-            is not DurableProviderAccountAcquisitionAuthority
-            or type(store) is not JournalStore
+            is not _account_acquisition_authority_type
+            or type(store) is not _journal_store_type
             or qualification_registry.store is not store
             or account_acquisition_authority.store is not store
             or store.store_identity != store_identity

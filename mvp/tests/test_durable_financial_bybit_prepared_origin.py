@@ -110,6 +110,30 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             material.price_semantics_digest,
         )
 
+    def test_resolve_pins_durable_admission_validator_before_execution(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._load_payload = lambda _admission_id: payload
+
+        def forged_validator(*_args, **_kwargs):
+            raise AssertionError("forged validator executed")
+
+        with patch.object(
+            binding_module,
+            "_validate_material_against_admission",
+            forged_validator,
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "admitted financial validator executable changed",
+            ):
+                registry.resolve("admission-1")
+
     def test_paper_live_bind_cannot_bypass_prepared_origin(self):
         registry = object.__new__(DurableFinancialRequestBindingRegistry)
         with self.assertRaisesRegex(

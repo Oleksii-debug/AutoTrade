@@ -107,6 +107,57 @@ class ProviderQualificationSupersessionCutTests(unittest.TestCase):
                 q3.qualification_id,
             )
 
+    def test_competing_same_target_supersession_remains_idempotent(self):
+        q1, r1, p1 = _issued(ordinal=65, campaign_version=1)
+        q2, r2, p2 = _issued(
+            ordinal=66,
+            campaign_version=2,
+            supersedes=q1.qualification_id,
+            route_parser="BYBIT_ORDER_V5_JSON_V2",
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "journal.db"
+            evidence_root = root / "evidence"
+            registry = _AfterHistoryRegistry(
+                JournalStore(database),
+                evidence_store=ArtifactStore(evidence_root),
+                evidence_root=evidence_root,
+            )
+            competing = _ProjectionOnlyRegistry(
+                JournalStore(database),
+                evidence_store=ArtifactStore(evidence_root),
+                evidence_root=evidence_root,
+            )
+            for record, receipt, protocol in (
+                (q1, r1, p1),
+                (q2, r2, p2),
+            ):
+                registry._append_accepted(
+                    protocol_key=protocol.key,
+                    record=record,
+                    receipt=receipt,
+                )
+
+            registry.after_history = lambda: competing._append_supersession(
+                old_id=q1.qualification_id,
+                new_id=q2.qualification_id,
+            )
+            self.assertFalse(
+                registry._append_supersession(
+                    old_id=q1.qualification_id,
+                    new_id=q2.qualification_id,
+                )
+            )
+
+            history = competing._history()
+            self.assertEqual(
+                history.superseded,
+                {q1.qualification_id: q2.qualification_id},
+            )
+
+
     def test_unrelated_journal_advance_does_not_block_valid_supersession(self):
         q1, r1, p1 = _issued(ordinal=63, campaign_version=1)
         q2, r2, p2 = _issued(

@@ -565,6 +565,10 @@ def _install_submission_response_binding_authority(loader):
     binding_token = _SUBMISSION_RESPONSE_BINDING_TOKEN
     error_type = ValueError
     canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_range = range
+    canonical_enumerate = enumerate
     canonical_isinstance = isinstance
     canonical_str = str
     canonical_int = int
@@ -621,6 +625,10 @@ def _install_submission_response_binding_authority(loader):
             or _SUBMISSION_RESPONSE_BINDING_TOKEN is not binding_token
             or ValueError is not error_type
             or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or range is not canonical_range
+            or enumerate is not canonical_enumerate
             or isinstance is not canonical_isinstance
             or str is not canonical_str
             or int is not canonical_int
@@ -656,13 +664,13 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
 
     def raw_snapshot(value):
-        return tuple(
+        return canonical_tuple(
             object_getattribute(value, name)
             for name in field_names
         )
 
     def prune():
-        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+        for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
             if value_ref() is None:
                 states.pop(object_id, None)
 
@@ -678,7 +686,7 @@ def _install_submission_response_binding_authority(loader):
         if canonical_type(current[11]) is not canonical_bytes:
             authority_changed()
         prune()
-        object_id = id(value)
+        object_id = canonical_id(value)
         previous = states.get(object_id)
         if previous is not None and previous[0]() is not None:
             authority_changed()
@@ -689,12 +697,12 @@ def _install_submission_response_binding_authority(loader):
         if canonical_type(value) is not binding_type:
             authority_changed()
         prune()
-        state = states.get(id(value))
+        state = states.get(canonical_id(value))
         if state is None or state[0]() is not value:
             authority_changed()
         expected = state[1]
         current = raw_snapshot(value)
-        for index in range(9):
+        for index in canonical_range(9):
             if canonical_type(current[index]) is not canonical_str:
                 authority_changed()
             if current[index] != expected[index]:
@@ -726,7 +734,7 @@ def _install_submission_response_binding_authority(loader):
         return mapping_proxy_type(
             {
                 name: current[index]
-                for index, name in enumerate(field_names[:-1])
+                for index, name in canonical_enumerate(field_names[:-1])
             }
         )
 

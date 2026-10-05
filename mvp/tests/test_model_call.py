@@ -4022,6 +4022,62 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
             self.assertEqual(orchestrator._events(attempt_id), [])
 
+    def test_model_clock_cannot_rebind_callback_restore_before_recovery(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            restore_descriptor = vars(DurableModelCallOrchestrator)[
+                "_restore_callback_shape"
+            ]
+            canonical_restore = DurableModelCallOrchestrator._restore_callback_shape
+            forged_restore_calls = []
+
+            def hostile_clock():
+                DurableModelCallOrchestrator._restore_callback_shape = (
+                    lambda *_args, **_kwargs: forged_restore_calls.append("forged") or []
+                )
+                return NOW_TEXT
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=hostile_clock,
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            try:
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    r"clock mutated orchestrator authority:.*"
+                    r"DurableModelCallOrchestrator\._restore_callback_shape",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=fixed_policy(),
+                        request=request_for(orchestrator, call_spec),
+                        descriptors=[descriptor()],
+                        call=lambda *_args: self.fail(
+                            "inference must not run after restore-authority mutation"
+                        ),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                    )
+
+                self.assertEqual(forged_restore_calls, [])
+                self.assertIs(
+                    DurableModelCallOrchestrator._restore_callback_shape,
+                    canonical_restore,
+                )
+                self.assertEqual(
+                    budget.active_reservation(attempt_id),
+                    Decimal("1.2"),
+                )
+                self.assertEqual(orchestrator._events(attempt_id), [])
+            finally:
+                type.__setattr__(
+                    DurableModelCallOrchestrator,
+                    "_restore_callback_shape",
+                    restore_descriptor,
+                )
+
     def test_adapter_class_rebinding_is_restored_before_dynamic_dispatch(self):
         class HostileOrchestrator(DurableModelCallOrchestrator):
             __slots__ = ()

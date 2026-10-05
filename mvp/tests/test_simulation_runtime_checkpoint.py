@@ -94,6 +94,49 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             self.assertEqual(result["new_outbound_requests"], 0)
             self.assertEqual(store.whole_store_state_cut(), before)
 
+    def test_delivered_host_ui_event_does_not_invalidate_zero_runtime_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            run(directory, stop_after_episodes=3)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = checkpoint_path(directory).read_bytes()
+
+            payload = {"reason": "host-ui-state-is-not-zero-financial-authority"}
+            store.append_event(
+                {
+                    "event_id": "host-ui-after-zero-checkpoint",
+                    "event_type": "HOST_UI_TEST_EVENT",
+                    "aggregate_type": "HOST_CONTROL",
+                    "aggregate_id": "host-ui-test",
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": NOW,
+                },
+                outbox_topic="ui.host-events",
+            )
+            pending = store.pending_outbox(limit=1000)
+            host_row = next(
+                item for item in pending
+                if item["event_id"] == "host-ui-after-zero-checkpoint"
+            )
+            store.mark_outbox_delivered(
+                host_row["outbox_id"],
+                expected_envelope_hash=host_row["envelope_hash"],
+            )
+            after_host = store.whole_store_state_cut()
+
+            with patch.object(
+                SimulatedProvider,
+                "transport_send",
+                side_effect=AssertionError("delivered host UI event cannot reopen a send"),
+            ):
+                result = run(directory, stop_after_episodes=3)
+
+            self.assertEqual(result["status"], "PAUSED")
+            self.assertEqual(result["new_outbound_requests"], 0)
+            self.assertEqual(store.whole_store_state_cut(), after_host)
+            self.assertEqual(checkpoint_path(directory).read_bytes(), checkpoint)
+
     def test_preseeded_runtime_authority_key_cannot_mint_initial_session_authority(self):
         with TemporaryDirectory() as directory:
             key_path = Path(directory) / ".autonomous-runtime-authority.key"
@@ -338,6 +381,32 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                 ["AutonomousEpisodeFillObserved", "AutonomousEpisodeCompleted"],
             )
             self.assertEqual(path.read_bytes(), before_checkpoint)
+
+            # A Host/UI event may be committed and independently published after
+            # the ZERO terminal event but before its checkpoint sidecar is repaired.
+            # It shares the physical journal, not ZERO financial/runtime authority.
+            host_payload = {"reason": "host-ui-after-zero-terminal-before-sidecar"}
+            store.append_event(
+                {
+                    "event_id": "host-ui-between-terminal-and-sidecar",
+                    "event_type": "HOST_UI_TEST_EVENT",
+                    "aggregate_type": "HOST_CONTROL",
+                    "aggregate_id": "host-ui-repair-test",
+                    "aggregate_version": "1",
+                    "payload": host_payload,
+                    "payload_hash": payload_digest(host_payload),
+                    "committed_at": NOW,
+                },
+                outbox_topic="ui.host-events",
+            )
+            host_row = next(
+                item for item in store.pending_outbox(limit=1000)
+                if item["event_id"] == "host-ui-between-terminal-and-sidecar"
+            )
+            store.mark_outbox_delivered(
+                host_row["outbox_id"],
+                expected_envelope_hash=host_row["envelope_hash"],
+            )
             durable_cut = store.whole_store_state_cut()
 
             with patch.object(SimulatedProvider, "transport_send", side_effect=AssertionError("no resend")):

@@ -175,9 +175,10 @@ class AblationUtilityRuleProvenanceTests(unittest.TestCase):
             permission_class="RESEARCH",
             payload={
                 "evidence_refs": ["artifact:source"],
-                "intended_action": {"case_id": "case-rule"},
+                "intended_action": {"case_id": "case-rule", "side": "HOLD"},
                 "actual_execution": {"fills": []},
                 "outcome": {
+                    "class": "POSITIVE",
                     "label": "observed",
                     "label_mature": True,
                     "reconciliation_state": "RECONCILED",

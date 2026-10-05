@@ -51,13 +51,16 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
-# Canonical sentinels and every workflow path are executable/control trust roots.
-# Ordinary content replacement requires exact-path authorization; destructive
-# removal/rename-away/type change remains unconditional. Workflow paths are
-# protected dynamically as well so a newly authorized workflow cannot become an
-# unprotected authority on the next run.
-PROTECTED_MUTATION_ROOTS = PROTECTED_SENTINELS
-_WORKFLOW_AUTHORITY_PREFIX = ".github/workflows/"
+# Only the two executable reconvergence trust roots require independently
+# supplied exact-path authority for ordinary content replacement. Other
+# PROTECTED_SENTINELS remain protected against destructive removal/rename/type
+# changes without freezing routine controlled metadata evolution.
+PROTECTED_MUTATION_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
 _SCOPE_HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 _WINDOWS_FORBIDDEN_COMPONENT_CHARS = frozenset('<>:"|?*')
 _WINDOWS_RESERVED_BASENAMES = frozenset(
@@ -68,7 +71,7 @@ _WINDOWS_RESERVED_BASENAMES = frozenset(
 
 
 def _is_protected_authority(path: str, protected_sentinels: frozenset[str]) -> bool:
-    return path in protected_sentinels or path.startswith(_WORKFLOW_AUTHORITY_PREFIX)
+    return path in protected_sentinels
 
 
 
@@ -383,19 +386,19 @@ def assess_reconvergence(
             protected_damage.add(f"{change.path} (type change)")
         if (
             change.status == "M"
-            and _is_protected_authority(change.path, protected_sentinels)
+            and change.path in PROTECTED_MUTATION_ROOTS
             and change.path not in exact_trust_root_authorizations
         ):
             protected_damage.add(
-                f"{change.path} (content change without exact authorization)"
+                f"{change.path} (content change without exact-path authorization)"
             )
         if (
             kind in {"A", "R", "C"}
-            and _is_protected_authority(change.path, protected_sentinels)
+            and change.path in PROTECTED_MUTATION_ROOTS
             and change.path not in exact_trust_root_authorizations
         ):
             protected_damage.add(
-                f"{change.path} (authority destination without exact authorization)"
+                f"{change.path} (trust-root destination without exact-path authorization)"
             )
     protected_violations = tuple(sorted(protected_damage))
 

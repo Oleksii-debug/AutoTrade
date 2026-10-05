@@ -1593,6 +1593,16 @@ _LOOP_AGGREGATE = "canonical_autonomous_simulation"
 _LOOP_PROTOCOL = "provider-free-zero-loop-v7"
 
 
+def _deliver_autonomous_owned_publications(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> None:
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+
+    deliver_autonomous_owned_publications(store, run_id=run_id)
+
+
 def _loop_event(
     store,
     run_id,
@@ -1609,9 +1619,8 @@ def _loop_event(
         else expected_journal_sequence
     )
     if kind == "AutonomousEpisodeCompleted":
-        # Deliver existing publications before freezing the completion preimage.
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+        # Deliver existing ZERO-owned publications before freezing the completion preimage.
+        _deliver_autonomous_owned_publications(store, run_id=run_id)
         from .simulation_runtime_checkpoint import (
             COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
         )
@@ -2330,11 +2339,7 @@ def _recover_autonomous_zero_wire_completion(
         timestamp,
         expected_journal_sequence=checkpoint["journal_sequence"],
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    _deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _recover_autonomous_observed_fill(
@@ -2633,11 +2638,7 @@ def _recover_autonomous_observed_fill(
         result,
         timestamp,
     )
-    for item in store.pending_outbox(limit=1000):
-        store.mark_outbox_delivered(
-            item["outbox_id"],
-            expected_envelope_hash=item["envelope_hash"],
-        )
+    _deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
@@ -3076,8 +3077,7 @@ def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "provider_state": provider.export_state(), "emergency": emergency}
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
-        for item in store.pending_outbox(limit=1000):
-            store.mark_outbox_delivered(item["outbox_id"], expected_envelope_hash=item["envelope_hash"])
+        _deliver_autonomous_owned_publications(store, run_id=run_id)
         completed.append(result)
         # Persist only after the durable episode and every publication in this
         # terminal cut are complete.  A crash before this point leaves the

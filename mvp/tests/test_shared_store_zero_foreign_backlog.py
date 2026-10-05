@@ -180,6 +180,40 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
             self.assertFalse(state["delivered"])
             self.assertEqual(store.pending_outbox_count(), 1)
 
+    def test_delivered_owned_loop_event_with_wrong_topic_still_fails_authority_check(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "zero-delivered-misrouted-loop-publication"
+            zero_event = _event(
+                aggregate_type="canonical_autonomous_simulation",
+                aggregate_id=run_id,
+                event_type="AutonomousEpisodeProgressed",
+                committed_at=_ZERO_TIME,
+                environment="SIMULATION",
+                host_id="local-simulation",
+            )
+            store.append_event(zero_event, outbox_topic="ui.host-events")
+            state = store.outbox_delivery_state(zero_event["event_id"])
+            self.assertIsNotNone(state)
+            store.mark_outbox_delivered(
+                state["outbox_id"],
+                expected_envelope_hash=state["envelope_hash"],
+            )
+
+            # Delivery status is not authority: a misrouted ZERO loop row must
+            # remain invalid evidence during later recovery/checkpoint scans.
+            with self.assertRaisesRegex(
+                AutonomousRuntimeCheckpointError,
+                "topic|routing|publication",
+            ):
+                deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            delivered = store.outbox_delivery_state(zero_event["event_id"])
+            self.assertIsNotNone(delivered)
+            self.assertTrue(delivered["delivered"])
+            self.assertEqual(delivered["topic"], "ui.host-events")
+            self.assertEqual(store.pending_outbox_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

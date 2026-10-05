@@ -89,7 +89,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 def _sha256(value: str, *, name: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or value != value.strip()
         or _SHA256.fullmatch(value) is None
     ):
@@ -430,8 +430,8 @@ class RecoveryQualificationDecision:
             "evidence_set_sha256",
             _sha256(self.evidence_set_sha256, name="evidence_set_sha256"),
         )
-        if not isinstance(self.status, RecoveryEvidenceStatus):
-            raise TypeError("status must be RecoveryEvidenceStatus")
+        if type(self.status) is not RecoveryEvidenceStatus:
+            raise TypeError("status must be exact RecoveryEvidenceStatus")
         if type(self.blockers) is not tuple:
             raise TypeError("blockers must be an exact tuple")
         blockers = tuple(_text(value, name="blocker") for value in self.blockers)

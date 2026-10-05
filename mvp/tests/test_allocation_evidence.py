@@ -1253,6 +1253,91 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 policy_version="risk-policy:12",
             )
 
+    def test_mapping_snapshot_cannot_rebind_proposal_resolver_authority(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        original_resolver = allocation_module._resolve_allocation_evidence
+        forged_calls = []
+
+        def forged_resolver(*args, **kwargs):
+            forged_calls.append("resolver")
+            return original_resolver(*args, **kwargs)
+
+        def retarget_resolver():
+            allocation_module._resolve_allocation_evidence = forged_resolver
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_resolver,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal trust helper changed during input snapshot: "
+                "_resolve_allocation_evidence",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            allocation_module._resolve_allocation_evidence = original_resolver
+
+        self.assertGreater(hostile_market.calls, 0)
+        self.assertEqual(forged_calls, [])
+
+    def test_mapping_snapshot_cannot_retarget_resolver_code_in_place(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        valuation = resolved["valuation:aaa:v1"]
+        resolver = allocation_module._resolve_allocation_evidence
+        original_code = resolver.__code__
+        forged_calls = []
+
+        def forged_resolver(*args, **kwargs):
+            forged_calls.append("resolver")
+            raise AssertionError("retargeted resolver executed")
+
+        def retarget_resolver_code():
+            resolver.__code__ = forged_resolver.__code__
+
+        hostile_market = _MutatingMapping(
+            {"AAA": market},
+            retarget_resolver_code,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "allocation proposal trust helper changed during input snapshot: "
+                "_resolve_allocation_evidence",
+            ):
+                allocate_evidence_bound_objective_targets(
+                    (self.candidate(),),
+                    self.policy(),
+                    objective_evidence={"AAA": objective},
+                    market_evidence=hostile_market,
+                    valuation_evidence={"AAA": valuation},
+                    capital_evidence=capital,
+                    stress_source_evidence=(stress,),
+                    resolved_evidence=resolved,
+                    environment="SIMULATION",
+                    decision_time=self.DECISION_TIME,
+                    policy_version="risk-policy:12",
+                )
+        finally:
+            resolver.__code__ = original_code
+
+        self.assertGreater(hostile_market.calls, 0)
+        self.assertEqual(forged_calls, [])
+
     def test_mapping_callback_cannot_mutate_verified_objective_before_use(self):
         objective, market, capital, stress, resolved = self.bundle()
         forged_horizon = "2026-09-27T18:30:00Z"

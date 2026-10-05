@@ -2740,6 +2740,176 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             )
             self.assertEqual(outcome.output, {"answer": 7})
 
+    def test_cancel_callback_cannot_redirect_not_sent_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = None
+            inference_calls = []
+
+            def hostile_cancel():
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return False
+
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: inference_calls.append("called") or observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=hostile_cancel,
+            )
+
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertIn(
+                "cancel_callback_mutated_orchestrator_authority",
+                result.reason,
+            )
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(inference_calls, [])
+            snapshot = budget.snapshot()
+            self.assertEqual(snapshot.reserved, Decimal("0"))
+            self.assertEqual(snapshot.incurred, Decimal("0"))
+            self.assertEqual(snapshot.estimated_unbilled, Decimal("0"))
+
+    def test_cancel_callback_rejects_executable_non_boolean_result(self):
+        class HostileTruthiness:
+            bool_calls = 0
+
+            def __bool__(self):
+                type(self).bool_calls += 1
+                raise AssertionError("cancel result truthiness must not execute")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            inference_calls = []
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: inference_calls.append("called") or observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=lambda: HostileTruthiness(),
+            )
+
+            self.assertEqual(result.status, "NOT_SENT")
+            self.assertEqual(result.reason, "cancel_callback_returned_non_boolean")
+            self.assertEqual(HostileTruthiness.bool_calls, 0)
+            self.assertEqual(inference_calls, [])
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_result_validator_cannot_redirect_observed_settlement_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = None
+
+            def hostile_validator(_value):
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return True
+
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=hostile_validator,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "result_validator_mutated_orchestrator_authority",
+                result.reason,
+            )
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
+            )
+
+    def test_recovery_fence_cannot_redirect_orchestrator_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+
+            def hostile_recovery_fence():
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "recovery fence mutated orchestrator authority",
+            ):
+                orchestrator.recover_reserved_not_started(
+                    spec=call_spec,
+                    recovery_fence=hostile_recovery_fence,
+                )
+
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(
+                budget.active_reservation(attempt_id),
+                Decimal("1.2"),
+            )
+
     def test_pricing_evidence_resolver_cannot_redirect_orchestrator_authority(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

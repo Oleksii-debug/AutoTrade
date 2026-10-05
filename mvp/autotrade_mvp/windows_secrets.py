@@ -71,7 +71,7 @@ def _scope_entropy(
     provider_environment: str,
     purpose: str,
     generation: int,
-    _json_dumps=json.dumps,
+    _json_encoder=json.JSONEncoder,
 ) -> bytes:
     payload = {
         "handle_id": handle_id,
@@ -83,9 +83,11 @@ def _scope_entropy(
         "purpose": purpose,
         "generation": generation,
     }
-    return sha256(
-        _json_dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).digest()
+    encoded = _json_encoder(
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode(payload)
+    return sha256(encoded.encode("utf-8")).digest()
 
 
 def _freeze_vault_path(path: str | Path) -> Path:
@@ -428,12 +430,12 @@ class ProtectedCredentialVault:
     def _load(
         self,
         *,
-        _json_loads=json.loads,
+        _json_decoder=json.JSONDecoder,
         _json_decode_error=json.JSONDecodeError,
     ) -> dict[str, object]:
         _require_vault_leaf(self.path)
         try:
-            raw = _json_loads(self.path.read_text(encoding="utf-8"))
+            raw = _json_decoder().decode(self.path.read_text(encoding="utf-8"))
         except (OSError, _json_decode_error) as error:
             raise SecretVaultError("credential vault is corrupt or unreadable") from error
         if not isinstance(raw, dict):
@@ -498,15 +500,14 @@ class ProtectedCredentialVault:
         self,
         value: dict[str, object],
         *,
-        _json_dumps=json.dumps,
+        _json_encoder=json.JSONEncoder,
     ) -> None:
-        encoded = _json_dumps(
-            value,
+        encoded = _json_encoder(
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
             allow_nan=False,
-        )
+        ).encode(value)
         fd, temp_name = tempfile.mkstemp(
             prefix=self.path.name + ".",
             suffix=".tmp",

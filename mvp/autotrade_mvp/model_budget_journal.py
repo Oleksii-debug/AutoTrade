@@ -246,7 +246,7 @@ class DurableModelBudget:
         object | None,
         type | None,
         dict[str, object] | None,
-        tuple[tuple[type, str, Mapping[str, object]], ...],
+        tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
     ]:
         """Freeze budget/journal authority before executing the injected clock."""
         budget_class = object.__getattribute__(self, "__class__")
@@ -293,6 +293,7 @@ class DurableModelBudget:
             (
                 authority_class,
                 authority_class.__module__ + "." + authority_class.__qualname__,
+                tuple(authority_class.__bases__),
                 MappingProxyType(dict(vars(authority_class))),
             )
             for authority_class in authority_classes
@@ -321,7 +322,7 @@ class DurableModelBudget:
             object | None,
             type | None,
             dict[str, object] | None,
-            tuple[tuple[type, str, Mapping[str, object]], ...],
+            tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
     ) -> list[str]:
         """Restore budget/journal authority without rebound-class dispatch."""
@@ -338,7 +339,30 @@ class DurableModelBudget:
         ) = snapshot
         changes: list[str] = []
 
-        for authority_class, class_label, expected_class_state in class_authority:
+        for (
+            authority_class,
+            class_label,
+            expected_bases,
+            expected_class_state,
+        ) in class_authority:
+            current_bases = tuple(authority_class.__bases__)
+            bases_changed = (
+                len(current_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(current_bases, expected_bases)
+                )
+            )
+            if bases_changed:
+                label = "class." + class_label + ".__bases__"
+                changes.append(label)
+                try:
+                    type.__setattr__(authority_class, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ValueError(
+                        label + " could not be restored after model budget clock"
+                    ) from error
+
             current_class_state = vars(authority_class)
             current_names = set(current_class_state)
             expected_names = set(expected_class_state)
@@ -365,6 +389,18 @@ class DurableModelBudget:
                         raise ValueError(
                             label + " could not be restored after model budget clock"
                         ) from error
+            restored_bases = tuple(authority_class.__bases__)
+            if (
+                len(restored_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                )
+            ):
+                raise ValueError(
+                    "model budget class base authority restore is incomplete for "
+                    + class_label
+                )
             restored_class_state = vars(authority_class)
             if set(restored_class_state) != expected_names or any(
                 restored_class_state[name] is not expected_class_state[name]

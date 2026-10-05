@@ -313,6 +313,41 @@ def _require_copied_executable(expected, snapshot, *, label):
         raise ValueError(label + ' executable changed between admission and candidate copy')
 
 
+def _candidate_composition(source_sha, components):
+    """Build canonical diagnostics composition accepted by Windows packaging."""
+
+    if type(source_sha) is not str or len(source_sha) != 40 or any(
+        char not in "0123456789abcdef" for char in source_sha
+    ):
+        raise ValueError("exact lowercase Git source SHA required")
+    if type(components) is not list:
+        raise TypeError("candidate components must be a list")
+    by_path = {
+        component["path"]: component["sha256"]
+        for component in components
+        if type(component) is dict
+        and type(component.get("path")) is str
+        and type(component.get("sha256")) is str
+    }
+    for required in ("dependency-lock.json", "sbom.json"):
+        if required not in by_path:
+            raise ValueError("candidate composition is missing " + required)
+    return {
+        "schema_version": "1.0.0",
+        "product": "AutoTrade",
+        "source_sha": source_sha,
+        "dependency_lock_sha256": by_path["dependency-lock.json"],
+        "sbom_sha256": by_path["sbom.json"],
+        "schema_compatibility": {"minimum": "1.0.0", "maximum": "1.0.x"},
+        "runtime": {
+            "architecture": "x64",
+            "runtime_identifier": "win-x64",
+            "minimum_windows_version": "10.0.22621",
+        },
+        "components": components,
+    }
+
+
 def build_candidate(*, source_root, source_sha, desktop, host, python_archive, webview_archive, work, output):
     if work.exists(): raise ValueError('candidate work directory must be new')
     work.mkdir(parents=True)
@@ -358,13 +393,7 @@ def build_candidate(*, source_root, source_sha, desktop, host, python_archive, w
     components = [{'component_id': 'candidate-' + sha256(p.encode()).hexdigest()[:32],
         'kind': 'dependency-lock' if p == 'dependency-lock.json' else 'sbom' if p == 'sbom.json' else 'product-file',
         'path': p, 'version': source_sha, 'sha256': 'sha256:' + sha256(b).hexdigest()} for p, _, b in files]
-    by_path = {c['path']: c['sha256'] for c in components}
-    from mvp.autotrade_mvp.persistence import JournalStore
-    composition = {'schema_version': '1.0.0', 'product': 'AutoTrade', 'source_sha': source_sha,
-        'dependency_lock_sha256': by_path['dependency-lock.json'], 'sbom_sha256': by_path['sbom.json'],
-        'schema_compatibility': {'minimum': str(JournalStore.SCHEMA_VERSION), 'maximum': str(JournalStore.SCHEMA_VERSION)},
-        'runtime': {'architecture': 'x64', 'runtime_identifier': 'win-x64', 'minimum_windows_version': 'Windows 11'},
-        'components': components}
+    composition = _candidate_composition(source_sha, components)
     composition_path = work / 'windows-composition.json'; atomic_write_json(composition_path, composition)
     result = build_bundle(staging=payload, output=output, version='0.1.0-zero-candidate', source_sha=source_sha,
         mode='diagnostics', provenance_path=payload / 'product/provenance/release-dependency-manifest.json',

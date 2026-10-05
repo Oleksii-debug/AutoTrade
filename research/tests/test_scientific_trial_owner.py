@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.evaluation.scientific_trial_owner import (
     evaluate_gates_with_scientific_trial_owner,
@@ -230,6 +231,87 @@ class ScientificTrialOwnerTests(unittest.TestCase):
                     profile=gate_profile,
                     evidence=evidence(trials_attempted=1, trial_log_complete=True),
                 )
+            self.assertFalse(state["called"])
+
+    def test_registry_connect_class_rebind_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry.register_protocol(bound_protocol(gate_profile))
+            state = {"called": False}
+
+            def hostile_connect(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("rebound registry connection descriptor executed")
+
+            with patch.object(ScientificRegistry, "_connect", new=hostile_connect):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: _connect",
+                ):
+                    resolve_gate_profile_protocol_binding(
+                        registry=registry,
+                        profile=gate_profile,
+                    )
+            self.assertFalse(state["called"])
+
+    def test_registry_trial_evidence_class_rebind_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(
+                bound_protocol(gate_profile, trial_budget=1)
+            )
+            fill_trials(registry, registered.protocol_id, 1)
+            state = {"called": False}
+
+            def hostile_trial_evidence(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("rebound trial evidence descriptor executed")
+
+            with patch.object(
+                ScientificRegistry,
+                "trial_completeness_evidence",
+                new=hostile_trial_evidence,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: trial_completeness_evidence",
+                ):
+                    resolve_scientific_trial_owner(
+                        registry=registry,
+                        profile=gate_profile,
+                        evidence=evidence(
+                            trials_attempted=1,
+                            trial_log_complete=True,
+                        ),
+                    )
+            self.assertFalse(state["called"])
+
+    def test_registry_path_class_rebind_cannot_retarget_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry.register_protocol(bound_protocol(gate_profile))
+            state = {"called": False}
+
+            def hostile_path(_self):
+                state["called"] = True
+                raise AssertionError("rebound registry path descriptor executed")
+
+            with patch.object(
+                ScientificRegistry,
+                "path",
+                new=property(hostile_path),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: path",
+                ):
+                    resolve_gate_profile_protocol_binding(
+                        registry=registry,
+                        profile=gate_profile,
+                    )
             self.assertFalse(state["called"])
 
     def test_wrapper_rejects_registry_shadow_before_base_gate_evaluation(self):

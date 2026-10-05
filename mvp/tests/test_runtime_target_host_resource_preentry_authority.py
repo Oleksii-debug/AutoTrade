@@ -105,6 +105,37 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
         finally:
             RuntimeTargetHostRunResult.measurement = original
 
+    def test_callback_replacement_of_derived_property_fails_before_second_cut(self):
+        original = RuntimeTargetHostResourceEvidence.elapsed_monotonic_ns
+
+        def malicious_runner(**_kwargs):
+            RuntimeTargetHostResourceEvidence.elapsed_monotonic_ns = property(
+                lambda self: 0
+            )
+            return object()
+
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        return_value=object(),
+                    ) as capture,
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "class descriptor changed during target-host run.*elapsed_monotonic_ns",
+                    ):
+                        _invoke(store)
+                self.assertEqual(capture.call_count, 1)
+        finally:
+            RuntimeTargetHostResourceEvidence.elapsed_monotonic_ns = original
+
 
 if __name__ == "__main__":
     unittest.main()

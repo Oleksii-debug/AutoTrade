@@ -1570,39 +1570,18 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 # It owns no ledger, risk engine, strategy, transport or allocation algorithm.
 _LOOP_AGGREGATE = "canonical_autonomous_simulation"
 _LOOP_PROTOCOL = "provider-free-zero-loop-v7"
-_ZERO_PUBLICATION_TOPICS = frozenset({
-    "financial.admission.ready",
-    "autotrade.simulation.events",
-    "autotrade.order-projection.events",
-    "autotrade.economic.events",
-    "autotrade.reconciliation.events",
-    "autotrade.submission.events",
-})
 
 
-def _deliver_pending_zero_publications(store: JournalStore) -> None:
-    """A ZERO checkpoint may only acknowledge publications owned by ZERO.
+def _deliver_pending_zero_publications(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> None:
+    """Deliver only ZERO-owned publications; leave Host/UI backlog untouched."""
 
-    The financial journal can also carry host UI publications. A blanket drain
-    would claim those were delivered without the host actually publishing them.
-    Preflight the entire pending set before changing even one delivery record.
-    """
-    count = store.pending_outbox_count()
-    if count > 1000:
-        raise ValueError("ZERO publication backlog exceeds bounded preflight")
-    pending = store.pending_outbox(limit=1000)
-    if len(pending) != count:
-        raise ValueError("ZERO publication backlog changed during preflight")
-    foreign_topics = sorted({
-        item["topic"] for item in pending
-        if item["topic"] not in _ZERO_PUBLICATION_TOPICS
-    })
-    if foreign_topics:
-        raise ValueError(f"ZERO cannot acknowledge a foreign publication: {foreign_topics}")
-    for item in pending:
-        store.mark_outbox_delivered(
-            item["outbox_id"], expected_envelope_hash=item["envelope_hash"]
-        )
+    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications
+
+    deliver_autonomous_owned_publications(store, run_id=run_id)
 
 
 def _loop_event(
@@ -1622,7 +1601,7 @@ def _loop_event(
     )
     if kind == "AutonomousEpisodeCompleted":
         # Deliver existing publications before freezing the completion preimage.
-        _deliver_pending_zero_publications(store)
+        _deliver_pending_zero_publications(store, run_id=run_id)
         from .simulation_runtime_checkpoint import (
             COMPLETION_RECEIPT_FIELD, prepare_autonomous_completion_receipt,
         )
@@ -2353,7 +2332,7 @@ def _recover_autonomous_zero_wire_completion(
         timestamp,
         expected_journal_sequence=checkpoint["journal_sequence"],
     )
-    _deliver_pending_zero_publications(store)
+    _deliver_pending_zero_publications(store, run_id=run_id)
 
 
 def _recover_autonomous_observed_fill(
@@ -2652,7 +2631,7 @@ def _recover_autonomous_observed_fill(
         result,
         timestamp,
     )
-    _deliver_pending_zero_publications(store)
+    _deliver_pending_zero_publications(store, run_id=run_id)
 
 
 def _run_autonomous_locked(
@@ -3109,7 +3088,7 @@ def _run_autonomous_locked(
             "reconciliation_event_id": after_checkpoint["event_id"], "protocol_digest": protocol_digest,
             "provider_state": provider.export_state(), "emergency": emergency}
         _loop_event(store, run_id, "AutonomousEpisodeCompleted", str(episode), result, timestamp)
-        _deliver_pending_zero_publications(store)
+        _deliver_pending_zero_publications(store, run_id=run_id)
         completed.append(result)
         # Persist only after the durable episode and every publication in this
         # terminal cut are complete.  A crash before this point leaves the

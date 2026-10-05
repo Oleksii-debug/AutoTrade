@@ -962,6 +962,54 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             object.__setattr__(contract, "multiplier", original_multiplier)
 
 
+    def test_durable_evidence_reseals_post_construction_field_types(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile settlement text executed")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("hostile settlement equality executed")
+
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        evidence = self._settlement(contract, "mutated-evidence", "105", sequence=1)
+        object.__setattr__(
+            evidence,
+            "settlement_id",
+            HostileText(evidence.settlement_id),
+        )
+
+        with self.assertRaisesRegex(FuturesError, "settlement_id must be exact"):
+            provider_settlement_evidence_receipt(evidence)
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(FuturesError, "settlement_id must be exact"):
+            provider_settlement_evidence_metadata(evidence)
+        self.assertEqual(callbacks, [])
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            ArtifactStore(artifact_root)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(FuturesError, "settlement_id must be exact"):
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    evidence,
+                    evidence_artifact_root=artifact_root,
+                )
+        self.assertEqual(callbacks, [])
+
+
     def test_durable_evidence_boundaries_reject_hostile_subclass_before_reads(self):
         callbacks = []
 

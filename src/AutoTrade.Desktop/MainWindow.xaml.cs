@@ -368,7 +368,19 @@ public partial class MainWindow : Window
                 return;
             }
 
-            ConfigureWebView(webView.CoreWebView2, policy);
+            CoreWebView2 core = webView.CoreWebView2;
+            // A prior build may have persisted an authority-bearing cookie or
+            // service worker in this profile. Remove both before any trusted
+            // document can navigate; current sessions are native-header only.
+            core.CookieManager.DeleteAllCookies();
+            await core.Profile.ClearBrowsingDataAsync(
+                CoreWebView2BrowsingDataKinds.ServiceWorkers);
+            if (_lifetime.IsCancellationRequested || !IsLoaded)
+            {
+                return;
+            }
+
+            ConfigureWebView(core, policy);
             Uri entryPoint = new(policy.HostOrigin, "/");
             _trustedTopLevelDocument = entryPoint;
             webView.Source = entryPoint;
@@ -416,9 +428,11 @@ public partial class MainWindow : Window
         core.WebResourceRequested += WebView_WebResourceRequested;
         core.NavigationStarting += WebView_NavigationStarting;
         core.NavigationCompleted += WebView_NavigationCompleted;
+        core.FrameNavigationStarting += WebView_FrameNavigationStarting;
         core.NewWindowRequested += WebView_NewWindowRequested;
         core.DownloadStarting += WebView_DownloadStarting;
         core.PermissionRequested += WebView_PermissionRequested;
+        core.ServerCertificateErrorDetected += WebView_ServerCertificateErrorDetected;
         core.ProcessFailed += WebView_ProcessFailed;
     }
 
@@ -471,6 +485,7 @@ public partial class MainWindow : Window
         if (_authenticatedHostClient is null
             || _webSecurityPolicy is null
             || _trustedTopLevelDocument is null
+            || args.RequestedSourceKind != CoreWebView2WebResourceRequestSourceKinds.Document
             || !IsSessionForwardingResourceContext(args.ResourceContext)
             || !Uri.TryCreate(request.Uri, UriKind.Absolute, out Uri? target)
             || !_webSecurityPolicy.AllowsSessionHeaderForwarding(
@@ -504,6 +519,15 @@ public partial class MainWindow : Window
         context is CoreWebView2WebResourceContext.Fetch
             or CoreWebView2WebResourceContext.XmlHttpRequest;
 
+    private void WebView_FrameNavigationStarting(
+        object? sender,
+        CoreWebView2NavigationStartingEventArgs args)
+    {
+        args.Cancel = true;
+        SetWebExperienceStatus(
+            "Blocked an embedded frame navigation. The trusted product UI has no frame workflow.");
+    }
+
     private void WebView_NewWindowRequested(
         object? sender,
         CoreWebView2NewWindowRequestedEventArgs args)
@@ -527,6 +551,16 @@ public partial class MainWindow : Window
         CoreWebView2PermissionRequestedEventArgs args)
     {
         args.State = CoreWebView2PermissionState.Deny;
+    }
+
+    private void WebView_ServerCertificateErrorDetected(
+        object? sender,
+        CoreWebView2ServerCertificateErrorDetectedEventArgs args)
+    {
+        args.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+        _trustedTopLevelDocument = null;
+        SetWebExperienceStatus(
+            "Blocked a certificate-invalid web request. No browser content is trusted until the web experience is reloaded.");
     }
 
     private void WebView_ProcessFailed(

@@ -131,6 +131,9 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
         original_authority = budget_module._MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY
         original_changes = budget_module._model_budget_journal_class_authority_changes
         original_require = budget_module._require_model_budget_journal_class_authority
+        module_state = vars(budget_module)
+        vars_existed = "vars" in module_state
+        original_vars = module_state.get("vars")
         forged_calls = []
 
         def forged_changes(*, restore):
@@ -139,6 +142,10 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
 
         def forged_require():
             forged_calls.append(("require", None))
+
+        def forged_vars(*_args, **_kwargs):
+            forged_calls.append(("vars", None))
+            raise AssertionError("hostile vars reached topology guard")
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")
@@ -151,6 +158,7 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 budget_module._require_model_budget_journal_class_authority = (
                     forged_require
                 )
+                budget_module.vars = forged_vars
                 return NOW_TEXT
 
             try:
@@ -175,6 +183,10 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 budget_module._require_model_budget_journal_class_authority = (
                     original_require
                 )
+                if vars_existed:
+                    budget_module.vars = original_vars
+                elif "vars" in vars(budget_module):
+                    delattr(budget_module, "vars")
 
             message = str(caught.exception)
             self.assertIn(
@@ -189,6 +201,7 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 "module._require_model_budget_journal_class_authority",
                 message,
             )
+            self.assertIn("module.vars", message)
             self.assertEqual(forged_calls, [])
             self.assertIs(
                 budget_module._MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY,
@@ -202,6 +215,9 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 budget_module._require_model_budget_journal_class_authority,
                 original_require,
             )
+            self.assertEqual("vars" in vars(budget_module), vars_existed)
+            if vars_existed:
+                self.assertIs(vars(budget_module)["vars"], original_vars)
             self.assertEqual(
                 journal.load_events(
                     "model_budget",

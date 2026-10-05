@@ -48,6 +48,8 @@ class _FrozenDict(MappingABC[str, object]):
     __slots__ = ("_values",)
 
     def __init__(self, values: Mapping[str, object]) -> None:
+        if type(values) is not dict:
+            raise TypeError("frozen proposal source must be an exact dict")
         object.__setattr__(
             self,
             "_values",
@@ -102,15 +104,15 @@ def _freeze_proposal(
         )
     if depth > 32:
         raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
-    if isinstance(value, Mapping):
+    if type(value) is dict or type(value) is _FrozenDict:
         if len(value) > _MAX_CONTAINER_ITEMS:
             raise ResearchBoundaryError(
                 f"{label} exceeds maximum object width"
             )
         frozen: dict[str, object] = {}
         for key, nested in value.items():
-            if not isinstance(key, str):
-                raise ResearchBoundaryError(f"{label} object keys must be strings")
+            if type(key) is not str:
+                raise ResearchBoundaryError(f"{label} object keys must be strings; exact strings are required")
             key_size = _utf8_size(key, label=f"{label} object key")
             if key_size > _MAX_STRING_UTF8_BYTES:
                 raise ResearchBoundaryError(
@@ -128,7 +130,7 @@ def _freeze_proposal(
                 _budget=_budget,
             )
         return _FrozenDict(frozen)
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         if len(value) > _MAX_CONTAINER_ITEMS:
             raise ResearchBoundaryError(
                 f"{label} exceeds maximum array width"
@@ -142,9 +144,9 @@ def _freeze_proposal(
             )
             for item in value
         )
-    if value is None or isinstance(value, bool):
+    if value is None or type(value) is bool:
         return value
-    if isinstance(value, str):
+    if type(value) is str:
         value_size = _utf8_size(value, label=f"{label} text value")
         if value_size > _MAX_STRING_UTF8_BYTES:
             raise ResearchBoundaryError(
@@ -156,13 +158,13 @@ def _freeze_proposal(
                 f"{label} exceeds aggregate UTF-8 text budget"
             )
         return value
-    if isinstance(value, int):
+    if type(value) is int:
         if value.bit_length() > _MAX_INTEGER_BITS:
             raise ResearchBoundaryError(
                 f"{label} integer exceeds maximum numeric size"
             )
         return value
-    if isinstance(value, float):
+    if type(value) is float:
         if not isfinite(value):
             raise ResearchBoundaryError(
                 f"{label} numbers must be finite JSON values"
@@ -189,9 +191,27 @@ class Redistribution(StrEnum):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ResearchBoundaryError(f"{name} is required")
-    return value.strip()
+    value_size = _utf8_size(value, label=name)
+    if value_size > _MAX_STRING_UTF8_BYTES:
+        raise ResearchBoundaryError(f"{name} exceeds maximum text size")
+    normalized = value.strip()
+    if not normalized:
+        raise ResearchBoundaryError(f"{name} is required")
+    return normalized
+
+
+def _exact_collection(value: object, *, name: str) -> tuple[object, ...]:
+    if type(value) not in (tuple, list):
+        raise ResearchBoundaryError(f"{name} must be an exact collection")
+    return tuple(value)
+
+
+def _permission_none(value: object, *, name: str) -> str:
+    if type(value) is not str or value != "NONE":
+        raise ResearchBoundaryError(f"{name} cannot grant authority")
+    return "NONE"
 
 
 def _hash(value: str) -> str:
@@ -224,8 +244,11 @@ class ResearchEvidence:
             )
         if self.untrusted_content is not True:
             raise ResearchBoundaryError("research evidence must remain untrusted")
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError("research evidence cannot grant authority")
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(self.permission_effect, name="research evidence"),
+        )
         if not isinstance(self.redistribution, Redistribution):
             raise ResearchBoundaryError("redistribution must be explicit")
 
@@ -243,19 +266,25 @@ class ResearchToolRequest:
         object.__setattr__(self, "tool_name", _text(self.tool_name, name="tool_name"))
         capabilities = tuple(
             _text(item, name="requested_capability").upper()
-            for item in self.requested_capabilities
+            for item in _exact_collection(
+                self.requested_capabilities,
+                name="requested_capabilities",
+            )
         )
         if len(set(capabilities)) != len(capabilities):
             raise ResearchBoundaryError("requested capabilities must be unique")
         object.__setattr__(self, "requested_capabilities", capabilities)
-        if not isinstance(self.arguments, Mapping):
-            raise ResearchBoundaryError("arguments must be an object")
+        if type(self.arguments) is not dict:
+            raise ResearchBoundaryError("arguments must be an exact object")
         object.__setattr__(
             self,
             "arguments",
             _freeze_proposal(self.arguments, label="research tool arguments"),
         )
-        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
+        )
         object.__setattr__(self, "evidence_refs", refs)
 
 
@@ -279,9 +308,7 @@ class AdmittedResearchToolRequest:
             "tool_name",
             _text(self.tool_name, name="tool_name"),
         )
-        if isinstance(self.capabilities, (str, bytes)):
-            raise ResearchBoundaryError("capabilities must be a collection")
-        capabilities = tuple(self.capabilities)
+        capabilities = _exact_collection(self.capabilities, name="capabilities")
         if not capabilities:
             raise ResearchBoundaryError(
                 "admitted request requires at least one research capability"
@@ -297,8 +324,8 @@ class AdmittedResearchToolRequest:
                 "admitted request contains a non-research capability"
             )
         object.__setattr__(self, "capabilities", capabilities)
-        if not isinstance(self.arguments, Mapping):
-            raise ResearchBoundaryError("arguments must be an object")
+        if type(self.arguments) not in (dict, _FrozenDict):
+            raise ResearchBoundaryError("arguments must be an exact object")
         object.__setattr__(
             self,
             "arguments",
@@ -307,17 +334,27 @@ class AdmittedResearchToolRequest:
                 label="admitted research tool arguments",
             ),
         )
+        privileged_arguments = _scan_privileged_fields(self.arguments)
+        if privileged_arguments:
+            raise PermissionError(
+                "admitted research tool arguments contain forbidden privileged fields: "
+                + ", ".join(sorted(privileged_arguments))
+            )
         refs = tuple(
             _text(item, name="evidence_ref")
-            for item in self.evidence_refs
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
         )
         if len(set(refs)) != len(refs):
             raise ResearchBoundaryError("evidence references must be unique")
         object.__setattr__(self, "evidence_refs", refs)
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError(
-                "admitted research request cannot grant authority"
-            )
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(
+                self.permission_effect,
+                name="admitted research request",
+            ),
+        )
 
 
 class ResearchToolBoundary:
@@ -356,8 +393,8 @@ class ResearchToolBoundary:
         self._tool_capabilities = normalized
 
     def admit(self, request: ResearchToolRequest) -> AdmittedResearchToolRequest:
-        if not isinstance(request, ResearchToolRequest):
-            raise TypeError("request must be a ResearchToolRequest")
+        if type(request) is not ResearchToolRequest:
+            raise TypeError("request must be an exact ResearchToolRequest")
         allowed = self._tool_capabilities.get(request.tool_name)
         if allowed is None:
             raise PermissionError("research tool is not allowlisted")
@@ -395,38 +432,68 @@ class ResearchModelResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "result_id", _text(self.result_id, name="result_id"))
-        if not isinstance(self.proposal, Mapping):
-            raise ResearchBoundaryError("proposal must be an object")
+        if type(self.proposal) is not dict:
+            raise ResearchBoundaryError("proposal must be an exact object")
         object.__setattr__(self, "proposal", _freeze_proposal(self.proposal))
-        refs = tuple(_text(item, name="evidence_ref") for item in self.evidence_refs)
+        refs = tuple(
+            _text(item, name="evidence_ref")
+            for item in _exact_collection(self.evidence_refs, name="evidence_refs")
+        )
         if not refs:
             raise ResearchBoundaryError("model result requires evidence references")
         object.__setattr__(self, "evidence_refs", refs)
         capabilities = tuple(
             _text(item, name="requested_capability").upper()
-            for item in self.requested_capabilities
+            for item in _exact_collection(
+                self.requested_capabilities,
+                name="requested_capabilities",
+            )
         )
         object.__setattr__(self, "requested_capabilities", capabilities)
-        if self.permission_effect != "NONE":
-            raise ResearchBoundaryError("model result cannot grant authority")
+        object.__setattr__(
+            self,
+            "permission_effect",
+            _permission_none(self.permission_effect, name="model result"),
+        )
 
 
 _FORBIDDEN_PRIVILEGED_FIELDS = frozenset(
     {
         "credentials",
         "credential",
+        "credentialhandle",
+        "credentialhandleid",
+        "credentialgeneration",
+        "credentialref",
         "secret",
+        "secretref",
         "token",
+        "sessiontoken",
+        "ownertoken",
+        "authtoken",
         "apikey",
+        "apisecret",
+        "clientsecret",
         "accesstoken",
         "refreshtoken",
         "password",
         "privatekey",
         "signingkey",
         "authorization",
+        "authorizationheader",
+        "proxyauthorization",
+        "proxyauthorizationheader",
+        "authheader",
+        "cookie",
+        "xapikey",
+        "xtxcapikey",
+        "xtxcpayload",
+        "xtxcsignature",
+        "apikeyheader",
         "bearertoken",
         "sessioncookie",
         "authoritygrant",
+        "authoritytoken",
         "toolgrant",
         "tradingauthority",
         "executionauthority",
@@ -444,15 +511,15 @@ def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
     if depth > _MAX_PROPOSAL_DEPTH:
         raise ResearchBoundaryError("model proposal exceeds maximum nesting depth")
     found: set[str] = set()
-    if isinstance(value, Mapping):
+    if type(value) in (dict, _FrozenDict):
         for key, nested in value.items():
-            if not isinstance(key, str):
-                raise ResearchBoundaryError("model proposal object keys must be strings")
+            if type(key) is not str:
+                raise ResearchBoundaryError("model proposal object keys must be strings; exact strings are required")
             normalized = _privileged_key(key.strip())
             if normalized in _FORBIDDEN_PRIVILEGED_FIELDS:
                 found.add(normalized)
             found.update(_scan_privileged_fields(nested, depth=depth + 1))
-    elif isinstance(value, (list, tuple)):
+    elif type(value) in (list, tuple):
         for nested in value:
             found.update(_scan_privileged_fields(nested, depth=depth + 1))
     return frozenset(found)
@@ -461,8 +528,8 @@ def _scan_privileged_fields(value: object, *, depth: int = 0) -> frozenset[str]:
 def validate_model_result(result: ResearchModelResult) -> ResearchModelResult:
     """Reject capability-seeking model output instead of interpreting it as policy."""
 
-    if not isinstance(result, ResearchModelResult):
-        raise TypeError("result must be a ResearchModelResult")
+    if type(result) is not ResearchModelResult:
+        raise TypeError("result must be an exact ResearchModelResult")
     if result.requested_capabilities:
         raise PermissionError(
             "model output cannot request or expand runtime capabilities"
@@ -481,8 +548,8 @@ def export_research_evidence(
 ) -> dict[str, object]:
     """Return the maximum redistribution-safe representation of evidence."""
 
-    if not isinstance(evidence, ResearchEvidence):
-        raise TypeError("evidence must be ResearchEvidence")
+    if type(evidence) is not ResearchEvidence:
+        raise TypeError("evidence must be exact ResearchEvidence")
     metadata = {
         "evidence_id": evidence.evidence_id,
         "source_id": evidence.source_id,
@@ -509,11 +576,20 @@ def export_research_evidence(
     }
 
 
+def _plain_json(value: object) -> object:
+    if type(value) is _FrozenDict:
+        return {key: _plain_json(nested) for key, nested in value.items()}
+    if type(value) is tuple:
+        return [_plain_json(nested) for nested in value]
+    return value
+
+
 def canonical_export_digest(value: Mapping[str, object]) -> str:
-    if not isinstance(value, Mapping):
-        raise TypeError("value must be a mapping")
+    if type(value) is not dict:
+        raise TypeError("value must be an exact dict")
+    frozen = _freeze_proposal(value, label="canonical export")
     encoded = json.dumps(
-        value,
+        _plain_json(frozen),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

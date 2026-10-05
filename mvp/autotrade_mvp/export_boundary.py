@@ -33,6 +33,8 @@ _WINDOWS_RESERVED = {
 _MAX_EXPORT_BYTES = 4 * 1024 * 1024
 _MAX_EXPORT_DEPTH = 32
 _MAX_EXPORT_ITEMS = 100_000
+_MAX_INTEGER_BITS = 4_096
+_MAX_INTEGER_DECIMAL_DIGITS = 1_234
 
 
 class ExportBoundaryError(ValueError):
@@ -63,8 +65,23 @@ class PreparedExport:
         }
 
 
+def _utf8_text(value: object, *, name: str, allow_empty: bool = True) -> str:
+    if type(value) is not str:
+        raise ExportBoundaryError(f"{name} must be exact text")
+    if len(value) > _MAX_EXPORT_BYTES:
+        raise ExportBoundaryError(f"{name} exceeds export text hard limit")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ExportBoundaryError(f"{name} must contain valid UTF-8 text") from error
+    if not allow_empty and not value:
+        raise ExportBoundaryError(f"{name} is required")
+    return value
+
+
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    value = _utf8_text(value, name=name)
+    if not value.strip():
         raise ExportBoundaryError(f"{name} is required")
     return value.strip()
 
@@ -96,8 +113,8 @@ def _safe_filename(value: object) -> str:
 
 
 def _rights(rights: Mapping[str, object]) -> str:
-    if not isinstance(rights, Mapping):
-        raise ExportBoundaryError("rights must be an object")
+    if type(rights) is not dict:
+        raise ExportBoundaryError("rights must be an exact object")
     if rights.get("export") is not True:
         raise PermissionError("rights do not permit export")
     return _required_text(rights.get("rights_id"), name="rights.rights_id")
@@ -105,7 +122,7 @@ def _rights(rights: Mapping[str, object]) -> str:
 
 class _Budget:
     def __init__(self, maximum_items: int):
-        if not isinstance(maximum_items, int) or isinstance(maximum_items, bool) or maximum_items < 1:
+        if type(maximum_items) is not int or maximum_items < 1:
             raise ExportBoundaryError("maximum_items must be a positive integer")
         self.remaining = maximum_items
 
@@ -120,19 +137,26 @@ def _normalize(value: object, *, depth: int, max_depth: int, budget: _Budget) ->
         raise ExportBoundaryError("payload exceeds nesting limit")
     budget.consume()
 
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) is bool:
         return value
-    if isinstance(value, Decimal):
+    if type(value) is int:
+        if value.bit_length() > _MAX_INTEGER_BITS:
+            raise ExportBoundaryError("integer exceeds export numeric hard limit")
+        return value
+    if type(value) is str:
+        return _utf8_text(value, name="payload text")
+    if type(value) is Decimal:
         if not value.is_finite():
             raise ExportBoundaryError("Decimal values must be finite")
         return format(value, "f")
-    if isinstance(value, float):
+    if type(value) is float:
         raise ExportBoundaryError("binary floating-point values are not export-safe")
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
-                raise ExportBoundaryError("object keys must be non-empty strings")
+            if type(key) is not str or not key:
+                raise ExportBoundaryError("object keys must be non-empty exact strings")
+            _utf8_text(key, name="object key", allow_empty=False)
             if key in result:
                 raise ExportBoundaryError("duplicate object key")
             if _SENSITIVE_KEY.search(key):
@@ -145,7 +169,7 @@ def _normalize(value: object, *, depth: int, max_depth: int, budget: _Budget) ->
                     budget=budget,
                 )
         return result
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return [
             _normalize(
                 item,
@@ -178,15 +202,11 @@ def prepare_json_export(
     tools, authority or credential access.
     """
 
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
+    if type(max_bytes) is not int or max_bytes < 1:
         raise ExportBoundaryError("max_bytes must be a positive integer")
-    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1:
+    if type(max_depth) is not int or max_depth < 1:
         raise ExportBoundaryError("max_depth must be a positive integer")
-    if (
-        not isinstance(maximum_items, int)
-        or isinstance(maximum_items, bool)
-        or maximum_items < 1
-    ):
+    if type(maximum_items) is not int or maximum_items < 1:
         raise ExportBoundaryError("maximum_items must be a positive integer")
     if max_bytes > _MAX_EXPORT_BYTES:
         raise ExportBoundaryError("max_bytes exceeds export boundary hard limit")
@@ -195,6 +215,8 @@ def prepare_json_export(
     if maximum_items > _MAX_EXPORT_ITEMS:
         raise ExportBoundaryError("maximum_items exceeds export boundary hard limit")
 
+    if type(source_refs) not in (tuple, list):
+        raise ExportBoundaryError("source_refs must be an exact collection")
     normalized_sources = tuple(
         _required_text(item, name="source_ref") for item in source_refs
     )
@@ -232,6 +254,16 @@ def prepare_json_export(
     )
 
 
+def _parse_json_int(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > _MAX_INTEGER_DECIMAL_DIGITS:
+        raise ExportBoundaryError("serialized integer exceeds numeric hard limit")
+    parsed = int(value)
+    if parsed.bit_length() > _MAX_INTEGER_BITS:
+        raise ExportBoundaryError("serialized integer exceeds numeric hard limit")
+    return parsed
+
+
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -253,13 +285,21 @@ def _serialized_payload_is_safe(
     if depth > max_depth:
         return False
     budget.consume()
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or type(value) is bool:
         return True
-    if isinstance(value, Decimal):
+    if type(value) is int:
+        return value.bit_length() <= _MAX_INTEGER_BITS
+    if type(value) is str:
+        try:
+            _utf8_text(value, name="serialized text")
+        except ExportBoundaryError:
+            return False
+        return True
+    if type(value) is Decimal:
         # json.loads(parse_float=Decimal) exposes forbidden binary-style JSON
         # numeric fractions. Exact financial decimals must have been strings.
         return False
-    if isinstance(value, list):
+    if type(value) is list:
         return all(
             _serialized_payload_is_safe(
                 item,
@@ -269,9 +309,13 @@ def _serialized_payload_is_safe(
             )
             for item in value
         )
-    if isinstance(value, dict):
+    if type(value) is dict:
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
+            if type(key) is not str or not key:
+                return False
+            try:
+                _utf8_text(key, name="serialized object key", allow_empty=False)
+            except ExportBoundaryError:
                 return False
             if _SENSITIVE_KEY.search(key):
                 if item != "[REDACTED]":
@@ -289,27 +333,35 @@ def _serialized_payload_is_safe(
 
 
 def verify_prepared_export(export: PreparedExport) -> bool:
-    if not isinstance(export, PreparedExport):
-        raise TypeError("export must be PreparedExport")
-    if export.media_type != "application/json":
-        return False
+    if type(export) is not PreparedExport:
+        raise TypeError("export must be an exact PreparedExport")
     try:
+        if type(export.media_type) is not str or export.media_type != "application/json":
+            return False
         _export_id(export.export_id)
         _safe_filename(export.filename)
         _required_text(export.rights_id, name="rights_id")
+        if type(export.source_refs) is not tuple:
+            return False
         normalized_sources = tuple(
             _required_text(item, name="source_ref") for item in export.source_refs
         )
         if len(normalized_sources) != len(set(normalized_sources)):
             return False
-        if not isinstance(export.data, bytes):
+        if type(export.data) is not bytes:
             return False
         if len(export.data) > _MAX_EXPORT_BYTES:
+            return False
+        if (
+            type(export.sha256) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", export.sha256) is None
+        ):
             return False
         decoded = export.data.decode("utf-8")
         parsed = json.loads(
             decoded,
             parse_float=Decimal,
+            parse_int=_parse_json_int,
             object_pairs_hook=_unique_json_object,
         )
         if not _serialized_payload_is_safe(
@@ -324,6 +376,7 @@ def verify_prepared_export(export: PreparedExport) -> bool:
         json.JSONDecodeError,
         ExportBoundaryError,
         TypeError,
+        ValueError,
         RecursionError,
     ):
         return False
@@ -342,12 +395,19 @@ def write_prepared_export(
     rights identity captured when the inert bytes were prepared.
     """
 
+    if type(export) is not PreparedExport:
+        raise TypeError("export must be an exact PreparedExport")
     current_rights_id = _rights(rights)
-    if current_rights_id != export.rights_id:
-        raise PermissionError("publication rights identity does not match prepared export")
     if not verify_prepared_export(export):
         raise ExportBoundaryError("prepared export failed integrity verification")
-    root = Path(directory)
+    if current_rights_id != export.rights_id:
+        raise PermissionError("publication rights identity does not match prepared export")
+    if type(directory) is str:
+        root = Path(directory)
+    elif type(directory) is type(Path()):
+        root = directory
+    else:
+        raise TypeError("directory must be an exact str or platform Path")
     root.mkdir(parents=True, exist_ok=True)
     target = root / export.filename
 

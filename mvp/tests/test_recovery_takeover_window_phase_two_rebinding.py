@@ -121,24 +121,38 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
             provider_id="SIMULATED",
         )
 
-    def test_private_canonical_window_rebind_before_call_is_never_executed(self) -> None:
+    def _assert_private_authority_rebind_is_ignored(self, attribute: str) -> None:
         calls = []
 
-        @contextmanager
-        def rebound_window(*args, **kwargs):
+        def rebound(*args, **kwargs):
             calls.append((args, kwargs))
-            raise AssertionError("pre-call canonical takeover window executed")
-            yield
+            raise AssertionError(f"pre-call private authority executed: {attribute}")
 
-        with patch.object(
-            takeover_module,
-            "_CANONICAL_TAKEOVER_AUTHORITY_WINDOW",
-            new=rebound_window,
-        ):
+        with patch.object(takeover_module, attribute, new=rebound):
             result = self._execute()
 
         self.assertEqual(result.target_owner.owner_id, "host-b")
         self.assertEqual(calls, [])
+
+    def test_private_canonical_window_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_TAKEOVER_AUTHORITY_WINDOW"
+        )
+
+    def test_private_record_anchor_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR"
+        )
+
+    def test_private_require_anchor_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR"
+        )
+
+    def test_private_current_sequence_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_JOURNAL_CURRENT_SEQUENCE"
+        )
 
     def test_phase_two_callback_cannot_retarget_phase_three_takeover_window(self) -> None:
         calls = []

@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 from types import MappingProxyType
+import subprocess
+import sys
 import unittest
 
 import mvp.autotrade_mvp.allocation as allocation_module
@@ -600,27 +602,45 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
         self.assertEqual(touched, [])
 
     def test_json_encoder_constructor_retarget_fails_before_callback(self):
-        evidence = self.evidence({"symbol": "AAA"})
-        encoder = allocation_module.json.JSONEncoder
-        encoder_dict = type.__getattribute__(encoder, "__dict__")
-        self.assertNotIn("__new__", encoder_dict)
-        touched = []
+        # CPython does not fully restore JSONEncoder's tp_new slot after a
+        # dynamic __new__ assignment is deleted. Mutating that shared stdlib
+        # class in this interpreter poisons every later json.dumps(cls=...)
+        # call. Exercise the hostile constructor mutation in a child process so
+        # the production guard is still tested without corrupting suite state.
+        script = r'''
+import mvp.autotrade_mvp.allocation as allocation_module
+encoder = allocation_module.json.JSONEncoder
+encoder_dict = type.__getattribute__(encoder, "__dict__")
+assert "__new__" not in encoder_dict
+touched = []
 
-        def forged_new(cls, *args, **kwargs):
-            touched.append("new")
-            raise AssertionError("forged JSON encoder constructor executed")
+def forged_new(cls, *args, **kwargs):
+    touched.append("new")
+    raise AssertionError("forged JSON encoder constructor executed")
 
-        encoder.__new__ = staticmethod(forged_new)
-        try:
-            with self.assertRaisesRegex(
-                ValueError,
-                "serializer authority changed after binding",
-            ):
-                allocation_module._allocation_payload_snapshot(evidence)
-        finally:
-            del encoder.__new__
-
-        self.assertEqual(touched, [])
+encoder.__new__ = staticmethod(forged_new)
+try:
+    try:
+        allocation_module._canonical_evidence_json({"symbol": "AAA"})
+    except ValueError as error:
+        assert "serializer authority changed after binding" in str(error)
+    else:
+        raise AssertionError("constructor retarget was not rejected")
+    assert touched == []
+finally:
+    del encoder.__new__
+'''
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
 
 
     def test_json_encoder_helper_retarget_fails_before_callback(self):

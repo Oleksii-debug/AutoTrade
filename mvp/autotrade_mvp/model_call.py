@@ -618,6 +618,7 @@ class DurableModelCallOrchestrator:
 
     def _now(self) -> str:
         """Capture injected chronology without allowing authority redirection."""
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         callback_shape = DurableModelCallOrchestrator._callback_shape_snapshot(self)
         clock = callback_shape[1].get("clock")
         if not callable(clock):
@@ -630,7 +631,7 @@ class DurableModelCallOrchestrator:
         except Exception as error:
             clock_error = error
         finally:
-            clock_changes = DurableModelCallOrchestrator._restore_callback_shape(
+            clock_changes = restore_callback_shape(
                 self,
                 callback_shape,
             )

@@ -4857,6 +4857,17 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertIsNone(accepted.ambiguity_reason)
 
 
+    def test_bybit_raw_response_without_http_status_requires_reconciliation(self):
+        raw = b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-raw"}}'
+        exact = _bybit_exact_trading_response(raw)
+        self.assertEqual(exact.response_bytes, raw)
+        self.assertIsNone(exact.http_status)
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "bybit_http_status_unavailable_execution_unknown",
+        )
+
     def test_bybit_http_503_persists_unknown_and_never_resends(self):
         from mvp.tests.test_bybit_transport import (
             BybitV5SharedTransportTests,

@@ -219,6 +219,7 @@ def _install_page_chain_authority():
             tuple[object, ...],
             weakref.ReferenceType,
             weakref.ReferenceType,
+            DurableProviderQualificationRegistry,
         ],
     ] = {}
     fields = (
@@ -252,6 +253,7 @@ def _install_page_chain_authority():
         value: ProviderAccountPageChain,
         origin_set: ProviderAccountOriginBindingSet,
         absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+        qualification_registry: DurableProviderQualificationRegistry,
     ) -> None:
         prune()
         if id(value) in states and states[id(value)][0]() is not None:
@@ -261,6 +263,7 @@ def _install_page_chain_authority():
             material(value),
             weakref.ref(origin_set),
             weakref.ref(absence_semantics),
+            qualification_registry,
         )
 
     def require(value: ProviderAccountPageChain) -> ProviderAccountPageChain:
@@ -284,14 +287,9 @@ def _install_page_chain_authority():
     def require_current(
         value: ProviderAccountPageChain,
         *,
-        qualification_registry: DurableProviderQualificationRegistry,
         at: datetime,
     ) -> ProviderAccountPageChain:
         require(value)
-        if type(qualification_registry) is not DurableProviderQualificationRegistry:
-            raise TypeError(
-                "qualification_registry must be exact DurableProviderQualificationRegistry"
-            )
         state = states.get(id(value))
         if state is None:
             raise ProviderAccountPageChainError(
@@ -299,6 +297,7 @@ def _install_page_chain_authority():
             )
         origin_set = state[2]()
         absence_semantics = state[3]()
+        qualification_registry = state[4]
         if origin_set is None or absence_semantics is None:
             raise ProviderAccountPageChainError(
                 "page-chain source authority is unavailable"
@@ -592,5 +591,6 @@ def issue_provider_account_page_chain(
         value,
         origin_set,
         absence_semantics,
+        qualification_registry,
     )
     return value

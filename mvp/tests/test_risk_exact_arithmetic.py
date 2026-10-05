@@ -810,7 +810,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
         for digest in digests:
             self.assertRegex(digest, r"^risk-intent:sha256:[0-9a-f]{64}$")
 
-    def test_bind_rejects_hash_from_different_evaluated_risk_intent(self):
+    def test_bind_preserves_command_identity_separately_from_evaluated_risk_intent(self):
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",
@@ -819,32 +819,10 @@ class RiskExactArithmeticTests(unittest.TestCase):
             expected_state_version=7,
         )
         raw = evaluate_risk(intent, exact_context(), policy())
-        other = RiskIntent.create(
-            symbol="ABC",
-            side="BUY",
-            quantity="0.2",
-            price="1",
-            expected_state_version=7,
-        )
-        with self.assertRaisesRegex(
-            ValueError,
-            "intent_hash does not match the evaluated risk intent",
-        ):
-            bind_risk_decision(
-                raw,
-                intent_hash=risk_module.risk_intent_hash(other),
-                state_version=7,
-                policy_version=1,
-                reservation_version=0,
-                reservation_requirements={"CASH:USD": "1"},
-                capability_snapshot_id="capability",
-                evaluated_at="2026-10-05T10:00:00Z",
-                valid_until="2026-10-05T10:01:00Z",
-            )
-
+        command_identity = "sha256:" + "a" * 64
         bound = bind_risk_decision(
             raw,
-            intent_hash=risk_module.risk_intent_hash(intent),
+            intent_hash=command_identity,
             state_version=7,
             policy_version=1,
             reservation_version=0,
@@ -853,11 +831,12 @@ class RiskExactArithmeticTests(unittest.TestCase):
             evaluated_at="2026-10-05T10:00:00Z",
             valid_until="2026-10-05T10:01:00Z",
         )
-        self.assertEqual(bound.intent_hash, raw.evaluated_intent_hash)
+        self.assertEqual(bound.intent_hash, command_identity)
         self.assertEqual(
-            bound.intent_hash,
+            bound.evaluated_intent_hash,
             risk_module.risk_intent_hash(intent),
         )
+        self.assertNotEqual(bound.intent_hash, bound.evaluated_intent_hash)
 
     def test_bind_rejects_missing_or_noncanonical_evaluated_intent_identity(self):
         intent = RiskIntent.create(
@@ -915,7 +894,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 valid_until="2026-10-05T10:01:00Z",
             )
 
-    def test_bound_risk_rejects_caller_intent_hash_substitution(self):
+    def test_bound_risk_keeps_evaluated_identity_separate_from_caller_command_hash(self):
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",
@@ -930,24 +909,27 @@ class RiskExactArithmeticTests(unittest.TestCase):
             price="1",
             expected_state_version=7,
         )
-        with self.assertRaisesRegex(
-            ValueError,
-            "intent_hash does not match the evaluated risk intent",
-        ):
-            risk_module.evaluate_bound_risk(
-                intent,
-                exact_context(),
-                policy(),
-                intent_hash=risk_module.risk_intent_hash(substituted),
-                policy_version=1,
-                reservation_version=0,
-                reservation_requirements={"POSITION:ABC": "1"},
-                capability_snapshot_id="capability",
-                evaluated_at="2026-10-05T10:00:00Z",
-                valid_until="2026-10-05T10:01:00Z",
-            )
+        caller_hash = risk_module.risk_intent_hash(substituted)
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash=caller_hash,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        self.assertEqual(bound.intent_hash, caller_hash)
+        self.assertEqual(
+            bound.evaluated_intent_hash,
+            risk_module.risk_intent_hash(intent),
+        )
+        self.assertNotEqual(bound.intent_hash, bound.evaluated_intent_hash)
 
-    def test_bound_fingerprint_rejects_rehydrated_intent_identity_mismatch(self):
+    def test_evaluated_intent_identity_participates_in_bound_fingerprint(self):
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",
@@ -959,7 +941,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
             intent,
             exact_context(),
             policy(),
-            intent_hash=risk_module.risk_intent_hash(intent),
+            intent_hash="sha256:" + "a" * 64,
             policy_version=1,
             reservation_version=0,
             reservation_requirements={"POSITION:ABC": "1"},
@@ -980,14 +962,13 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 "evaluated_intent_hash": risk_module.risk_intent_hash(substituted),
             }
         )
+        self.assertNotEqual(
+            risk_module.risk_decision_fingerprint(bound),
+            risk_module.risk_decision_fingerprint(rehydrated),
+        )
         with self.assertRaisesRegex(
             ValueError,
-            "bound risk decision intent_hash does not match evaluated intent identity",
-        ):
-            risk_module.risk_decision_fingerprint(rehydrated)
-        with self.assertRaisesRegex(
-            ValueError,
-            "bound risk decision intent_hash does not match evaluated intent identity",
+            "risk_decision_id does not match bound evidence",
         ):
             risk_module.validate_bound_risk_decision(
                 rehydrated,

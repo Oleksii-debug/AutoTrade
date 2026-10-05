@@ -77,8 +77,15 @@ _EFFECTFUL_SUBMISSION_EVENTS = frozenset(
     {"SubmissionSending", "SubmissionSent", "SubmissionUnknown"}
 )
 
-# Retain the installed JournalStore takeover primitives once. A later public
-# class-method rebind must not retarget the financial owner-transition proof.
+# Retain installed primitives once. Later module/class rebinding must not
+# retarget the financial owner-transition proof.
+_CANONICAL_PAYLOAD_DIGEST = payload_digest
+_CANONICAL_REVOKE_TRADE_CREDENTIAL_WITH_RECEIPT = (
+    revoke_trade_credential_with_receipt
+)
+_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT = (
+    verify_trade_credential_transition_receipt
+)
 _CANONICAL_JOURNAL_APPEND_EVENT = JournalStore.append_event
 _CANONICAL_JOURNAL_LOAD_EVENTS = JournalStore.load_events
 _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE = (
@@ -158,6 +165,7 @@ def _event_id(
     version: int,
     event_type: str,
     payload: dict[str, object],
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> str:
     return str(
         uuid5(
@@ -169,7 +177,7 @@ def _event_id(
             + "/"
             + event_type
             + "/"
-            + payload_digest(payload),
+            + _payload_digest(payload),
         )
     )
 
@@ -183,6 +191,7 @@ def _append_takeover_event(
     payload: dict[str, object],
     _append_event=_CANONICAL_JOURNAL_APPEND_EVENT,
     _load_events=_CANONICAL_JOURNAL_LOAD_EVENTS,
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> dict[str, object]:
     event = {
         "event_id": _event_id(
@@ -196,7 +205,7 @@ def _append_takeover_event(
         "aggregate_id": takeover_id,
         "aggregate_version": str(version),
         "payload": payload,
-        "payload_hash": payload_digest(payload),
+        "payload_hash": _payload_digest(payload),
         "committed_at": _now(),
     }
     _append_event(store, event)
@@ -250,7 +259,10 @@ def _started_owners(
 
 
 def _validate_takeover_events(
-    events: list[dict[str, object]], *, takeover_id: str
+    events: list[dict[str, object]],
+    *,
+    takeover_id: str,
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> tuple[dict[str, object], ...]:
     if not events or len(events) > len(_EVENT_TYPES):
         raise DurableTakeoverError(
@@ -271,7 +283,7 @@ def _validate_takeover_events(
             or event.get("event_type") != expected_type
             or event.get("aggregate_version") != index
             or type(payload) is not dict
-            or payload_digest(payload) != event.get("payload_hash")
+            or _payload_digest(payload) != event.get("payload_hash")
             or event.get("event_id")
             != _event_id(
                 takeover_id=takeover_id,
@@ -349,6 +361,7 @@ def _vault_snapshot(
     vault: ProtectedCredentialVault,
     *,
     handle_id: str,
+    _verify_receipt=_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT,
 ) -> tuple[
     PersistentCredentialHandle,
     bool,
@@ -379,7 +392,7 @@ def _vault_snapshot(
             if item is not None:
                 receipt = transition._parse_receipt(item["receipt"])
     if receipt is not None:
-        verify_trade_credential_transition_receipt(vault, receipt)
+        _verify_receipt(vault, receipt)
     return current, active, receipt
 
 
@@ -431,9 +444,11 @@ def _seal_entropy(
 def _seal_evidence(
     vault: ProtectedCredentialVault,
     subject: dict[str, object],
+    *,
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> str:
     message = (
-        "takeover-evidence:" + payload_digest(subject)
+        "takeover-evidence:" + _payload_digest(subject)
     ).encode("utf-8")
     try:
         sealed = vault._protector.protect(
@@ -454,6 +469,8 @@ def _seal_evidence(
 def _verify_evidence_seal(
     vault: ProtectedCredentialVault,
     payload: dict[str, object],
+    *,
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> None:
     seal_b64 = payload.get("issuer_seal_b64")
     if type(seal_b64) is not str or not seal_b64:
@@ -463,7 +480,7 @@ def _verify_evidence_seal(
     subject = dict(payload)
     subject.pop("issuer_seal_b64", None)
     message = (
-        "takeover-evidence:" + payload_digest(subject)
+        "takeover-evidence:" + _payload_digest(subject)
     ).encode("utf-8")
     try:
         sealed = b64decode(seal_b64, validate=True)
@@ -487,6 +504,7 @@ def _owner_event(
     owner_scope: str,
     owner: OwnerFence,
     _load_events=_CANONICAL_JOURNAL_LOAD_EVENTS,
+    _payload_digest=_CANONICAL_PAYLOAD_DIGEST,
 ) -> dict[str, object]:
     events = _load_events(
         store, "recovery_owner", owner_scope
@@ -503,7 +521,7 @@ def _owner_event(
         or type(payload) is not dict
         or payload.get("owner_id") != owner.owner_id
         or payload.get("owner_epoch") != str(owner.epoch)
-        or payload_digest(payload) != event.get("payload_hash")
+        or _payload_digest(payload) != event.get("payload_hash")
     ):
         raise DurableTakeoverError(
             "recovery owner event does not match takeover target"
@@ -781,6 +799,8 @@ def _execute_durable_takeover_impl(
         record_credential_transition_anchor,
         require_credential_transition_anchor,
         journal_current_sequence,
+        revoke_trade_credential,
+        verify_trade_credential_receipt,
     ) = _installed_authority
 
     (
@@ -956,12 +976,12 @@ def _execute_durable_takeover_impl(
                 raise DurableTakeoverError(
                     "credential generation changed during pending takeover"
                 )
-            receipt = revoke_trade_credential_with_receipt(
+            receipt = revoke_trade_credential(
                 vault,
                 handle,
                 execution_identity=execution_identity,
             )
-            verify_trade_credential_transition_receipt(
+            verify_trade_credential_receipt(
                 vault, receipt
             )
         else:
@@ -1290,5 +1310,7 @@ execute_durable_takeover = _bind_execute_durable_takeover(
         _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR,
         _CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR,
         _CANONICAL_JOURNAL_CURRENT_SEQUENCE,
+        _CANONICAL_REVOKE_TRADE_CREDENTIAL_WITH_RECEIPT,
+        _CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT,
     ),
 )

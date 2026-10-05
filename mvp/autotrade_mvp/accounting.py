@@ -665,7 +665,12 @@ def _scoped_economic_owner_operations():
             current = owners.get(id(value))
             if current is not None and current[0]() is value:
                 raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (weakref.ref(value), environment, account_id, book)
+            owners[id(value)] = (
+                weakref.ref(value),
+                environment,
+                account_id,
+                weakref.ref(book),
+            )
 
     def require(value):
         if type(value) is not ScopedEconomicBook:
@@ -674,7 +679,10 @@ def _scoped_economic_owner_operations():
             owner = owners.get(id(value))
             if owner is None or owner[0]() is not value:
                 raise AccountingConflict("immutable scoped-book owner is unavailable")
-            _reference, environment, account_id, book = owner
+            _reference, environment, account_id, book_ref = owner
+            book = book_ref()
+        if book is None:
+            raise AccountingConflict("immutable scoped-book owner was lost")
         state = object.__getattribute__(value, "__dict__")
         current_book = state.get("_book")
         if type(current_book) is not EconomicBook:

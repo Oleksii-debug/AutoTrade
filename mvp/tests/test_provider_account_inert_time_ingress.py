@@ -7,6 +7,7 @@ from mvp.autotrade_mvp import provider_account_accepted_cut as accepted_cut
 from mvp.autotrade_mvp import provider_account_coverage_set as coverage_set
 from mvp.autotrade_mvp import provider_account_currentness as currentness
 from mvp.autotrade_mvp import provider_account_empty_exclusion as empty_exclusion
+from mvp.autotrade_mvp import provider_account_origin_set as origin_set
 from mvp.autotrade_mvp import provider_account_reconciliation_semantics as reconciliation_semantics
 
 
@@ -45,6 +46,13 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
                     validator(value)
                 self.assertEqual(hostile.calls, 0)
 
+    def test_origin_set_rejects_executable_nested_tzinfo_without_calling_it(self):
+        hostile = _ExecutableTimezone()
+        value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)
+        with self.assertRaises(origin_set.ProviderAccountOriginSetError):
+            origin_set._utc(value, name="at")
+        self.assertEqual(hostile.calls, 0)
+
     def test_public_reconciliation_resolver_rejects_hostile_time_before_registry_lookup(self):
         hostile = _ExecutableTimezone()
         value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)
@@ -77,6 +85,7 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             self.assertIs(empty_exclusion._at(value), value)
             self.assertIs(accepted_cut._at(value), value)
             self.assertIs(reconciliation_semantics._at(value), value)
+            self.assertIs(origin_set._utc(value, name="at"), value)
 
 
 if __name__ == "__main__":

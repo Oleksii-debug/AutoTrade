@@ -517,24 +517,41 @@ class DurableModelCallOrchestrator:
 
     def _callback_shape_snapshot(
         self,
-    ) -> tuple[frozenset[str], frozenset[str], dict[str, object]]:
+    ) -> tuple[
+        frozenset[str],
+        frozenset[str],
+        dict[str, object],
+        dict[str, object] | None,
+    ]:
         """Freeze instance-shape and JournalStore state around caller callbacks.
 
         Explicit authority fields are restored by each boundary. This companion
         snapshot catches method shadows/new instance attributes and mutation of
         the canonical JournalStore object's own authority state.
         """
+        identity = getattr(self.journal, "_store_identity", None)
+        identity_state = (
+            dict(vars(identity))
+            if identity is not None and hasattr(identity, "__dict__")
+            else None
+        )
         return (
             frozenset(vars(self)),
             frozenset(vars(self.budget)),
             dict(vars(self.journal)),
+            identity_state,
         )
 
     def _restore_callback_shape(
         self,
-        snapshot: tuple[frozenset[str], frozenset[str], dict[str, object]],
+        snapshot: tuple[
+            frozenset[str],
+            frozenset[str],
+            dict[str, object],
+            dict[str, object] | None,
+        ],
     ) -> list[str]:
-        orchestrator_names, budget_names, journal_state = snapshot
+        orchestrator_names, budget_names, journal_state, identity_state = snapshot
         changes: list[str] = []
 
         for name in tuple(vars(self)):
@@ -564,6 +581,30 @@ class DurableModelCallOrchestrator:
         if changes:
             current_journal_state.clear()
             current_journal_state.update(journal_state)
+
+        identity = journal_state.get("_store_identity")
+        if identity_state is not None:
+            if identity is None or not hasattr(identity, "__dict__"):
+                changes.append("journal._store_identity")
+            else:
+                current_identity_state = vars(identity)
+                for name in sorted(set(current_identity_state) | set(identity_state)):
+                    if name not in identity_state or name not in current_identity_state:
+                        changes.append("journal._store_identity." + name)
+                        continue
+                    current = current_identity_state[name]
+                    expected = identity_state[name]
+                    if type(current) is not type(expected) or current != expected:
+                        changes.append("journal._store_identity." + name)
+                if any(
+                    item == "journal._store_identity"
+                    or item.startswith("journal._store_identity.")
+                    for item in changes
+                ):
+                    current_identity_state.clear()
+                    current_identity_state.update(identity_state)
+        elif identity is not None:
+            changes.append("journal._store_identity")
         return changes
 
     @staticmethod

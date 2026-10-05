@@ -9,7 +9,7 @@ accept a caller-minted ``FinancialSendAuthority`` or a caller-selected
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .dispatch import DispatchOutcome
 from .durable_financial_request_binding import DurableFinancialRequestBindingRegistry
@@ -28,22 +28,6 @@ _FACTORY_TOKEN = object()
 _ISSUER_TYPE = FinancialSendAuthorityIssuer
 _REGISTRY_TYPE = DurableFinancialRequestBindingRegistry
 _SENDER_TYPE = FinanciallyBoundBybitOrderSender
-
-_REGISTRY_REQUIRE_STORE = _REGISTRY_TYPE.__dict__.get("_require_store")
-_REGISTRY_REQUIRE_STORE_CODE = getattr(_REGISTRY_REQUIRE_STORE, "__code__", None)
-if not callable(_REGISTRY_REQUIRE_STORE) or _REGISTRY_REQUIRE_STORE_CODE is None:
-    raise RuntimeError("durable financial binding store authority is unavailable")
-
-_ISSUER_RUNTIME_DESCRIPTOR = _ISSUER_TYPE.__dict__.get("runtime")
-if (
-    type(_ISSUER_RUNTIME_DESCRIPTOR) is not property
-    or _ISSUER_RUNTIME_DESCRIPTOR.fget is None
-    or getattr(_ISSUER_RUNTIME_DESCRIPTOR.fget, "__code__", None) is None
-):
-    raise RuntimeError("financial send issuer runtime authority is unavailable")
-_ISSUER_RUNTIME_GETTER = _ISSUER_RUNTIME_DESCRIPTOR.fget
-_ISSUER_RUNTIME_GETTER_CODE = _ISSUER_RUNTIME_GETTER.__code__
-
 _MINT_PERSISTED_AUTHORITY = issue_persisted_financial_send_authority
 _MINT_PERSISTED_AUTHORITY_CODE = _MINT_PERSISTED_AUTHORITY.__code__
 _SENDER_DISPATCH_FUNCTION = _SENDER_TYPE.__dict__.get("dispatch")
@@ -53,6 +37,8 @@ if not callable(_SENDER_DISPATCH_FUNCTION) or _SENDER_DISPATCH_CODE is None:
 
 
 def _require_module_authority() -> None:
+    """Check only retained identities; execute no registry/issuer callback here."""
+
     if FinancialSendAuthorityIssuer is not _ISSUER_TYPE:
         raise DurableFinancialBybitSenderError("financial issuer type authority changed")
     if DurableFinancialRequestBindingRegistry is not _REGISTRY_TYPE:
@@ -61,25 +47,6 @@ def _require_module_authority() -> None:
         )
     if FinanciallyBoundBybitOrderSender is not _SENDER_TYPE:
         raise DurableFinancialBybitSenderError("financial Bybit sender type authority changed")
-    current_store = _REGISTRY_TYPE.__dict__.get("_require_store")
-    if (
-        current_store is not _REGISTRY_REQUIRE_STORE
-        or getattr(_REGISTRY_REQUIRE_STORE, "__code__", None)
-        is not _REGISTRY_REQUIRE_STORE_CODE
-    ):
-        raise DurableFinancialBybitSenderError(
-            "durable binding store executable authority changed"
-        )
-    current_runtime = _ISSUER_TYPE.__dict__.get("runtime")
-    if (
-        current_runtime is not _ISSUER_RUNTIME_DESCRIPTOR
-        or type(current_runtime) is not property
-        or current_runtime.fget is not _ISSUER_RUNTIME_GETTER
-        or _ISSUER_RUNTIME_GETTER.__code__ is not _ISSUER_RUNTIME_GETTER_CODE
-    ):
-        raise DurableFinancialBybitSenderError(
-            "financial issuer runtime executable authority changed"
-        )
     if (
         issue_persisted_financial_send_authority is not _MINT_PERSISTED_AUTHORITY
         or _MINT_PERSISTED_AUTHORITY.__code__ is not _MINT_PERSISTED_AUTHORITY_CODE
@@ -94,6 +61,43 @@ def _require_module_authority() -> None:
         raise DurableFinancialBybitSenderError(
             "financial Bybit dispatch executable authority changed"
         )
+
+
+def _structural_authorities(
+    sender: FinanciallyBoundBybitOrderSender,
+    issuer: FinancialSendAuthorityIssuer,
+    registry: DurableFinancialRequestBindingRegistry,
+) -> tuple[object, object]:
+    """Read canonical private object identities without executing mutable methods."""
+
+    runtime = object.__getattribute__(
+        issuer,
+        "_FinancialSendAuthorityIssuer__runtime",
+    )
+    issuer_store = object.__getattribute__(
+        issuer,
+        "_FinancialSendAuthorityIssuer__journal",
+    )
+    registry_store = object.__getattribute__(registry, "_store")
+    if registry_store is not issuer_store:
+        raise DurableFinancialBybitSenderError(
+            "durable financial binding and product sender must share one exact JournalStore"
+        )
+    if object.__getattribute__(
+        sender,
+        "_FinanciallyBoundBybitOrderSender__issuer",
+    ) is not issuer:
+        raise DurableFinancialBybitSenderError(
+            "financial Bybit sender belongs to another issuer"
+        )
+    if object.__getattribute__(
+        sender,
+        "_FinanciallyBoundBybitOrderSender__runtime",
+    ) is not runtime:
+        raise DurableFinancialBybitSenderError(
+            "financial Bybit sender belongs to another production host"
+        )
+    return runtime, issuer_store
 
 
 class DurableFinanciallyBoundBybitOrderSender:
@@ -133,20 +137,7 @@ class DurableFinanciallyBoundBybitOrderSender:
                 "registry must be exact DurableFinancialRequestBindingRegistry"
             )
         _require_module_authority()
-        runtime = _ISSUER_RUNTIME_GETTER(issuer)
-        store = _REGISTRY_REQUIRE_STORE(registry)
-        if getattr(runtime, "journal", None) is not store:
-            raise DurableFinancialBybitSenderError(
-                "durable financial binding and product sender must share one exact JournalStore"
-            )
-        if object.__getattribute__(sender, "_FinanciallyBoundBybitOrderSender__issuer") is not issuer:
-            raise DurableFinancialBybitSenderError(
-                "financial Bybit sender belongs to another issuer"
-            )
-        if object.__getattribute__(sender, "_FinanciallyBoundBybitOrderSender__runtime") is not runtime:
-            raise DurableFinancialBybitSenderError(
-                "financial Bybit sender belongs to another production host"
-            )
+        runtime, store = _structural_authorities(sender, issuer, registry)
         provider_environment = object.__getattribute__(
             sender,
             "_FinanciallyBoundBybitOrderSender__provider_environment",
@@ -169,6 +160,8 @@ class DurableFinanciallyBoundBybitOrderSender:
         return self.__provider_environment
 
     def _require_current(self) -> None:
+        """Perform structural checks only; #1713 owns executable/generation proof."""
+
         _require_module_authority()
         if type(self.__sender) is not _SENDER_TYPE:
             raise DurableFinancialBybitSenderError("financial Bybit sender type changed")
@@ -176,21 +169,15 @@ class DurableFinanciallyBoundBybitOrderSender:
             raise DurableFinancialBybitSenderError("financial issuer type changed")
         if type(self.__registry) is not _REGISTRY_TYPE:
             raise DurableFinancialBybitSenderError("durable binding registry type changed")
-        runtime = _ISSUER_RUNTIME_GETTER(self.__issuer)
-        if runtime is not self.__runtime or getattr(runtime, "journal", None) is not self.__store:
-            raise DurableFinancialBybitSenderError("production financial host changed")
-        if _REGISTRY_REQUIRE_STORE(self.__registry) is not self.__store:
-            raise DurableFinancialBybitSenderError("durable financial binding store changed")
-        if object.__getattribute__(
+        runtime, store = _structural_authorities(
             self.__sender,
-            "_FinanciallyBoundBybitOrderSender__issuer",
-        ) is not self.__issuer:
-            raise DurableFinancialBybitSenderError("financial Bybit issuer binding changed")
-        if object.__getattribute__(
-            self.__sender,
-            "_FinanciallyBoundBybitOrderSender__runtime",
-        ) is not self.__runtime:
-            raise DurableFinancialBybitSenderError("financial Bybit runtime binding changed")
+            self.__issuer,
+            self.__registry,
+        )
+        if runtime is not self.__runtime or store is not self.__store:
+            raise DurableFinancialBybitSenderError(
+                "durable financial product composition changed"
+            )
         if object.__getattribute__(
             self.__sender,
             "_FinanciallyBoundBybitOrderSender__provider_environment",
@@ -222,6 +209,8 @@ class DurableFinanciallyBoundBybitOrderSender:
         """Resolve the persisted admitted request, mint, then dispatch exact request."""
 
         self._require_current()
+        # The #1713 adapter performs the executable-authority and durable store
+        # generation checks before it executes any registry/issuer authority.
         authority = _MINT_PERSISTED_AUTHORITY(
             self.__issuer,
             self.__registry,

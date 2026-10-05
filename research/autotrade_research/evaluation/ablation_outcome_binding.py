@@ -2,25 +2,20 @@
 
 The bridge deliberately does not expose or validate the artifact's numeric utility.
 It proves only that the artifact points at one ExperienceMemory-owned outcome fact
-at the selected causal cut.  A registered task-specific scorer remains required
+at the selected causal cut. A registered task-specific scorer remains required
 before that fact can become numeric utility authority.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from uuid import UUID
 
-from research.autotrade_research.evaluation.ablation import (
-    CanonicalAblationOutcomeEvidence,
-)
-from research.autotrade_research.memory.episodes import (
-    ExperienceMemory,
-    MemoryIntegrityError,
-)
-from research.autotrade_research.memory.reconciled_outcome import (
+from autotrade_research.evaluation.ablation import CanonicalAblationOutcomeEvidence
+from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
+from autotrade_research.memory.reconciled_outcome import (
     ReconciledOutcomeFactEvidence,
     resolve_reconciled_outcome_fact,
     reverify_reconciled_outcome_fact,
@@ -48,24 +43,23 @@ def _sha256(value: object, *, name: str) -> str:
 
 def _stored_utc(value: object, *, name: str) -> datetime:
     if type(value) is not str:
-        raise MemoryIntegrityError(f"{name} must be canonical UTC text")
+        raise MemoryIntegrityError(f"{name} must be exact canonical UTC text")
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
         raise MemoryIntegrityError(f"{name} is not a valid timestamp") from error
-    if parsed.tzinfo is None:
-        raise MemoryIntegrityError(f"{name} must be timezone-aware")
-    normalized = parsed.astimezone(timezone.utc)
-    if normalized.isoformat() != value:
+    if type(parsed) is not datetime or parsed.tzinfo is not timezone.utc:
+        raise MemoryIntegrityError(f"{name} must use exact UTC timezone")
+    if parsed.isoformat() != value:
         raise MemoryIntegrityError(f"{name} must be canonical UTC text")
-    return normalized
+    return parsed
 
 
 @dataclass(frozen=True)
 class BoundReconciledAblationOutcome:
     """Non-numeric binding between one ablation artifact and one memory fact.
 
-    This is a value object, not an issuer capability.  Its embedded reconciled fact
+    This is a value object, not an issuer capability. Its embedded reconciled fact
     still has to be reverified against ExperienceMemory at every authority boundary.
     """
 
@@ -80,16 +74,24 @@ class BoundReconciledAblationOutcome:
         _canonical_text(self.case_id, name="case_id")
         if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
             raise MemoryIntegrityError("variant must be exact FULL or ABLATED text")
+        episode_id = _canonical_text(
+            self.population_unit_id,
+            name="population_unit_id",
+        )
         try:
-            canonical_episode_id = str(UUID(self.population_unit_id))
+            canonical_episode_id = str(UUID(episode_id))
         except (TypeError, ValueError, AttributeError) as error:
-            raise MemoryIntegrityError("population_unit_id must be a canonical UUID") from error
-        if canonical_episode_id != self.population_unit_id:
+            raise MemoryIntegrityError(
+                "population_unit_id must be a canonical UUID"
+            ) from error
+        if canonical_episode_id != episode_id:
             raise MemoryIntegrityError("population_unit_id must be a canonical UUID")
         _sha256(self.ablation_artifact_digest, name="ablation_artifact_digest")
         if type(self.reconciled_fact) is not ReconciledOutcomeFactEvidence:
-            raise TypeError("reconciled_fact must be exact ReconciledOutcomeFactEvidence")
-        self.reconciled_fact.verify_integrity()
+            raise TypeError(
+                "reconciled_fact must be exact ReconciledOutcomeFactEvidence"
+            )
+        ReconciledOutcomeFactEvidence.verify_integrity(self.reconciled_fact)
         if self.population_unit_id != self.reconciled_fact.episode_id:
             raise MemoryIntegrityError(
                 "ablation population unit does not match reconciled outcome episode"
@@ -97,7 +99,9 @@ class BoundReconciledAblationOutcome:
         if type(self.effective_outcome_available_utc) is not datetime:
             raise TypeError("effective_outcome_available_utc must be exact datetime")
         if self.effective_outcome_available_utc.tzinfo is not timezone.utc:
-            raise ValueError("effective_outcome_available_utc must use exact UTC timezone")
+            raise ValueError(
+                "effective_outcome_available_utc must use exact UTC timezone"
+            )
         fact_cutoff = _stored_utc(
             self.reconciled_fact.causal_cutoff,
             name="reconciled fact causal_cutoff",
@@ -119,7 +123,7 @@ def bind_ablation_outcome_to_reconciled_fact(
 ) -> BoundReconciledAblationOutcome:
     """Bind an ablation artifact to independently re-resolved outcome history.
 
-    ``outcome.utility`` is intentionally never read.  The artifact's
+    ``outcome.utility`` is intentionally never read. The artifact's
     ``utility_evidence_digest`` must instead equal the digest independently
     recomputed from ExperienceMemory for the same population unit and frozen cut.
     """
@@ -132,6 +136,8 @@ def bind_ablation_outcome_to_reconciled_fact(
         raise TypeError("causal_cutoff must be exact datetime")
     if causal_cutoff.tzinfo is not timezone.utc:
         raise ValueError("causal_cutoff must use exact UTC timezone")
+    if type(granted_permissions) is not set or not granted_permissions:
+        raise TypeError("granted_permissions must be a non-empty exact set")
     cutoff = causal_cutoff
     if outcome.superseded_at_utc is not None and outcome.superseded_at_utc <= cutoff:
         raise MemoryIntegrityError(
@@ -152,9 +158,10 @@ def bind_ablation_outcome_to_reconciled_fact(
             "ablation utility evidence digest does not match canonical reconciled outcome fact"
         )
 
-    snapshot = memory.coverage_population_snapshot(
+    snapshot = ExperienceMemory.coverage_population_snapshot(
+        memory,
         causal_cutoff=cutoff,
-        granted_permissions=granted_permissions,
+        granted_permissions=set(granted_permissions),
         task=task,
         instrument_family=instrument_family,
     )
@@ -173,14 +180,16 @@ def bind_ablation_outcome_to_reconciled_fact(
     row = rows[0]
     available = _stored_utc(row.get("created_at"), name="episode created_at")
     lineage = row.get("correction_lineage")
-    if not isinstance(lineage, tuple):
+    if type(lineage) is not tuple:
         raise MemoryIntegrityError("canonical correction lineage is malformed")
     for correction in lineage:
-        if not isinstance(correction, Mapping):
+        if type(correction) not in {dict, MappingProxyType}:
             raise MemoryIntegrityError("canonical correction lineage is malformed")
         fields = correction.get("supersedes_fields")
-        if not isinstance(fields, tuple):
-            raise MemoryIntegrityError("canonical correction supersedes_fields are malformed")
+        if type(fields) is not tuple:
+            raise MemoryIntegrityError(
+                "canonical correction supersedes_fields are malformed"
+            )
         if "outcome" in fields:
             correction_available = _stored_utc(
                 correction.get("available_at"),

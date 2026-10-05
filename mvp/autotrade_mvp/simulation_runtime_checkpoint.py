@@ -283,7 +283,14 @@ def _runtime_scope_snapshot(
         loop_events = loop_events[:-1]
 
     authority_events = {
-        aggregate_type: _aggregate_events(store, aggregate_type)
+        aggregate_type: [
+            _event_identity(event)
+            for event in JournalStore.load_events_by_aggregate_type(
+                store,
+                aggregate_type,
+            )
+            if _autonomous_event_owned(event, run_id=run_id)
+        ]
         for aggregate_type in _COMPONENT_AGGREGATE_TYPES
     }
     cut = {
@@ -897,6 +904,8 @@ def _require_autonomous_runtime_authority_key(
 
 
 def _verifier(authority_id: str, key: bytes) -> RuntimeStateVerifier:
+    if type(authority_id) is not str or not authority_id:
+        raise TypeError("runtime checkpoint authority id is required")
     if type(key) is not bytes or len(key) != 32:
         raise TypeError("runtime checkpoint authority key must be 32 bytes")
     with _VERIFIER_LOCK:

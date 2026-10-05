@@ -106,6 +106,7 @@ class ExecutionModel:
     price_quantum: Decimal | None = None
     price_projection_policy_id: str | None = None
     price_projection_policy_version: int | None = None
+    price_grid_instrument_version: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -175,6 +176,15 @@ class ExecutionModel:
                     name="price_projection_policy_id",
                 ),
             )
+        if self.price_grid_instrument_version is not None:
+            object.__setattr__(
+                self,
+                "price_grid_instrument_version",
+                _text(
+                    self.price_grid_instrument_version,
+                    name="price_grid_instrument_version",
+                ),
+            )
         if self.price_projection_policy_version is not None:
             if (
                 isinstance(self.price_projection_policy_version, bool)
@@ -204,6 +214,7 @@ class ExecutionModel:
         price_quantum=None,
         price_projection_policy_id=None,
         price_projection_policy_version=None,
+        price_grid_instrument_version=None,
     ) -> "ExecutionModel":
         if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -260,6 +271,14 @@ class ExecutionModel:
                 )
             ),
             price_projection_policy_version=price_projection_policy_version,
+            price_grid_instrument_version=(
+                None
+                if price_grid_instrument_version is None
+                else _text(
+                    price_grid_instrument_version,
+                    name="price_grid_instrument_version",
+                )
+            ),
         )
 
     @property
@@ -288,6 +307,8 @@ class ExecutionModel:
             payload["price_projection_policy_id"] = self.price_projection_policy_id
         if self.price_projection_policy_version is not None:
             payload["price_projection_policy_version"] = self.price_projection_policy_version
+        if self.price_grid_instrument_version is not None:
+            payload["price_grid_instrument_version"] = self.price_grid_instrument_version
         encoded = json.dumps(
             payload,
             sort_keys=True,

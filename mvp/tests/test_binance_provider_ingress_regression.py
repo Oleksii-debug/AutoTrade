@@ -616,5 +616,22 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
 
 
+    def test_usdm_ack_rejects_noncanonical_digit_timestamp_alias(self):
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "canonical non-negative integer millisecond timestamp",
+        ):
+            parse_usdm_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="usdm-leading-zero-time",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 13,
+                    "clientOrderId": "usdm-leading-zero-time",
+                    "updateTime": "01791187200123",
+                },
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

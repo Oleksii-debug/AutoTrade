@@ -670,6 +670,37 @@ class HostNetworkTests(unittest.TestCase):
             },
         )
 
+    def test_event_cursor_rejects_noncanonical_sequence_before_store_lookup(self):
+        original = self.app.store.events_after
+
+        def unexpected_store_lookup(_after):
+            self.fail("noncanonical event cursor reached store lookup")
+
+        self.app.store.events_after = unexpected_store_lookup
+        try:
+            for target in (
+                "/api/v1/events?after=",
+                "/api/v1/events?after=00",
+                "/api/v1/events?after=01",
+                "/api/v1/events?after=%2B1",
+                "/api/v1/events?after=-0",
+                "/api/v1/events?after=%200",
+                "/api/v1/events?after=0%20",
+            ):
+                with self.subTest(target=target):
+                    response = self.app.dispatch(
+                        method="GET",
+                        target=target,
+                        headers=self.headers(),
+                    )
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(
+                        self.body(response),
+                        {"error": "INVALID_EVENT_CURSOR"},
+                    )
+        finally:
+            self.app.store.events_after = original
+
     def test_events_support_existing_json_client_and_canonical_sse_without_secrets(self):
         self.post(self.command())
         json_response = self.app.dispatch(

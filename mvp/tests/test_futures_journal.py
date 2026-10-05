@@ -870,6 +870,26 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(len(read_calls), 2)
 
 
+    def test_durable_scope_rejects_post_construction_contract_drift(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        original_multiplier = contract.multiplier
+        try:
+            object.__setattr__(contract, "multiplier", Decimal("999"))
+            with self.assertRaisesRegex(
+                FuturesError,
+                "contract conflicts with canonical InstrumentVersion",
+            ):
+                variation_margin_aggregate_id(opening)
+        finally:
+            object.__setattr__(contract, "multiplier", original_multiplier)
+
+
     def test_durable_evidence_boundaries_reject_hostile_subclass_before_reads(self):
         callbacks = []
 

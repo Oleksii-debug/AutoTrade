@@ -84,7 +84,8 @@ class VerifyScopeTests(unittest.TestCase):
             "mvp.tests.test_qualification_attestation "
             "mvp.tests.test_verify_scope -v"
         )
-        self.assertIn(focused_command, text)
+        normalized_workflow = " ".join(text.split())
+        self.assertIn(focused_command, normalized_workflow)
         self.assertIn("tools/write_ci_evidence.py", text)
         self.assertIn("--suite recovery-qualification-foundation", text)
 

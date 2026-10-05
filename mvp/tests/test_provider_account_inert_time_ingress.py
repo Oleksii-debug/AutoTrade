@@ -7,6 +7,7 @@ from mvp.autotrade_mvp import provider_account_accepted_cut as accepted_cut
 from mvp.autotrade_mvp import provider_account_coverage_set as coverage_set
 from mvp.autotrade_mvp import provider_account_currentness as currentness
 from mvp.autotrade_mvp import provider_account_empty_exclusion as empty_exclusion
+from mvp.autotrade_mvp import provider_account_reconciliation_semantics as reconciliation_semantics
 
 
 class _ExecutableTimezone(tzinfo):
@@ -31,6 +32,10 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             (coverage_set._at, coverage_set.ProviderAccountCoverageSetError),
             (empty_exclusion._at, empty_exclusion.ProviderAccountEmptyExclusionError),
             (accepted_cut._at, accepted_cut.AcceptedProviderAccountCutError),
+            (
+                reconciliation_semantics._at,
+                reconciliation_semantics.ProviderAccountReconciliationSemanticsError,
+            ),
         )
         for validator, error_type in boundaries:
             with self.subTest(boundary=validator.__module__):
@@ -39,6 +44,20 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
                 with self.assertRaises(error_type):
                     validator(value)
                 self.assertEqual(hostile.calls, 0)
+
+    def test_public_reconciliation_resolver_rejects_hostile_time_before_registry_lookup(self):
+        hostile = _ExecutableTimezone()
+        value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)
+        with self.assertRaises(
+            reconciliation_semantics.ProviderAccountReconciliationSemanticsError
+        ):
+            reconciliation_semantics.resolve_current_provider_account_reconciliation_semantics(
+                qualification_registry=object(),  # type: ignore[arg-type]
+                qualification_id="not-a-qualified-id",
+                provider_scope_digest="not-a-scope",
+                at=value,
+            )
+        self.assertEqual(hostile.calls, 0)
 
     def test_exact_stdlib_fixed_offset_timezones_remain_accepted(self):
         values = (
@@ -57,6 +76,7 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             self.assertIs(coverage_set._at(value), value)
             self.assertIs(empty_exclusion._at(value), value)
             self.assertIs(accepted_cut._at(value), value)
+            self.assertIs(reconciliation_semantics._at(value), value)
 
 
 if __name__ == "__main__":

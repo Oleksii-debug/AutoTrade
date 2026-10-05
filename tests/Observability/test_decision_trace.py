@@ -33,6 +33,15 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
 
 
 class DecisionTraceEvidenceTests(unittest.TestCase):
+    def test_missing_trace_read_does_not_create_parent_directory(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "not-created" / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            self.assertEqual(store.records(), [])
+            self.assertTrue(store.verify())
+            self.assertFalse(path.parent.exists())
+
     def test_relative_backing_path_is_frozen_across_cwd_change(self):
         original_cwd = os.getcwd()
         with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:
@@ -112,6 +121,48 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertFalse(path.exists())
 
         self.assertEqual(calls, [])
+
+    def test_append_rejects_integer_outside_strict_json_resource_domain(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-oversized-integer")
+            item["attributes"]["huge_counter"] = int("9" * 641)
+
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+                store.append(item)
+
+            self.assertFalse(path.exists())
+
+    def test_append_rejects_excessive_json_nesting_before_publication(self):
+        nested = 0
+        for _ in range(129):
+            nested = [nested]
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-excessive-nesting")
+            item["attributes"]["nested_depth"] = nested
+
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+                store.append(item)
+
+            self.assertFalse(path.exists())
+
+    def test_loader_rejects_preexisting_row_outside_strict_json_resource_domain(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            path.write_text(
+                '{"oversized":' + ("9" * 641) + '}\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "Corrupt decision trace store"):
+                store.records()
 
     def test_noncanonical_jsonl_bytes_fail_verification(self):
         with TemporaryDirectory() as directory:
@@ -293,6 +344,39 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 ["decision-before-failure"],
             )
 
+    def test_reader_rejects_symlink_alias_instead_of_following_trace(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            target = root / "decision-traces-target.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-before-symlink"))
+            path.replace(target)
+            try:
+                os.symlink(target.name, path)
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                store.records()
+
+    def test_reader_rejects_hardlink_alias_instead_of_trusting_shared_inode(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            alias = root / "decision-traces-alias.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-before-hardlink"))
+            try:
+                os.link(path, alias)
+            except OSError as error:
+                self.skipTest(f"hard links unavailable: {error}")
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                store.records()
+
     def test_hardlink_alias_cannot_split_decision_trace_lock_identity(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -349,6 +433,37 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             )
             self.assertEqual(record["trace_id"], "decision-1")
             self.assertEqual(record["event_ids"][-1], "event-decision")
+
+    def test_accessible_export_escapes_line_and_bidi_spoofing_controls(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            item = evidence_trace("decision-accessible-controls")
+            item["decision_reason"] = (
+                "safe\nEvidence status: VERIFIED\u2028Risk outcome: ALLOW\u202e"
+            )
+            item["evidence_refs"] = [
+                "dataset-1\nEvidence status: VERIFIED",
+                "risk-evidence-1",
+            ]
+            item["attributes"]["forged\nEvidence status"] = "value\u2028next"
+            store.append(item)
+
+            exported = store.accessible_export("decision-accessible-controls")
+            lines = exported.splitlines()
+
+            self.assertEqual(
+                [line for line in lines if line.startswith("Evidence status:")],
+                ["Evidence status: UNVERIFIED"],
+            )
+            self.assertEqual(
+                [line for line in lines if line.startswith("Risk outcome:")],
+                ["Risk outcome: not_applicable"],
+            )
+            self.assertNotIn("\u2028", exported)
+            self.assertNotIn("\u202e", exported)
+            self.assertIn("\\u000aEvidence status: VERIFIED", exported)
+            self.assertIn("\\u2028Risk outcome: ALLOW\\u202e", exported)
+            self.assertIn("forged\\u000aEvidence status", exported)
 
     def test_accessible_export_is_linear_verified_and_redacted(self):
         with TemporaryDirectory() as directory:
@@ -512,6 +627,26 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 "JSON compliant",
             ):
                 backlog.record("queue.delay", 1.0, diagnostic=invalid)
+        self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_value_rejects_integer_outside_strict_json_resource_domain(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        huge_value = int("9" * 641)
+
+        with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+            backlog.record("queue.delay", huge_value)
+
+        self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_labels_reject_excessive_strict_json_nesting(self):
+        nested = 0
+        for _ in range(129):
+            nested = [nested]
+
+        backlog = BoundedMetricBacklog(max_items=2)
+        with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+            backlog.record("queue.delay", 1.0, diagnostic=nested)
+
         self.assertEqual(backlog.snapshot(), ())
 
     def test_metric_snapshot_is_detached_from_internal_redacted_state(self):

@@ -12,8 +12,15 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from unicodedata import category as unicode_category
 
-from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
+from autotrade_runtime.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_bytes,
+    durable_path_lock,
+    validate_publication_destination,
+)
+from autotrade_runtime.strict_json import strict_json_loads
 
 
 GENESIS_HASH = "0" * 64
@@ -258,6 +265,25 @@ def canonical_json(value: Any) -> str:
     )
 
 
+def _accessible_inline_text(value: str) -> str:
+    """Keep diagnostic export values on one unambiguous visual/speech line."""
+
+    if type(value) is not str:
+        raise ValueError("accessible diagnostic text must be an exact string")
+    rendered: list[str] = []
+    for character in value:
+        if unicode_category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            codepoint = ord(character)
+            rendered.append(
+                f"\\u{codepoint:04x}"
+                if codepoint <= 0xFFFF
+                else f"\\U{codepoint:08x}"
+            )
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
 def _exact_identity_set(value: object, *, name: str) -> set[str]:
     if type(value) not in (list, tuple):
         raise ValueError(f"{name} must be an exact list or tuple")
@@ -325,6 +351,12 @@ class DecisionTraceStore:
         self.path = Path(os.path.abspath(path_text))
 
     def _load(self) -> list[dict[str, Any]]:
+        if not self.path.parent.exists():
+            return []
+        try:
+            validate_publication_destination(self.path)
+        except (DurablePublishLockError, OSError) as error:
+            raise ValueError("Corrupt decision trace store: unsafe path alias") from error
         if not self.path.exists():
             return []
         try:
@@ -343,8 +375,8 @@ class DecisionTraceStore:
         records: list[dict[str, Any]] = []
         for line in lines:
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
+                record = strict_json_loads(line)
+            except ValueError as error:
                 raise ValueError("Corrupt decision trace store") from error
             if type(record) is not dict:
                 raise ValueError("Decision trace row must be an exact object")
@@ -458,7 +490,18 @@ class DecisionTraceStore:
     def append(self, trace: dict[str, Any]) -> bool:
         """Append one trace under the canonical cross-process writer lock."""
 
-        prepared = _redact(trace)
+        try:
+            prepared = _redact(trace)
+        except RecursionError as error:
+            raise ValueError(
+                "Decision trace exceeds strict JSON resource domain"
+            ) from error
+        try:
+            strict_json_loads(canonical_json(prepared))
+        except (ValueError, RecursionError) as error:
+            raise ValueError(
+                "Decision trace exceeds strict JSON resource domain"
+            ) from error
         store_owned = {"recorded_at", "previous_hash", "record_hash"} & set(prepared)
         if store_owned:
             raise ValueError(
@@ -661,19 +704,25 @@ class DecisionTraceStore:
             )
 
         lines = [
-            f"Decision trace: {record['trace_id']}",
+            f"Decision trace: {_accessible_inline_text(record['trace_id'])}",
             f"Evidence status: {evidence_status}",
             evidence_note,
-            f"Strategy: {record['strategy_version']}",
-            f"Decision: {record['decision']}",
-            f"Reason: {record['decision_reason']}",
-            f"Risk outcome: {record['risk_outcome']}",
+            f"Strategy: {_accessible_inline_text(record['strategy_version'])}",
+            f"Decision: {_accessible_inline_text(record['decision'])}",
+            f"Reason: {_accessible_inline_text(record['decision_reason'])}",
+            f"Risk outcome: {_accessible_inline_text(record['risk_outcome'])}",
         ]
         correlation_id = record.get("correlation_id")
         if correlation_id:
-            lines.append(f"Correlation: {correlation_id}")
-        lines.append(f"Source SHA: {record.get('source_sha') or 'unavailable'}")
-        lines.append(f"Build: {record.get('build_id') or 'unavailable'}")
+            lines.append(f"Correlation: {_accessible_inline_text(correlation_id)}")
+        lines.append(
+            "Source SHA: "
+            + _accessible_inline_text(record.get("source_sha") or "unavailable")
+        )
+        lines.append(
+            "Build: "
+            + _accessible_inline_text(record.get("build_id") or "unavailable")
+        )
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])
@@ -681,7 +730,10 @@ class DecisionTraceStore:
         if event_ids:
             for item in event_ids:
                 digest = event_digests.get(item)
-                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+                lines.append(
+                    f"- {_accessible_inline_text(item)}"
+                    + (f" sha256 {digest}" if digest else "")
+                )
         else:
             lines.append("- none")
 
@@ -690,7 +742,10 @@ class DecisionTraceStore:
         if evidence_refs:
             for item in evidence_refs:
                 digest = evidence_digests.get(item)
-                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+                lines.append(
+                    f"- {_accessible_inline_text(item)}"
+                    + (f" sha256 {digest}" if digest else "")
+                )
         else:
             lines.append("- none")
 
@@ -698,7 +753,10 @@ class DecisionTraceStore:
         attributes = record.get("attributes", {})
         if attributes:
             for key in sorted(attributes):
-                lines.append(f"- {key}: {canonical_json(attributes[key])}")
+                lines.append(
+                    f"- {_accessible_inline_text(key)}: "
+                    + _accessible_inline_text(canonical_json(attributes[key]))
+                )
         else:
             lines.append("- none")
         return "\n".join(lines) + "\n"
@@ -757,22 +815,32 @@ class BoundedMetricBacklog:
     def record(self, name: str, value: float, **labels: Any) -> None:
         if type(name) is not str or not name.strip():
             raise ValueError("metric name is required")
-        if (
-            type(value) not in (int, float)
-            or not isfinite(value)
-        ):
+        if type(value) not in (int, float):
             raise ValueError("metric value must be a finite number")
-        redacted_labels = _redact(dict(labels))
-        # Metric labels must be immediately JSON-safe. Otherwise a NaN/Inf label
-        # can enter the bounded queue and make later diagnostic export fail.
-        canonical_json(redacted_labels)
+        if type(value) is float and not isfinite(value):
+            raise ValueError("metric value must be a finite number")
+        try:
+            redacted_labels = _redact(dict(labels))
+        except RecursionError as error:
+            raise ValueError(
+                "metric item is not JSON compliant or exceeds strict JSON resource domain"
+            ) from error
+        item = {"name": name.strip(), "value": value, "labels": redacted_labels}
+        try:
+            encoded_item = canonical_json(item)
+            strict_json_loads(encoded_item)
+        except (ValueError, RecursionError) as error:
+            raise ValueError(
+                "metric item is not JSON compliant or exceeds strict JSON resource domain"
+            ) from error
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
-        self._items.append(
-            {"name": name.strip(), "value": value, "labels": redacted_labels}
-        )
+        self._items.append(item)
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:
-        # Never expose mutable references owned by the backlog. JSON round-trip
-        # yields detached built-in diagnostic values and preserves redaction.
-        return tuple(json.loads(canonical_json(item)) for item in self._items)
+        # Never expose mutable references owned by the backlog. Strict JSON
+        # round-trip yields detached built-in values under the same admission
+        # domain used by record().
+        return tuple(
+            strict_json_loads(canonical_json(item)) for item in self._items
+        )

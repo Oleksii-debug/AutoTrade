@@ -195,8 +195,8 @@ class PerpetualFundingObservation:
 def canonical_perpetual_funding_observation(
     observation: PerpetualFundingObservation,
 ) -> dict[str, object]:
-    if not isinstance(observation, PerpetualFundingObservation):
-        raise TypeError("observation must be PerpetualFundingObservation")
+    if type(observation) is not PerpetualFundingObservation:
+        raise TypeError("observation must be exact PerpetualFundingObservation")
     return {
         "schema_version": "1.0.0",
         "provider_id": observation.provider_id,

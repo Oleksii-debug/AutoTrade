@@ -679,11 +679,14 @@ def verify_replay(state_dir: str | Path) -> bool:
         if not events:
             return False
         journal_evidence_ids = set()
-        for event in events:
+        if len(events) != len(ids):
+            return False
+        for expected_aggregate_version, event in enumerate(events, start=1):
             if type(event) is not dict:
                 return False
             if (
-                event.get("event_type") != "SimulationEpisodeRecorded"
+                event.get("aggregate_version") != expected_aggregate_version
+                or event.get("event_type") != "SimulationEpisodeRecorded"
                 or event.get("aggregate_type") != "simulation_portfolio"
                 or event.get("aggregate_id") != symbol
                 or event.get("environment") != "SIMULATION"
@@ -727,6 +730,8 @@ def verify_replay(state_dir: str | Path) -> bool:
                 != _event_uuid("correlation", evidence_id)
             ):
                 return False
+        if journal_evidence_ids != set(ids):
+            return False
         return True
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return False

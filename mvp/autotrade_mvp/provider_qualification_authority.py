@@ -324,7 +324,20 @@ def source_provider_qualification_protocol(
         raise ProviderQualificationUnavailable(
             "provider qualification protocol authority is invalid"
         )
-    return protocol
+    # Never expose the shared source-owned descriptor itself. Frozen dataclasses
+    # remain mutable through object.__setattr__, so returning the shared object
+    # would let one caller retarget future protocol resolution. Reconstruct an
+    # exact detached value from the retained source descriptor on every lookup.
+    return ProviderQualificationProtocol(
+        key=protocol.key,
+        domain=protocol.domain,
+        gate=protocol.gate,
+        package_id=protocol.package_id,
+        protocol_id=protocol.protocol_id,
+        protocol_version=protocol.protocol_version,
+        requirement_id=protocol.requirement_id,
+        campaign_evidence_kind=protocol.campaign_evidence_kind,
+    )
 
 
 @dataclass(frozen=True, slots=True)

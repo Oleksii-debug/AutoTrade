@@ -834,6 +834,7 @@ def _submission_evidence(
     *,
     prepared_request: BybitPreparedSubmission,
 ) -> dict[str, str]:
+    require_canonical_bybit_prepared_submission(prepared_request)
     if not isinstance(observation, ProviderSubmissionObservation):
         raise TypeError(
             "observation must be durable ProviderSubmissionObservation"
@@ -877,8 +878,7 @@ def parse_submission_response(
     """Map one exact durable Bybit create-order response to SubmissionResult."""
 
     aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, BybitPreparedSubmission):
-        raise TypeError("prepared_request must be BybitPreparedSubmission")
+    require_canonical_bybit_prepared_submission(prepared_request)
     cid = _client_order_id(prepared_request.body.get("orderLinkId"))
     if type(transport_ambiguous) is not bool:
         raise ProviderCoreError("transport_ambiguous must be boolean")

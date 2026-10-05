@@ -861,6 +861,18 @@ class DurableModelCallOrchestrator:
                 orchestrator_class,
             )
 
+        current_budget_alias = dict.get(
+            module_globals,
+            "DurableModelBudget",
+        )
+        if current_budget_alias is not budget_class:
+            changes.append("module.DurableModelBudget")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelBudget",
+                budget_class,
+            )
+
         current_journal_helper = dict.get(
             module_globals,
             "_model_journal_class_authority_changes",

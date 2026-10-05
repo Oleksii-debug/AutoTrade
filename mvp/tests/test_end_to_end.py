@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.pipeline import SimulatedProvider, run_multi_episode, run_vertical_slice, verify_replay
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 class VerticalSliceTests(unittest.TestCase):
@@ -355,6 +355,34 @@ class VerticalSliceTests(unittest.TestCase):
                 "Unsupported or corrupt checkpoint schema",
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
+
+    def test_replay_rejects_unrelated_simulation_aggregate_event(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint = json.loads(
+                (Path(directory) / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            next_version = store.next_aggregate_version(
+                "simulation_portfolio",
+                checkpoint["symbol"],
+            )
+            payload = {
+                "financial_configuration_hash": checkpoint["financial_configuration_hash"],
+            }
+            store.append_event(
+                {
+                    "event_id": "simulation-noise-event",
+                    "event_type": "UnrelatedSimulationEvent",
+                    "aggregate_type": "simulation_portfolio",
+                    "aggregate_id": checkpoint["symbol"],
+                    "aggregate_version": str(next_version),
+                    "committed_at": "2026-10-06T00:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+            self.assertFalse(verify_replay(directory))
 
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:

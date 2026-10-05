@@ -516,6 +516,46 @@ class DurableModelCallOrchestrator:
         return _utc_text(self.clock(), name="clock")
 
     @staticmethod
+    def _capture_nested_budget_authority(
+        budget: DurableModelBudget,
+    ) -> tuple[DurableModelBudget, dict[str, object], dict[str, object]]:
+        """Capture every mutable DurableModelBudget authority field."""
+        return (
+            budget,
+            {
+                "journal": budget.journal,
+                "_clock": budget._clock,
+            },
+            {
+                "budget_id": budget.budget_id,
+                "environment": budget.environment,
+                "_ceiling": budget._ceiling,
+            },
+        )
+
+    @staticmethod
+    def _restore_nested_budget_authority(
+        snapshot: tuple[
+            DurableModelBudget,
+            dict[str, object],
+            dict[str, object],
+        ],
+    ) -> list[str]:
+        """Restore captured budget internals before any later durable action."""
+        budget, refs, values = snapshot
+        changes: list[str] = []
+        for name, expected in refs.items():
+            if getattr(budget, name, None) is not expected:
+                changes.append("budget." + name)
+            setattr(budget, name, expected)
+        for name, expected in values.items():
+            current = getattr(budget, name, None)
+            if type(current) is not type(expected) or current != expected:
+                changes.append("budget." + name)
+            setattr(budget, name, expected)
+        return changes
+
+    @staticmethod
     def _sealed_spec(spec: ModelCallSpec) -> ModelCallSpec:
         if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
@@ -705,6 +745,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -716,6 +761,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    callback_budget_authority
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)
@@ -1114,6 +1164,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -1125,6 +1180,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    callback_budget_authority
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)
@@ -1443,6 +1503,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        descriptor_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         descriptor_error: Exception | None = None
         descriptor_changes: list[str] = []
         try:
@@ -1451,6 +1516,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 descriptor_error = error
         finally:
+            descriptor_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    descriptor_budget_authority
+                )
+            )
             for name, expected in descriptor_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     descriptor_changes.append(name)
@@ -1605,6 +1675,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        cancel_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         cancel_error: Exception | None = None
         cancel_changes: list[str] = []
         try:
@@ -1613,6 +1688,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 cancel_error = error
         finally:
+            cancel_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    cancel_budget_authority
+                )
+            )
             for name, expected in cancel_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     cancel_changes.append(name)
@@ -1742,6 +1822,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        adapter_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         observation_evidence_resolver = self.observation_evidence_resolver
         adapter_error: Exception | None = None
         authority_changes: list[str] = []
@@ -1751,6 +1836,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 adapter_error = error
         finally:
+            authority_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    adapter_budget_authority
+                )
+            )
             for name, expected in adapter_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     authority_changes.append(name)
@@ -1997,6 +2087,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        validator_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         validator_changes: list[str] = []
         try:
             try:
@@ -2004,6 +2099,11 @@ class DurableModelCallOrchestrator:
             except Exception:
                 schema_valid = False
         finally:
+            validator_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    validator_budget_authority
+                )
+            )
             for name, expected in validator_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     validator_changes.append(name)
@@ -2093,6 +2193,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        recovery_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         recovery_error: Exception | None = None
         recovery_changes: list[str] = []
         try:
@@ -2101,6 +2206,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 recovery_error = error
         finally:
+            recovery_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    recovery_budget_authority
+                )
+            )
             for name, expected in recovery_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     recovery_changes.append(name)
@@ -2385,6 +2495,11 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        callback_budget_authority = (
+            DurableModelCallOrchestrator._capture_nested_budget_authority(
+                self.budget
+            )
+        )
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -2397,6 +2512,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_nested_budget_authority(
+                    callback_budget_authority
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)

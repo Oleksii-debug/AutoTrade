@@ -64,13 +64,16 @@ def option_version(
     quantity_step: str = "1",
     minimum_quantity: str = "1",
     maximum_quantity: str | None = None,
+    option_right: str = "CALL",
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=OPTION_ID,
         version=version,
         provider_id="BYBIT",
         venue_id="OPTIONS",
-        provider_symbol="ABC-202612-C50",
+        provider_symbol=(
+            "ABC-202612-C50" if option_right == "CALL" else "ABC-202612-P50"
+        ),
         asset_class="OPTION",
         base_currency="ABC",
         quote_currency="USD",
@@ -94,7 +97,7 @@ def option_version(
         settlement_method=settlement_method,
         margin_model_id="option-margin-v1",
         strike=Decimal(strike),
-        option_right="CALL",
+        option_right=option_right,
         exercise_style="AMERICAN",
         deliverable=(DeliverableLeg("ABC", Decimal(deliverable_quantity)),),
     )
@@ -1086,6 +1089,38 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             self.store.load_events("economic_book", self.book.book_id),
+            [],
+        )
+
+    def test_long_put_exercise_that_requires_borrow_fails_before_mutation(self):
+        put_registry = InstrumentRegistry(
+            versions=(option_version(option_right="PUT"),)
+        )
+        authority = self._authority(
+            registry=put_registry,
+            economic_book=self.book,
+        )
+        self.seed_option_position("1")
+        before_transactions = tuple(self.book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "without atomic borrow authority",
+        ):
+            authority.apply(
+                self.evidence(
+                    external_event_id="put-exercise-needs-borrow",
+                    event_kind="EXERCISE",
+                    signed_contracts="1",
+                )
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("1"))
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+        self.assertEqual(self.book.cash("USD"), Decimal("-1"))
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", authority.aggregate_id),
             [],
         )
 

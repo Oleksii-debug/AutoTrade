@@ -7,7 +7,7 @@ replaced here; all other unittest cases run unchanged.
 """
 from __future__ import annotations
 
-from . import _test_reconciliation_legacy as _legacy_tests
+from mvp.tests import _test_reconciliation_legacy as _legacy_tests
 
 for _name in dir(_legacy_tests):
     if not _name.startswith("__"):

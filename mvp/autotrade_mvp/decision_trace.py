@@ -326,7 +326,8 @@ class DecisionTraceStore:
         if not self.path.exists():
             return []
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw_bytes = self.path.read_bytes()
+            raw = raw_bytes.decode("utf-8")
         except (OSError, UnicodeError) as error:
             raise ValueError("Corrupt decision trace store") from error
         if raw == "":

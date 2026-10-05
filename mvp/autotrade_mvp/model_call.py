@@ -147,8 +147,7 @@ class ModelCallSpec:
                 ),
             )
         if (
-            not isinstance(self.fallback_index, int)
-            or isinstance(self.fallback_index, bool)
+            type(self.fallback_index) is not int
             or self.fallback_index < 0
             or self.fallback_index > 32
         ):
@@ -492,8 +491,7 @@ class DurableModelCallOrchestrator:
         if not callable(billing_evidence_resolver):
             raise TypeError("billing_evidence_resolver must be callable")
         if (
-            not isinstance(started_lease_seconds, int)
-            or isinstance(started_lease_seconds, bool)
+            type(started_lease_seconds) is not int
             or started_lease_seconds < 1
             or started_lease_seconds > 3600
         ):
@@ -516,9 +514,16 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         return _utc_text(self.clock(), name="clock")
 
-    def attempt_id(self, spec: ModelCallSpec) -> str:
+    @staticmethod
+    def _sealed_spec(spec: ModelCallSpec) -> ModelCallSpec:
         if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        return ModelCallSpec(
+            **{field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)}
+        )
+
+    def attempt_id(self, spec: ModelCallSpec) -> str:
+        spec = self._sealed_spec(spec)
         material = {
             "budget_id": self.budget.budget_id,
             "environment": self.budget.environment,
@@ -1260,8 +1265,7 @@ class DurableModelCallOrchestrator:
         now_utc: datetime | None = None,
         cancel_requested: CancelCheck | None = None,
     ) -> ModelCallOutcome:
-        if type(spec) is not ModelCallSpec:
-            raise TypeError("spec must be ModelCallSpec")
+        spec = self._sealed_spec(spec)
         if type(policy) is not RoutingPolicy:
             raise TypeError("policy must be RoutingPolicy")
         if type(request) is not ModelRequest:

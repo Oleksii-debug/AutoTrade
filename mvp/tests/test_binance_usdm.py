@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.binance_usdm import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -732,6 +733,45 @@ class BinanceUsdmTemporalIngressTests(unittest.TestCase):
                 capability=hostile,
                 at=NOW,
             )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_timestamp_rejects_str_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileMillis(str):
+            def isdigit(self):
+                callbacks.append("isdigit")
+                raise AssertionError("hostile timestamp callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError, "integer millisecond timestamp"
+        ):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-usdm-hostile-millis",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 42,
+                    "clientOrderId": "at-usdm-hostile-millis",
+                    "updateTime": HostileMillis("1790272800123"),
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_trade_parser_rejects_observation_subclass_before_scope_callback(self):
+        callbacks = []
+        trusted = execution_observation([])
+
+        class HostileObservation(ProviderResponseObservation):
+            def require_scope(self, *args, **kwargs):
+                callbacks.append("require_scope")
+
+        hostile = object.__new__(HostileObservation)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderResponseObservation"):
+            parse_account_trades(hostile, instrument_versions={})
         self.assertEqual(callbacks, [])
 
     def test_order_admission_keeps_builtin_fixed_offset_supported(self):

@@ -158,6 +158,22 @@ def parse_name_status_z(raw: bytes) -> tuple[Change, ...]:
     return tuple(changes)
 
 
+def _validated_change(change: Change) -> Change:
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change records")
+    kind = _validated_status(change.status)
+    path = _validated_repo_path(change.path)
+    if kind in {"R", "C"}:
+        if change.previous_path is None:
+            raise ValueError("rename/copy change is missing previous_path")
+        previous_path = _validated_repo_path(change.previous_path)
+    else:
+        if change.previous_path is not None:
+            raise ValueError("non-rename/copy change must not carry previous_path")
+        previous_path = None
+    return Change(status=change.status, path=path, previous_path=previous_path)
+
+
 def _normalized_protected_authorizations(
     values: Sequence[str] | None,
     *,
@@ -198,11 +214,12 @@ def assess_reconvergence(
         raise TypeError("base_matches_remote_tip must be boolean")
 
     normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_changes = tuple(_validated_change(change) for change in changes)
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
 
-    deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
+    deleted = tuple(sorted({change.path for change in normalized_changes if change.status == "D"}))
     protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
     fraction = len(deleted) / base_count
 
@@ -211,7 +228,7 @@ def assess_reconvergence(
         protected_sentinels=protected_sentinels,
     )
     protected_damage: set[str] = set(protected)
-    for change in changes:
+    for change in normalized_changes:
         kind = _validated_status(change.status)
         if kind in {"M", "A"} and change.path in protected_sentinels:
             if change.path not in authorized_protected:
@@ -239,8 +256,8 @@ def assess_reconvergence(
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in changes:
-            kind = change.status[:1]
+        for change in normalized_changes:
+            kind = _validated_status(change.status)
             if kind == "R":
                 touched = (change.previous_path, change.path)
             elif kind == "C":

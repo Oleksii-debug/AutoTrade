@@ -92,6 +92,10 @@ public partial class MainWindow : Window
                 "WebView2");
             CoreWebView2Environment environment =
                 await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            if (_lifetime.IsCancellationRequested || !IsLoaded)
+            {
+                return;
+            }
 
             webView = new WebView2
             {
@@ -107,6 +111,7 @@ public partial class MainWindow : Window
             await webView.EnsureCoreWebView2Async(environment);
             if (_lifetime.IsCancellationRequested || !IsLoaded)
             {
+                DisposeWebExperience();
                 return;
             }
 
@@ -171,6 +176,7 @@ public partial class MainWindow : Window
                 CoreWebView2BrowsingDataKinds.ServiceWorkers);
             if (_lifetime.IsCancellationRequested || !IsLoaded)
             {
+                DisposeWebExperience();
                 return;
             }
 

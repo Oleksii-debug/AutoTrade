@@ -84,6 +84,35 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("CoreWebView2WebResourceContext.XmlHttpRequest", code)
         self.assertIn("_trustedWebDocumentActive", code)
 
+    def test_webview2_async_startup_cannot_create_or_leak_browser_after_window_close(self):
+        code = CODE.read_text(encoding="utf-8")
+        connect = code.split("private async Task ConnectWebExperienceAsync", 1)[1].split(
+            "private static bool RequiresFreshWebViewAfterFailure", 1
+        )[0]
+        environment = connect.index("await CoreWebView2Environment.CreateAsync")
+        cancellation_after_environment = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            environment,
+        )
+        create_control = connect.index("webView = new WebView2", cancellation_after_environment)
+        self.assertLess(cancellation_after_environment, create_control)
+        ensure = connect.index("await webView.EnsureCoreWebView2Async", create_control)
+        cancellation_after_ensure = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            ensure,
+        )
+        cleanup_after_ensure = connect.index("DisposeWebExperience();", cancellation_after_ensure)
+        clear = connect.index("await core.Profile.ClearBrowsingDataAsync", cleanup_after_ensure)
+        cancellation_after_clear = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            clear,
+        )
+        cleanup_after_clear = connect.index("DisposeWebExperience();", cancellation_after_clear)
+        self.assertLess(ensure, cancellation_after_ensure)
+        self.assertLess(cancellation_after_ensure, cleanup_after_ensure)
+        self.assertLess(clear, cancellation_after_clear)
+        self.assertLess(cancellation_after_clear, cleanup_after_clear)
+
     def test_webview2_process_failure_revokes_trust_and_recreates_control_outside_handler(self):
         xaml = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

@@ -870,5 +870,105 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(len(read_calls), 2)
 
 
+    def test_durable_entrypoints_reject_hostile_state_subclasses_before_reads(self):
+        callbacks = []
+
+        class HostileLinearState(VariationMarginState):
+            def __getattribute__(self, name):
+                if name in {
+                    "contract",
+                    "settlement_scope",
+                    "settlement_history",
+                    "signed_contracts",
+                    "last_settlement_price",
+                    "cumulative_variation_margin",
+                }:
+                    callbacks.append(("linear", name))
+                    raise AssertionError("hostile linear state attribute executed")
+                return object.__getattribute__(self, name)
+
+        class HostileInverseState(InverseVariationMarginState):
+            def __getattribute__(self, name):
+                if name in {
+                    "contract",
+                    "settlement_scope",
+                    "settlement_history",
+                    "signed_contracts",
+                    "last_settlement_price",
+                    "cumulative_variation_margin",
+                }:
+                    callbacks.append(("inverse", name))
+                    raise AssertionError("hostile inverse state attribute executed")
+                return object.__getattribute__(self, name)
+
+        linear = VariationMarginState(
+            contract=self._contract(),
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        inverse = InverseVariationMarginState(
+            contract=self._contract(payoff="INVERSE"),
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+
+        def hostile_copy(base, cls):
+            hostile = object.__new__(cls)
+            for name, value in object.__getattribute__(base, "__dict__").items():
+                object.__setattr__(hostile, name, value)
+            return hostile
+
+        hostile_linear = hostile_copy(linear, HostileLinearState)
+        hostile_inverse = hostile_copy(inverse, HostileInverseState)
+        unused_root = Path("unused-hostile-state-artifacts")
+
+        linear_calls = (
+            lambda: variation_margin_aggregate_id(hostile_linear),
+            lambda: restore_linear_variation_margin(
+                None,
+                hostile_linear,
+                evidence_artifact_root=unused_root,
+            ),
+            lambda: rebuild_variation_margin_book(
+                None,
+                hostile_linear,
+                evidence_artifact_root=unused_root,
+            ),
+            lambda: commit_linear_variation_margin(
+                None,
+                hostile_linear,
+                None,
+                evidence_artifact_root=unused_root,
+            ),
+        )
+        inverse_calls = (
+            lambda: variation_margin_aggregate_id(hostile_inverse),
+            lambda: restore_inverse_variation_margin(
+                None,
+                hostile_inverse,
+                evidence_artifact_root=unused_root,
+            ),
+            lambda: rebuild_variation_margin_book(
+                None,
+                hostile_inverse,
+                evidence_artifact_root=unused_root,
+            ),
+            lambda: commit_inverse_variation_margin(
+                None,
+                hostile_inverse,
+                None,
+                evidence_artifact_root=unused_root,
+            ),
+        )
+
+        for call in linear_calls + inverse_calls:
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(TypeError, "exact"):
+                    call()
+                self.assertEqual(callbacks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

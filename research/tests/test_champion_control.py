@@ -1148,6 +1148,11 @@ class ChampionRegistryTests(unittest.TestCase):
             )
             self.assertEqual(restarted.state(), state)
             self.assertEqual(
+                state.obligation_snapshot_digest,
+                first_history[-1]["obligation_snapshot_digest"],
+            )
+            self.assertEqual(state.management_policy_digest, policy.policy_digest)
+            self.assertEqual(
                 restarted.history()[-1]["management_policy_digest"],
                 policy.policy_digest,
             )
@@ -1210,6 +1215,11 @@ class ChampionRegistryTests(unittest.TestCase):
             self.assertEqual(state.generation, 3)
             self.assertEqual(state.champion_candidate_id, "candidate-a")
             self.assertEqual(state.existing_position_policy, policy.token)
+            self.assertEqual(state.management_policy_digest, policy.policy_digest)
+            self.assertEqual(
+                state.obligation_snapshot_digest,
+                authority.read().snapshot_digest,
+            )
             self.assertEqual(
                 [row["action"] for row in registry.history()],
                 ["PROMOTE", "PROMOTE", "ROLLBACK"],
@@ -1260,6 +1270,15 @@ class ChampionRegistryTests(unittest.TestCase):
                 existing_position_policy=None,
             )
             self.assertEqual(retry, first)
+            self.assertIsNotNone(retry.obligation_snapshot_digest)
+            self.assertEqual(
+                retry.obligation_snapshot_digest,
+                restarted.history()[-1]["obligation_snapshot_digest"],
+            )
+            self.assertEqual(
+                retry.management_policy_digest,
+                restarted.history()[-1]["management_policy_digest"],
+            )
             self.assertEqual(authority.read_count, reads_before_retry)
             self.assertEqual(len(restarted.history()), 1)
 
@@ -1345,6 +1364,14 @@ class ChampionRegistryTests(unittest.TestCase):
                 management_policy=policy,
             )
             self.assertEqual(retry, first)
+            self.assertEqual(
+                retry.obligation_snapshot_digest,
+                restarted.history()[-1]["obligation_snapshot_digest"],
+            )
+            self.assertEqual(
+                retry.management_policy_digest,
+                policy.policy_digest,
+            )
             self.assertEqual(authority.read_count, reads_before_retry)
             self.assertEqual(
                 [row["action"] for row in restarted.history()],

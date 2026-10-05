@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
 
 
 GENESIS_HASH = "0" * 64
@@ -233,6 +233,22 @@ def _validate_digest_map(
         raise ValueError(f"{name} keys must exactly match linked identities")
 
 
+def _canonical_identity_set(name: str, value: object) -> set[str]:
+    """Admit caller-declared identities without polymorphic iteration/hash callbacks."""
+
+    if type(value) not in (list, tuple, set, frozenset):
+        raise ValueError(f"{name} must be an exact built-in identity collection")
+    items = tuple(value)
+    if any(
+        type(identity) is not str
+        or not identity.strip()
+        or identity != identity.strip()
+        for identity in items
+    ):
+        raise ValueError(f"{name} must contain canonical non-empty strings")
+    return set(items)
+
+
 def _hash_record(record: dict[str, Any]) -> str:
     payload = {key: value for key, value in record.items() if key != "record_hash"}
     return sha256(canonical_json(payload).encode("utf-8")).hexdigest()
@@ -373,12 +389,12 @@ class DecisionTraceStore:
         prepared = _redact(trace)
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
-        lock_path = self.path.with_name(self.path.name + ".lock")
-        with ResourceLock(lock_path, blocking=True):
+        with durable_path_lock(self.path):
             records = self._load()
-            # Integrity verification must precede idempotency handling. Otherwise
-            # an identical retry could silently succeed against a tampered chain.
-            if records and not self.verify():
+            # Validate the exact loaded snapshot before idempotency handling. A
+            # second path read could otherwise verify a newer file while stale or
+            # corrupt rows from the first read are still used for the append.
+            if records and not self._records_are_valid(records):
                 raise ValueError("Existing decision trace chain is corrupt")
 
             trace_id = prepared["trace_id"]
@@ -405,7 +421,7 @@ class DecisionTraceStore:
 
     def records(self) -> list[dict[str, Any]]:
         records = self._load()
-        if records and not self.verify():
+        if records and not self._records_are_valid(records):
             raise ValueError("Decision trace chain is corrupt")
         return records
 
@@ -420,8 +436,10 @@ class DecisionTraceStore:
 
         if type(trace_id) is not str or not trace_id.strip():
             raise ValueError("trace_id must be an exact non-empty string")
-        events = set(available_event_ids)
-        evidence = set(available_evidence_ids)
+        events = _canonical_identity_set("available_event_ids", available_event_ids)
+        evidence = _canonical_identity_set(
+            "available_evidence_ids", available_evidence_ids
+        )
         record = next(
             (item for item in self.records() if item.get("trace_id") == trace_id),
             None,
@@ -482,8 +500,8 @@ class DecisionTraceStore:
         self._validate_input(candidate)
         record = self.reconstruct(
             trace_id,
-            available_event_ids=available_event_digests.keys(),
-            available_evidence_ids=available_evidence_digests.keys(),
+            available_event_ids=tuple(available_event_digests),
+            available_evidence_ids=tuple(available_evidence_digests),
         )
         if record.get("source_sha") != expected_source_sha:
             raise ValueError("trace source identity mismatch")
@@ -595,12 +613,7 @@ class DecisionTraceStore:
             lines.append("- none")
         return "\n".join(lines) + "\n"
 
-    def verify(self) -> bool:
-        try:
-            records = self._load()
-        except ValueError:
-            return False
-
+    def _records_are_valid(self, records: list[dict[str, Any]]) -> bool:
         seen: set[str] = set()
         expected_previous = GENESIS_HASH
         for record in records:
@@ -613,10 +626,15 @@ class DecisionTraceStore:
                 if record.get("previous_hash") != expected_previous:
                     return False
                 recorded_at = record.get("recorded_at")
-                if not isinstance(recorded_at, str) or not recorded_at:
+                if type(recorded_at) is not str or not recorded_at:
                     return False
                 record_hash = record.get("record_hash")
-                if not isinstance(record_hash, str) or len(record_hash) != 64:
+                if (
+                    type(record_hash) is not str
+                    or len(record_hash) != 64
+                    or record_hash != record_hash.lower()
+                    or any(ch not in "0123456789abcdef" for ch in record_hash)
+                ):
                     return False
                 if _hash_record(record) != record_hash:
                     return False
@@ -624,6 +642,13 @@ class DecisionTraceStore:
             except (KeyError, TypeError, ValueError):
                 return False
         return True
+
+    def verify(self) -> bool:
+        try:
+            records = self._load()
+        except ValueError:
+            return False
+        return self._records_are_valid(records)
 
 
 class BoundedMetricBacklog:

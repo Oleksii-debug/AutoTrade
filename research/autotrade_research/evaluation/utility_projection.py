@@ -14,7 +14,7 @@ import json
 import re
 from uuid import UUID, uuid5
 
-from autotrade_runtime.artifacts import ArtifactStore
+from autotrade_research.artifacts.store import ArtifactStore
 
 
 UTILITY_PROJECTION_MEDIA_TYPE = (

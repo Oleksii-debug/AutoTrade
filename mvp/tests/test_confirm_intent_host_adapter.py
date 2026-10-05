@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 import unittest
@@ -27,6 +28,30 @@ NOW = datetime(2026, 10, 5, 0, 45, tzinfo=timezone.utc)
 NOW_TEXT = NOW.isoformat().replace("+00:00", "Z")
 INSTRUMENT_ID = "11111111-1111-1111-1111-111111111111"
 COMMAND_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+class _ActorFlipMapping(Mapping[str, object]):
+    """Mapping whose actor differs across repeated Mapping.get() calls."""
+
+    def __init__(self, source: dict[str, object]) -> None:
+        self._source = dict(source)
+        self.actor_gets = 0
+
+    def __getitem__(self, key: str) -> object:
+        return self._source[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+    def get(self, key: str, default=None):
+        if key == "actor":
+            self.actor_gets += 1
+            if self.actor_gets == 1:
+                return "attacker-before-auth"
+        return self._source.get(key, default)
 
 
 class ConfirmIntentHostAdapterTests(unittest.TestCase):
@@ -206,6 +231,22 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
         self.assertEqual(replay, result)
         self.assertEqual(host.state_version, 1)
 
+    def test_submit_snapshots_mapping_before_actor_authentication(self) -> None:
+        host = self.host()
+        hostile = _ActorFlipMapping(self.command())
+        result = host.submit(hostile)
+        self.assertEqual(result.status, "ACCEPTED")
+        accepted = host.events_after(0)[0]
+        self.assertEqual(accepted.payload["actor"], "owner-1")
+        self.assertEqual(
+            accepted.payload["action_payload"]["actor_id"],
+            "owner-1",
+        )
+        # The detached dict boundary means the original Mapping.get() callback
+        # is never authority. Before the repair its first actor result became
+        # ContextVar authority while the second actor result passed auth.
+        self.assertEqual(hostile.actor_gets, 0)
+
     def test_client_financial_override_is_rejected_before_host_mutation(self) -> None:
         host = self.host()
         with self.assertRaisesRegex(ValueError, "only pending_intent_id"):
@@ -237,7 +278,10 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
         )
         confirmation = AuthorityService(self.store)._confirmations[COMMAND_ID]
         self.assertEqual(confirmation.account_id, "acct-1")
-        self.assertEqual(confirmation.notional, self.pending._read("pending-host-confirm-1")[0].notional)
+        self.assertEqual(
+            confirmation.notional,
+            self.pending._read("pending-host-confirm-1")[0].notional,
+        )
         self.assertIsNotNone(confirmation.financial_binding_hash)
 
         restarted = self.host()

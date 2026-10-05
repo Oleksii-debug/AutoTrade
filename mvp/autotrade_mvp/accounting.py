@@ -653,11 +653,17 @@ del _make_economic_book_audit_digest
 del _cached_transaction_digest
 
 
-def _scoped_economic_owner_operations():
+def _scoped_economic_owner_operations(scoped_type, book_type):
+    """Create one closure-owned scoped-book owner registry and verifier."""
+
     owners = {}
     lock = RLock()
 
     def bind(value, environment, account_id, book):
+        if type(value) is not scoped_type:
+            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
+        if type(book) is not book_type:
+            raise TypeError("ScopedEconomicBook must own an exact EconomicBook")
         with lock:
             for key, (reference, *_rest) in tuple(owners.items()):
                 if reference() is None:
@@ -668,7 +674,7 @@ def _scoped_economic_owner_operations():
             owners[id(value)] = (weakref.ref(value), environment, account_id, book)
 
     def require(value):
-        if type(value) is not ScopedEconomicBook:
+        if type(value) is not scoped_type:
             raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
         with lock:
             owner = owners.get(id(value))
@@ -677,7 +683,7 @@ def _scoped_economic_owner_operations():
             _reference, environment, account_id, book = owner
         state = object.__getattribute__(value, "__dict__")
         current_book = state.get("_book")
-        if type(current_book) is not EconomicBook:
+        if type(current_book) is not book_type:
             raise TypeError("ScopedEconomicBook must own an exact EconomicBook")
         if (
             type(state.get("environment")) is not str
@@ -692,8 +698,40 @@ def _scoped_economic_owner_operations():
     return bind, require
 
 
-_bind_scoped_economic_book_owner, _require_scoped_economic_book_owner = _scoped_economic_owner_operations()
-del _scoped_economic_owner_operations
+def _make_scoped_economic_constructor(
+    bind_owner,
+    scoped_type,
+    book_type,
+    normalize_name,
+    environments,
+    *,
+    _setattr=object.__setattr__,
+):
+    """Freeze construction dependencies before module bindings can be poisoned."""
+
+    def init(
+        self,
+        *,
+        environment: str,
+        account_id: str,
+        transactions: Iterable[JournalTransaction] = (),
+    ):
+        if type(self) is not scoped_type:
+            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
+        normalized_environment = normalize_name(
+            environment,
+            field="environment",
+        ).upper()
+        if normalized_environment not in environments:
+            raise ValueError("unsupported environment")
+        normalized_account = normalize_name(account_id, field="account_id")
+        book = book_type(transactions)
+        _setattr(self, "environment", normalized_environment)
+        _setattr(self, "account_id", normalized_account)
+        _setattr(self, "_book", book)
+        bind_owner(self, normalized_environment, normalized_account, book)
+
+    return init
 
 
 def _make_scoped_economic_facade(
@@ -754,6 +792,22 @@ def _make_scoped_economic_facade(
     )
 
 
+class ScopedEconomicBook:
+    """Account/environment-bound facade over the canonical EconomicBook."""
+
+    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+
+
+_bind_scoped_economic_book_owner, _require_scoped_economic_book_owner = (
+    _scoped_economic_owner_operations(ScopedEconomicBook, EconomicBook)
+)
+_scoped_init = _make_scoped_economic_constructor(
+    _bind_scoped_economic_book_owner,
+    ScopedEconomicBook,
+    EconomicBook,
+    _name,
+    frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"}),
+)
 (
     _scoped_transactions,
     _scoped_append,
@@ -764,42 +818,23 @@ def _make_scoped_economic_facade(
     _scoped_fee_expense,
     _scoped_audit_digest,
 ) = _make_scoped_economic_facade(_require_scoped_economic_book_owner)
-del _make_scoped_economic_facade
 
+ScopedEconomicBook.__init__ = _scoped_init
+ScopedEconomicBook.transactions = _scoped_transactions
+ScopedEconomicBook.append = _scoped_append
+ScopedEconomicBook.append_batch = _scoped_append_batch
+ScopedEconomicBook.balance = _scoped_balance
+ScopedEconomicBook.cash = _scoped_cash
+ScopedEconomicBook.position = _scoped_position
+ScopedEconomicBook.fee_expense = _scoped_fee_expense
+ScopedEconomicBook.audit_digest = _scoped_audit_digest
 
-class ScopedEconomicBook:
-    """Account/environment-bound facade over the canonical EconomicBook."""
-
-    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
-
-    def __init__(
-        self,
-        *,
-        environment: str,
-        account_id: str,
-        transactions: Iterable[JournalTransaction] = (),
-    ):
-        normalized_environment = _name(environment, field="environment").upper()
-        if normalized_environment not in self._ENVIRONMENTS:
-            raise ValueError("unsupported environment")
-        normalized_account = _name(account_id, field="account_id")
-        book = EconomicBook(transactions)
-        if type(self) is ScopedEconomicBook:
-            _bind_scoped_economic_book_owner(self, normalized_environment, normalized_account, book)
-        self.environment = normalized_environment
-        self.account_id = normalized_account
-        self._book = book
-
-    transactions = _scoped_transactions
-    append = _scoped_append
-    append_batch = _scoped_append_batch
-    balance = _scoped_balance
-    cash = _scoped_cash
-    position = _scoped_position
-    fee_expense = _scoped_fee_expense
-    audit_digest = _scoped_audit_digest
-
-
+# No module-global writer/read helper remains after the canonical class captures
+# its constructor and facade closures. A caller cannot mint or retarget owner
+# registry entries by rebinding module state.
+del _bind_scoped_economic_book_owner
+del _require_scoped_economic_book_owner
+del _scoped_init
 del _scoped_transactions
 del _scoped_append
 del _scoped_append_batch
@@ -808,7 +843,9 @@ del _scoped_cash
 del _scoped_position
 del _scoped_fee_expense
 del _scoped_audit_digest
-
+del _scoped_economic_owner_operations
+del _make_scoped_economic_constructor
+del _make_scoped_economic_facade
 
 def book_external_cash_flow(
     *,

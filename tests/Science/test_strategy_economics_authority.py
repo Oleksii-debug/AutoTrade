@@ -249,19 +249,20 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             assessment.unresolved_owners,
         )
 
-    def test_cross_symbol_instrument_substitution_fails_before_assessment(self):
+    def test_provider_symbol_alias_does_not_close_provider_scope_owner(self):
         item = _proposal()
-        with self.assertRaisesRegex(
-            StrategyEconomicsAuthorityError,
-            "proposal symbol does not match instrument provider_symbol",
-        ):
-            assess_strategy_economics_authority(
-                item,
-                _binding(item),
-                instrument_registry=_registry(
-                    _instrument_version(provider_symbol="BBB")
-                ),
-            )
+        assessment = assess_strategy_economics_authority(
+            item,
+            _binding(item),
+            instrument_registry=_registry(
+                _instrument_version(provider_symbol="BBB")
+            ),
+        )
+        self.assertEqual(assessment.status, "INCONCLUSIVE")
+        self.assertIn(
+            "provider_scope_binding",
+            assessment.unresolved_owners,
+        )
 
     def test_future_instrument_version_is_not_valid_at_information_cutoff(self):
         item = _proposal()

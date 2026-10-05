@@ -304,27 +304,22 @@ def _runtime_scope_snapshot(
     return cut, loop_events, authority_events
 
 
-def _autonomous_publication_owned(
-    item: Mapping[str, object],
+def _autonomous_event_owned(
+    event: Mapping[str, object],
     *,
     run_id: str,
 ) -> bool:
-    """Return whether one pending publication belongs to ZERO runtime authority."""
+    """Return whether one durable event belongs to ZERO runtime authority."""
 
-    envelope = item.get("payload")
-    if type(envelope) is not dict:
-        raise AutonomousRuntimeCheckpointError(
-            "pending outbox payload is not a canonical event envelope"
-        )
-    aggregate_type = envelope.get("aggregate_type")
-    aggregate_id = envelope.get("aggregate_id")
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
     if aggregate_type == "canonical_autonomous_simulation":
         return aggregate_id == run_id
 
-    event_payload = envelope.get("payload")
+    event_payload = event.get("payload")
     event_payload = event_payload if type(event_payload) is dict else {}
-    environment = envelope.get("environment", event_payload.get("environment"))
-    host_id = envelope.get("host_id", event_payload.get("host_id"))
+    environment = event.get("environment", event_payload.get("environment"))
+    host_id = event.get("host_id", event_payload.get("host_id"))
     return (
         aggregate_type in _COMPONENT_AGGREGATE_TYPES
         and environment == "SIMULATION"
@@ -332,26 +327,68 @@ def _autonomous_publication_owned(
     )
 
 
+def _autonomous_publication_owned(
+    item: Mapping[str, object],
+    *,
+    run_id: str,
+) -> bool:
+    """Return whether one publication belongs to ZERO runtime authority."""
+
+    envelope = item.get("payload")
+    if type(envelope) is not dict:
+        raise AutonomousRuntimeCheckpointError(
+            "outbox payload is not a canonical event envelope"
+        )
+    return _autonomous_event_owned(envelope, run_id=run_id)
+
+
+def _autonomous_owned_event_ids(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> tuple[str, ...]:
+    """Resolve exact ZERO event identities without scanning foreign outbox rows."""
+
+    events = list(
+        JournalStore.load_events(
+            store,
+            "canonical_autonomous_simulation",
+            run_id,
+        )
+    )
+    for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
+        events.extend(
+            event
+            for event in JournalStore.load_events_by_aggregate_type(
+                store,
+                aggregate_type,
+            )
+            if _autonomous_event_owned(event, run_id=run_id)
+        )
+    event_ids = tuple(event["event_id"] for event in events)
+    if len(set(event_ids)) != len(event_ids):
+        raise AutonomousRuntimeCheckpointError(
+            "ZERO runtime event identities are not unique"
+        )
+    return event_ids
+
+
 def _autonomous_owned_pending_publications(
     store: JournalStore,
     *,
     run_id: str,
 ) -> tuple[dict[str, object], ...]:
-    pending = JournalStore.pending_outbox(store, limit=1000)
-    count = JournalStore.pending_outbox_count(store)
-    if len(pending) == 1000 and count > len(pending):
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint publication ownership scan exceeded bounded outbox window"
-        )
-    if len(pending) != count:
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint pending outbox changed during ownership preflight"
-        )
-    return tuple(
-        item
-        for item in pending
-        if _autonomous_publication_owned(item, run_id=run_id)
-    )
+    pending: list[dict[str, object]] = []
+    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
+        state = JournalStore.outbox_delivery_state(store, event_id)
+        if state is None or state["delivered"]:
+            continue
+        if not _autonomous_publication_owned(state, run_id=run_id):
+            raise AutonomousRuntimeCheckpointError(
+                "exact ZERO outbox state escaped runtime ownership"
+            )
+        pending.append(state)
+    return tuple(pending)
 
 
 def deliver_autonomous_owned_publications(

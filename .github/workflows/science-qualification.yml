@@ -44,9 +44,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run scientific qualification tests
-        run: python -m unittest discover -s tests/Science -p "test_science_qualification.py" -v
+        run: python -m unittest discover -s tests/Science -p "test_science*.py" -v
       - name: Write exact-head science evidence
-        run: python tools/write_ci_evidence.py --suite science-qualification --command "python -m unittest discover -s tests/Science -p test_science_qualification.py -v" --output "artifacts/science-qualification-${{ runner.os }}.json"
+        run: python tools/write_ci_evidence.py --suite science-qualification --command "python -m unittest discover -s tests/Science -p test_science*.py -v" --output "artifacts/science-qualification-${{ runner.os }}.json"
       - name: Upload exact-head science evidence
         uses: actions/upload-artifact@v4
         with:

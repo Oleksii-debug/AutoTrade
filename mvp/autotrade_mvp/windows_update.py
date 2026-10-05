@@ -332,6 +332,7 @@ def _release_manifest(
         "schema_contract_hash",
         "artifacts",
         "qualification",
+        "supply_chain",
     }
     if set(manifest) != expected_manifest_fields:
         raise WindowsUpdateError(f"{name} manifest structure is not canonical")
@@ -703,6 +704,7 @@ def _validated_plan_release(
             "schema_contract_hash",
             "artifacts",
             "qualification",
+            "supply_chain",
         }:
             raise ValueError("release manifest structure is not canonical")
         qualification = parsed_manifest["qualification"]

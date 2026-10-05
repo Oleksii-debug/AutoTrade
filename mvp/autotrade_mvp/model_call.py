@@ -1590,7 +1590,9 @@ class DurableModelCallOrchestrator:
                 payload=prepared_payload,
             )
 
-        cancelled = cancel_requested or (lambda: False)
+        cancelled = (
+            cancel_requested if cancel_requested is not None else (lambda: False)
+        )
         cancel_boundary_refs = {
             "budget": self.budget,
             "journal": self.journal,

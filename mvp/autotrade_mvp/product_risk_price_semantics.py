@@ -49,6 +49,8 @@ _AT_KNOWN = InstrumentRegistry.at_known
 _AT_KNOWN_CODE = _AT_KNOWN.__code__
 _METADATA_BINDING = InstrumentVersion.metadata_evidence_binding
 _METADATA_BINDING_CODE = _METADATA_BINDING.__code__
+_VALIDATE_QUANTITY = InstrumentVersion.validate_quantity
+_VALIDATE_QUANTITY_CODE = _VALIDATE_QUANTITY.__code__
 
 
 def _require_module_authority() -> None:
@@ -71,6 +73,8 @@ def _require_module_authority() -> None:
         or _AT_KNOWN.__code__ is not _AT_KNOWN_CODE
         or InstrumentVersion.metadata_evidence_binding is not _METADATA_BINDING
         or _METADATA_BINDING.__code__ is not _METADATA_BINDING_CODE
+        or InstrumentVersion.validate_quantity is not _VALIDATE_QUANTITY
+        or _VALIDATE_QUANTITY.__code__ is not _VALIDATE_QUANTITY_CODE
     ):
         raise ProductRiskPriceSemanticsError(
             "instrument price-semantics authority changed"
@@ -287,6 +291,15 @@ class ProductRiskPriceSemanticsComposer:
                 "instrument registry returned non-canonical version"
             )
         before_binding = _METADATA_BINDING(before)
+        if before.provider_symbol != body.get("symbol"):
+            raise ProductRiskPriceSemanticsError(
+                "prepared symbol differs from causal instrument authority"
+            )
+        validated_quantity = _VALIDATE_QUANTITY(before, intent.quantity)
+        if validated_quantity != intent.quantity:
+            raise ProductRiskPriceSemanticsError(
+                "canonical quantity validation changed admitted quantity"
+            )
 
         digest = _AUTHENTICATED_DIGEST(
             registry,

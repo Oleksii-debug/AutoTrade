@@ -96,13 +96,25 @@ def _score_decimal(value: Fraction) -> Decimal:
         ) from error
 
 
+def _exact_sequence(value: object, name: str) -> tuple[object, ...]:
+    """Detach one caller collection without invoking polymorphic iteration."""
+
+    if type(value) not in (list, tuple):
+        raise SpecialistDagError(f"{name} must be an exact built-in list or tuple")
+    return tuple(value)
+
+
 def _utc(value: datetime, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise SpecialistDagError(f"{name} must be an exact timezone-aware datetime")
+    # The outer datetime type alone is not enough: an exact datetime may embed
+    # caller-defined tzinfo whose utcoffset/dst/fromutc callbacks would execute
+    # while this authority-bearing deadline/evidence time is normalized.
+    # Admit only the non-polymorphic stdlib timezone implementation first.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise SpecialistDagError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    if value.utcoffset() is None:
+        raise SpecialistDagError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
 
@@ -363,15 +375,16 @@ def plan_specialists(
 ) -> DagPlan:
     """Choose useful dependency-satisfied roles without exceeding the hard budget."""
 
+    raw_items = _exact_sequence(specs, "specs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
     snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     budget = _decimal(total_budget, "total_budget", non_negative=True)
-    raw_items = tuple(specs)
     items = tuple(_readmit_spec(item) for item in raw_items)
     by_id = {item.role_id: item for item in items}
     if len(by_id) != len(items):
         raise SpecialistDagError("specialist role ids must be unique")
 
-    available = {_text(item, "available input") for item in available_inputs}
+    available = {_text(item, "available input") for item in raw_available}
     scheduled: list[str] = []
     skipped: list[tuple[str, str]] = []
     reserved = Decimal("0")
@@ -436,8 +449,14 @@ def aggregate_specialists(
 ) -> AggregatedProposal:
     """Aggregate only outputs admitted by the exact canonical specialist plan."""
 
+    raw_spec_items = _exact_sequence(specs, "specs")
+    raw_runs = _exact_sequence(runs, "runs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
+    raw_blockers = _exact_sequence(
+        blocking_critique_terms,
+        "blocking_critique_terms",
+    )
     deadline = _utc(decision_deadline, "decision_deadline")
-    raw_spec_items = tuple(specs)
     spec_items = tuple(_readmit_spec(spec) for spec in raw_spec_items)
     by_id = {spec.role_id: spec for spec in spec_items}
     if not by_id:
@@ -450,7 +469,7 @@ def aggregate_specialists(
     canonical_plan = plan_specialists(
         spec_items,
         input_snapshot_id=snapshot_id,
-        available_inputs=available_inputs,
+        available_inputs=raw_available,
         total_budget=total_budget,
     )
     if plan != canonical_plan:
@@ -464,10 +483,10 @@ def aggregate_specialists(
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
     rejected: list[tuple[str, str]] = []
     blockers: set[str] = set()
-    for item in blocking_critique_terms:
+    for item in raw_blockers:
         blockers.add(_text(item, "blocking critique term").lower())
 
-    for raw_run in runs:
+    for raw_run in raw_runs:
         run = _readmit_run(raw_run)
         if run.role_id in seen:
             raise SpecialistDagError("duplicate specialist result")
@@ -558,7 +577,9 @@ def aggregate_specialists(
                 "specialist group weighted score",
             )
         if weight_sum == 0:
-            group_scores.append(Fraction(0, 1))
+            # A zero-confidence group is evidence with no numerical weight.
+            # Counting it in the equal-group denominator would let a
+            # zero-confidence specialist dilute an independent signal.
             continue
         group_scores.append(
             _bounded_fraction(
@@ -567,17 +588,20 @@ def aggregate_specialists(
             )
         )
 
-    aggregate_fraction = Fraction(0, 1)
-    for group_score in group_scores:
+    if group_scores:
+        aggregate_fraction = Fraction(0, 1)
+        for group_score in group_scores:
+            aggregate_fraction = _bounded_fraction(
+                aggregate_fraction + group_score,
+                "aggregate specialist score",
+            )
         aggregate_fraction = _bounded_fraction(
-            aggregate_fraction + group_score,
+            aggregate_fraction / len(group_scores),
             "aggregate specialist score",
         )
-    aggregate_fraction = _bounded_fraction(
-        aggregate_fraction / len(group_scores),
-        "aggregate specialist score",
-    )
-    aggregate = _score_decimal(aggregate_fraction)
+        aggregate = _score_decimal(aggregate_fraction)
+    else:
+        aggregate = Decimal("0")
     if aggregate > 0:
         direction: Literal["LONG", "SHORT", "FLAT"] = "LONG"
     elif aggregate < 0:

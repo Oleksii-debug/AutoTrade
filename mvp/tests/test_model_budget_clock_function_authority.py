@@ -23,6 +23,10 @@ def _poisoned_clock_text(_value):
     return NOW_TEXT
 
 
+class DecoyBudget:
+    pass
+
+
 class ModelBudgetClockFunctionAuthorityTests(unittest.TestCase):
     def test_clock_cannot_replace_restore_helper_code_in_place(self):
         global RESTORE_DECOY_CALLS
@@ -63,6 +67,47 @@ class ModelBudgetClockFunctionAuthorityTests(unittest.TestCase):
             self.assertIs(restore.__kwdefaults__, original_kwdefaults)
             self.assertEqual(
                 journal.load_events("model_budget", "clock-restore-function-budget"),
+                [],
+            )
+
+    def test_clock_cannot_replace_restore_helper_defaults_in_place(self):
+        budget_class = budget_module.DurableModelBudget
+        restore = budget_class._restore_clock_authority
+        original_defaults = restore.__defaults__
+        original_kwdefaults = restore.__kwdefaults__
+        alias_restored = False
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                restore.__defaults__ = ({},)
+                budget_module.DurableModelBudget = DecoyBudget
+                return NOW_TEXT
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "model budget clock mutated authority",
+                ):
+                    budget_class(
+                        journal=journal,
+                        budget_id="clock-restore-defaults-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+            finally:
+                alias_restored = budget_module.DurableModelBudget is budget_class
+                budget_module.DurableModelBudget = budget_class
+                restore.__defaults__ = original_defaults
+                restore.__kwdefaults__ = original_kwdefaults
+
+            self.assertTrue(alias_restored)
+            self.assertIs(restore.__defaults__, original_defaults)
+            self.assertIs(restore.__kwdefaults__, original_kwdefaults)
+            self.assertEqual(
+                journal.load_events("model_budget", "clock-restore-defaults-budget"),
                 [],
             )
 

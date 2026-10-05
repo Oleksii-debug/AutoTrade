@@ -177,6 +177,37 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
 
+    def test_financial_configuration_rejects_hostile_scalar_subclasses_before_use(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile strip callback executed")
+
+            def __bool__(self):
+                raise AssertionError("hostile bool callback executed")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("hostile Decimal string callback executed")
+
+        class HostileInt(int):
+            def __str__(self):
+                raise AssertionError("hostile int string callback executed")
+
+        with TemporaryDirectory() as directory:
+            cases = (
+                {"symbol": HostileText("SIM")},
+                {"initial_cash": HostileDecimal("10000")},
+                {"order_quantity": HostileInt(1)},
+            )
+            for kwargs in cases:
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaises(TypeError):
+                        run_vertical_slice(
+                            [100, 101, 102, 103],
+                            directory,
+                            **kwargs,
+                        )
+
     def test_financial_outputs_ignore_ambient_decimal_context(self):
         prices = ["100.12345678", "101.23456789", "102.34567891", "103.45678912"]
         kwargs = {

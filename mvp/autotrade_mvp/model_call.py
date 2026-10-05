@@ -36,6 +36,7 @@ from .model_gateway import (
     route_model,
 )
 from .persistence import (
+    JournalStore,
     canonical_json,
     payload_digest,
     require_exact_journal_store_authority,
@@ -53,6 +54,100 @@ class ModelCallError(RuntimeError):
 
 class ModelCallNotSent(ModelCallError):
     """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
+
+
+# Callback-held budget references can reach both the JournalStore facade class
+# and its project-owned implementation base. Instance restoration is therefore
+# insufficient: class-level rebinding could redirect the durable post-callback
+# release/settlement path while leaving every protected instance dictionary
+# unchanged. Capture the exact trusted dispatch graph at module import.
+_MODEL_JOURNAL_CLASS_AUTHORITY = tuple(
+    (
+        cls,
+        tuple(cls.__bases__),
+        MappingProxyType(dict(vars(cls))),
+    )
+    for cls in JournalStore.__mro__
+    if cls is not object
+)
+
+
+def _model_journal_class_authority_changes(
+    *,
+    restore: bool,
+    authority=_MODEL_JOURNAL_CLASS_AUTHORITY,
+) -> list[str]:
+    """Detect and optionally restore mutation of canonical journal class dispatch."""
+
+    changes: list[str] = []
+    for cls, expected_bases, expected_state in authority:
+        current_bases = tuple(cls.__bases__)
+        bases_changed = (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        )
+        if bases_changed:
+            changes.append(f"journal.class.{cls.__name__}.__bases__")
+            if restore:
+                try:
+                    type.__setattr__(cls, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        "journal class base authority could not be restored"
+                    ) from error
+
+        current_state = vars(cls)
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            raise ModelCallError("journal class authority state keys are invalid")
+        names = set(current_keys) | set(expected_state)
+        for name in sorted(names):
+            label = f"journal.class.{cls.__name__}.{name}"
+            if name not in expected_state:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__delattr__(cls, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+                continue
+            expected = expected_state[name]
+            if name not in current_state or current_state[name] is not expected:
+                changes.append(label)
+                if restore:
+                    try:
+                        type.__setattr__(cls, name, expected)
+                    except TypeError as error:
+                        raise ModelCallError(
+                            "journal class authority could not be restored"
+                        ) from error
+
+        if restore:
+            restored_bases = tuple(cls.__bases__)
+            if (
+                len(restored_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                )
+            ):
+                raise ModelCallError(
+                    "journal class base authority restore is incomplete"
+                )
+            restored = vars(cls)
+            if set(restored) != set(expected_state):
+                raise ModelCallError("journal class authority restore is incomplete")
+            if any(
+                restored[name] is not expected_state[name]
+                for name in expected_state
+            ):
+                raise ModelCallError("journal class authority restore is incomplete")
+    return changes
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -622,6 +717,10 @@ class DurableModelCallOrchestrator:
         dict[str, object] | None,
     ]:
         """Freeze exact class and instance authority around caller callbacks."""
+        if _model_journal_class_authority_changes(restore=False):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
         orchestrator_class = object.__getattribute__(self, "__class__")
         if orchestrator_class is not DurableModelCallOrchestrator:
             raise ModelCallError("model orchestrator class authority is invalid")
@@ -713,7 +812,9 @@ class DurableModelCallOrchestrator:
             identity_class,
             identity_state,
         ) = snapshot
-        changes: list[str] = []
+        # Class dispatch must be restored before any later durable call can
+        # resolve through a callback-rebound JournalStore facade/base member.
+        changes = _model_journal_class_authority_changes(restore=True)
 
         def restore_class(
             value: object,

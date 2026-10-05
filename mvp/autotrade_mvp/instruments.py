@@ -1369,6 +1369,37 @@ def _install_authenticated_price_semantics_authority():
     json_dumps = json.dumps
     json_dumps_code = getattr(json_dumps, "__code__", None)
     sha256_function = sha256
+    decimal_text = _decimal_text
+    decimal_text_code = _decimal_text.__code__
+    utc_text = _utc_text
+    utc_text_code = _utc_text.__code__
+    thaw_jsonish = _thaw_jsonish
+    thaw_jsonish_code = _thaw_jsonish.__code__
+    dataclass_fields = fields
+    dataclass_fields_code = fields.__code__
+    to_contract_dict = version_type.to_contract_dict
+    to_contract_dict_code = to_contract_dict.__code__
+    version_init = version_type.__init__
+    version_init_code = version_init.__code__
+    settlement_convention_type = SettlementConvention
+    settlement_payload = settlement_convention_type.payload
+    settlement_payload_code = settlement_payload.__code__
+    registry_error_type = InstrumentRegistryError
+    canonical_decimal_text_function = canonical_decimal_text
+    canonical_decimal_text_code = getattr(canonical_decimal_text_function, "__code__", None)
+    exact_decimal_error_type = ExactDecimalError
+    timezone_type = timezone
+    mapping_type = Mapping
+    mapping_proxy_type = MappingProxyType
+    deliverable_leg_type = DeliverableLeg
+    canonical_dict = dict
+    canonical_str = str
+    canonical_type = type
+    canonical_int = int
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_any = any
+    canonical_isinstance = isinstance
 
     def require_executable_authority() -> None:
         if (
@@ -1389,16 +1420,17 @@ def _install_authenticated_price_semantics_authority():
             or _is_exact_multiple is not exact_multiple
             or _is_exact_multiple.__code__ is not exact_multiple_code
             or parse_bounded_exact_decimal is not bounded_decimal_parser
-            or getattr(bounded_decimal_parser, "__code__", None)
+            or canonical_getattr(bounded_decimal_parser, "__code__", None)
             is not bounded_decimal_parser_code
             or is_exact_decimal_multiple is not decimal_multiple
-            or getattr(decimal_multiple, "__code__", None) is not decimal_multiple_code
+            or canonical_getattr(decimal_multiple, "__code__", None)
+            is not decimal_multiple_code
             or version_type.metadata_evidence_binding is not metadata_binding
             or version_type.metadata_evidence_binding.__code__ is not metadata_binding_code
             or _registry_versions_for is not versions_for
-            or getattr(versions_for, "__code__", None) is not versions_for_code
+            or canonical_getattr(versions_for, "__code__", None) is not versions_for_code
             or trusted_authenticated_reader is not trusted_reader
-            or getattr(trusted_reader, "__code__", None) is not trusted_reader_code
+            or canonical_getattr(trusted_reader, "__code__", None) is not trusted_reader_code
             or _detached_instrument_version is not detach
             or _detached_instrument_version.__code__ is not detach_code
             or _instrument_version_ref is not canonical_ref
@@ -1409,10 +1441,42 @@ def _install_authenticated_price_semantics_authority():
             or _utc.__code__ is not utc_code
             or json is not json_module
             or json.dumps is not json_dumps
-            or getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or canonical_getattr(json_dumps, "__code__", None) is not json_dumps_code
             or sha256 is not sha256_function
+            or version_type.to_contract_dict is not to_contract_dict
+            or version_type.to_contract_dict.__code__ is not to_contract_dict_code
+            or version_type.__init__ is not version_init
+            or version_type.__init__.__code__ is not version_init_code
+            or _decimal_text is not decimal_text
+            or _decimal_text.__code__ is not decimal_text_code
+            or _utc_text is not utc_text
+            or _utc_text.__code__ is not utc_text_code
+            or _thaw_jsonish is not thaw_jsonish
+            or _thaw_jsonish.__code__ is not thaw_jsonish_code
+            or fields is not dataclass_fields
+            or fields.__code__ is not dataclass_fields_code
+            or SettlementConvention is not settlement_convention_type
+            or SettlementConvention.payload is not settlement_payload
+            or SettlementConvention.payload.__code__ is not settlement_payload_code
+            or InstrumentRegistryError is not registry_error_type
+            or canonical_decimal_text is not canonical_decimal_text_function
+            or canonical_getattr(canonical_decimal_text_function, "__code__", None)
+            is not canonical_decimal_text_code
+            or ExactDecimalError is not exact_decimal_error_type
+            or timezone is not timezone_type
+            or Mapping is not mapping_type
+            or MappingProxyType is not mapping_proxy_type
+            or DeliverableLeg is not deliverable_leg_type
+            or dict is not canonical_dict
+            or str is not canonical_str
+            or type is not canonical_type
+            or int is not canonical_int
+            or tuple is not canonical_tuple
+            or getattr is not canonical_getattr
+            or any is not canonical_any
+            or isinstance is not canonical_isinstance
         ):
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "instrument price-semantics executable authority changed"
             )
 

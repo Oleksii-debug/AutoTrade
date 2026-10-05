@@ -355,6 +355,54 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     submission_scope=scope,
                 )
 
+    def test_malformed_unicode_fails_as_financial_authority_error_before_digest(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+            malformed = "\ud800"
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": malformed},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], malformed: "forbidden"},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": malformed},
+                )
+
     def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
         parameters = inspect.signature(
             AdmittedFinancialRequestAuthorityIssuer.issue

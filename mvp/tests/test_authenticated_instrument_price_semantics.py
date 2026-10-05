@@ -223,6 +223,100 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                 ):
                     self._digest(registry, artifact_store)
 
+    def test_registry_versions_code_mutation_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            target = instruments_module._registry_versions_for
+            original_code = target.__code__
+
+            def forged_code_factory():
+                retained_marker = object()
+
+                def forged(_registry, _instrument_id):
+                    _ = retained_marker
+                    raise AssertionError("forged registry versions executable ran")
+
+                return forged.__code__
+
+            forged_code = forged_code_factory()
+            self.assertEqual(
+                len(original_code.co_freevars),
+                len(forged_code.co_freevars),
+            )
+            try:
+                target.__code__ = forged_code
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            finally:
+                target.__code__ = original_code
+
+    def test_trusted_reader_code_mutation_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            target = instruments_module.trusted_authenticated_reader
+            original_code = target.__code__
+
+            def forged_reader(*_args, **_kwargs):
+                raise AssertionError("forged trusted reader executed")
+
+            self.assertEqual(
+                len(original_code.co_freevars),
+                len(forged_reader.__code__.co_freevars),
+            )
+            try:
+                target.__code__ = forged_reader.__code__
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            finally:
+                target.__code__ = original_code
+
+    def test_artifact_store_type_rebinding_fails_before_causal_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+
+            class ForgedArtifactStore:
+                pass
+
+            with patch.object(
+                instruments_module,
+                "ArtifactStore",
+                ForgedArtifactStore,
+            ):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+
+    def test_json_dumps_code_mutation_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            target = instruments_module.json.dumps
+            original_code = target.__code__
+
+            def forged_dumps(*_args, **_kwargs):
+                raise AssertionError("forged json serializer executed")
+
+            self.assertEqual(
+                len(original_code.co_freevars),
+                len(forged_dumps.__code__.co_freevars),
+            )
+            try:
+                target.__code__ = forged_dumps.__code__
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            finally:
+                target.__code__ = original_code
+
     def test_snapshot_binds_price_semantics_without_putting_it_in_request(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

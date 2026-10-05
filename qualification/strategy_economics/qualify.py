@@ -1,18 +1,20 @@
 """Fail-closed terminal economics assessment for deterministic baselines.
 
-StrategyEconomicsBinding is a public research value.  Its structural
+StrategyEconomicsBinding is a public research value. Its structural
 status=QUALIFIED proves deterministic shape and causal metadata, not that the
 referenced costs, capacity, FX/borrow/funding evidence, or after-cost values
 came from independent canonical owners.
 
-This qualification composition creates a separate issued assessment.  Current
-main can re-run the structural join, resolve an exact caller-selected product
+This qualification composition creates a separate issued assessment. The
+current WP-33 composition can replay one exact registered strategy-run receipt,
+re-run the structural economics join, resolve an exact caller-selected product
 instrument version, and optionally reverify a durable provider-economic cut
-from a caller-selected sealed book.  Structural replay of caller-selected
-sources is not proof that product composition selected those owner authorities.
-The assessment deliberately remains INCONCLUSIVE until the remaining WP-33
-owner graph is independently available.  No green software test from this
-module is economic-edge evidence.
+from a caller-selected sealed book. Registered-run replay proves deterministic
+computation provenance only. Structural replay of caller-selected external
+sources is not proof that product composition selected those economic owner
+authorities. The assessment deliberately remains INCONCLUSIVE until the
+remaining WP-33 owner graph is independently available. No green software test
+from this module is economic-edge evidence.
 """
 
 from __future__ import annotations
@@ -31,8 +33,10 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
 )
 from research.autotrade_research.strategies.deterministic import (
     DeterministicProposal,
+    RegisteredStrategyRunReceipt,
     StrategyEconomicsBinding,
     bind_strategy_economics,
+    verify_registered_strategy_run,
 )
 
 
@@ -40,9 +44,10 @@ class StrategyEconomicsAuthorityError(ValueError):
     """Terminal strategy-economics authority is unavailable or inconsistent."""
 
 
-# Retain installed structural/replay primitives.  Later public module/class
+# Retain installed structural/replay primitives. Later public module/class
 # rebinding must not redirect which implementation this composition uses.
 _BIND_STRATEGY_ECONOMICS = bind_strategy_economics
+_VERIFY_REGISTERED_STRATEGY_RUN = verify_registered_strategy_run
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
@@ -130,6 +135,7 @@ class StrategyEconomicsAuthorityAssessment:
     instrument_provider_id: str
     verified_owners: tuple[str, ...]
     unresolved_owners: tuple[str, ...]
+    registered_run_receipt_digest: str | None
     provider_economic_cut_digest: str | None
     _token: InitVar[object | None] = None
 
@@ -167,16 +173,18 @@ class StrategyEconomicsAuthorityAssessment:
             )
         object.__setattr__(self, "verified_owners", verified)
         object.__setattr__(self, "unresolved_owners", unresolved)
-        if self.provider_economic_cut_digest is not None:
-            _exact_text(
-                self.provider_economic_cut_digest,
-                name="provider_economic_cut_digest",
-            )
+        for name in (
+            "registered_run_receipt_digest",
+            "provider_economic_cut_digest",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _exact_text(value, name=name)
 
     @property
     def digest(self) -> str:
         payload = {
-            "schema_version": "wp33-strategy-economics-authority.v1",
+            "schema_version": "wp33-strategy-economics-authority.v2",
             "status": self.status,
             "binding_fingerprint": self.binding_fingerprint,
             "bound_proposal_fingerprint": self.bound_proposal_fingerprint,
@@ -184,6 +192,9 @@ class StrategyEconomicsAuthorityAssessment:
             "instrument_provider_id": self.instrument_provider_id,
             "verified_owners": list(self.verified_owners),
             "unresolved_owners": list(self.unresolved_owners),
+            "registered_run_receipt_digest": (
+                self.registered_run_receipt_digest
+            ),
             "provider_economic_cut_digest": (
                 self.provider_economic_cut_digest
             ),
@@ -209,6 +220,7 @@ def _issued_seal(
         value.instrument_provider_id,
         value.verified_owners,
         value.unresolved_owners,
+        value.registered_run_receipt_digest,
         value.provider_economic_cut_digest,
         value.digest,
     )
@@ -269,18 +281,23 @@ def assess_strategy_economics_authority(
     economics_binding: StrategyEconomicsBinding,
     *,
     instrument_registry: InstrumentRegistry,
+    registered_run_receipt: RegisteredStrategyRunReceipt | None = None,
     provider_economic_book: DurableProviderEconomicBook | None = None,
     provider_economic_cut: ProviderEconomicCut | None = None,
     expected_visibility_journal_sequence: int | None = None,
     additional_required_owners: tuple[str, ...] = (),
 ) -> StrategyEconomicsAuthorityAssessment:
-    """Reverify structural/durable facts and preserve missing owner authority.
+    """Reverify deterministic provenance/durable facts and preserve owner gaps.
 
-    No caller-supplied verifier/callback is accepted.  Provider economics replay
-    can verify that a supplied exact cut is reproduced by a supplied sealed book
-    at one visibility sequence.  Because this API does not select/authenticate
-    that book as the product's economic owner, replay is recorded separately and
-    does not satisfy the unresolved ``provider_economic_cut`` owner.
+    No caller-supplied verifier/callback is accepted. Exposure-bearing proposals
+    require the canonical replay-verifiable registered-run receipt and the exact
+    economics binding must name that receipt digest. This proves registered
+    deterministic computation provenance, not economic edge.
+
+    Provider economics replay can verify that a supplied exact cut is reproduced
+    by a supplied sealed book at one visibility sequence. Because this API does
+    not select/authenticate that book as the product's economic owner, replay is
+    recorded separately and does not satisfy ``provider_economic_cut``.
     """
 
     proposal = _snapshot_proposal(proposal)
@@ -290,21 +307,58 @@ def assess_strategy_economics_authority(
             "instrument_registry must be exact InstrumentRegistry"
         )
 
-    bound = _BIND_STRATEGY_ECONOMICS(
-        proposal,
-        economics_binding,
-        instrument_version=economics_binding.instrument_version,
-    )
-    instrument = _INSTRUMENT_REGISTRY_EXACT(
-        instrument_registry,
-        economics_binding.instrument_version,
-    )
-
     verified = {
         "instrument_registry_shape",
         "structural_economics_binding",
     }
     unresolved = set(_BASE_REQUIRED_OWNERS)
+    receipt_digest: str | None = None
+
+    if registered_run_receipt is not None:
+        if type(registered_run_receipt) is not RegisteredStrategyRunReceipt:
+            raise TypeError(
+                "registered_run_receipt must be exact RegisteredStrategyRunReceipt"
+            )
+        try:
+            receipt_digest = _VERIFY_REGISTERED_STRATEGY_RUN(
+                proposal,
+                registered_run_receipt,
+            )
+        except (TypeError, ValueError) as error:
+            raise StrategyEconomicsAuthorityError(
+                "registered strategy-run receipt failed deterministic replay"
+            ) from error
+        if registered_run_receipt.instrument_version != economics_binding.instrument_version:
+            raise StrategyEconomicsAuthorityError(
+                "registered strategy-run receipt instrument does not match economics"
+            )
+        if economics_binding.registered_run_receipt_sha256 != receipt_digest:
+            raise StrategyEconomicsAuthorityError(
+                "economics binding does not name the replayed registered strategy run"
+            )
+        verified.add("registered_strategy_run_receipt")
+        unresolved.remove("registered_strategy_run_receipt")
+    elif proposal.action != "HOLD":
+        raise StrategyEconomicsAuthorityError(
+            "exposure-bearing strategy economics requires registered-run replay authority"
+        )
+
+    try:
+        bound = _BIND_STRATEGY_ECONOMICS(
+            proposal,
+            economics_binding,
+            instrument_version=economics_binding.instrument_version,
+            registered_run_receipt=registered_run_receipt,
+        )
+    except (TypeError, ValueError) as error:
+        raise StrategyEconomicsAuthorityError(
+            "strategy economics structural join failed"
+        ) from error
+
+    instrument = _INSTRUMENT_REGISTRY_EXACT(
+        instrument_registry,
+        economics_binding.instrument_version,
+    )
     unresolved.update(
         _ASSET_REQUIRED_OWNERS.get(instrument.asset_class, ())
     )
@@ -370,6 +424,7 @@ def assess_strategy_economics_authority(
         instrument_provider_id=instrument.provider_id,
         verified_owners=tuple(sorted(verified)),
         unresolved_owners=tuple(sorted(unresolved)),
+        registered_run_receipt_digest=receipt_digest,
         provider_economic_cut_digest=cut_digest,
         _token=_ISSUE_TOKEN,
     )
@@ -381,11 +436,11 @@ def require_qualified_strategy_economics(
 ) -> StrategyEconomicsAuthorityAssessment:
     """Fail closed until a non-caller-forgeable positive issuer exists.
 
-    Current main deliberately has no terminal positive WP-33 issuer.  The
+    Current main deliberately has no terminal positive WP-33 issuer. The
     in-process issuance registry is useful for detecting accidental mutation of
     diagnostic INCONCLUSIVE assessments, but Python module-private objects are
     not a security boundary: a same-process caller can import private symbols,
-    mutate an object and attempt to re-register a matching seal.  Therefore no
+    mutate an object and attempt to re-register a matching seal. Therefore no
     registry state can promote an assessment to terminal financial authority.
     """
 

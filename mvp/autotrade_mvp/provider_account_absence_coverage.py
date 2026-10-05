@@ -36,6 +36,7 @@ from .provider_account_absence_semantics import (
 from .provider_account_page_chain import (
     ProviderAccountPageChain,
     ProviderAccountPageChainError,
+    require_current_provider_account_page_chain_authority,
     require_provider_account_page_chain_authority,
 )
 
@@ -524,6 +525,7 @@ def _install_surface_coverage_authority():
             tuple[object, ...],
             weakref.ReferenceType,
             weakref.ReferenceType,
+            DurableProviderQualificationRegistry,
         ],
     ] = {}
     fields = (
@@ -564,13 +566,19 @@ def _install_surface_coverage_authority():
         value: ProviderAccountSurfaceCoverage,
         page_chain: ProviderAccountPageChain,
         historical_submission: HistoricalUnknownSubmissionBinding,
+        qualification_registry: DurableProviderQualificationRegistry,
     ) -> None:
+        if type(qualification_registry) is not DurableProviderQualificationRegistry:
+            raise TypeError(
+                "qualification_registry must be exact DurableProviderQualificationRegistry"
+            )
         prune()
         states[id(value)] = (
             weakref.ref(value),
             material(value),
             weakref.ref(page_chain),
             weakref.ref(historical_submission),
+            qualification_registry,
         )
 
     def require(value: ProviderAccountSurfaceCoverage) -> ProviderAccountSurfaceCoverage:
@@ -603,12 +611,57 @@ def _install_surface_coverage_authority():
             ) from error
         return value
 
-    return register, require
+    def require_current(
+        value: ProviderAccountSurfaceCoverage,
+        *,
+        at: datetime,
+    ) -> ProviderAccountSurfaceCoverage:
+        require(value)
+        state = states.get(id(value))
+        if state is None:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage construction authority is unavailable"
+            )
+        page_chain = state[2]()
+        historical = state[3]()
+        qualification_registry = state[4]
+        if page_chain is None or historical is None:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage source authority is unavailable"
+            )
+        try:
+            require_current_provider_account_page_chain_authority(
+                page_chain,
+                qualification_registry=qualification_registry,
+                at=at,
+            )
+            require_historical_unknown_submission_authority(historical)
+        except (
+            ProviderAccountPageChainError,
+            ProviderAccountAbsenceCoverageError,
+        ) as error:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage is not exact current authority"
+            ) from error
+        if (
+            value.page_chain_digest != page_chain.content_digest
+            or value.historical_submission_digest != historical.content_digest
+            or value.provider_scope_digest != page_chain.provider_scope_digest
+            or value.account_id != page_chain.account_id
+            or value.qualification_id != page_chain.qualification_id
+        ):
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage no longer matches current source authority"
+            )
+        return value
+
+    return register, require, require_current
 
 
 (
     _register_provider_account_surface_coverage_authority,
     require_provider_account_surface_coverage_authority,
+    require_current_provider_account_surface_coverage_authority,
 ) = _install_surface_coverage_authority()
 del _install_surface_coverage_authority
 
@@ -756,7 +809,11 @@ def issue_provider_account_surface_coverage(
         )
     point = _at_point(at)
     try:
-        require_provider_account_page_chain_authority(page_chain)
+        require_current_provider_account_page_chain_authority(
+            page_chain,
+            qualification_registry=qualification_registry,
+            at=point,
+        )
         require_historical_unknown_submission_authority(historical_submission)
     except (
         ProviderAccountPageChainError,
@@ -929,5 +986,6 @@ def issue_provider_account_surface_coverage(
         value,
         page_chain,
         historical_submission,
+        qualification_registry,
     )
     return value

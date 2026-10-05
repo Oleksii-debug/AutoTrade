@@ -599,15 +599,10 @@ def _provider_fill_transaction_is_bound(
                 "provider fill financial binding scope is inconsistent"
             )
 
-        request_environment = request.get("environment")
-        request_provider_environment = request.get(
-            "provider_environment", request_environment
-        )
         in_scope = (
             request.get("provider_id") == economic_book.provider_id
             and request.get("account_id") == economic_book.account_id
-            and request_environment == economic_book.environment
-            and request_provider_environment == economic_book.provider_environment
+            and request.get("environment") == economic_book.environment
         )
         if not in_scope:
             continue

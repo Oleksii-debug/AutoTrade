@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 from types import MappingProxyType
+import subprocess
+import sys
 import unittest
 
 import mvp.autotrade_mvp.allocation as allocation_module
@@ -433,6 +435,349 @@ class AllocationPayloadProvenanceTests(unittest.TestCase):
             allocation_module._canonical_evidence_json = original_canonical_json
             allocation_module._allocation_evidence_digest = original_digest
             allocation_module.sha256 = original_sha256
+
+
+    def test_resolver_ignores_evidence_class_valid_at_rebinding(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        evidence_type = type(evidence)
+        original_valid_at = evidence_type.valid_at
+        touched = []
+
+        def forged_valid_at(_self, _instant):
+            touched.append("valid_at")
+            return True
+
+        evidence_type.valid_at = forged_valid_at
+        try:
+            with self.assertRaisesRegex(ValueError, "stale or not yet observable"):
+                allocation_module._resolve_allocation_evidence(
+                    evidence,
+                    {object.__getattribute__(evidence, "evidence_id"): evidence},
+                    expected_kind="VALUATION",
+                    expected_environment="SIMULATION",
+                    at="2026-09-25T18:50:00Z",
+                )
+        finally:
+            evidence_type.valid_at = original_valid_at
+
+        self.assertEqual(touched, [])
+
+    def test_resolver_and_payload_helpers_ignore_class_attribute_dispatch(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        evidence_type = type(evidence)
+        evidence_type_dict = type.__getattribute__(evidence_type, "__dict__")
+        self.assertNotIn("__getattribute__", evidence_type_dict)
+        evidence_id = object.__getattribute__(evidence, "evidence_id")
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged evidence attribute dispatch executed")
+
+        evidence_type.__getattribute__ = forged_getattribute
+        try:
+            resolved = allocation_module._resolve_allocation_evidence(
+                evidence,
+                {evidence_id: evidence},
+                expected_kind="VALUATION",
+                expected_environment="SIMULATION",
+                at="2026-09-25T18:30:00Z",
+            )
+            self.assertIs(resolved, evidence)
+            self.assertEqual(
+                allocation_module._payload_text(evidence, "symbol"),
+                "AAA",
+            )
+        finally:
+            del evidence_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
+    def test_evidence_type_global_rebinding_cannot_admit_foreign_object(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        original_type = allocation_module.ImmutableAllocationEvidence
+
+        class ForgedEvidence:
+            pass
+
+        forged = ForgedEvidence()
+        for name in (
+            "evidence_id",
+            "kind",
+            "environment",
+            "schema_version",
+            "observed_at",
+            "valid_until",
+            "payload",
+            "digest",
+            "_payload_owners",
+        ):
+            setattr(forged, name, object.__getattribute__(evidence, name))
+
+        allocation_module.ImmutableAllocationEvidence = ForgedEvidence
+        try:
+            with self.assertRaisesRegex(TypeError, "canonical evidence type"):
+                allocation_module._verified_allocation_payload_owner(forged)
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            allocation_module.ImmutableAllocationEvidence = original_type
+
+    def test_resolver_verifier_global_rebinding_cannot_bypass_digest(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        original_verify = allocation_module._verified_allocation_payload_owner
+        original_digest = evidence.digest
+        object.__setattr__(evidence, "digest", "0" * 64)
+        allocation_module._verified_allocation_payload_owner = lambda _value: None
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "payload provenance digest mismatch",
+            ):
+                allocation_module._resolve_allocation_evidence(
+                    evidence,
+                    {evidence.evidence_id: evidence},
+                    expected_kind="VALUATION",
+                    expected_environment="SIMULATION",
+                    at="2026-09-25T18:30:00Z",
+                )
+        finally:
+            allocation_module._verified_allocation_payload_owner = original_verify
+            object.__setattr__(evidence, "digest", original_digest)
+
+
+    def test_sealer_ignores_post_import_mappingproxy_and_weakref_rebinding(self):
+        original_mapping_proxy = allocation_module.MappingProxyType
+        original_weakref = allocation_module.weakref
+        touched = []
+
+        class ForgedWeakref:
+            @staticmethod
+            def ref(*args, **kwargs):
+                touched.append("weakref")
+                raise AssertionError("forged weakref authority executed")
+
+        def forged_mapping_proxy(*args, **kwargs):
+            touched.append("mappingproxy")
+            raise AssertionError("forged mappingproxy authority executed")
+
+        allocation_module.MappingProxyType = forged_mapping_proxy
+        allocation_module.weakref = ForgedWeakref
+        try:
+            evidence = self.evidence({"symbol": "AAA"})
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            allocation_module.MappingProxyType = original_mapping_proxy
+            allocation_module.weakref = original_weakref
+
+        self.assertEqual(touched, [])
+
+
+    def test_json_encoder_global_rebind_is_not_serialization_authority(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        dumps_globals = allocation_module.json.dumps.__globals__
+        original_encoder = dumps_globals["JSONEncoder"]
+        touched = []
+
+        class ForgedEncoder:
+            def __init__(self, *args, **kwargs):
+                touched.append("init")
+                raise AssertionError("forged JSON encoder executed")
+
+        dumps_globals["JSONEncoder"] = ForgedEncoder
+        try:
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            dumps_globals["JSONEncoder"] = original_encoder
+
+        self.assertEqual(touched, [])
+
+    def test_json_encoder_constructor_retarget_fails_before_callback(self):
+        # CPython does not fully restore JSONEncoder's tp_new slot after a
+        # dynamic __new__ assignment is deleted. Mutating that shared stdlib
+        # class in this interpreter poisons every later json.dumps(cls=...)
+        # call. Exercise the hostile constructor mutation in a child process so
+        # the production guard is still tested without corrupting suite state.
+        script = r'''
+import mvp.autotrade_mvp.allocation as allocation_module
+encoder = allocation_module.json.JSONEncoder
+encoder_dict = type.__getattribute__(encoder, "__dict__")
+assert "__new__" not in encoder_dict
+touched = []
+
+def forged_new(cls, *args, **kwargs):
+    touched.append("new")
+    raise AssertionError("forged JSON encoder constructor executed")
+
+encoder.__new__ = staticmethod(forged_new)
+try:
+    try:
+        allocation_module._canonical_evidence_json({"symbol": "AAA"})
+    except ValueError as error:
+        assert "serializer authority changed after binding" in str(error)
+    else:
+        raise AssertionError("constructor retarget was not rejected")
+    assert touched == []
+finally:
+    del encoder.__new__
+'''
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+
+
+    def test_json_encoder_helper_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_helper = encoder_globals["_make_iterencode"]
+        touched = []
+
+        def forged_helper(*args, **kwargs):
+            touched.append("helper")
+            raise AssertionError("forged JSON helper executed")
+
+        encoder_globals["_make_iterencode"] = forged_helper
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["_make_iterencode"] = original_helper
+
+        self.assertEqual(touched, [])
+
+    def test_json_default_decoder_global_rebind_is_not_decode_authority(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        loads_globals = allocation_module.json.loads.__globals__
+        original_decoder = loads_globals["_default_decoder"]
+        touched = []
+
+        class ForgedDecoder:
+            def decode(self, _value):
+                touched.append("decode")
+                raise AssertionError("forged JSON decoder executed")
+
+        loads_globals["_default_decoder"] = ForgedDecoder()
+        try:
+            self.assertEqual(
+                allocation_module._allocation_payload_snapshot(evidence),
+                {"symbol": "AAA"},
+            )
+        finally:
+            loads_globals["_default_decoder"] = original_decoder
+
+        self.assertEqual(touched, [])
+
+    def test_json_decoder_attribute_dispatch_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        decoder_type = allocation_module.json.JSONDecoder
+        decoder_type_dict = type.__getattribute__(decoder_type, "__dict__")
+        self.assertNotIn("__getattribute__", decoder_type_dict)
+        touched = []
+
+        def forged_getattribute(self, name):
+            touched.append(name)
+            raise AssertionError("forged JSON decoder attribute dispatch executed")
+
+        decoder_type.__getattribute__ = forged_getattribute
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decoder authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            del decoder_type.__getattribute__
+
+        self.assertEqual(touched, [])
+
+
+    def test_json_decoder_scanner_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        decoder = allocation_module.json.loads.__globals__["_default_decoder"]
+        original_scan_once = decoder.scan_once
+        touched = []
+
+        def forged_scan_once(*args, **kwargs):
+            touched.append("scan_once")
+            raise AssertionError("forged JSON scanner executed")
+
+        decoder.scan_once = forged_scan_once
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decoder authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            decoder.scan_once = original_scan_once
+
+        self.assertEqual(touched, [])
+
+    def test_json_infinity_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_infinity = encoder_globals["INFINITY"]
+        touched = []
+
+        class ForgedInfinity:
+            def __neg__(self):
+                touched.append("neg")
+                raise AssertionError("forged JSON infinity executed")
+
+        encoder_globals["INFINITY"] = ForgedInfinity()
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["INFINITY"] = original_infinity
+
+        self.assertEqual(touched, [])
+
+
+    def test_json_c_encoder_retarget_fails_before_callback(self):
+        evidence = self.evidence({"symbol": "AAA"})
+        encoder_globals = allocation_module.json.JSONEncoder.iterencode.__globals__
+        original_encoder = encoder_globals["c_make_encoder"]
+        touched = []
+
+        def forged_encoder(*args, **kwargs):
+            touched.append("c_make_encoder")
+            raise AssertionError("forged C encoder shim executed")
+
+        encoder_globals["c_make_encoder"] = forged_encoder
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "serializer authority changed after binding",
+            ):
+                allocation_module._allocation_payload_snapshot(evidence)
+        finally:
+            encoder_globals["c_make_encoder"] = original_encoder
+
+        self.assertEqual(touched, [])
 
 
     def test_same_function_digest_code_mutation_fails_before_execution(self):

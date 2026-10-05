@@ -603,6 +603,10 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 "str",
                 "int",
                 "bool",
+                "object",
+                "ValueError",
+                "AttributeError",
+                "TypeError",
             ):
                 with self.subTest(name=name):
                     with patch.object(
@@ -617,6 +621,66 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                         ):
                             composer.compose(request, prepared)
                     self.assertEqual(callbacks, [])
+
+    def test_coherent_expected_alias_rebinding_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged authority executed")
+
+            with (
+                patch.object(
+                    price_semantics_module,
+                    "_REQUIRE_PREPARED",
+                    forged,
+                ),
+                patch.object(
+                    price_semantics_module,
+                    "_REQUIRE_PREPARED_CODE",
+                    forged.__code__,
+                ),
+                patch.object(
+                    bybit_module,
+                    "require_canonical_bybit_prepared_submission",
+                    forged,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "binding authority changed",
+                ):
+                    composer.compose(request, prepared)
+
+            with (
+                patch.object(
+                    price_semantics_module,
+                    "_AUTHENTICATED_EVIDENCE",
+                    forged,
+                ),
+                patch.object(
+                    price_semantics_module,
+                    "_AUTHENTICATED_EVIDENCE_CODE",
+                    forged.__code__,
+                ),
+                patch.object(
+                    instruments_module,
+                    "authenticated_price_semantics_evidence",
+                    forged,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "binding authority changed",
+                ):
+                    composer.compose(request, prepared)
+
+            self.assertEqual(callbacks, [])
 
     def test_product_helper_rebinding_fails_before_forged_execution(self):
         with TemporaryDirectory() as directory:

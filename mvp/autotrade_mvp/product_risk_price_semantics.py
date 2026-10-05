@@ -539,6 +539,22 @@ def _install_product_risk_price_semantics_binding_authority(
     canonical_timezone = timezone
     canonical_decimal = Decimal
     canonical_invalid_operation = InvalidOperation
+    canonical_object = object
+    canonical_value_error = ValueError
+    canonical_attribute_error = AttributeError
+    canonical_type_error = TypeError
+    prepared_verifier = _REQUIRE_PREPARED
+    prepared_verifier_code = _REQUIRE_PREPARED_CODE
+    price_evidence_type = _PRICE_EVIDENCE_TYPE
+    authenticated_evidence = _AUTHENTICATED_EVIDENCE
+    authenticated_evidence_code = _AUTHENTICATED_EVIDENCE_CODE
+    at_known = _AT_KNOWN
+    at_known_code = _AT_KNOWN_CODE
+    metadata_binding = _METADATA_BINDING
+    metadata_binding_code = _METADATA_BINDING_CODE
+    validate_quantity = _VALIDATE_QUANTITY
+    validate_quantity_code = _VALIDATE_QUANTITY_CODE
+    instrument_version_type = InstrumentVersion
     fields = (
         "provider_id",
         "account_id",
@@ -592,6 +608,27 @@ def _install_product_risk_price_semantics_binding_authority(
             or timezone is not canonical_timezone
             or Decimal is not canonical_decimal
             or InvalidOperation is not canonical_invalid_operation
+            or object is not canonical_object
+            or ValueError is not canonical_value_error
+            or AttributeError is not canonical_attribute_error
+            or TypeError is not canonical_type_error
+            or _REQUIRE_PREPARED is not prepared_verifier
+            or _REQUIRE_PREPARED_CODE is not prepared_verifier_code
+            or prepared_verifier.__code__ is not prepared_verifier_code
+            or _PRICE_EVIDENCE_TYPE is not price_evidence_type
+            or _AUTHENTICATED_EVIDENCE is not authenticated_evidence
+            or _AUTHENTICATED_EVIDENCE_CODE is not authenticated_evidence_code
+            or authenticated_evidence.__code__ is not authenticated_evidence_code
+            or _AT_KNOWN is not at_known
+            or _AT_KNOWN_CODE is not at_known_code
+            or at_known.__code__ is not at_known_code
+            or _METADATA_BINDING is not metadata_binding
+            or _METADATA_BINDING_CODE is not metadata_binding_code
+            or metadata_binding.__code__ is not metadata_binding_code
+            or _VALIDATE_QUANTITY is not validate_quantity
+            or _VALIDATE_QUANTITY_CODE is not validate_quantity_code
+            or validate_quantity.__code__ is not validate_quantity_code
+            or InstrumentVersion is not instrument_version_type
             or _require_module_authority is not module_guard
             or module_guard.__code__ is not module_guard_code
             or _instant is not canonical_instant

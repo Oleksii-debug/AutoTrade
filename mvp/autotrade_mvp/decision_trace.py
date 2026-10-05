@@ -17,6 +17,7 @@ from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, dura
 
 
 GENESIS_HASH = "0" * 64
+_CONCRETE_PATH_TYPE = type(Path())
 _BUILD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
 REQUIRED_FIELDS = (
     "trace_id",
@@ -234,11 +235,15 @@ def _redact(value: Any) -> Any:
         return [_redact(item) for item in value]
     if type(value) is tuple:
         return tuple(_redact(item) for item in value)
-    if isinstance(value, (str, Mapping, list, tuple)):
+    if value is None or type(value) in (bool, int, float):
+        return value
+    if isinstance(value, (str, Mapping, list, tuple, int, float)):
         raise ValueError(
-            "diagnostic structured values must use exact built-in containers and strings"
+            "diagnostic values must use exact built-in containers and JSON scalars"
         )
-    return value
+    raise ValueError(
+        "diagnostic values must use exact built-in containers and JSON scalars"
+    )
 
 
 def canonical_json(value: Any) -> str:
@@ -303,25 +308,53 @@ class DecisionTraceStore:
     """Durable JSONL trace store with idempotent append and hash-chain verification."""
 
     def __init__(self, path: str | Path):
+        # Admit only exact built-in path carriers before any path protocol call.
+        # An arbitrary PathLike.__fspath__ callback must not execute inside the
+        # durable trace authority boundary.
+        if type(path) is str:
+            path_text = path
+        elif type(path) is _CONCRETE_PATH_TYPE:
+            path_text = os.fspath(path)
+        else:
+            raise TypeError("path must be an exact str or pathlib Path")
         # Freeze the selected durable location at composition time. A later
         # process-wide CWD change must not retarget either the trace file or
-        # its sibling canonical writer lock.
-        self.path = Path(os.path.abspath(os.fspath(path)))
+        # its canonical writer lock.
+        self.path = Path(os.path.abspath(path_text))
 
     def _load(self) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
-        records: list[dict[str, Any]] = []
         try:
-            for line in self.path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError("Decision trace row must be an object")
-                records.append(record)
-        except (OSError, json.JSONDecodeError) as error:
+            raw = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
             raise ValueError("Corrupt decision trace store") from error
+        if raw == "":
+            return []
+        if not raw.endswith("\n"):
+            raise ValueError("Corrupt decision trace store: missing canonical newline")
+
+        lines = raw[:-1].split("\n")
+        if any(line == "" for line in lines):
+            raise ValueError("Corrupt decision trace store: blank row")
+
+        records: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError("Corrupt decision trace store") from error
+            if type(record) is not dict:
+                raise ValueError("Decision trace row must be an exact object")
+            try:
+                canonical = canonical_json(record)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Corrupt decision trace store") from error
+            if canonical != line:
+                raise ValueError(
+                    "Corrupt decision trace store: non-canonical durable row"
+                )
+            records.append(record)
         return records
 
     @staticmethod
@@ -427,7 +460,10 @@ class DecisionTraceStore:
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
         with durable_path_lock(self.path):
-            records = self._load()
+            try:
+                records = self._load()
+            except ValueError as error:
+                raise ValueError("Existing decision trace chain is corrupt") from error
             # Validate the exact loaded snapshot before idempotency handling. A
             # second path read could otherwise verify a newer file while stale or
             # corrupt rows from the first read are still used for the append.
@@ -456,7 +492,10 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        records = self._load()
+        try:
+            records = self._load()
+        except ValueError as error:
+            raise ValueError("Decision trace chain is corrupt") from error
         if records and not self._records_are_valid(records):
             raise ValueError("Decision trace chain is corrupt")
         return records

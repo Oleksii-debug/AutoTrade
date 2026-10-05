@@ -11,6 +11,7 @@ from control.tools.reconvergence_integrity import (
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
+    parse_name_status_z,
 )
 
 
@@ -310,8 +311,191 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("pull_request_target:", workflow)
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
+        self.assertNotIn("--allow-protected-sentinel", workflow)
+        self.assertIn("--base-ref \"$BASE_REF\"", workflow)
+        self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", workflow)
         self.assertNotIn("edited", workflow)
 
+
+    def test_protected_sentinel_plain_modification_requires_exact_authorization(self):
+        sentinel = "control/INDEX.json"
+        blocked = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.protected_violations,
+            (f"{sentinel} (modified)",),
+        )
+
+        authorized = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_protected_sentinels=(sentinel,),
+        )
+        self.assertTrue(authorized.allowed)
+        self.assertEqual(authorized.protected_violations, ())
+
+    def test_protected_authorization_requires_exact_sentinel_path(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["control/INDEX.json", "README.md"],
+                changes=[Change(status="M", path="control/INDEX.json")],
+                allowed_protected_sentinels=("control",),
+            )
+
+    def test_protected_sentinel_add_and_copy_destination_fail_closed(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        added = assess_reconvergence(
+            base_paths=["README.md"],
+            changes=[Change(status="A", path=sentinel)],
+        )
+        copied = assess_reconvergence(
+            base_paths=["README.md", "source.yml"],
+            changes=[
+                Change(
+                    status="C100",
+                    previous_path="source.yml",
+                    path=sentinel,
+                )
+            ],
+        )
+
+        self.assertFalse(added.allowed)
+        self.assertFalse(copied.allowed)
+        self.assertIn(f"{sentinel} (added)", added.protected_violations)
+        self.assertIn(
+            f"{sentinel} (copy destination)",
+            copied.protected_violations,
+        )
+
+    def test_parser_rejects_unmerged_unknown_and_broken_statuses(self):
+        for status in ("U", "X", "B"):
+            with self.subTest(status=status):
+                with self.assertRaises(ValueError):
+                    parse_name_status([f"{status}\tREADME.md"])
+
+    def test_parser_rejects_noncanonical_changed_paths(self):
+        for path in (
+            "../escape.py",
+            "nested/../escape.py",
+            "/absolute.py",
+            "nested\\windows.py",
+            "nested//double.py",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    parse_name_status([f"M\t{path}"])
+
+    def test_nul_delimited_parser_preserves_rename_fields(self):
+        changes = parse_name_status_z(
+            b"M\x00mvp/runtime.py\x00R100\x00old.py\x00new.py\x00"
+        )
+        self.assertEqual(
+            changes,
+            (
+                Change(status="M", path="mvp/runtime.py"),
+                Change(status="R100", previous_path="old.py", path="new.py"),
+            ),
+        )
+
+    def test_nul_delimited_parser_rejects_truncated_or_non_utf8_output(self):
+        with self.assertRaises(ValueError):
+            parse_name_status_z(b"M\x00README.md")
+        with self.assertRaises(ValueError):
+            parse_name_status_z(b"M\x00\xff\x00")
+
+    def test_git_guard_rejects_stale_event_base_against_live_target_tip(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            git("branch", "-M", "main")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "feature")
+            (root / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+            git("add", "feature.py")
+            git("commit", "-m", "feature")
+            head_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "main")
+            (root / "README.md").write_text("advanced\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "advance main")
+
+            result = assess_git_revisions(
+                base_sha,
+                head_sha,
+                base_ref="main",
+                remote=str(root),
+                cwd=root,
+            )
+
+        self.assertFalse(result.allowed)
+        self.assertTrue(result.base_is_ancestor)
+        self.assertFalse(result.base_matches_remote_tip)
+        self.assertIn(
+            "event base revision is not current remote target tip",
+            result.reasons,
+        )
+
+    def test_git_guard_accepts_exact_live_target_tip(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            git("branch", "-M", "main")
+            (root / "README.md").write_text("base\n", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "feature")
+            (root / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+            git("add", "feature.py")
+            git("commit", "-m", "feature")
+            head_sha = git("rev-parse", "HEAD")
+
+            result = assess_git_revisions(
+                base_sha,
+                head_sha,
+                base_ref="main",
+                remote=str(root),
+                cwd=root,
+            )
+
+        self.assertTrue(result.allowed)
+        self.assertTrue(result.base_matches_remote_tip)
 
 
 if __name__ == "__main__":

@@ -9,13 +9,21 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from hashlib import sha256
-import ctypes
-import json
-import os
+from ctypes import (
+    Structure as _Structure,
+    byref as _byref,
+    c_size_t as _c_size_t,
+    c_ulong as _c_ulong,
+    c_ulonglong as _c_ulonglong,
+    sizeof as _sizeof,
+)
+from io import open as _io_open
+from json import dumps as _json_dumps
+from os import getpid as _getpid, name as _os_name
 from pathlib import Path
 import re
-import shutil
-import sys
+from shutil import disk_usage as _disk_usage
+from sys import platform as _sys_platform
 from threading import active_count
 from time import perf_counter_ns, process_time_ns
 from types import FunctionType
@@ -47,8 +55,29 @@ _UNCLOSED_AUTHORITIES = (
     "signed_terminal_qualification",
 )
 _EVIDENCE_TOKEN = object()
+_ISSUER_TOKEN = object()
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+
+if _os_name == "nt":  # pragma: no branch - platform import boundary
+    from ctypes import windll as _windll
+
+    _get_current_process = _windll.kernel32.GetCurrentProcess
+    _get_process_memory_info = _windll.psapi.GetProcessMemoryInfo
+    _get_process_io_counters = _windll.kernel32.GetProcessIoCounters
+else:
+    _get_current_process = None
+    _get_process_memory_info = None
+    _get_process_io_counters = None
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - Windows
+    _getrusage = None
+    _rusage_self = None
+else:
+    _getrusage = _resource.getrusage
+    _rusage_self = _resource.RUSAGE_SELF
 
 
 class RuntimeTargetHostResourceEvidenceError(ValueError):
@@ -114,7 +143,7 @@ def _uuid(value: object, *, name: str) -> str:
 
 def _canonical_bytes(value: object) -> bytes:
     return (
-        json.dumps(
+        _json_dumps(
             value,
             sort_keys=True,
             separators=(",", ":"),
@@ -126,76 +155,69 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 def _windows_peak_rss_bytes() -> int:
-    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    class PROCESS_MEMORY_COUNTERS(_Structure):
         _fields_ = (
-            ("cb", ctypes.c_ulong),
-            ("PageFaultCount", ctypes.c_ulong),
-            ("PeakWorkingSetSize", ctypes.c_size_t),
-            ("WorkingSetSize", ctypes.c_size_t),
-            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-            ("PagefileUsage", ctypes.c_size_t),
-            ("PeakPagefileUsage", ctypes.c_size_t),
+            ("cb", _c_ulong),
+            ("PageFaultCount", _c_ulong),
+            ("PeakWorkingSetSize", _c_size_t),
+            ("WorkingSetSize", _c_size_t),
+            ("QuotaPeakPagedPoolUsage", _c_size_t),
+            ("QuotaPagedPoolUsage", _c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", _c_size_t),
+            ("QuotaNonPagedPoolUsage", _c_size_t),
+            ("PagefileUsage", _c_size_t),
+            ("PeakPagefileUsage", _c_size_t),
         )
 
     counters = PROCESS_MEMORY_COUNTERS()
-    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
-    process = ctypes.windll.kernel32.GetCurrentProcess()
-    ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-        process, ctypes.byref(counters), counters.cb
-    )
+    counters.cb = _sizeof(PROCESS_MEMORY_COUNTERS)
+    process = _get_current_process()
+    ok = _get_process_memory_info(process, _byref(counters), counters.cb)
     if not ok:
         raise OSError("GetProcessMemoryInfo failed")
     return int(counters.PeakWorkingSetSize)
 
 
 def _peak_rss_bytes() -> int:
-    if os.name == "nt":
+    if _os_name == "nt":
         return _positive_int(_windows_peak_rss_bytes(), name="process peak RSS")
-    try:
-        import resource
-    except ImportError as error:  # pragma: no cover - unsupported target host
+    if _getrusage is None or _rusage_self is None:
         raise RuntimeTargetHostResourceEvidenceError(
             "process peak RSS is unavailable on this target host"
-        ) from error
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        )
+    raw = _getrusage(_rusage_self).ru_maxrss
     if type(raw) not in (int, float) or raw <= 0:
         raise RuntimeTargetHostResourceEvidenceError(
             "process peak RSS is unavailable on this target host"
         )
-    # Linux reports KiB. Darwin reports bytes; Darwin is developer diagnostics
-    # only because terminal AutoTrade targets Windows/Linux.
     return _positive_int(
-        int(raw * (1 if sys.platform == "darwin" else 1024)),
+        int(raw * (1 if _sys_platform == "darwin" else 1024)),
         name="process peak RSS",
     )
 
 
 def _windows_process_io_bytes() -> tuple[int, int]:
-    class IO_COUNTERS(ctypes.Structure):
+    class IO_COUNTERS(_Structure):
         _fields_ = (
-            ("ReadOperationCount", ctypes.c_ulonglong),
-            ("WriteOperationCount", ctypes.c_ulonglong),
-            ("OtherOperationCount", ctypes.c_ulonglong),
-            ("ReadTransferCount", ctypes.c_ulonglong),
-            ("WriteTransferCount", ctypes.c_ulonglong),
-            ("OtherTransferCount", ctypes.c_ulonglong),
+            ("ReadOperationCount", _c_ulonglong),
+            ("WriteOperationCount", _c_ulonglong),
+            ("OtherOperationCount", _c_ulonglong),
+            ("ReadTransferCount", _c_ulonglong),
+            ("WriteTransferCount", _c_ulonglong),
+            ("OtherTransferCount", _c_ulonglong),
         )
 
     counters = IO_COUNTERS()
-    process = ctypes.windll.kernel32.GetCurrentProcess()
-    if not ctypes.windll.kernel32.GetProcessIoCounters(
-        process, ctypes.byref(counters)
-    ):
+    process = _get_current_process()
+    if not _get_process_io_counters(process, _byref(counters)):
         raise OSError("GetProcessIoCounters failed")
     return int(counters.ReadTransferCount), int(counters.WriteTransferCount)
 
 
 def _linux_process_io_bytes() -> tuple[int, int]:
     try:
-        raw = Path("/proc/self/io").read_text(encoding="ascii")
+        with _io_open("/proc/self/io", "r", encoding="ascii") as handle:
+            raw = handle.read()
     except OSError as error:
         raise RuntimeTargetHostResourceEvidenceError(
             "process I/O counters are unavailable on this Linux host"
@@ -220,9 +242,9 @@ def _linux_process_io_bytes() -> tuple[int, int]:
 
 
 def _process_io_bytes() -> tuple[int, int]:
-    if os.name == "nt":
+    if _os_name == "nt":
         values = _windows_process_io_bytes()
-    elif sys.platform.startswith("linux"):
+    elif _sys_platform.startswith("linux"):
         values = _linux_process_io_bytes()
     else:  # pragma: no cover - unsupported target host
         raise RuntimeTargetHostResourceEvidenceError(
@@ -284,14 +306,14 @@ def capture_runtime_target_host_resource_snapshot(
     if type(evidence_root) is not type(Path()):
         raise TypeError("evidence_root must be an exact pathlib path")
     try:
-        usage = shutil.disk_usage(evidence_root)
+        usage = _disk_usage(evidence_root)
     except OSError as error:
         raise RuntimeTargetHostResourceEvidenceError(
             "target-host evidence filesystem usage is unavailable"
         ) from error
     read_bytes, write_bytes = _process_io_bytes()
     return RuntimeTargetHostResourceSnapshot(
-        process_id=_positive_int(os.getpid(), name="process_id"),
+        process_id=_positive_int(_getpid(), name="process_id"),
         monotonic_ns=_non_negative_int(perf_counter_ns(), name="monotonic_ns"),
         process_cpu_ns=_non_negative_int(process_time_ns(), name="process_cpu_ns"),
         peak_rss_bytes=_peak_rss_bytes(),
@@ -517,9 +539,19 @@ def issue_runtime_target_host_resource_evidence(
     *,
     before: RuntimeTargetHostResourceSnapshot,
     after: RuntimeTargetHostResourceSnapshot,
+    _issuer_token: object | None = None,
 ) -> RuntimeTargetHostResourceEvidence:
-    """Bind resource counters to the exact retained current-run chain."""
+    """Bind resource counters to the exact retained current-run chain.
 
+    The helper is intentionally wrapper-issued: callers cannot turn a
+    caller-constructed ``RuntimeTargetHostRunResult`` into retained resource
+    evidence merely by matching its outer Python type.
+    """
+
+    if _issuer_token is not _ISSUER_TOKEN:
+        raise RuntimeTargetHostResourceEvidenceError(
+            "resource evidence must be issued by canonical campaign wrapper"
+        )
     if type(run) is not RuntimeTargetHostRunResult:
         raise TypeError("run must be exact RuntimeTargetHostRunResult")
     if type(before) is not RuntimeTargetHostResourceSnapshot:
@@ -640,15 +672,15 @@ def run_declared_target_host_campaign_with_resources(
     issue_evidence = issue_runtime_target_host_resource_evidence
     publish_evidence = publish_runtime_target_host_resource_evidence
     read_snapshot = ArtifactStore.read_authenticated_snapshot
+    artifact_publish = ArtifactStore.publish_bytes
     runner = run_declared_target_host_campaign
     capture_state = _capture_callable_authority(capture_snapshot)
     issue_state = _capture_callable_authority(issue_evidence)
     publish_state = _capture_callable_authority(publish_evidence)
     read_state = _capture_callable_authority(read_snapshot)
+    artifact_publish_state = _capture_callable_authority(artifact_publish)
     runner_state = _capture_callable_authority(runner)
 
-    # These are the verifiers used after caller-owned workload callbacks. Capture
-    # both their transitive authority and raw code/binding identity before load.
     require_callable = _require_callable_authority
     require_store = _require_artifact_store_authority
     require_callable_state = _capture_callable_authority(require_callable)
@@ -686,6 +718,15 @@ def run_declared_target_host_campaign_with_resources(
             ("__init__", "terminal_qualification_eligible"),
         ),
     )
+    class_function_states = tuple(
+        (
+            f"{owner.__name__}.{name}",
+            function,
+            _capture_callable_authority(function),
+        )
+        for owner, name, _descriptor, function, _code in descriptor_states
+        if function is not None
+    )
 
     before = capture_snapshot(evidence_root=evidence_store.root)
     run = runner(
@@ -701,8 +742,6 @@ def run_declared_target_host_campaign_with_resources(
         run_receipt_artifact_id=run_receipt_artifact_id,
     )
 
-    # Do not invoke a module-level verifier before proving that verifier survived
-    # caller callbacks. Raw built-in descriptors are retained in local cells.
     if (
         raw_dict_getitem(module_namespace, "_require_callable_authority")
         is not require_callable
@@ -747,7 +786,17 @@ def run_declared_target_host_campaign_with_resources(
                 "resource evidence class executable changed during target-host run: "
                 f"{name}"
             )
-
+    for name, function, state in class_function_states:
+        require_callable(function, state, name=name)
+    if ArtifactStore.publish_bytes is not artifact_publish:
+        raise RuntimeTargetHostResourceEvidenceError(
+            "ArtifactStore publisher authority changed during target-host run"
+        )
+    require_callable(
+        artifact_publish,
+        artifact_publish_state,
+        name="ArtifactStore publisher",
+    )
     require_store(evidence_store, store_authority)
     require_callable(
         capture_snapshot, capture_state, name="resource snapshot collector"
@@ -762,7 +811,12 @@ def run_declared_target_host_campaign_with_resources(
     require_callable(runner, runner_state, name="canonical target-host runner")
 
     after = capture_snapshot(evidence_root=evidence_store.root)
-    evidence = issue_evidence(run, before=before, after=after)
+    evidence = issue_evidence(
+        run,
+        before=before,
+        after=after,
+        _issuer_token=_ISSUER_TOKEN,
+    )
     published = publish_evidence(
         evidence_store,
         artifact_id=resource_artifact_id,

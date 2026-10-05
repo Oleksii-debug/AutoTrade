@@ -1281,6 +1281,11 @@ def run_declared_target_host_campaign_with_resources(
     require_resource_class_authority(phase="before target-host run")
     backlog_start = outbox_backlog_cut(journal)
     before = capture_snapshot(evidence_root=evidence_store.root)
+    backlog_start_after_snapshot = outbox_backlog_cut(journal)
+    if backlog_start_after_snapshot != backlog_start:
+        raise RuntimeTargetHostResourceEvidenceError(
+            "outbox backlog changed while opening the resource measurement cut"
+        )
     run = runner(
         journal=journal,
         evidence_store=evidence_store,

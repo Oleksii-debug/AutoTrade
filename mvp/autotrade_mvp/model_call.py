@@ -32,6 +32,7 @@ from .model_gateway import (
     RouteDecision,
     RouteStatus,
     RoutingPolicy,
+    route_model,
 )
 from .persistence import canonical_json, payload_digest
 from .exact_decimal import exact_add, parse_bounded_exact_decimal
@@ -1293,25 +1294,34 @@ class DurableModelCallOrchestrator:
             )
 
         first = existing[0] if existing else None
-        if first is None and (
-            request.cancelled or getattr(policy.mode, "value", None) == "ZERO"
-        ):
-            decision = self.budget.admit_route(
+        if first is None:
+            inventory_free = route_model(
                 policy,
                 request,
                 (),
                 now_utc=now_utc,
             )
-            if decision.status is RouteStatus.ADMITTED:
-                raise ModelCallError(
-                    "inventory-free route unexpectedly admitted a model"
+            if inventory_free.reason in {
+                "request_cancelled",
+                "deadline_expired",
+                "zero_model_policy",
+            }:
+                decision = self.budget.admit_route(
+                    policy,
+                    request,
+                    (),
+                    now_utc=now_utc,
                 )
-            return ModelCallOutcome(
-                decision.status.value,
-                attempt_id,
-                decision,
-                decision.reason,
-            )
+                if decision.status is RouteStatus.ADMITTED:
+                    raise ModelCallError(
+                        "inventory-free route unexpectedly admitted a model"
+                    )
+                return ModelCallOutcome(
+                    decision.status.value,
+                    attempt_id,
+                    decision,
+                    decision.reason,
+                )
 
         materialized = tuple(descriptors)
         if any(type(item) is not ModelDescriptor for item in materialized):

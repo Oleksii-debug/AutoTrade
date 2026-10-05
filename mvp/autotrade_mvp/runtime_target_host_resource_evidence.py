@@ -2,25 +2,16 @@
 
 This module extends the existing current-schema target-host campaign without
 creating another scheduler, journal, evaluator, runtime host or trading
-authority.  It captures only provider-free resource facts around the canonical
-``run_declared_target_host_campaign`` execution:
+authority. It captures only provider-free resource facts around the canonical
+``run_declared_target_host_campaign`` execution.
 
-* monotonic elapsed time and process CPU time;
-* process peak RSS;
-* process I/O byte counters;
-* filesystem capacity/free-space around the retained evidence store; and
-* Python thread-count endpoints.
-
-No wall-clock timestamp is used.  The resulting artifact is deliberately
-nonterminal: queue/backlog high-water evidence, independently attestable
-chronology, provider/source-clock freshness and signed release qualification
-remain separate authorities.  ``COLLECTED_PROCESS_DISK_V1`` therefore means
-exactly that bounded resource subset, never a terminal WP-65 PASS.
+No wall-clock timestamp is used. ``COLLECTED_PROCESS_DISK_V1`` means only this
+bounded resource subset and never a terminal WP-65 PASS.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from hashlib import sha256
 import ctypes
 import json
@@ -59,6 +50,7 @@ _UNCLOSED_AUTHORITIES = (
     "queue_backlog_high_water",
     "signed_terminal_qualification",
 )
+_EVIDENCE_TOKEN = object()
 
 
 class RuntimeTargetHostResourceEvidenceError(ValueError):
@@ -164,9 +156,6 @@ def _peak_rss_bytes() -> int:
         raise RuntimeTargetHostResourceEvidenceError(
             "process peak RSS is unavailable on this target host"
         )
-    # Linux reports KiB; macOS reports bytes. AutoTrade target qualification is
-    # Windows/Linux, but keeping the Darwin conversion explicit prevents a
-    # misleading 1024x result in developer diagnostics.
     multiplier = 1 if sys.platform == "darwin" else 1024
     return _positive_int(int(raw * multiplier), name="process peak RSS")
 
@@ -327,8 +316,30 @@ class RuntimeTargetHostResourceEvidence:
     terminal_qualification_eligible: bool = False
     schema_version: str = _SCHEMA_VERSION
     evidence_type: str = _EVIDENCE_TYPE
+    _token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _token: object | None) -> None:
+        if _token is not _EVIDENCE_TOKEN:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource evidence must come from canonical issuer"
+            )
+        for name in (
+            "authority_id",
+            "authority_digest",
+            "source_sha",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "scenario_id",
+            "spec_digest",
+            "host_fingerprint",
+            "inventory_artifact_id",
+            "inventory_payload_sha256",
+            "measurement_artifact_id",
+            "measurement_payload_sha256",
+            "run_receipt_artifact_id",
+            "run_receipt_payload_sha256",
+        ):
+            _text(getattr(self, name), name=name)
         if type(self.before) is not RuntimeTargetHostResourceSnapshot:
             raise TypeError("before must be exact RuntimeTargetHostResourceSnapshot")
         if type(self.after) is not RuntimeTargetHostResourceSnapshot:
@@ -504,6 +515,7 @@ def issue_runtime_target_host_resource_evidence(
         reconnect_backlog_remaining=run.measurement.reconnect_backlog_remaining,
         before=before,
         after=after,
+        _token=_EVIDENCE_TOKEN,
     )
 
 
@@ -513,7 +525,7 @@ def publish_runtime_target_host_resource_evidence(
     artifact_id: str,
     evidence: RuntimeTargetHostResourceEvidence,
 ) -> PublishedRuntimeTargetHostResourceEvidence:
-    """Retain exact raw resource bytes in the existing neutral ArtifactStore."""
+    """Retain exact issuer-created resource bytes in the neutral ArtifactStore."""
 
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")

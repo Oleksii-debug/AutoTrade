@@ -46,10 +46,21 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
         raise ValueError(f"{name} exceeds exact decimal resource envelope") from error
 
 
-def _name(value: str, *, field: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise ValueError(f"{field} is required")
-    return value.strip()
+def _name(
+    value: str,
+    *,
+    field: str,
+    _exact_type=type,
+    _text_type=str,
+    _strip=str.strip,
+    _value_error=ValueError,
+) -> str:
+    if _exact_type(value) is not _text_type:
+        raise _value_error(f"{field} is required")
+    stripped = _strip(value)
+    if not stripped:
+        raise _value_error(f"{field} is required")
+    return stripped
 
 
 def _instant(value: str | None, *, field: str) -> str | None:
@@ -709,7 +720,16 @@ del _make_economic_book_audit_digest
 del _cached_transaction_digest
 
 
-def _scoped_economic_owner_operations(*, _weakref_ref=weakref.ref):
+def _scoped_economic_owner_operations(
+    *,
+    _weakref_ref=weakref.ref,
+    _exact_type=type,
+    _identity=id,
+    _getattribute=object.__getattribute__,
+    _text_type=str,
+    _type_error=TypeError,
+    _conflict_type=AccountingConflict,
+):
     owners = {}
     lock = RLock()
 
@@ -718,23 +738,23 @@ def _scoped_economic_owner_operations(*, _weakref_ref=weakref.ref):
             for key, (reference, *_rest) in tuple(owners.items()):
                 if reference() is None:
                     owners.pop(key)
-            current = owners.get(id(value))
+            current = owners.get(_identity(value))
             if current is not None and current[0]() is value:
-                raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (
+                raise _conflict_type("immutable scoped-book owner is already initialized")
+            owners[_identity(value)] = (
                 _weakref_ref(value),
-                type(value),
+                _exact_type(value),
                 environment,
                 account_id,
                 _weakref_ref(book),
-                type(book),
+                _exact_type(book),
             )
 
     def require(value):
         with lock:
-            owner = owners.get(id(value))
+            owner = owners.get(_identity(value))
             if owner is None or owner[0]() is not value:
-                raise AccountingConflict("immutable scoped-book owner is unavailable")
+                raise _conflict_type("immutable scoped-book owner is unavailable")
             (
                 _reference,
                 owner_type,
@@ -744,22 +764,22 @@ def _scoped_economic_owner_operations(*, _weakref_ref=weakref.ref):
                 book_type,
             ) = owner
             book = book_ref()
-        if type(value) is not owner_type:
-            raise TypeError("scoped economic authority owner type changed")
+        if _exact_type(value) is not owner_type:
+            raise _type_error("scoped economic authority owner type changed")
         if book is None:
-            raise AccountingConflict("immutable scoped-book owner was lost")
-        state = object.__getattribute__(value, "__dict__")
+            raise _conflict_type("immutable scoped-book owner was lost")
+        state = _getattribute(value, "__dict__")
         current_book = state.get("_book")
-        if type(current_book) is not book_type:
-            raise TypeError("ScopedEconomicBook canonical book type changed")
+        if _exact_type(current_book) is not book_type:
+            raise _type_error("ScopedEconomicBook canonical book type changed")
         if (
-            type(state.get("environment")) is not str
-            or type(state.get("account_id")) is not str
+            _exact_type(state.get("environment")) is not _text_type
+            or _exact_type(state.get("account_id")) is not _text_type
             or state["environment"] != environment
             or state["account_id"] != account_id
             or current_book is not book
         ):
-            raise AccountingConflict("immutable scoped-book owner changed")
+            raise _conflict_type("immutable scoped-book owner changed")
         return environment, account_id, book
 
     return bind, require
@@ -846,6 +866,11 @@ def _make_scoped_economic_init(
     economic_book_type,
     normalize_name,
     environments,
+    *,
+    _exact_type=type,
+    _setattr=object.__setattr__,
+    _type_error=TypeError,
+    _value_error=ValueError,
 ):
     """Seal scoped-book construction dependencies against later rebinding."""
 
@@ -856,20 +881,20 @@ def _make_scoped_economic_init(
         account_id: str,
         transactions: Iterable[JournalTransaction] = (),
     ):
-        if type(self) is not expected_type:
-            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
+        if _exact_type(self) is not expected_type:
+            raise _type_error("scoped economic authority requires exact ScopedEconomicBook")
         normalized_environment = normalize_name(
             environment,
             field="environment",
         ).upper()
         if normalized_environment not in environments:
-            raise ValueError("unsupported environment")
+            raise _value_error("unsupported environment")
         normalized_account = normalize_name(account_id, field="account_id")
         book = economic_book_type(transactions)
         bind_owner(self, normalized_environment, normalized_account, book)
-        object.__setattr__(self, "environment", normalized_environment)
-        object.__setattr__(self, "account_id", normalized_account)
-        object.__setattr__(self, "_book", book)
+        _setattr(self, "environment", normalized_environment)
+        _setattr(self, "account_id", normalized_account)
+        _setattr(self, "_book", book)
 
     return __init__
 

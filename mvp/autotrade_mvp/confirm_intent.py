@@ -90,8 +90,8 @@ def confirm_pending_intent(
     pending intent is claimed.  The claim is then written before the authority
     confirmation.  If the process crashes in that narrow window, retrying the
     same confirmation/actor pair reuses the durable claim and finishes the
-    idempotent AuthorityConfirmationAdded write.  A different actor or
-    confirmation id can never take over the claimed pending intent.
+    idempotent AuthorityConfirmationAdded write, even after pending expiry.  A
+    different actor or confirmation id can never take over the claimed intent.
     """
 
     if type(store) is not JournalStore:
@@ -134,22 +134,23 @@ def confirm_pending_intent(
             "current quantitative risk authority no longer matches confirmed envelope"
         ) from error
 
+    # Read the registered economics without applying the first-claim expiry
+    # rule. claim_confirmation() below owns that rule and can distinguish a new
+    # claim from an exact durable retry. Calling resolve() here would wrongly
+    # block crash recovery after a previously durable claim has expired.
     try:
-        pending = pending_registry.resolve(
-            pending_id,
-            account_id=account,
-            environment=env,
-            policy_id=binding.authority_policy_id,
-            authority_policy_version=binding.authority_policy_version,
-            at=point,
-        )
+        pending, _existing_claim = pending_registry._read(pending_id)
     except PendingIntentError as error:
+        raise ConfirmIntentError("pending intent durable state is unavailable") from error
+    if (
+        pending.account_id != account
+        or pending.environment != env
+        or pending.policy_id != binding.authority_policy_id
+        or pending.authority_policy_version != binding.authority_policy_version
+        or pending.intent_hash != binding.intent_hash
+    ):
         raise ConfirmIntentError(
-            "pending intent is not current for authenticated confirmation scope"
-        ) from error
-    if pending.intent_hash != binding.intent_hash:
-        raise ConfirmIntentError(
-            "pending intent no longer matches durable financial-envelope binding"
+            "pending intent no longer matches authenticated financial-envelope binding"
         )
 
     # Construct/replay AuthorityService before the one-way pending claim.  This

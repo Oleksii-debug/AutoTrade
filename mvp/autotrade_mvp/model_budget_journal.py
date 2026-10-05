@@ -541,9 +541,32 @@ class DurableModelBudget:
                     "JournalStore",
                     "_clock_text",
                     "Exception",
+                    "AttributeError",
+                    "KeyError",
+                    "TypeError",
                     "ValueError",
+                    # Python builtins are normally resolved only after module globals.
+                    # A hostile clock can create a same-named module binding and leave
+                    # later replay/commit code executing the shadow unless absence is
+                    # frozen as part of the authority graph.
+                    "all",
+                    "any",
+                    "callable",
+                    "dict",
+                    "enumerate",
+                    "getattr",
+                    "int",
+                    "isinstance",
+                    "len",
+                    "list",
+                    "min",
+                    "object",
                     "set",
                     "sorted",
+                    "str",
+                    "tuple",
+                    "type",
+                    "zip",
                     # Financial/routing authority consulted after the clock returns.
                     # A caller-owned clock must not leave any of these rebound for
                     # this commit or for a later durable budget operation.

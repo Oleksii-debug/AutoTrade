@@ -157,6 +157,10 @@ def _material_from_payload(value: object) -> FinancialRequestBindingMaterial:
     return material
 
 
+_CANONICAL_MATERIAL_FROM_PAYLOAD = _material_from_payload
+_CANONICAL_MATERIAL_FROM_PAYLOAD_CODE = _material_from_payload.__code__
+
+
 def _production_request_origin_receipt(
     material: FinancialRequestBindingMaterial,
 ) -> dict[str, object] | None:
@@ -345,6 +349,12 @@ def _require_bybit_prepared_request_origin(
     return receipt
 
 
+_CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT = _production_request_origin_receipt
+_CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT_CODE = (
+    _production_request_origin_receipt.__code__
+)
+
+
 def _require_prepared_request_origin(
     material: FinancialRequestBindingMaterial,
     prepared_request: object | None,
@@ -385,6 +395,10 @@ def _binding_payload(
     if origin is not None:
         payload["provider_request_origin"] = origin
     return payload
+
+
+_CANONICAL_BINDING_PAYLOAD = _binding_payload
+_CANONICAL_BINDING_PAYLOAD_CODE = _binding_payload.__code__
 
 
 def _risk_intent_axis(
@@ -937,8 +951,8 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        material = _material_from_payload(payload.get("material"))
-        expected_origin = _production_request_origin_receipt(material)
+        material = _CANONICAL_MATERIAL_FROM_PAYLOAD(payload.get("material"))
+        expected_origin = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
         expected_fields = (
             _BINDING_PAYLOAD_PRODUCTION_FIELDS
             if expected_origin is not None
@@ -963,7 +977,7 @@ class DurableFinancialRequestBindingRegistry:
     def resolve(self, admission_id: str) -> FinancialRequestBindingMaterial:
         aid = _text(admission_id, name="admission_id")
         payload = self._load_payload(aid)
-        material = _material_from_payload(payload.get("material"))
+        material = _CANONICAL_MATERIAL_FROM_PAYLOAD(payload.get("material"))
         if payload.get("binding_id") != material.binding_id:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding id does not match material"
@@ -988,7 +1002,7 @@ class DurableFinancialRequestBindingRegistry:
             material=material,
             current_journal_sequence=self._current_sequence(),
         )
-        if _binding_payload(
+        if _CANONICAL_BINDING_PAYLOAD(
             admission_id=aid,
             material=material,
             store_identity_digest=self._store_identity_digest,
@@ -1048,7 +1062,7 @@ class DurableFinancialRequestBindingRegistry:
             material=material,
             current_journal_sequence=self._current_sequence(),
         )
-        payload = _binding_payload(
+        payload = _CANONICAL_BINDING_PAYLOAD(
             admission_id=aid,
             material=material,
             store_identity_digest=self._store_identity_digest,

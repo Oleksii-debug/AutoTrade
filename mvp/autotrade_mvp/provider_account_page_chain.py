@@ -344,18 +344,46 @@ def _install_page_chain_authority():
             )
         return value
 
-    return register, require, require_current
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_page_chain(
+            *,
+            absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+            origin_set: ProviderAccountOriginBindingSet,
+            observations: tuple[ProviderOriginObservation, ...],
+            qualification_registry: DurableProviderQualificationRegistry,
+            surface: str,
+            at: datetime,
+        ) -> ProviderAccountPageChain:
+            value = issue_impl(
+                absence_semantics=absence_semantics,
+                origin_set=origin_set,
+                observations=observations,
+                qualification_registry=qualification_registry,
+                surface=surface,
+                at=at,
+            )
+            register(
+                value,
+                origin_set,
+                absence_semantics,
+                qualification_registry,
+            )
+            return value
+
+        return sealed_issue_provider_account_page_chain
+
+    return seal_issuer, require, require_current
 
 
 (
-    _register_provider_account_page_chain_authority,
+    _seal_provider_account_page_chain_issuer,
     require_provider_account_page_chain_authority,
     require_current_provider_account_page_chain_authority,
 ) = _install_page_chain_authority()
 del _install_page_chain_authority
 
 
-def issue_provider_account_page_chain(
+def _issue_provider_account_page_chain_unregistered(
     *,
     absence_semantics: QualifiedProviderAccountAbsenceSemantics,
     origin_set: ProviderAccountOriginBindingSet,
@@ -591,10 +619,11 @@ def issue_provider_account_page_chain(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_provider_account_page_chain_authority(
-        value,
-        origin_set,
-        absence_semantics,
-        qualification_registry,
-    )
     return value
+
+
+issue_provider_account_page_chain = _seal_provider_account_page_chain_issuer(
+    _issue_provider_account_page_chain_unregistered
+)
+del _seal_provider_account_page_chain_issuer
+del _issue_provider_account_page_chain_unregistered

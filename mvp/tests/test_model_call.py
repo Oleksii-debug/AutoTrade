@@ -2676,6 +2676,49 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 "ModelCallUnknown",
             )
 
+    def test_adapter_cannot_rewrite_remaining_post_call_authorities(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_pricing = orchestrator.pricing_evidence_resolver
+            trusted_billing = orchestrator.billing_evidence_resolver
+            trusted_started_lease_seconds = orchestrator.started_lease_seconds
+            trusted_owner_token = orchestrator.owner_token
+            call_spec = spec()
+
+            def mutating_adapter(*_args):
+                orchestrator.pricing_evidence_resolver = lambda *_: object()
+                orchestrator.billing_evidence_resolver = lambda *_: object()
+                orchestrator.started_lease_seconds = 1
+                orchestrator.owner_token = "forged-owner"
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("billing_evidence_resolver", result.reason)
+            self.assertIn("pricing_evidence_resolver", result.reason)
+            self.assertIn("started_lease_seconds", result.reason)
+            self.assertIn("owner_token", result.reason)
+            self.assertIs(orchestrator.pricing_evidence_resolver, trusted_pricing)
+            self.assertIs(orchestrator.billing_evidence_resolver, trusted_billing)
+            self.assertEqual(
+                orchestrator.started_lease_seconds,
+                trusted_started_lease_seconds,
+            )
+            self.assertEqual(orchestrator.owner_token, trusted_owner_token)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

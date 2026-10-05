@@ -147,6 +147,8 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
     def test_parser_rejects_unsupported_git_status_and_malformed_paths(self):
         for record in (
             "U100\tfile.py",
+            "Rxx\told.py\tnew.py",
+            "M100\tfile.py",
             "Z\tfile.py",
             "M\t../file.py",
             "M\t/control/file.py",

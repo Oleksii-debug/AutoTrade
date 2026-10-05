@@ -485,14 +485,19 @@ class DurableModelBudget:
         return changes
 
     def _clock_now(self) -> str:
-        restore_clock_authority = DurableModelBudget._restore_clock_authority
+        budget_class = DurableModelBudget
+        clock_now = budget_class._clock_now
+        snapshot_clock_authority = budget_class._clock_authority_snapshot
+        safe_authority_state = budget_class._safe_authority_state
+        restore_clock_authority = budget_class._restore_clock_authority
         clock_text = _clock_text
         module_globals = globals()
 
-        # The injected clock is caller-owned code. Freeze the executable state
-        # and every module binding consulted by the trusted helper graph before
-        # yielding control. In-place function-code poisoning preserves function
-        # identity, so class/module alias checks alone cannot detect it.
+        # The injected clock is caller-owned code. Freeze every trusted function
+        # that participates in this boundary or prepares the next one, plus the
+        # transitive module globals referenced by those functions. Class-state
+        # snapshots alone compare function identity and cannot see in-place
+        # __code__/default poisoning that survives into a later durable call.
         object_getattribute = object.__getattribute__
         object_setattr = object.__setattr__
         dict_get = dict.get
@@ -504,6 +509,21 @@ class DurableModelBudget:
         sorted_fn = sorted
         missing_binding = object()
 
+        clock_now_function_state = (
+            ("__code__", object_getattribute(clock_now, "__code__")),
+            ("__defaults__", object_getattribute(clock_now, "__defaults__")),
+            ("__kwdefaults__", object_getattribute(clock_now, "__kwdefaults__")),
+        )
+        snapshot_function_state = (
+            ("__code__", object_getattribute(snapshot_clock_authority, "__code__")),
+            ("__defaults__", object_getattribute(snapshot_clock_authority, "__defaults__")),
+            ("__kwdefaults__", object_getattribute(snapshot_clock_authority, "__kwdefaults__")),
+        )
+        safe_state_function_state = (
+            ("__code__", object_getattribute(safe_authority_state, "__code__")),
+            ("__defaults__", object_getattribute(safe_authority_state, "__defaults__")),
+            ("__kwdefaults__", object_getattribute(safe_authority_state, "__kwdefaults__")),
+        )
         restore_function_state = (
             ("__code__", object_getattribute(restore_clock_authority, "__code__")),
             ("__defaults__", object_getattribute(restore_clock_authority, "__defaults__")),
@@ -514,8 +534,31 @@ class DurableModelBudget:
             ("__defaults__", object_getattribute(clock_text, "__defaults__")),
             ("__kwdefaults__", object_getattribute(clock_text, "__kwdefaults__")),
         )
+        protected_function_states = (
+            (
+                "DurableModelBudget._clock_now",
+                clock_now,
+                clock_now_function_state,
+            ),
+            (
+                "DurableModelBudget._clock_authority_snapshot",
+                snapshot_clock_authority,
+                snapshot_function_state,
+            ),
+            (
+                "DurableModelBudget._safe_authority_state",
+                safe_authority_state,
+                safe_state_function_state,
+            ),
+            (
+                "DurableModelBudget._restore_clock_authority",
+                restore_clock_authority,
+                restore_function_state,
+            ),
+            ("_clock_text", clock_text, clock_text_function_state),
+        )
 
-        code_type = type(restore_function_state[0][1])
+        code_type = type(clock_now_function_state[0][1])
 
         def referenced_names(code) -> tuple[str, ...]:
             names = list(code.co_names)
@@ -533,6 +576,9 @@ class DurableModelBudget:
                     "ValueError",
                     "set",
                     "sorted",
+                    *referenced_names(clock_now_function_state[0][1]),
+                    *referenced_names(snapshot_function_state[0][1]),
+                    *referenced_names(safe_state_function_state[0][1]),
                     *referenced_names(restore_function_state[0][1]),
                     *referenced_names(clock_text_function_state[0][1]),
                 )
@@ -543,7 +589,7 @@ class DurableModelBudget:
             for name in runtime_names
         )
 
-        snapshot = DurableModelBudget._clock_authority_snapshot(self)
+        snapshot = snapshot_clock_authority(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
             raise ValueError("model budget clock authority is invalid")
@@ -557,15 +603,15 @@ class DurableModelBudget:
             clock_error = error
         finally:
             try:
-                for attribute, expected in restore_function_state:
-                    current = object_getattribute(restore_clock_authority, attribute)
-                    if current is expected:
-                        continue
-                    changes.append(
-                        "function.DurableModelBudget._restore_clock_authority."
-                        + attribute
-                    )
-                    object_setattr(restore_clock_authority, attribute, expected)
+                for function_label, function, function_state in protected_function_states:
+                    for attribute, expected in function_state:
+                        current = object_getattribute(function, attribute)
+                        if current is expected:
+                            continue
+                        changes.append(
+                            "function." + function_label + "." + attribute
+                        )
+                        object_setattr(function, attribute, expected)
 
                 for name, expected in runtime_bindings:
                     current = dict_get(module_globals, name, missing_binding)
@@ -588,14 +634,19 @@ class DurableModelBudget:
                     )
                 )
             finally:
-                for attribute, expected in clock_text_function_state:
-                    current = object_getattribute(clock_text, attribute)
-                    if current is expected:
-                        continue
-                    changes.append("function._clock_text." + attribute)
-                    object_setattr(clock_text, attribute, expected)
+                # Reassert executable function state and helper runtime bindings
+                # after class/state recovery as well. This uses only primitives
+                # captured before yielding to the caller-owned clock.
+                for function_label, function, function_state in protected_function_states:
+                    for attribute, expected in function_state:
+                        current = object_getattribute(function, attribute)
+                        if current is expected:
+                            continue
+                        changes.append(
+                            "function." + function_label + "." + attribute
+                        )
+                        object_setattr(function, attribute, expected)
 
-                # Reassert helper runtime bindings after class/state recovery too.
                 for name, expected in runtime_bindings:
                     current = dict_get(module_globals, name, missing_binding)
                     if expected is missing_binding:

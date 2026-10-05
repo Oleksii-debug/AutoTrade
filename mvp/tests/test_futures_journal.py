@@ -870,6 +870,48 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(len(read_calls), 2)
 
 
+    def test_durable_replay_reseals_post_construction_quantity_grid(self):
+        linear = VariationMarginState(
+            contract=self._contract(),
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        inverse = InverseVariationMarginState(
+            contract=self._contract(payoff="INVERSE"),
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+        object.__setattr__(linear, "signed_contracts", Decimal("1.5"))
+        object.__setattr__(inverse, "signed_contracts", Decimal("100.5"))
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            ArtifactStore(artifact_root)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "signed_contracts must be an exact multiple",
+            ):
+                restore_linear_variation_margin(
+                    store,
+                    linear,
+                    evidence_artifact_root=artifact_root,
+                )
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "signed_contracts must be an exact multiple",
+            ):
+                restore_inverse_variation_margin(
+                    store,
+                    inverse,
+                    evidence_artifact_root=artifact_root,
+                )
+
+
     def test_durable_scope_rejects_hostile_scope_before_field_reads(self):
         callbacks = []
 

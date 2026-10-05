@@ -1126,6 +1126,73 @@ class HostNetworkTests(unittest.TestCase):
                 self.assertEqual(callbacks, [])
 
 
+    def test_snapshot_identity_metadata_rejects_str_subclasses_without_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("snapshot text truthiness callback must not run")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot text equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot text inequality callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("snapshot text strip callback must not run")
+
+        cases = (
+            ("actor", "owner"),
+            ("session", public_session_reference(self.owner.token)),
+            ("role", "OWNER"),
+            ("capability", "READ"),
+            ("reason_code", "diagnostic"),
+            ("server_time", "2026-09-25T09:30:00Z"),
+        )
+        for target, raw_value in cases:
+            with self.subTest(target=target):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _target=target, _value=raw_value):
+                    payload = dict(self._snapshot(durable, principal))
+                    hostile = HostileText(_value)
+                    if _target in {"actor", "session", "role"}:
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"][_target] = hostile
+                    elif _target == "capability":
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"]["capabilities"] = [hostile]
+                    elif _target == "reason_code":
+                        payload["reason_codes"] = [hostile]
+                    else:
+                        payload["server_time"] = hostile
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-metadata-{target}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(callbacks, [])
+
+
     def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
         for field in ("state_version", "event_cursor"):
             with self.subTest(field=field):

@@ -529,6 +529,73 @@ class AccountingFoundationTests(unittest.TestCase):
             del accounting_module._transaction_digest_cache_lock
             del accounting_module._cached_transaction_digest
 
+    def test_audit_digest_cache_miss_fails_closed_on_rebound_canonicalizer_dependencies(self):
+        first = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        )
+        second = book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="deposit-2",
+            currency="USD",
+            amount="50",
+        )
+        book = EconomicBook((first,))
+        book.audit_digest()
+        book.append(second)
+
+        def hostile_helper(*_args, **_kwargs):
+            raise AssertionError("rebound helper must not execute")
+
+        for attribute in ("_name", "parse_bounded_exact_decimal"):
+            with self.subTest(attribute=attribute):
+                original = getattr(accounting_module, attribute)
+                setattr(accounting_module, attribute, hostile_helper)
+                try:
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "digest authority dependency was rebound",
+                    ):
+                        book.audit_digest()
+                finally:
+                    setattr(accounting_module, attribute, original)
+
+    def test_audit_digest_rejects_hostile_transaction_subclass_before_attribute_callback(self):
+        exact = book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        )
+
+        class HostileTransaction(JournalTransaction):
+            touched = False
+
+            def __getattribute__(self, name):
+                if name == "transaction_id":
+                    type(self).touched = True
+                    raise AssertionError("hostile transaction attribute callback")
+                return super().__getattribute__(name)
+
+        hostile = HostileTransaction(
+            transaction_id=exact.transaction_id,
+            cause_event_id=exact.cause_event_id,
+            postings=exact.postings,
+            reverses_transaction_id=exact.reverses_transaction_id,
+            economic_effective_at=exact.economic_effective_at,
+            economic_order_key=exact.economic_order_key,
+            observed_at=exact.observed_at,
+            corrects_transaction_id=exact.corrects_transaction_id,
+        )
+        book = EconomicBook((exact,))
+        book._transactions[0] = hostile
+
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction values"):
+            book.audit_digest()
+        self.assertFalse(HostileTransaction.touched)
+
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(
             transaction_id="bad",

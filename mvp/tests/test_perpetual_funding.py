@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.perpetual_funding import (
     PerpetualFundingConflict,
     PerpetualFundingError,
     PerpetualFundingObservation,
+    canonical_perpetual_funding_observation,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -211,6 +212,21 @@ def seed_position(
 
 
 class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
+    def test_canonical_funding_serializer_rejects_dto_subclasses(self):
+        evidence = sealed_funding()
+        valid = normalize(evidence)
+
+        class DerivedFundingObservation(PerpetualFundingObservation):
+            pass
+
+        forged = object.__new__(DerivedFundingObservation)
+        forged.__dict__.update(vars(valid))
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact PerpetualFundingObservation",
+        ):
+            canonical_perpetual_funding_observation(forged)
+
     def test_funding_observation_rejects_hostile_scalar_and_datetime_subclasses(self):
         evidence = sealed_funding()
         valid = normalize(evidence)

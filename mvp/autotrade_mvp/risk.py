@@ -126,10 +126,13 @@ def _exact_ratio(numerator: Decimal, denominator: Decimal, *, name: str) -> Frac
     try:
         numerator_fraction = as_fraction(numerator)
         denominator_fraction = as_fraction(denominator)
-        if denominator_fraction <= 0:
-            raise ZeroDivisionError
+    except (ExactDecimalError, TypeError) as error:
+        raise _risk_arithmetic_error(name, error) from error
+    if denominator_fraction <= 0:
+        raise ValueError(f"{name} denominator must be positive")
+    try:
         return bounded_fraction(numerator_fraction / denominator_fraction)
-    except (ExactDecimalError, TypeError, ZeroDivisionError) as error:
+    except (ExactDecimalError, TypeError) as error:
         raise _risk_arithmetic_error(name, error) from error
 
 

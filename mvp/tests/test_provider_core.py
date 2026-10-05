@@ -314,6 +314,7 @@ class ProviderCoreTests(unittest.TestCase):
         capability_snapshot_ids=("cap-1",),
         instrument_versions=("BTCUSD:v1",),
         raw=b'{ "orderId" : "provider-1" }',
+        http_status=200,
     ):
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
@@ -340,7 +341,7 @@ class ProviderCoreTests(unittest.TestCase):
 
         def transport(_client_id, _request, guard):
             guard()
-            return ExactJsonTransportResponse(raw)
+            return ExactJsonTransportResponse(raw, http_status=http_status)
 
         outcome = dispatcher.dispatch(
             attempt_id="provider-evidence-a1",
@@ -363,6 +364,51 @@ class ProviderCoreTests(unittest.TestCase):
             ),
             request_sha,
         )
+
+    def test_submission_observation_evidence_identity_binds_http_status(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            first_binding, first_request_sha = self._durable_submission_binding(
+                first,
+                raw=b'{"orderId":"provider-1"}',
+                http_status=200,
+            )
+            second_binding, second_request_sha = self._durable_submission_binding(
+                second,
+                raw=b'{"orderId":"provider-1"}',
+                http_status=503,
+            )
+            self.assertEqual(first_binding.response_bytes, second_binding.response_bytes)
+            self.assertEqual(first_request_sha, second_request_sha)
+            first_observation = observe_submission_json_response(
+                response_binding=first_binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=first_request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            second_observation = observe_submission_json_response(
+                response_binding=second_binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=second_request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            self.assertEqual(first_binding.http_status, 200)
+            self.assertEqual(second_binding.http_status, 503)
+            self.assertNotEqual(
+                first_observation.evidence_ref,
+                second_observation.evidence_ref,
+            )
+            self.assertEqual(
+                provider_submission_observation_projection(first_observation)["http_status"],
+                200,
+            )
+            self.assertEqual(
+                provider_submission_observation_projection(second_observation)["http_status"],
+                503,
+            )
 
     def test_submission_observation_requires_durable_exact_send_scope(self):
         with TemporaryDirectory() as directory:

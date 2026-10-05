@@ -19,6 +19,20 @@ class HostOpenApiRouteTests(unittest.TestCase):
             self.assertIn(f"  {route}:", text)
         self.assertNotIn("\n  /v1/", text)
 
+    def test_event_resume_cursor_reuses_canonical_sequence_contract(self):
+        text = OPENAPI.read_text(encoding="utf-8")
+        events = text.split("  /api/v1/events:", 1)[1].split(
+            "\n  /api/v1/health:", 1
+        )[0]
+        self.assertIn(
+            "$ref: ../jsonschema/common.schema.json#/$defs/Sequence",
+            events,
+        )
+        self.assertNotIn(
+            "name: after\n          required: false\n          schema:\n            type: string",
+            events,
+        )
+
     def test_cursor_gap_description_points_to_canonical_state_route(self):
         text = OPENAPI.read_text(encoding="utf-8")
         self.assertIn("requires /api/v1/state resnapshot", text)

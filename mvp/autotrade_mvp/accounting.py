@@ -222,6 +222,11 @@ class JournalTransaction:
     corrects_transaction_id: str | None = None
 
 
+_TRANSACTION_DIGEST_CACHE_LIMIT = 2048
+_transaction_digest_cache: dict[tuple[object, ...], str] = {}
+_transaction_digest_cache_lock = RLock()
+
+
 def _require_exact_transaction_graph(transaction: JournalTransaction) -> None:
     # Economic authority must not dispatch through caller-defined semantic
     # subclasses before canonicalization. The exact base dataclasses plus an
@@ -306,6 +311,62 @@ def canonical_transaction(transaction: JournalTransaction) -> dict[str, object]:
 
 def transaction_digest(transaction: JournalTransaction) -> str:
     return payload_digest(canonical_transaction(transaction))
+
+
+def _transaction_digest_fingerprint(
+    transaction: JournalTransaction,
+) -> tuple[object, ...] | None:
+    """Return a callback-free cache key for one exact transaction graph.
+
+    ``EconomicBook`` stores normalized exact base dataclasses, but Python still
+    permits deliberate ``object.__setattr__`` tampering.  The fingerprint must
+    therefore cover every digest-bearing field instead of trusting object
+    identity.  Invalid scalar types bypass the cache so canonical validation
+    retains its fail-closed behaviour.
+    """
+
+    _require_exact_transaction_graph(transaction)
+    text_values = (
+        transaction.transaction_id,
+        transaction.cause_event_id,
+        transaction.reverses_transaction_id,
+        transaction.economic_effective_at,
+        transaction.economic_order_key,
+        transaction.observed_at,
+        transaction.corrects_transaction_id,
+    )
+    if any(value is not None and type(value) is not str for value in text_values):
+        return None
+    posting_values: list[tuple[str, str, Decimal]] = []
+    for item in transaction.postings:
+        if (
+            type(item.ledger_account) is not str
+            or type(item.asset_or_currency) is not str
+            or type(item.signed_amount) is not Decimal
+        ):
+            return None
+        posting_values.append(
+            (item.ledger_account, item.asset_or_currency, item.signed_amount)
+        )
+    return (*text_values, tuple(posting_values))
+
+
+def _cached_transaction_digest(transaction: JournalTransaction) -> str:
+    fingerprint = _transaction_digest_fingerprint(transaction)
+    if fingerprint is None:
+        return transaction_digest(transaction)
+    with _transaction_digest_cache_lock:
+        cached = _transaction_digest_cache.get(fingerprint)
+    if cached is not None:
+        return cached
+
+    digest = transaction_digest(transaction)
+    if _transaction_digest_fingerprint(transaction) != fingerprint:
+        return digest
+    with _transaction_digest_cache_lock:
+        if len(_transaction_digest_cache) >= _TRANSACTION_DIGEST_CACHE_LIMIT:
+            _transaction_digest_cache.clear()
+        return _transaction_digest_cache.setdefault(fingerprint, digest)
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
@@ -518,6 +579,9 @@ class EconomicBook:
         return self.balance(f"FEE_EXPENSE:{value}", value)
 
     def audit_digest(self) -> str:
+        if type(self._transactions) is not list:
+            raise TypeError("economic transactions must use an exact list")
+        transactions = tuple(self._transactions)
         return payload_digest(
             {
                 "schema_version": "1.0.0",
@@ -527,9 +591,9 @@ class EconomicBook:
                             transaction.transaction_id,
                             field="transaction_id",
                         ),
-                        "digest": transaction_digest(transaction),
+                        "digest": _cached_transaction_digest(transaction),
                     }
-                    for transaction in self._transactions
+                    for transaction in transactions
                 ],
             }
         )

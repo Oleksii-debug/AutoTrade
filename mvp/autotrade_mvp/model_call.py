@@ -620,6 +620,8 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         """Capture injected chronology without allowing authority redirection."""
         restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
+        utc_text = _utc_text
+        module_globals = globals()
         callback_shape = DurableModelCallOrchestrator._callback_shape_snapshot(self)
         clock = callback_shape[1].get("clock")
         if not callable(clock):
@@ -627,15 +629,28 @@ class DurableModelCallOrchestrator:
 
         clock_error: Exception | None = None
         clock_value: object = None
+        clock_changes: list[str] = []
         try:
             clock_value = clock()
         except Exception as error:
             clock_error = error
         finally:
-            clock_changes = restore_callback_shape(
-                self,
-                callback_shape,
-            )
+            try:
+                clock_changes.extend(
+                    restore_callback_shape(
+                        self,
+                        callback_shape,
+                    )
+                )
+            finally:
+                current_utc_text = dict.get(module_globals, "_utc_text")
+                if current_utc_text is not utc_text:
+                    clock_changes.append("module._utc_text")
+                    dict.__setitem__(
+                        module_globals,
+                        "_utc_text",
+                        utc_text,
+                    )
 
         if clock_changes:
             error = ModelCallError(
@@ -647,7 +662,7 @@ class DurableModelCallOrchestrator:
             raise error
         if clock_error is not None:
             raise clock_error
-        return _utc_text(clock_value, name="clock")
+        return utc_text(clock_value, name="clock")
 
     @staticmethod
     def _safe_instance_snapshot(

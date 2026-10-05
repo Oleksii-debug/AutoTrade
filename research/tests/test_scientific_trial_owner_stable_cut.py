@@ -49,6 +49,95 @@ class ScientificTrialOwnerStableCutTests(unittest.TestCase):
             self.assertEqual(owner.trial_evidence.recorded_trials, 1)
             self.assertTrue(owner.authoritative)
 
+    def test_owner_detaches_gate_evidence_before_registry_io(self) -> None:
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            payload = protocol()
+            payload["trial_budget"] = 1
+            payload["gate_profile_id"] = gate_profile.profile_id
+            payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
+            registered = registry.register_protocol(payload)
+            registry.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"candidate": "candidate-1"},
+            )
+            caller_evidence = evidence(
+                trials_attempted=0,
+                trial_log_complete=False,
+            )
+            original_connect = sqlite3.connect
+            mutated = False
+
+            def mutate_after_snapshot(*args, **kwargs):
+                nonlocal mutated
+                if not mutated:
+                    object.__setattr__(caller_evidence, "trials_attempted", 1)
+                    object.__setattr__(caller_evidence, "trial_log_complete", True)
+                    mutated = True
+                return original_connect(*args, **kwargs)
+
+            with patch(
+                "research.autotrade_research.science.registry.sqlite3.connect",
+                side_effect=mutate_after_snapshot,
+            ):
+                owner = resolve_scientific_trial_owner(
+                    registry=registry,
+                    profile=gate_profile,
+                    evidence=caller_evidence,
+                )
+
+            self.assertTrue(mutated)
+            self.assertEqual(caller_evidence.trials_attempted, 1)
+            self.assertTrue(caller_evidence.trial_log_complete)
+            self.assertFalse(owner.population_matches_gate_evidence)
+            self.assertFalse(owner.completion_matches_gate_evidence)
+            self.assertFalse(owner.authoritative)
+
+    def test_owner_detaches_completion_policy_before_registry_io(self) -> None:
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            payload = protocol()
+            payload["trial_budget"] = 1
+            payload["gate_profile_id"] = gate_profile.profile_id
+            payload["gate_profile_digest"] = gate_profile_subject_digest(gate_profile)
+            registry.register_protocol(payload)
+            caller_evidence = evidence(
+                trials_attempted=0,
+                trial_log_complete=False,
+            )
+            original_connect = sqlite3.connect
+            mutated = False
+
+            def mutate_after_snapshot(*args, **kwargs):
+                nonlocal mutated
+                if not mutated:
+                    object.__setattr__(
+                        gate_profile,
+                        "require_complete_trials",
+                        False,
+                    )
+                    mutated = True
+                return original_connect(*args, **kwargs)
+
+            with patch(
+                "research.autotrade_research.science.registry.sqlite3.connect",
+                side_effect=mutate_after_snapshot,
+            ):
+                owner = resolve_scientific_trial_owner(
+                    registry=registry,
+                    profile=gate_profile,
+                    evidence=caller_evidence,
+                )
+
+            self.assertTrue(mutated)
+            self.assertFalse(gate_profile.require_complete_trials)
+            self.assertTrue(owner.complete_required)
+            self.assertFalse(owner.trial_evidence.complete)
+            self.assertFalse(owner.authoritative)
+
     def test_owner_composition_holds_writer_reservation_across_trial_snapshot(self) -> None:
         gate_profile = profile()
         with TemporaryDirectory() as directory:

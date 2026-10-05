@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import operator_authority_commands as operator_commands
 from mvp.autotrade_mvp.authority import (
     AuthorityPolicy,
     AuthorityService,
@@ -364,6 +365,61 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
         self.assertNotIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
         _pending, claim = self.pending._read("pending-host-confirm-1")
         self.assertIsNotNone(claim)
+
+    def test_terminal_readback_rejects_stale_policy_confirmation_with_exact_claim(self) -> None:
+        host = self.host()
+        accepted = host.submit(self.command())
+        risk_registry, scope = self._register_second_risk_policy()
+        binding = DurablePendingIntentFinancialBindingRegistry(self.store)._load(
+            "pending-host-confirm-1"
+        )
+        stale_policy = self._risk_policy()
+
+        def bypass_safe_composition(_journal, **kwargs):
+            pending = self.pending.claim_confirmation(
+                "pending-host-confirm-1",
+                confirmation_id=COMMAND_ID,
+                actor_id="owner-1",
+                account_id="acct-1",
+                environment="PAPER",
+                policy_id="authority-policy-1",
+                authority_policy_version=3,
+                at=kwargs["accepted_at"],
+            )
+            risk_registry.activate(
+                scope=scope,
+                policy_id="risk-policy-1",
+                version=2,
+                committed_at=NOW + timedelta(seconds=2),
+            )
+            AuthorityService(self.store).add_financial_confirmation(
+                confirmation_id=COMMAND_ID,
+                policy_id=pending.policy_id,
+                intent_hash=pending.intent_hash,
+                account_id=pending.account_id,
+                environment=pending.environment,
+                instrument_id=pending.instrument_id,
+                instrument_version=pending.instrument_version,
+                action=pending.authority_action,
+                notional=pending.notional,
+                expires_at=pending.expires_at,
+                risk_intent=pending.risk_intent,
+                risk_policy=stale_policy,
+                reservation_requirements=dict(binding.reservation_requirements),
+            )
+
+        with patch.object(
+            operator_commands._confirm_impl,
+            "confirm_pending_intent",
+            bypass_safe_composition,
+        ):
+            failed = host.execute_authority_operation(accepted.operation_id)
+
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
+        _pending, claim = self.pending._read("pending-host-confirm-1")
+        self.assertEqual(claim["confirmation_id"], COMMAND_ID)
+        self.assertEqual(claim["actor_id"], "owner-1")
 
     def test_stale_authority_cut_fails_without_claiming_pending_intent(self) -> None:
         host = self.host()

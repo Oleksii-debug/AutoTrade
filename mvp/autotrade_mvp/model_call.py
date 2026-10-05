@@ -36,6 +36,7 @@ from .model_gateway import (
     route_model,
 )
 from .persistence import (
+    JournalStore,
     canonical_json,
     payload_digest,
     require_exact_journal_store_authority,

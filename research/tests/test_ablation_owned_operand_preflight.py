@@ -103,6 +103,7 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
                 (
                     "utility_numeric_projection",
                     "registered_cost_component_attribution",
+                    "registered_cost_component_projection",
                     "complete_cost_composite",
                 ),
             )

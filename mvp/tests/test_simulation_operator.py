@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import dispatch as dispatch_module
 from mvp.autotrade_mvp import simulation_session
 from mvp.autotrade_mvp.accounting import book_external_cash_flow, book_equity_fill
 from mvp.autotrade_mvp.cli import get_status, main
@@ -58,7 +59,22 @@ class SimulationOperatorTests(unittest.TestCase):
             kwargs["events"] = [(changed(envelope), topic) for envelope, topic in kwargs["events"]]
             return commit(store, **kwargs)
         with TemporaryDirectory() as directory:
-            with patch.object(JournalStore, "append_event", altered), patch.object(JournalStore, "commit_command", altered_command):
+            # GuardedDispatcher deliberately pins the canonical commit callable at
+            # module import so caller-time class monkeypatching cannot retarget the
+            # irreversible send barrier.  This helper is not exercising that trust
+            # boundary; it needs to manufacture an integrity-valid malformed
+            # journal for read-side falsification. Patch the pinned test seam too,
+            # before dispatch starts, while retaining the captured real commit as
+            # the durable writer underneath altered_command.
+            with (
+                patch.object(JournalStore, "append_event", altered),
+                patch.object(JournalStore, "commit_command", altered_command),
+                patch.object(
+                    dispatch_module,
+                    "_CANONICAL_JOURNAL_COMMIT_COMMAND",
+                    altered_command,
+                ),
+            ):
                 run(directory, prices)
             self._assert_untrusted_read(directory)
 

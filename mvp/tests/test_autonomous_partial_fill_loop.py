@@ -20,6 +20,7 @@ from mvp.autotrade_mvp.durable_settlement import DurableSettlementBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulated_provider import SimulatedProvider
+from mvp.autotrade_mvp.simulation_status import inspect_canonical_simulation
 from mvp.tests.test_autonomous_simulation import run as base_run, NOW
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -57,6 +58,15 @@ def owners(directory):
 
 
 class AutonomousPartialFillLoopTests(unittest.TestCase):
+    def test_partial_then_full_status_reads_retained_two_fill_observation(self):
+        with TemporaryDirectory() as directory:
+            result = run(directory, ["100", "101", "103", "102"], partial_fills=True)
+            status = inspect_canonical_simulation(directory)["status"]
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(status["session_status"], "COMPLETED")
+            self.assertEqual(status["completed_episodes"], 4)
+            self.assertEqual(status["position"], "2")
+
     def test_zero_does_not_acknowledge_foreign_host_ui_publications(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+import research.autotrade_research.evaluation.scientific_trial_owner as trial_owner_module
 
 from research.autotrade_research.evaluation.scientific_trial_owner import (
     evaluate_gates_with_scientific_trial_owner,
@@ -232,6 +235,87 @@ class ScientificTrialOwnerTests(unittest.TestCase):
                 )
             self.assertFalse(state["called"])
 
+    def test_registry_connect_class_rebind_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry.register_protocol(bound_protocol(gate_profile))
+            state = {"called": False}
+
+            def hostile_connect(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("rebound registry connection descriptor executed")
+
+            with patch.object(ScientificRegistry, "_connect", new=hostile_connect):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: _connect",
+                ):
+                    resolve_gate_profile_protocol_binding(
+                        registry=registry,
+                        profile=gate_profile,
+                    )
+            self.assertFalse(state["called"])
+
+    def test_registry_trial_evidence_class_rebind_cannot_replace_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(
+                bound_protocol(gate_profile, trial_budget=1)
+            )
+            fill_trials(registry, registered.protocol_id, 1)
+            state = {"called": False}
+
+            def hostile_trial_evidence(*_args, **_kwargs):
+                state["called"] = True
+                raise AssertionError("rebound trial evidence descriptor executed")
+
+            with patch.object(
+                ScientificRegistry,
+                "trial_completeness_evidence",
+                new=hostile_trial_evidence,
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: trial_completeness_evidence",
+                ):
+                    resolve_scientific_trial_owner(
+                        registry=registry,
+                        profile=gate_profile,
+                        evidence=evidence(
+                            trials_attempted=1,
+                            trial_log_complete=True,
+                        ),
+                    )
+            self.assertFalse(state["called"])
+
+    def test_registry_path_class_rebind_cannot_retarget_owner_authority(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registry.register_protocol(bound_protocol(gate_profile))
+            state = {"called": False}
+
+            def hostile_path(_self):
+                state["called"] = True
+                raise AssertionError("rebound registry path descriptor executed")
+
+            with patch.object(
+                ScientificRegistry,
+                "path",
+                new=property(hostile_path),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "class authority descriptor changed: path",
+                ):
+                    resolve_gate_profile_protocol_binding(
+                        registry=registry,
+                        profile=gate_profile,
+                    )
+            self.assertFalse(state["called"])
+
     def test_wrapper_rejects_registry_shadow_before_base_gate_evaluation(self):
         gate_profile = profile()
         with TemporaryDirectory() as directory:
@@ -248,6 +332,49 @@ class ScientificTrialOwnerTests(unittest.TestCase):
                     evidence(),
                     scientific_registry=registry,
                 )
+
+    def test_wrapper_uses_one_detached_evidence_cut_for_base_and_owner(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(
+                bound_protocol(gate_profile, trial_budget=1)
+            )
+            fill_trials(registry, registered.protocol_id, 1)
+            caller_evidence = evidence(
+                trials_attempted=0,
+                trial_log_complete=False,
+            )
+            canonical_evaluate = trial_owner_module.evaluate_gates
+
+            def mutate_caller_after_base(profile_value, evidence_value, **kwargs):
+                decision = canonical_evaluate(
+                    profile_value,
+                    evidence_value,
+                    **kwargs,
+                )
+                object.__setattr__(caller_evidence, "trials_attempted", 1)
+                object.__setattr__(caller_evidence, "trial_log_complete", True)
+                return decision
+
+            with patch.object(
+                trial_owner_module,
+                "evaluate_gates",
+                new=mutate_caller_after_base,
+            ):
+                decision = evaluate_gates_with_scientific_trial_owner(
+                    gate_profile,
+                    caller_evidence,
+                    scientific_registry=registry,
+                )
+
+            self.assertEqual(caller_evidence.trials_attempted, 1)
+            self.assertTrue(caller_evidence.trial_log_complete)
+            self.assertEqual(
+                decision.checks["scientific_trial_owner"],
+                "FAIL",
+            )
+            self.assertEqual(decision.status, "FAIL")
 
     def test_wrapper_reports_missing_registry_owner_as_inconclusive(self):
         gate_profile = profile()

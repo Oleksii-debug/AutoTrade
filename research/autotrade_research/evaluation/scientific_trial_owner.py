@@ -25,6 +25,7 @@ from .gates import (
     GateDecision,
     GateProfile,
     _decimal_text,
+    _detached_gate_input,
     evaluate_gates,
 )
 from ..science.registry import (
@@ -42,9 +43,28 @@ _GATE_PROFILE_DIGEST_FIELD = "gate_profile_digest"
 _REGISTRY_CRITICAL_INSTANCE_OVERRIDES = frozenset(
     {"_connect", "trial_completeness_evidence"}
 )
+_REGISTRY_CONNECT_DESCRIPTOR = ScientificRegistry.__dict__["_connect"]
+_REGISTRY_PATH_DESCRIPTOR = ScientificRegistry.__dict__["path"]
+_REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR = ScientificRegistry.__dict__[
+    "trial_completeness_evidence"
+]
+
+
+def _assert_registry_class_authority_intact() -> None:
+    expected = {
+        "_connect": _REGISTRY_CONNECT_DESCRIPTOR,
+        "path": _REGISTRY_PATH_DESCRIPTOR,
+        "trial_completeness_evidence": _REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR,
+    }
+    for name, descriptor in expected.items():
+        if ScientificRegistry.__dict__.get(name) is not descriptor:
+            raise TypeError(
+                f"ScientificRegistry class authority descriptor changed: {name}"
+            )
 
 
 def _assert_registry_dispatch_unshadowed(registry: ScientificRegistry) -> None:
+    _assert_registry_class_authority_intact()
     if type(registry) is not ScientificRegistry:
         raise TypeError("registry must be exact ScientificRegistry")
     shadowed = _REGISTRY_CRITICAL_INSTANCE_OVERRIDES.intersection(registry.__dict__)
@@ -59,7 +79,7 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
     """Freeze one caller registry onto one pathlib-owned DB path for this cut."""
 
     _assert_registry_dispatch_unshadowed(registry)
-    path = object.__getattribute__(registry, "path")
+    path = _REGISTRY_PATH_DESCRIPTOR.__get__(registry, ScientificRegistry)
     if type(path) is not type(Path()) or not path.is_absolute():
         raise TypeError(
             "ScientificRegistry path must be a frozen absolute pathlib path"
@@ -75,6 +95,17 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
     if type(profile) is not GateProfile:
         raise TypeError("profile must be exact GateProfile")
 
+    exact_text: dict[str, str] = {}
+    for name in (
+        "profile_id",
+        "primary_baseline_id",
+        "selection_correction",
+    ):
+        value = object.__getattribute__(profile, name)
+        if type(value) is not str:
+            raise TypeError(f"{name} must remain exact built-in text")
+        exact_text[name] = value
+
     baseline_ids = object.__getattribute__(profile, "baseline_ids")
     required_regimes = object.__getattribute__(profile, "required_regimes")
     for name, values in (
@@ -89,7 +120,7 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
             )
 
     return GateProfile(
-        profile_id=object.__getattribute__(profile, "profile_id"),
+        profile_id=exact_text["profile_id"],
         minimum_net_advantage=object.__getattribute__(
             profile, "minimum_net_advantage"
         ),
@@ -98,13 +129,9 @@ def _canonical_gate_profile_authority_view(profile: GateProfile) -> GateProfile:
             profile, "max_adverse_cost_loss"
         ),
         min_power=object.__getattribute__(profile, "min_power"),
-        primary_baseline_id=object.__getattribute__(
-            profile, "primary_baseline_id"
-        ),
+        primary_baseline_id=exact_text["primary_baseline_id"],
         baseline_ids=baseline_ids,
-        selection_correction=object.__getattribute__(
-            profile, "selection_correction"
-        ),
+        selection_correction=exact_text["selection_correction"],
         max_trials=object.__getattribute__(profile, "max_trials"),
         required_regimes=required_regimes,
         require_complete_trials=object.__getattribute__(
@@ -222,7 +249,7 @@ class ScientificTrialOwnerEvidence:
 
 def _registered_protocol_rows(registry: ScientificRegistry) -> tuple[dict[str, Any], ...]:
     authority = _registry_authority_view(registry)
-    with ScientificRegistry._connect(authority) as con:
+    with _REGISTRY_CONNECT_DESCRIPTOR(authority) as con:
         con.execute("BEGIN")
         rows = con.execute(
             "SELECT protocol_id,protocol_hash,payload_json "
@@ -331,15 +358,14 @@ def resolve_scientific_trial_owner(
 
     authority = _registry_authority_view(registry)
     canonical_profile = _canonical_gate_profile_authority_view(profile)
-    if type(evidence) is not EvaluationEvidence:
-        raise TypeError("evidence must be exact EvaluationEvidence")
-    with ScientificRegistry._connect(authority) as authority_guard:
+    canonical_evidence = _detached_gate_input(evidence, EvaluationEvidence)
+    with _REGISTRY_CONNECT_DESCRIPTOR(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
             registry=authority,
             profile=canonical_profile,
         )
-        trial_evidence = ScientificRegistry.trial_completeness_evidence(
+        trial_evidence = _REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR(
             authority,
             binding.protocol_id,
         )
@@ -352,19 +378,19 @@ def resolve_scientific_trial_owner(
                 "bound scientific protocol trial budget exceeds gate profile max_trials"
             )
     population_matches = (
-        evidence.trials_attempted is not None
-        and evidence.trials_attempted == trial_evidence.recorded_trials
+        canonical_evidence.trials_attempted is not None
+        and canonical_evidence.trials_attempted == trial_evidence.recorded_trials
     )
     completion_matches = (
-        evidence.trial_log_complete is not None
-        and evidence.trial_log_complete == trial_evidence.complete
+        canonical_evidence.trial_log_complete is not None
+        and canonical_evidence.trial_log_complete == trial_evidence.complete
     )
     return ScientificTrialOwnerEvidence(
         binding=binding,
         trial_evidence=trial_evidence,
         population_matches_gate_evidence=population_matches,
         completion_matches_gate_evidence=completion_matches,
-        complete_required=profile.require_complete_trials,
+        complete_required=canonical_profile.require_complete_trials,
     )
 
 
@@ -384,10 +410,9 @@ def evaluate_gates_with_scientific_trial_owner(
     """
 
     canonical_profile = _canonical_gate_profile_authority_view(profile)
-    if type(evidence) is not EvaluationEvidence:
-        raise TypeError("evidence must be exact EvaluationEvidence")
+    canonical_evidence = _detached_gate_input(evidence, EvaluationEvidence)
     _assert_registry_dispatch_unshadowed(scientific_registry)
-    base = evaluate_gates(canonical_profile, evidence, **gate_kwargs)
+    base = evaluate_gates(canonical_profile, canonical_evidence, **gate_kwargs)
     checks = dict(base.checks)
     provenance = dict(base.provenance or {})
     reasons = list(base.reasons)
@@ -395,7 +420,7 @@ def evaluate_gates_with_scientific_trial_owner(
         owner = resolve_scientific_trial_owner(
             registry=scientific_registry,
             profile=canonical_profile,
-            evidence=evidence,
+            evidence=canonical_evidence,
         )
     except KeyError:
         checks["scientific_trial_owner"] = "INCONCLUSIVE"

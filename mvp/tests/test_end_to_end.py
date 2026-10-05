@@ -202,6 +202,53 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertTrue(verify_replay(directory))
 
 
+    def test_resume_rejects_historical_evidence_gap_before_new_financial_work(self):
+        with TemporaryDirectory() as directory:
+            run_multi_episode(
+                [
+                    [100, 101, 102, 103],
+                    [100, 100, 100],
+                    [103, 102, 101, 100],
+                ],
+                directory,
+            )
+            root = Path(directory)
+            evidence_path = root / "learning-evidence.jsonl"
+            rows = evidence_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows), 3)
+            evidence_path.write_text(
+                rows[1] + "\n" + rows[2] + "\n",
+                encoding="utf-8",
+            )
+            checkpoint_before = (root / "checkpoint.json").read_bytes()
+            journal_before = (root / "journal.sqlite3").read_bytes()
+            intents_before = {
+                path.name: path.read_bytes()
+                for path in (root / "order-intents").glob("*.json")
+            }
+            evidence_before = evidence_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Historical learning evidence is incomplete",
+            ):
+                run_vertical_slice(
+                    [100, 101, 102, 103],
+                    directory,
+                )
+
+            self.assertEqual((root / "checkpoint.json").read_bytes(), checkpoint_before)
+            self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+            self.assertEqual(evidence_path.read_bytes(), evidence_before)
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                },
+                intents_before,
+            )
+
+
     def test_checkpoint_ledger_mismatch_is_rejected(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

@@ -66,6 +66,8 @@ _COMPONENT_PUBLICATION_TOPICS: dict[str, str | None] = {
     "submission_attempt": "autotrade.submission.events",
     "valuation_observation": None,
 }
+_LOCAL_COMPONENT_HOST_IDS = frozenset({"local-simulation", "local-mvp"})
+_AGGREGATE_SCOPE_INHERITANCE_TYPES = frozenset({"submission_attempt"})
 _VERIFIER_LOCK = threading.RLock()
 _VERIFIERS: dict[str, RuntimeStateVerifier] = {}
 
@@ -278,6 +280,30 @@ def _payload_scope_value(
     return None
 
 
+def _payload_provider_id(payload: Mapping[str, object]) -> object | None:
+    """Resolve the canonical provider id plus the durable submission `provider` alias."""
+
+    provider_id = _payload_scope_value(payload, "provider_id")
+    if provider_id is not None:
+        return provider_id
+    provider = _payload_scope_value(payload, "provider")
+    return provider if type(provider) is str else None
+
+
+def _component_environment(event: Mapping[str, object]) -> object | None:
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    environment = event.get("environment")
+    return environment if environment is not None else _payload_scope_value(payload, "environment")
+
+
+def _component_host_id(event: Mapping[str, object]) -> object | None:
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    host_id = event.get("host_id")
+    return host_id if host_id is not None else _payload_scope_value(payload, "host_id")
+
+
 def _autonomous_run_financial_scope(
     store: JournalStore,
     *,
@@ -325,17 +351,16 @@ def _component_event_definitively_foreign(
 ) -> bool:
     """Exclude only component facts that prove they belong outside ZERO.
 
-    Durable component schemas predate a universal host_id field. Treating a
-    missing marker as foreign would hide real risk/economic authority from the
-    checkpoint. Unknown scope therefore remains included (fail closed), while
-    explicit environment/account/provider/host conflicts are foreign.
+    Durable component schemas predate universal host/provider field names. A
+    missing marker therefore remains checkpoint authority (fail closed), while
+    explicit environment/account/provider/host conflicts are foreign. Both
+    product-owned simulation writers (`local-simulation` and `local-mvp`) are
+    accepted; production or other hosts remain excluded.
     """
 
     payload = event.get("payload")
     payload = payload if type(payload) is dict else {}
-    environment = event.get("environment")
-    if environment is None:
-        environment = _payload_scope_value(payload, "environment")
+    environment = _component_environment(event)
     if environment is not None and environment != "SIMULATION":
         return True
 
@@ -344,31 +369,27 @@ def _component_event_definitively_foreign(
         if type(environments) in {list, tuple} and "SIMULATION" not in environments:
             return True
 
-    host_id = event.get("host_id")
-    if host_id is None:
-        host_id = _payload_scope_value(payload, "host_id")
-    if host_id is not None and host_id != "local-simulation":
+    host_id = _component_host_id(event)
+    if host_id is not None and host_id not in _LOCAL_COMPONENT_HOST_IDS:
         return True
 
     if financial_scope is not None:
         account_id = _payload_scope_value(payload, "account_id")
         if account_id is not None and account_id != financial_scope["account_id"]:
             return True
-        provider_id = _payload_scope_value(payload, "provider_id")
+        provider_id = _payload_provider_id(payload)
         if provider_id is not None and provider_id != financial_scope["provider_id"]:
             return True
     return False
 
 
-def _component_publication_matches_run_scope(
+def _component_event_has_positive_run_scope(
     event: Mapping[str, object],
     *,
-    financial_scope: Mapping[str, str] | None,
+    financial_scope: Mapping[str, str],
 ) -> bool:
-    """Require positive financial-scope proof before ZERO acknowledges a component."""
+    """Require positive environment/account proof; optional provider must agree."""
 
-    if financial_scope is None or event.get("aggregate_type") not in _COMPONENT_AGGREGATE_TYPES:
-        return False
     if _component_event_definitively_foreign(
         event,
         financial_scope=financial_scope,
@@ -378,9 +399,7 @@ def _component_publication_matches_run_scope(
     if type(payload) is not dict:
         return False
 
-    environment = event.get("environment")
-    if environment is None:
-        environment = _payload_scope_value(payload, "environment")
+    environment = _component_environment(event)
     if environment is None:
         environments = payload.get("environments")
         if (
@@ -394,13 +413,65 @@ def _component_publication_matches_run_scope(
     account_id = _payload_scope_value(payload, "account_id")
     if account_id != financial_scope["account_id"]:
         return False
-    provider_id = _payload_scope_value(payload, "provider_id")
+    provider_id = _payload_provider_id(payload)
     if provider_id is not None and provider_id != financial_scope["provider_id"]:
         return False
     return True
 
 
+def _component_aggregate_events(
+    store: JournalStore,
+    event: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
+    if (
+        aggregate_type not in _AGGREGATE_SCOPE_INHERITANCE_TYPES
+        or type(aggregate_id) is not str
+        or not aggregate_id
+    ):
+        return (event,)
+    events = JournalStore.load_events(store, aggregate_type, aggregate_id)
+    return tuple(events) if events else (event,)
+
+
+def _component_publication_matches_run_scope(
+    store: JournalStore,
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str] | None,
+) -> bool:
+    """Require positive aggregate financial-scope proof before ZERO acknowledges it.
+
+    Submission lifecycle events become sparse after `SubmissionPrepared`; the
+    immutable aggregate history is therefore the ownership authority for later
+    Sending/Sent/Failed publications. Any explicit conflict anywhere in that
+    lifecycle rejects the entire aggregate. Other aggregate types intentionally
+    remain event-scoped until their producer contract proves inheritance safe.
+    """
+
+    if financial_scope is None or event.get("aggregate_type") not in _COMPONENT_AGGREGATE_TYPES:
+        return False
+    aggregate_events = _component_aggregate_events(store, event)
+    if any(
+        _component_event_definitively_foreign(
+            candidate,
+            financial_scope=financial_scope,
+        )
+        for candidate in aggregate_events
+    ):
+        return False
+    return any(
+        _component_event_has_positive_run_scope(
+            candidate,
+            financial_scope=financial_scope,
+        )
+        for candidate in aggregate_events
+    )
+
+
 def _autonomous_event_owned(
+    store: JournalStore,
     event: Mapping[str, object],
     *,
     run_id: str,
@@ -412,12 +483,15 @@ def _autonomous_event_owned(
     aggregate_id = event.get("aggregate_id")
     if aggregate_type == "canonical_autonomous_simulation":
         return aggregate_id == run_id
-    return (
-        aggregate_type in _COMPONENT_AGGREGATE_TYPES
-        and not _component_event_definitively_foreign(
-            event,
+    if aggregate_type not in _COMPONENT_AGGREGATE_TYPES:
+        return False
+    aggregate_events = _component_aggregate_events(store, event)
+    return not any(
+        _component_event_definitively_foreign(
+            candidate,
             financial_scope=financial_scope,
         )
+        for candidate in aggregate_events
     )
 
 
@@ -469,6 +543,7 @@ def _runtime_scope_snapshot(
                 aggregate_type,
             )
             if _autonomous_event_owned(
+                store,
                 event,
                 run_id=run_id,
                 financial_scope=financial_scope,
@@ -495,6 +570,7 @@ def _runtime_scope_snapshot(
 
 
 def _autonomous_publication_owned(
+    store: JournalStore,
     item: Mapping[str, object],
     *,
     run_id: str,
@@ -510,6 +586,7 @@ def _autonomous_publication_owned(
     if envelope.get("aggregate_type") == "canonical_autonomous_simulation":
         return envelope.get("aggregate_id") == run_id
     return _component_publication_matches_run_scope(
+        store,
         envelope,
         financial_scope=financial_scope,
     )
@@ -557,6 +634,7 @@ def _autonomous_owned_event_ids(
                     aggregate_type,
                 )
                 if _component_publication_matches_run_scope(
+                    store,
                     event,
                     financial_scope=financial_scope,
                 )
@@ -581,6 +659,7 @@ def _autonomous_owned_pending_publications(
         if state is None:
             continue
         if not _autonomous_publication_owned(
+            store,
             state,
             run_id=run_id,
             financial_scope=financial_scope,

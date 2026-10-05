@@ -23,6 +23,8 @@ from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
 
+SUPPORTED_CHANGE_KINDS = frozenset({"A", "C", "D", "M", "R", "T"})
+
 PROTECTED_SENTINELS = frozenset(
     {
         ".github/workflows/baseline.yml",
@@ -71,6 +73,20 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
+def _require_repo_relative_path(value: str, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or any(ord(character) in {0, 10, 13, 92} for character in value)
+        or value.startswith("/")
+        or value.endswith("/")
+        or "//" in value
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        raise ValueError(f"{name} is malformed")
+    return value
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
@@ -80,16 +96,24 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         parts = line.split("\t")
         status = parts[0]
         kind = status[:1]
+        if kind not in SUPPORTED_CHANGE_KINDS:
+            raise ValueError(f"Unsupported Git name-status record: {line!r}")
+        if not status:
+            raise ValueError(f"Malformed Git name-status record: {line!r}")
         if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(
-                Change(status=status, previous_path=parts[1], path=parts[2])
+            previous_path = _require_repo_relative_path(
+                parts[1],
+                name="previous path",
             )
+            path = _require_repo_relative_path(parts[2], name="path")
+            changes.append(Change(status=status, previous_path=previous_path, path=path))
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
+            path = _require_repo_relative_path(parts[1], name="path")
+            changes.append(Change(status=status, path=path))
     return tuple(changes)
 
 
@@ -131,6 +155,22 @@ def assess_reconvergence(
         raise ValueError("max_deletions must be positive")
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
+    for change in changes:
+        if type(change) is not Change:
+            raise TypeError("changes must contain exact Change values")
+        if type(change.status) is not str or not change.status:
+            raise ValueError("Git change status is malformed")
+        kind = change.status[:1]
+        if kind not in SUPPORTED_CHANGE_KINDS:
+            raise ValueError("unsupported Git change status")
+        _require_repo_relative_path(change.path, name="changed path")
+        if kind in {"R", "C"}:
+            if change.previous_path is None:
+                raise ValueError("rename/copy change requires previous path")
+            _require_repo_relative_path(change.previous_path, name="previous path")
+        elif change.previous_path is not None:
+            raise ValueError("non-rename/copy change must not have previous path")
+
     authorized_protected_paths = _normalized_exact_paths(
         authorized_protected_sentinel_paths
     )
@@ -153,7 +193,10 @@ def assess_reconvergence(
         kind = change.status[:1]
         if (
             kind == "R"
-            and change.previous_path in protected_sentinels
+            and (
+                change.previous_path in protected_sentinels
+                or change.path in protected_sentinels
+            )
             and change.path != change.previous_path
         ):
             protected_damage.add(
@@ -164,6 +207,8 @@ def assess_reconvergence(
         if kind == "M" and change.path in protected_sentinels:
             if change.path not in authorized_protected_paths:
                 protected_damage.add(f"{change.path} (modification)")
+        if kind in {"A", "C"} and change.path in protected_sentinels:
+            protected_damage.add(f"{change.path} (addition/copy)")
     protected_violations = tuple(sorted(protected_damage))
 
     normalized_scopes: tuple[str, ...] | None = None

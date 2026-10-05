@@ -227,6 +227,58 @@ class VerticalSliceTests(unittest.TestCase):
         )
         self.assertEqual(hostile[-1].position, reference[-1].position)
 
+    def test_resume_rejects_changed_financial_configuration_before_mutation(self):
+        changes = (
+            {"initial_cash": "9999"},
+            {"order_quantity": "2"},
+            {"max_abs_position": "9"},
+            {"max_notional": "4999"},
+            {"fee_rate": "0.002"},
+        )
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_before = (root / "checkpoint.json").read_text(encoding="utf-8")
+            evidence_before = (root / "learning-evidence.jsonl").read_text(encoding="utf-8")
+            intents_before = sorted(path.name for path in (root / "order-intents").glob("*.json"))
+
+            for kwargs in changes:
+                with self.subTest(kwargs=kwargs):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "financial configuration changed",
+                    ):
+                        run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
+
+            self.assertEqual(
+                (root / "checkpoint.json").read_text(encoding="utf-8"),
+                checkpoint_before,
+            )
+            self.assertEqual(
+                (root / "learning-evidence.jsonl").read_text(encoding="utf-8"),
+                evidence_before,
+            )
+            self.assertEqual(
+                sorted(path.name for path in (root / "order-intents").glob("*.json")),
+                intents_before,
+            )
+
+    def test_legacy_checkpoint_without_financial_identity_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["schema_version"] = 1
+            checkpoint.pop("financial_configuration", None)
+            checkpoint.pop("financial_configuration_hash", None)
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Legacy checkpoint schema 1",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode([[100, 101, 102, 103], [103, 102, 101, 100]], directory)

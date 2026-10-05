@@ -188,13 +188,62 @@ def _immutable_settlement_evidence_ref(value: object) -> tuple[str, str, str]:
     return artifact_id, digest, canonical
 
 
+def _detached_settlement_evidence(
+    evidence: FuturesSettlementEvidence,
+) -> FuturesSettlementEvidence:
+    """Revalidate one exact caller-held settlement before durable use."""
+
+    if type(evidence) is not FuturesSettlementEvidence:
+        raise TypeError("evidence must be exact FuturesSettlementEvidence")
+    if type(evidence.instrument_version) is not int:
+        raise FuturesError("settlement instrument_version must be exact int")
+    if type(evidence.sequence) is not int or type(evidence.revision) is not int:
+        raise FuturesError("settlement sequence/revision must be exact int")
+    if type(evidence.settlement_price) is not Decimal:
+        raise FuturesError("settlement price must be exact Decimal")
+    if evidence.evidence_ref is not None:
+        if type(evidence.evidence_ref) is not str:
+            raise FuturesError("settlement evidence_ref must be exact text or None")
+        _immutable_settlement_evidence_ref(evidence.evidence_ref)
+
+    scope = evidence.scope
+    if type(scope) is not FuturesSettlementScope:
+        raise FuturesError("settlement scope must be exact FuturesSettlementScope")
+    detached_scope = FuturesSettlementScope(
+        source_id=scope.source_id,
+        provider_id=scope.provider_id,
+        account_id=scope.account_id,
+        environment=scope.environment,
+    )
+    if detached_scope != scope:
+        raise FuturesError("settlement scope is not canonical")
+
+    detached = FuturesSettlementEvidence(
+        settlement_id=evidence.settlement_id,
+        observation_id=evidence.observation_id,
+        supersedes_observation_id=evidence.supersedes_observation_id,
+        instrument_id=evidence.instrument_id,
+        instrument_version=evidence.instrument_version,
+        scope=detached_scope,
+        effective_at=evidence.effective_at,
+        sequence=evidence.sequence,
+        revision=evidence.revision,
+        settlement_price=evidence.settlement_price,
+        price_currency=evidence.price_currency,
+        settlement_currency=evidence.settlement_currency,
+        evidence_ref=evidence.evidence_ref,
+    )
+    if detached != evidence:
+        raise FuturesError("settlement evidence is not canonical")
+    return detached
+
+
 def provider_settlement_evidence_receipt(
     evidence: FuturesSettlementEvidence,
 ) -> dict[str, Any]:
     """Canonical preserved-provider receipt, excluding its self-reference."""
 
-    if type(evidence) is not FuturesSettlementEvidence:
-        raise TypeError("evidence must be exact FuturesSettlementEvidence")
+    evidence = _detached_settlement_evidence(evidence)
     settlement = _evidence_payload(evidence)
     settlement.pop("evidence_ref", None)
     return {
@@ -207,8 +256,7 @@ def provider_settlement_evidence_receipt(
 def provider_settlement_evidence_metadata(
     evidence: FuturesSettlementEvidence,
 ) -> dict[str, object]:
-    if type(evidence) is not FuturesSettlementEvidence:
-        raise TypeError("evidence must be exact FuturesSettlementEvidence")
+    evidence = _detached_settlement_evidence(evidence)
     scope = evidence.scope
     if scope.provider_id is None or scope.account_id is None or scope.environment is None:
         raise FuturesError("provider settlement evidence requires provider/account/environment")
@@ -259,8 +307,7 @@ def _verify_provider_settlement_evidence(
     evidence: FuturesSettlementEvidence,
     authenticated_reader,
 ) -> str:
-    if type(evidence) is not FuturesSettlementEvidence:
-        raise TypeError("evidence must be exact FuturesSettlementEvidence")
+    evidence = _detached_settlement_evidence(evidence)
     artifact_id, digest, canonical_ref = _immutable_settlement_evidence_ref(
         evidence.evidence_ref
     )
@@ -643,6 +690,7 @@ def commit_linear_variation_margin(
 
     if type(opening_state) is not VariationMarginState:
         raise TypeError("opening_state must be exact VariationMarginState")
+    settlement = _detached_settlement_evidence(settlement)
     aggregate_id, environment = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
         evidence_artifact_root,
@@ -835,6 +883,7 @@ def commit_inverse_variation_margin(
 
     if type(opening_state) is not InverseVariationMarginState:
         raise TypeError("opening_state must be exact InverseVariationMarginState")
+    settlement = _detached_settlement_evidence(settlement)
     convention = inverse_settlement_convention(opening_state.contract)
     quantum = Decimal(convention.quantum)
     rounding = convention.rounding

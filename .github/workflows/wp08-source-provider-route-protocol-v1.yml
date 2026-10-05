@@ -1,0 +1,74 @@
+name: WP08 source provider route protocol v1
+
+on:
+  push:
+    branches:
+      - "wp08/source-provider-route-protocol-v1-20261005-sol56-g91"
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add source-owned provider route protocol
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("mvp/autotrade_mvp/provider_qualification_authority.py")
+          source = source_path.read_text(encoding="utf-8")
+          old_doc = '''No provider-qualification protocol is source-enabled yet because the canonical\nqualification trust policy is not present on this lineage.  Public issuance is\ntherefore intentionally unavailable rather than silently trusting test material.\n'''
+          new_doc = '''The provider-route v1 protocol descriptor is source-owned here, but canonical\nqualification trust policy roots remain separately controlled.  Configuring the\nprotocol alone never makes a campaign authoritative: public issuance still must\ncross the canonical signed-attestation trust boundary and remains unavailable\nwhile that policy is absent.\n'''
+          if new_doc not in source:
+              if source.count(old_doc) != 1:
+                  raise SystemExit("unexpected provider qualification module docstring")
+              source = source.replace(old_doc, new_doc, 1)
+
+          old = '''# Runtime registration would reintroduce caller-selected trust semantics.  A real\n# provider protocol must be added here together with a reviewed canonical trust\n# policy.  The empty mapping keeps today's lineage fail-closed.\n_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType({})\n'''
+          new = '''# Runtime registration would reintroduce caller-selected protocol semantics.\n# The descriptor below fixes the product-owned protocol/case contract in source;\n# it deliberately does not configure signer roots or a trust-policy file.  Those\n# remain a separate independently reviewed authority consumed only by the\n# canonical attestation verifier.\n_PROVIDER_ROUTE_V1 = ProviderQualificationProtocol(\n    key="PROVIDER_ROUTE_V1",\n    domain="PROVIDER",\n    gate="ROUTE_QUALIFICATION",\n    package_id="AUTOTRADE",\n    protocol_id="provider-route-v1",\n    protocol_version="1.0.0",\n    requirement_id="provider-route-required",\n)\n_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType(\n    {_PROVIDER_ROUTE_V1.key: _PROVIDER_ROUTE_V1}\n)\n'''
+          if new not in source:
+              if source.count(old) != 1:
+                  raise SystemExit("unexpected _SOURCE_PROTOCOLS authority")
+              source = source.replace(old, new, 1)
+          source_path.write_text(source, encoding="utf-8")
+
+          test_path = Path("mvp/tests/test_provider_qualification_authority.py")
+          tests = test_path.read_text(encoding="utf-8")
+          marker = '''    def test_source_protocol_is_fail_closed_until_canonical_policy_exists(self):\n        with self.assertRaises(ProviderQualificationUnavailable):\n            source_provider_qualification_protocol("TEST_PROVIDER_V1")\n'''
+          addition = marker + '''\n    def test_source_provider_route_v1_protocol_is_fixed_in_product_source(self):\n        protocol = source_provider_qualification_protocol("PROVIDER_ROUTE_V1")\n\n        self.assertEqual(protocol.key, "PROVIDER_ROUTE_V1")\n        self.assertEqual(protocol.domain, "PROVIDER")\n        self.assertEqual(protocol.gate, "ROUTE_QUALIFICATION")\n        self.assertEqual(protocol.package_id, "AUTOTRADE")\n        self.assertEqual(protocol.protocol_id, "provider-route-v1")\n        self.assertEqual(protocol.protocol_version, "1.0.0")\n        self.assertEqual(protocol.requirement_id, "provider-route-required")\n        self.assertEqual(\n            protocol.campaign_evidence_kind,\n            "PROVIDER_QUALIFICATION_CAMPAIGN",\n        )\n\n    def test_unknown_protocol_remains_unavailable(self):\n        with self.assertRaises(ProviderQualificationUnavailable):\n            source_provider_qualification_protocol("UNCONFIGURED_PROVIDER_ROUTE_V2")\n'''
+          if "test_source_provider_route_v1_protocol_is_fixed_in_product_source" not in tests:
+              if tests.count(marker) != 1:
+                  raise SystemExit("source protocol fail-closed test marker not found exactly once")
+              tests = tests.replace(marker, addition, 1)
+          test_path.write_text(tests, encoding="utf-8")
+          PY
+
+      - name: Focused verification
+        shell: bash
+        run: |
+          python -m py_compile \
+            mvp/autotrade_mvp/provider_qualification_authority.py \
+            mvp/tests/test_provider_qualification_authority.py
+          python -m unittest \
+            mvp.tests.test_provider_qualification_authority
+
+      - name: Commit verified source and remove bootstrap workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            mvp/autotrade_mvp/provider_qualification_authority.py \
+            mvp/tests/test_provider_qualification_authority.py
+          git rm .github/workflows/wp08-source-provider-route-protocol-v1.yml
+          git commit -m "feat: source-own provider route qualification protocol v1"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

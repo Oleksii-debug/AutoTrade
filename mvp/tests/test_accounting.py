@@ -545,19 +545,14 @@ class AccountingFoundationTests(unittest.TestCase):
         )
         expected = scoped.audit_digest()
 
-        original_require = accounting_module._require_scoped_economic_book_owner
         original_payload_digest = accounting_module.payload_digest
-        accounting_module._require_scoped_economic_book_owner = (
-            lambda _value: ("LIVE", "forged-account", EconomicBook())
-        )
         accounting_module.payload_digest = lambda _payload: "sha256:" + "0" * 64
         try:
-            # Facade methods retain the owner verifier and digest primitive
-            # selected during module construction.
+            # Facade methods retain the verifier and digest primitive selected
+            # during module construction.
             self.assertEqual(scoped.audit_digest(), expected)
             self.assertEqual(scoped.cash("USD"), Decimal("100"))
         finally:
-            accounting_module._require_scoped_economic_book_owner = original_require
             accounting_module.payload_digest = original_payload_digest
 
         object.__setattr__(scoped, "environment", "LIVE")
@@ -590,6 +585,93 @@ class AccountingFoundationTests(unittest.TestCase):
                 )
             )
         self.assertEqual(replacement.cash("USD"), Decimal("999"))
+
+    def test_scoped_economic_book_constructor_ignores_module_binding_poisoning(self):
+        seed = book_external_cash_flow(
+            transaction_id="constructor-seed",
+            cause_event_id="constructor-seed-cause",
+            currency="USD",
+            amount="125",
+        )
+        original_economic_book = accounting_module.EconomicBook
+        original_scoped_book = accounting_module.ScopedEconomicBook
+        original_name = accounting_module._name
+        original_environments = ScopedEconomicBook._ENVIRONMENTS
+
+        class ForgedBook:
+            def __init__(self, _transactions=()):
+                self.transactions = ()
+
+            def cash(self, _currency):
+                return Decimal("999999")
+
+            def audit_digest(self):
+                return "sha256:" + "f" * 64
+
+        accounting_module.EconomicBook = ForgedBook
+        accounting_module.ScopedEconomicBook = object
+        accounting_module._name = lambda _value, *, field: "FORGED"
+        ScopedEconomicBook._ENVIRONMENTS = frozenset({"FORGED"})
+        try:
+            scoped = ScopedEconomicBook(
+                environment="paper",
+                account_id="acct-constructor",
+                transactions=(seed,),
+            )
+            self.assertEqual(scoped.environment, "PAPER")
+            self.assertEqual(scoped.account_id, "acct-constructor")
+            self.assertEqual(scoped.cash("USD"), Decimal("125"))
+            self.assertIs(type(object.__getattribute__(scoped, "_book")), EconomicBook)
+
+            with self.assertRaisesRegex(ValueError, "unsupported environment"):
+                ScopedEconomicBook(
+                    environment="FORGED",
+                    account_id="acct-forged",
+                )
+        finally:
+            accounting_module.EconomicBook = original_economic_book
+            accounting_module.ScopedEconomicBook = original_scoped_book
+            accounting_module._name = original_name
+            ScopedEconomicBook._ENVIRONMENTS = original_environments
+
+    def test_scoped_economic_book_owner_writer_is_not_public_authority(self):
+        self.assertFalse(
+            hasattr(accounting_module, "_bind_scoped_economic_book_owner")
+        )
+        self.assertFalse(
+            hasattr(accounting_module, "_require_scoped_economic_book_owner")
+        )
+
+        forged = object.__new__(ScopedEconomicBook)
+        object.__setattr__(forged, "environment", "PAPER")
+        object.__setattr__(forged, "account_id", "acct-forged")
+        object.__setattr__(forged, "_book", EconomicBook())
+        with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
+            forged.cash("USD")
+        with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
+            forged.audit_digest()
+
+    def test_scoped_economic_book_subclass_rejected_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileScopedBook(ScopedEconomicBook):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(("get", name))
+                    raise AssertionError("hostile scoped-book attribute dispatch")
+                return super().__getattribute__(name)
+
+            def __setattr__(self, name, value):
+                touched.append(("set", name))
+                raise AssertionError("hostile scoped-book attribute dispatch")
+
+        with self.assertRaisesRegex(TypeError, "exact ScopedEconomicBook"):
+            HostileScopedBook(
+                environment="PAPER",
+                account_id="acct-hostile",
+            )
+
+        self.assertEqual(touched, [])
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

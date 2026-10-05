@@ -61,7 +61,7 @@ _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION = guarded_order_projection
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code__
 _CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
 _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
-_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v2"
 _BINDING_PAYLOAD_BASE_FIELDS = frozenset(
     {
         "schema_version",
@@ -161,6 +161,51 @@ _CANONICAL_MATERIAL_FROM_PAYLOAD = _material_from_payload
 _CANONICAL_MATERIAL_FROM_PAYLOAD_CODE = _material_from_payload.__code__
 
 
+def _install_bybit_prepared_price_authority_reader():
+    """Read issued price authority without invoking mutable instance descriptors."""
+
+    canonical_type = type
+    prepared_type = _BYBIT_PREPARED_TYPE
+    object_getattribute = object.__getattribute__
+    attribute_error_type = AttributeError
+    error_type = DurableFinancialRequestBindingError
+
+    def read(prepared_request: object) -> tuple[object, object, object]:
+        if canonical_type(prepared_request) is not prepared_type:
+            raise error_type(
+                "Bybit prepared price authority requires exact prepared request"
+            )
+        try:
+            return (
+                object_getattribute(
+                    prepared_request,
+                    "price_rule_instrument_id",
+                ),
+                object_getattribute(
+                    prepared_request,
+                    "price_rule_instrument_version",
+                ),
+                object_getattribute(
+                    prepared_request,
+                    "price_semantics_digest",
+                ),
+            )
+        except attribute_error_type as error:
+            raise error_type(
+                "Bybit prepared price authority is unavailable"
+            ) from error
+
+    return read
+
+
+_bybit_prepared_price_authority = _install_bybit_prepared_price_authority_reader()
+_CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY = _bybit_prepared_price_authority
+_CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY_CODE = (
+    _bybit_prepared_price_authority.__code__
+)
+del _install_bybit_prepared_price_authority_reader
+
+
 def _production_request_origin_receipt(
     material: FinancialRequestBindingMaterial,
 ) -> dict[str, object] | None:
@@ -187,6 +232,9 @@ def _production_request_origin_receipt(
         "body_sha256": material.body_sha256,
         "query_sha256": material.query_sha256,
         "trigger_protection_digest": material.trigger_protection_digest,
+        "instrument_id": material.instrument_id,
+        "instrument_version": material.instrument_version,
+        "price_semantics_digest": material.price_semantics_digest,
     }
 
 
@@ -209,11 +257,7 @@ def _require_bybit_prepared_request_origin(
     if (
         require_canonical_bybit_prepared_submission
         is not _CANONICAL_BYBIT_REQUIRE_PREPARED
-        or getattr(
-            _CANONICAL_BYBIT_REQUIRE_PREPARED,
-            "__code__",
-            None,
-        )
+        or _CANONICAL_BYBIT_REQUIRE_PREPARED.__code__
         is not _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE
     ):
         raise DurableFinancialRequestBindingError(
@@ -226,12 +270,41 @@ def _require_bybit_prepared_request_origin(
             "Bybit prepared request lacks canonical issuance provenance"
         ) from error
     if (
-        guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
-        or getattr(
-            _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION,
-            "__code__",
-            None,
+        _bybit_prepared_price_authority
+        is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY
+        or _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY.__code__
+        is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price authority executable changed"
         )
+    (
+        prepared_price_rule_instrument_id,
+        prepared_price_rule_instrument_version,
+        prepared_price_semantics_digest,
+    ) = _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY(prepared_request)
+    if (
+        prepared_price_rule_instrument_id is None
+        or prepared_price_rule_instrument_version is None
+        or prepared_price_semantics_digest is None
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit PAPER/LIVE prepared request lacks authenticated price semantics authority"
+        )
+    if (
+        prepared_price_rule_instrument_id != material.instrument_id
+        or prepared_price_rule_instrument_version != material.instrument_version
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price-rule instrument differs from financial binding"
+        )
+    if prepared_price_semantics_digest != material.price_semantics_digest:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price semantics differ from financial binding"
+        )
+    if (
+        guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
+        or _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION.__code__
         is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE
     ):
         raise DurableFinancialRequestBindingError(

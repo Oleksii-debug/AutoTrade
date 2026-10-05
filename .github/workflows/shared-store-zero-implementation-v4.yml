@@ -6,6 +6,7 @@ on:
       - fix/shared-store-zero-checkpoint-outbox-20261005-sol56
     paths:
       - .github/workflows/shared-store-zero-implementation-v4.yml
+      - .github/scripts/shared_store_zero_patch.py
 
 permissions:
   contents: write

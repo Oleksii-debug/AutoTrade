@@ -275,6 +275,7 @@ def _install_futures_contract_settlement_authority():
     convention_type = SettlementConvention
     canonical_type = type
     canonical_id = id
+    canonical_tuple = tuple
     canonical_ref = weakref_ref
     object_getattribute = object.__getattribute__
     error_type = FuturesError
@@ -292,12 +293,12 @@ def _install_futures_contract_settlement_authority():
     def snapshot(convention):
         if canonical_type(convention) is not convention_type:
             raise error_type("settlement convention authority must be exact")
-        return tuple(object_getattribute(convention, name) for name in names)
+        return canonical_tuple(object_getattribute(convention, name) for name in names)
 
     def prune():
         dead = [
             key
-            for key, (contract_ref, _expected) in tuple(authorities.items())
+            for key, (contract_ref, _expected) in canonical_tuple(authorities.items())
             if contract_ref() is None
         ]
         for key in dead:

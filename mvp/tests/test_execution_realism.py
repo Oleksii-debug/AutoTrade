@@ -30,6 +30,7 @@ def model(**overrides):
         price_quantum="0.01",
         price_projection_policy_id="ADVERSE_PRICE_GRID",
         price_projection_policy_version=1,
+        price_grid_instrument_version="ABC@v1",
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -149,6 +150,17 @@ class ExecutionRealismTests(unittest.TestCase):
         one = model(price_projection_policy_version=1)
         two = model(price_projection_policy_version=2)
         self.assertNotEqual(one.fingerprint, two.fingerprint)
+
+    def test_market_price_grid_scope_must_match_order_instrument(self):
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "not bound to the order instrument_version",
+        ):
+            simulate_execution(
+                order(),
+                top(),
+                model(price_grid_instrument_version="OTHER@v1"),
+            )
 
     def test_market_price_quantum_changes_model_identity(self):
         one = model(price_quantum="0.01")

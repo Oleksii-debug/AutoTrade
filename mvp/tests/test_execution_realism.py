@@ -118,6 +118,30 @@ class ExecutionRealismTests(unittest.TestCase):
             rebuilt.price_grid_instrument_version,
             "11111111-1111-4111-8111-111111111111@1",
         )
+        self.assertEqual(
+            rebuilt.price_grid_instrument_binding,
+            instrument_version.metadata_evidence_binding(),
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price grid is authoritative from instrument_version",
+        ):
+            ExecutionModel.create_for_instrument_version(
+                instrument_version=instrument_version,
+                price_grid_instrument_binding="sha256:" + "0" * 64,
+                model_version=configured.model_version,
+                calibration_sha256=configured.calibration_sha256,
+                data_fidelity=configured.data_fidelity,
+                scenario=configured.scenario,
+                latency_ms=configured.latency_ms,
+                fee_rate=configured.fee_rate,
+                minimum_fee=configured.minimum_fee,
+                max_participation=configured.max_participation,
+                slippage_bps=configured.slippage_bps,
+                impact_bps_at_max_participation=configured.impact_bps_at_max_participation,
+                bar_half_spread_bps=configured.bar_half_spread_bps,
+                scenario_cost_multiplier=configured.scenario_cost_multiplier,
+            )
         with self.assertRaisesRegex(
             ExecutionRealismError,
             "price grid is authoritative from instrument_version",

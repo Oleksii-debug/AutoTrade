@@ -399,6 +399,37 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                 },
             )
 
+    def test_timestamp_conversion_is_platform_independent_inside_supported_domain(self):
+        timestamp_ms = 32_503_680_000_000  # 3000-01-01T00:00:00Z
+        spot = parse_spot_order_ack(
+            attempt_id=str(uuid4()),
+            client_order_id="spot-year-3000",
+            response={
+                "symbol": "BTCUSDT",
+                "orderId": 11,
+                "clientOrderId": "spot-year-3000",
+                "transactTime": timestamp_ms,
+            },
+        )
+        usdm = parse_usdm_order_ack(
+            attempt_id=str(uuid4()),
+            client_order_id="usdm-year-3000",
+            response={
+                "symbol": "BTCUSDT",
+                "orderId": 12,
+                "clientOrderId": "usdm-year-3000",
+                "updateTime": timestamp_ms,
+            },
+        )
+        self.assertEqual(
+            spot["provider_received_at"],
+            "3000-01-01T00:00:00.000Z",
+        )
+        self.assertEqual(
+            usdm["provider_received_at"],
+            "3000-01-01T00:00:00.000Z",
+        )
+
     def test_usdm_ack_rejects_int_subclass_before_comparison_callback(self):
         callbacks = []
 

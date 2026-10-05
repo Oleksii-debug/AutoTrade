@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -717,7 +717,10 @@ def simulate_execution(
         raise ExecutionRealismError(
             "MARKET execution requires complete price projection policy evidence"
         )
-    if order.order_type == "MARKET" and model.price_grid_instrument_version != order.instrument_version:
+    if (
+        order.order_type == "MARKET"
+        and model.price_grid_instrument_version != order.instrument_version
+    ):
         raise ExecutionRealismError(
             "MARKET price grid is not bound to the order instrument_version"
         )

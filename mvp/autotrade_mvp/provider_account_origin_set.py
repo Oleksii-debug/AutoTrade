@@ -18,7 +18,7 @@ from .durable_provider_qualification import (
     DurableProviderQualificationRegistry,
     ProviderQualificationError,
 )
-from .persistence import canonical_json
+from .persistence import JournalStore, canonical_json
 from .provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
     ProviderAccountAcquisitionError,
@@ -167,8 +167,81 @@ class ProviderAccountOriginBindingSet:
         ).hexdigest()
 
 
-def _install_origin_set_authority():
-    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+def _install_origin_set_authority(
+    *,
+    _qualification_registry_type=DurableProviderQualificationRegistry,
+    _account_acquisition_authority_type=DurableProviderAccountAcquisitionAuthority,
+    _journal_store_type=JournalStore,
+):
+    def descriptor_state(
+        owner: type,
+        names: tuple[str, ...],
+    ) -> tuple[tuple[str, object], ...]:
+        return tuple((name, getattr(owner, name)) for name in names)
+
+    descriptor_authority = (
+        (
+            _qualification_registry_type,
+            descriptor_state(
+                _qualification_registry_type,
+                (
+                    "_authenticate_record",
+                    "_history",
+                    "_resolved_cut",
+                    "current",
+                    "qualification",
+                    "require_exact_current",
+                ),
+            ),
+        ),
+        (
+            _account_acquisition_authority_type,
+            descriptor_state(
+                _account_acquisition_authority_type,
+                (
+                    "_journal_authority",
+                    "_replay",
+                    "require_current",
+                    "resolve_current",
+                ),
+            ),
+        ),
+        (
+            _journal_store_type,
+            descriptor_state(
+                _journal_store_type,
+                (
+                    "load_events_by_aggregate_type",
+                    "store_identity",
+                    "whole_store_state_cut",
+                ),
+            ),
+        ),
+    )
+
+    def require_descriptor_authority() -> None:
+        for owner, expected in descriptor_authority:
+            for name, descriptor in expected:
+                if getattr(owner, name, None) is not descriptor:
+                    raise ProviderAccountOriginSetError(
+                        "origin-set currentness class authority changed"
+                    )
+
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+            DurableProviderQualificationRegistry,
+            DurableProviderAccountAcquisitionAuthority,
+            SerializedProviderAccountAcquisition,
+            JournalStore,
+            object,
+            object,
+            object,
+            tuple[str, ...],
+        ],
+    ] = {}
 
     def snapshot(value: ProviderAccountOriginBindingSet) -> tuple[object, ...]:
         if type(value) is not ProviderAccountOriginBindingSet:
@@ -187,11 +260,43 @@ def _install_origin_set_authority():
         )
 
     def prune() -> None:
-        for object_id, (ref, _state) in tuple(states.items()):
-            if ref() is None:
+        for object_id, state in tuple(states.items()):
+            if state[0]() is None:
                 states.pop(object_id, None)
 
-    def register(value: ProviderAccountOriginBindingSet) -> None:
+    def register(
+        value: ProviderAccountOriginBindingSet,
+        *,
+        qualification_registry: DurableProviderQualificationRegistry,
+        account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+        account_acquisition: SerializedProviderAccountAcquisition,
+    ) -> None:
+        require_descriptor_authority()
+        if type(qualification_registry) is not _qualification_registry_type:
+            raise TypeError(
+                "qualification_registry must be exact DurableProviderQualificationRegistry"
+            )
+        if type(account_acquisition_authority) is not _account_acquisition_authority_type:
+            raise TypeError(
+                "account_acquisition_authority must be exact "
+                "DurableProviderAccountAcquisitionAuthority"
+            )
+        if type(account_acquisition) is not SerializedProviderAccountAcquisition:
+            raise TypeError(
+                "account_acquisition must be exact SerializedProviderAccountAcquisition"
+            )
+        store = qualification_registry.store
+        if (
+            type(store) is not _journal_store_type
+            or store is not account_acquisition_authority.store
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin-set currentness authorities must share one exact JournalStore"
+            )
+        store_identity = store.store_identity
+        evidence_store = qualification_registry.evidence_store
+        evidence_root = qualification_registry.evidence_root
+        registry_state_names = tuple(sorted(vars(qualification_registry)))
         prune()
         object_id = id(value)
         state = snapshot(value)
@@ -200,9 +305,23 @@ def _install_origin_set_authority():
             raise ProviderAccountOriginSetError(
                 "origin-set authority identity collision"
             )
-        states[object_id] = (weakref.ref(value), state)
+        value_ref = weakref.ref(value)
+        states[object_id] = (
+            value_ref,
+            state,
+            qualification_registry,
+            account_acquisition_authority,
+            account_acquisition,
+            store,
+            store_identity,
+            evidence_store,
+            evidence_root,
+            registry_state_names,
+        )
 
-    def require(value: ProviderAccountOriginBindingSet) -> ProviderAccountOriginBindingSet:
+    def require(
+        value: ProviderAccountOriginBindingSet,
+    ) -> ProviderAccountOriginBindingSet:
         prune()
         state = snapshot(value)
         expected = states.get(id(value))
@@ -216,24 +335,150 @@ def _install_origin_set_authority():
             )
         return value
 
-    return register, require
+    def require_current(
+        value: ProviderAccountOriginBindingSet,
+        *,
+        at: datetime,
+    ) -> ProviderAccountOriginBindingSet:
+        accepted = require(value)
+        point = _utc(at, name="at")
+        state = states.get(id(accepted))
+        assert state is not None and state[0]() is accepted
+        qualification_registry = state[2]
+        account_acquisition_authority = state[3]
+        account_acquisition = state[4]
+        store = state[5]
+        store_identity = state[6]
+        evidence_store = state[7]
+        evidence_root = state[8]
+        registry_state_names = state[9]
+        require_descriptor_authority()
+        if (
+            type(qualification_registry) is not _qualification_registry_type
+            or type(account_acquisition_authority)
+            is not _account_acquisition_authority_type
+            or type(store) is not _journal_store_type
+            or qualification_registry.store is not store
+            or account_acquisition_authority.store is not store
+            or store.store_identity != store_identity
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin-set currentness JournalStore generation changed"
+            )
+        if (
+            tuple(sorted(vars(qualification_registry))) != registry_state_names
+            or qualification_registry.evidence_store is not evidence_store
+            or qualification_registry.evidence_root is not evidence_root
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin-set provider qualification registry authority changed"
+            )
+
+        try:
+            current_acquisition = account_acquisition_authority.require_current(
+                account_acquisition
+            )
+        except ProviderAccountAcquisitionError as error:
+            raise ProviderAccountOriginSetError(
+                "origin set account acquisition is no longer exact current authority"
+            ) from error
+        if (
+            current_acquisition.account_id != accepted.account_id
+            or current_acquisition.provider_scope.content_digest
+            != accepted.provider_scope_digest
+            or current_acquisition.acquisition_id != accepted.acquisition_id
+            or current_acquisition.acquisition_generation
+            != accepted.acquisition_generation
+            or current_acquisition.acquisition_journal_sequence_cut
+            != accepted.acquisition_journal_sequence_cut
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin set no longer matches exact current account acquisition"
+            )
+
+        try:
+            accepted_q = qualification_registry.qualification(
+                accepted.qualification_id
+            )
+        except ProviderQualificationError as error:
+            raise ProviderAccountOriginSetError(
+                "origin set provider qualification is unavailable"
+            ) from error
+        if (
+            accepted_q.scope.provider_scope.content_digest
+            != accepted.provider_scope_digest
+            or accepted_q.identity.route_semantics_digest
+            != accepted.qualification_route_semantics_digest
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin set provider qualification identity changed"
+            )
+        current_scope = ProviderQualificationCurrentScope(
+            provider_scope=accepted_q.scope.provider_scope,
+            product_family=accepted_q.scope.product_family,
+            adapter_source_git_sha=accepted_q.scope.adapter_source_git_sha,
+            packaged_artifact_digest=accepted_q.scope.packaged_artifact_digest,
+            protocol_id=accepted_q.scope.protocol_id,
+            protocol_version=accepted_q.scope.protocol_version,
+        )
+        try:
+            qualification_registry.require_exact_current(
+                scope=current_scope,
+                at=point,
+                expected_qualification_id=accepted.qualification_id,
+            )
+        except ProviderQualificationError as error:
+            raise ProviderAccountOriginSetError(
+                "origin set provider qualification is no longer exact current Q"
+            ) from error
+        return accepted
+
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_origin_set(
+            *,
+            qualification_registry: DurableProviderQualificationRegistry,
+            account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+            account_acquisition: SerializedProviderAccountAcquisition,
+            response_bindings: tuple[AuthenticatedReadResponseBinding, ...],
+            at: datetime,
+        ) -> ProviderAccountOriginBindingSet:
+            value, current_acquisition = issue_impl(
+                qualification_registry=qualification_registry,
+                account_acquisition_authority=account_acquisition_authority,
+                account_acquisition=account_acquisition,
+                response_bindings=response_bindings,
+                at=at,
+            )
+            register(
+                value,
+                qualification_registry=qualification_registry,
+                account_acquisition_authority=account_acquisition_authority,
+                account_acquisition=current_acquisition,
+            )
+            return value
+
+        return sealed_issue_provider_account_origin_set
+
+    return seal_issuer, require, require_current
 
 
-_register_provider_account_origin_set_authority, require_provider_account_origin_set_authority = (
-    _install_origin_set_authority()
-)
+(
+    _seal_provider_account_origin_set_issuer,
+    require_provider_account_origin_set_authority,
+    require_current_provider_account_origin_set_authority,
+) = _install_origin_set_authority()
 del _install_origin_set_authority
 
 
-def issue_provider_account_origin_set(
+def _issue_provider_account_origin_set_unregistered(
     *,
     qualification_registry: DurableProviderQualificationRegistry,
     account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
     account_acquisition: SerializedProviderAccountAcquisition,
     response_bindings: tuple[AuthenticatedReadResponseBinding, ...],
     at: datetime,
-) -> ProviderAccountOriginBindingSet:
-    """Seal exact current Q + acquisition + direct origin bindings, and nothing more."""
+) -> tuple[ProviderAccountOriginBindingSet, SerializedProviderAccountAcquisition]:
+    """Build exact current Q + acquisition + direct origin material before issuance."""
 
     if type(qualification_registry) is not DurableProviderQualificationRegistry:
         raise TypeError(
@@ -365,5 +610,11 @@ def issue_provider_account_origin_set(
         accepted_q.identity.route_semantics_digest,
     )
     object.__setattr__(value, "entries_json", entries_json)
-    _register_provider_account_origin_set_authority(value)
-    return value
+    return value, current_acquisition
+
+
+issue_provider_account_origin_set = _seal_provider_account_origin_set_issuer(
+    _issue_provider_account_origin_set_unregistered
+)
+del _seal_provider_account_origin_set_issuer
+del _issue_provider_account_origin_set_unregistered

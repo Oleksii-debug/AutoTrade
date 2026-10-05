@@ -36,6 +36,7 @@ from .provider_account_absence_semantics import (
 from .provider_account_page_chain import (
     ProviderAccountPageChain,
     ProviderAccountPageChainError,
+    require_current_provider_account_page_chain_authority,
     require_provider_account_page_chain_authority,
 )
 
@@ -271,24 +272,43 @@ def _install_historical_unknown_authority():
             )
         return value
 
-    return register, require
+    def seal_resolver(resolve_impl):
+        def sealed_resolve_historical_unknown_submission(
+            store: JournalStore,
+            *,
+            environment: str,
+            account_id: str,
+            attempt_id: str,
+        ) -> HistoricalUnknownSubmissionBinding:
+            value, path, store_identity = resolve_impl(
+                store,
+                environment=environment,
+                account_id=account_id,
+                attempt_id=attempt_id,
+            )
+            register(value, store, path, store_identity)
+            return value
+
+        return sealed_resolve_historical_unknown_submission
+
+    return seal_resolver, require
 
 
 (
-    _register_historical_unknown_submission_authority,
+    _seal_historical_unknown_submission_resolver,
     require_historical_unknown_submission_authority,
 ) = _install_historical_unknown_authority()
 del _install_historical_unknown_authority
 
 
-def resolve_historical_unknown_submission(
+def _resolve_historical_unknown_submission_unregistered(
     store: JournalStore,
     *,
     environment: str,
     account_id: str,
     attempt_id: str,
-) -> HistoricalUnknownSubmissionBinding:
-    """Resolve only a durable possible-send UNKNOWN, never caller submission fields."""
+) -> tuple[HistoricalUnknownSubmissionBinding, object, object]:
+    """Resolve durable possible-send UNKNOWN material before authority issuance."""
 
     path, store_identity = _canonical_journal_authority_snapshot(store)
     normalized_environment = _exact_text(environment, name="environment").upper()
@@ -433,13 +453,14 @@ def resolve_historical_unknown_submission(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_historical_unknown_submission_authority(
-        value,
-        store,
-        path,
-        store_identity,
-    )
-    return value
+    return value, path, store_identity
+
+
+resolve_historical_unknown_submission = _seal_historical_unknown_submission_resolver(
+    _resolve_historical_unknown_submission_unregistered
+)
+del _seal_historical_unknown_submission_resolver
+del _resolve_historical_unknown_submission_unregistered
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -517,6 +538,9 @@ class ProviderAccountSurfaceCoverage:
 
 
 def _install_surface_coverage_authority():
+    page_chain_authority = require_provider_account_page_chain_authority
+    current_page_chain_authority = require_current_provider_account_page_chain_authority
+    historical_unknown_authority = require_historical_unknown_submission_authority
     states: dict[
         int,
         tuple[
@@ -524,6 +548,7 @@ def _install_surface_coverage_authority():
             tuple[object, ...],
             weakref.ReferenceType,
             weakref.ReferenceType,
+            DurableProviderQualificationRegistry,
         ],
     ] = {}
     fields = (
@@ -564,13 +589,19 @@ def _install_surface_coverage_authority():
         value: ProviderAccountSurfaceCoverage,
         page_chain: ProviderAccountPageChain,
         historical_submission: HistoricalUnknownSubmissionBinding,
+        qualification_registry: DurableProviderQualificationRegistry,
     ) -> None:
+        if type(qualification_registry) is not DurableProviderQualificationRegistry:
+            raise TypeError(
+                "qualification_registry must be exact DurableProviderQualificationRegistry"
+            )
         prune()
         states[id(value)] = (
             weakref.ref(value),
             material(value),
             weakref.ref(page_chain),
             weakref.ref(historical_submission),
+            qualification_registry,
         )
 
     def require(value: ProviderAccountSurfaceCoverage) -> ProviderAccountSurfaceCoverage:
@@ -592,8 +623,8 @@ def _install_surface_coverage_authority():
                 "provider surface coverage source authority is unavailable"
             )
         try:
-            require_provider_account_page_chain_authority(page_chain)
-            require_historical_unknown_submission_authority(historical)
+            page_chain_authority(page_chain)
+            historical_unknown_authority(historical)
         except (
             ProviderAccountPageChainError,
             ProviderAccountAbsenceCoverageError,
@@ -603,12 +634,82 @@ def _install_surface_coverage_authority():
             ) from error
         return value
 
-    return register, require
+    def require_current(
+        value: ProviderAccountSurfaceCoverage,
+        *,
+        at: datetime,
+    ) -> ProviderAccountSurfaceCoverage:
+        require(value)
+        state = states.get(id(value))
+        if state is None:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage construction authority is unavailable"
+            )
+        page_chain = state[2]()
+        historical = state[3]()
+        qualification_registry = state[4]
+        if page_chain is None or historical is None:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage source authority is unavailable"
+            )
+        try:
+            current_page_chain_authority(
+                page_chain,
+                at=at,
+            )
+            historical_unknown_authority(historical)
+        except (
+            ProviderAccountPageChainError,
+            ProviderAccountAbsenceCoverageError,
+        ) as error:
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage is not exact current authority"
+            ) from error
+        if (
+            value.page_chain_digest != page_chain.content_digest
+            or value.historical_submission_digest != historical.content_digest
+            or value.provider_scope_digest != page_chain.provider_scope_digest
+            or value.account_id != page_chain.account_id
+            or value.qualification_id != page_chain.qualification_id
+        ):
+            raise ProviderAccountAbsenceCoverageError(
+                "provider surface coverage no longer matches current source authority"
+            )
+        return value
+
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_surface_coverage(
+            *,
+            absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+            page_chain: ProviderAccountPageChain,
+            historical_submission: HistoricalUnknownSubmissionBinding,
+            qualification_registry: DurableProviderQualificationRegistry,
+            at: datetime,
+        ) -> ProviderAccountSurfaceCoverage:
+            value = issue_impl(
+                absence_semantics=absence_semantics,
+                page_chain=page_chain,
+                historical_submission=historical_submission,
+                qualification_registry=qualification_registry,
+                at=at,
+            )
+            register(
+                value,
+                page_chain,
+                historical_submission,
+                qualification_registry,
+            )
+            return value
+
+        return sealed_issue_provider_account_surface_coverage
+
+    return seal_issuer, require, require_current
 
 
 (
-    _register_provider_account_surface_coverage_authority,
+    _seal_provider_account_surface_coverage_issuer,
     require_provider_account_surface_coverage_authority,
+    require_current_provider_account_surface_coverage_authority,
 ) = _install_surface_coverage_authority()
 del _install_surface_coverage_authority
 
@@ -730,7 +831,7 @@ def _validate_query_shape(
     return search_binding, start_ms, end_ms
 
 
-def issue_provider_account_surface_coverage(
+def _issue_provider_account_surface_coverage_unregistered(
     *,
     absence_semantics: QualifiedProviderAccountAbsenceSemantics,
     page_chain: ProviderAccountPageChain,
@@ -756,7 +857,10 @@ def issue_provider_account_surface_coverage(
         )
     point = _at_point(at)
     try:
-        require_provider_account_page_chain_authority(page_chain)
+        require_current_provider_account_page_chain_authority(
+            page_chain,
+            at=point,
+        )
         require_historical_unknown_submission_authority(historical_submission)
     except (
         ProviderAccountPageChainError,
@@ -925,9 +1029,11 @@ def issue_provider_account_surface_coverage(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_provider_account_surface_coverage_authority(
-        value,
-        page_chain,
-        historical_submission,
-    )
     return value
+
+
+issue_provider_account_surface_coverage = _seal_provider_account_surface_coverage_issuer(
+    _issue_provider_account_surface_coverage_unregistered
+)
+del _seal_provider_account_surface_coverage_issuer
+del _issue_provider_account_surface_coverage_unregistered

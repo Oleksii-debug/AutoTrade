@@ -23,7 +23,7 @@ from .provider_account_absence_semantics import (
 from .provider_account_origin_set import (
     ProviderAccountOriginBindingSet,
     ProviderAccountOriginSetError,
-    require_provider_account_origin_set_authority,
+    require_current_provider_account_origin_set_authority,
 )
 from .provider_origin import (
     AuthenticatedReadResponseBinding,
@@ -212,7 +212,18 @@ class ProviderAccountPageChain:
 
 
 def _install_page_chain_authority():
-    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    current_origin_set_authority = require_current_provider_account_origin_set_authority
+    current_absence_rule_authority = require_provider_account_absence_rule
+    states: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[object, ...],
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            DurableProviderQualificationRegistry,
+        ],
+    ] = {}
     fields = (
         "provider_scope_digest",
         "account_id",
@@ -240,11 +251,22 @@ def _install_page_chain_authority():
             if state[0]() is None:
                 states.pop(object_id, None)
 
-    def register(value: ProviderAccountPageChain) -> None:
+    def register(
+        value: ProviderAccountPageChain,
+        origin_set: ProviderAccountOriginBindingSet,
+        absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+        qualification_registry: DurableProviderQualificationRegistry,
+    ) -> None:
         prune()
         if id(value) in states and states[id(value)][0]() is not None:
             raise ProviderAccountPageChainError("page-chain authority identity collision")
-        states[id(value)] = (weakref.ref(value), material(value))
+        states[id(value)] = (
+            weakref.ref(value),
+            material(value),
+            weakref.ref(origin_set),
+            weakref.ref(absence_semantics),
+            qualification_registry,
+        )
 
     def require(value: ProviderAccountPageChain) -> ProviderAccountPageChain:
         current = material(value)
@@ -258,18 +280,110 @@ def _install_page_chain_authority():
             raise ProviderAccountPageChainError(
                 "page-chain authority changed after issuance"
             )
+        if state[2]() is None or state[3]() is None:
+            raise ProviderAccountPageChainError(
+                "page-chain source authority is unavailable"
+            )
         return value
 
-    return register, require
+    def require_current(
+        value: ProviderAccountPageChain,
+        *,
+        at: datetime,
+    ) -> ProviderAccountPageChain:
+        require(value)
+        state = states.get(id(value))
+        if state is None:
+            raise ProviderAccountPageChainError(
+                "page-chain construction authority is unavailable"
+            )
+        origin_set = state[2]()
+        absence_semantics = state[3]()
+        qualification_registry = state[4]
+        if origin_set is None or absence_semantics is None:
+            raise ProviderAccountPageChainError(
+                "page-chain source authority is unavailable"
+            )
+        try:
+            current_origin_set_authority(
+                origin_set,
+                at=at,
+            )
+        except ProviderAccountOriginSetError as error:
+            raise ProviderAccountPageChainError(
+                "page chain is not exact current acquisition authority"
+            ) from error
+        try:
+            rule = current_absence_rule_authority(
+                absence_semantics,
+                surface=value.surface,
+                endpoint=value.endpoint,
+                data_entitlement=value.data_entitlement,
+                qualification_registry=qualification_registry,
+                at=at,
+            )
+        except ProviderAccountAbsenceSemanticsError as error:
+            raise ProviderAccountPageChainError(
+                "page chain is not exact current provider-Q authority"
+            ) from error
+        if (
+            origin_set.provider_scope_digest != value.provider_scope_digest
+            or origin_set.account_id != value.account_id
+            or origin_set.acquisition_id != value.acquisition_id
+            or origin_set.acquisition_generation != value.acquisition_generation
+            or origin_set.qualification_id != value.qualification_id
+            or origin_set.content_digest != value.origin_set_digest
+            or absence_semantics.provider_scope_digest != value.provider_scope_digest
+            or absence_semantics.qualification_id != value.qualification_id
+            or absence_semantics.content_digest != value.absence_semantics_digest
+            or rule["query_scope_rule_id"] != value.query_scope_rule_id
+            or rule["pagination_rule_id"] != value.pagination_rule_id
+        ):
+            raise ProviderAccountPageChainError(
+                "page chain no longer matches current acquisition/Q source authority"
+            )
+        return value
+
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_page_chain(
+            *,
+            absence_semantics: QualifiedProviderAccountAbsenceSemantics,
+            origin_set: ProviderAccountOriginBindingSet,
+            observations: tuple[ProviderOriginObservation, ...],
+            qualification_registry: DurableProviderQualificationRegistry,
+            surface: str,
+            at: datetime,
+        ) -> ProviderAccountPageChain:
+            value = issue_impl(
+                absence_semantics=absence_semantics,
+                origin_set=origin_set,
+                observations=observations,
+                qualification_registry=qualification_registry,
+                surface=surface,
+                at=at,
+            )
+            register(
+                value,
+                origin_set,
+                absence_semantics,
+                qualification_registry,
+            )
+            return value
+
+        return sealed_issue_provider_account_page_chain
+
+    return seal_issuer, require, require_current
 
 
-_register_provider_account_page_chain_authority, require_provider_account_page_chain_authority = (
-    _install_page_chain_authority()
-)
+(
+    _seal_provider_account_page_chain_issuer,
+    require_provider_account_page_chain_authority,
+    require_current_provider_account_page_chain_authority,
+) = _install_page_chain_authority()
 del _install_page_chain_authority
 
 
-def issue_provider_account_page_chain(
+def _issue_provider_account_page_chain_unregistered(
     *,
     absence_semantics: QualifiedProviderAccountAbsenceSemantics,
     origin_set: ProviderAccountOriginBindingSet,
@@ -300,10 +414,13 @@ def issue_provider_account_page_chain(
             "observations must be a non-empty exact tuple"
         )
     try:
-        require_provider_account_origin_set_authority(origin_set)
+        require_current_provider_account_origin_set_authority(
+            origin_set,
+            at=at,
+        )
     except ProviderAccountOriginSetError as error:
         raise ProviderAccountPageChainError(
-            "provider origin set authority is unavailable"
+            "provider origin set is not exact current authority"
         ) from error
 
     if (
@@ -502,5 +619,11 @@ def issue_provider_account_page_chain(
     }
     for name, item in material.items():
         object.__setattr__(value, name, item)
-    _register_provider_account_page_chain_authority(value)
     return value
+
+
+issue_provider_account_page_chain = _seal_provider_account_page_chain_issuer(
+    _issue_provider_account_page_chain_unregistered
+)
+del _seal_provider_account_page_chain_issuer
+del _issue_provider_account_page_chain_unregistered

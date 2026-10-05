@@ -8,6 +8,7 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 import mvp.autotrade_mvp.provider_origin as provider_origin_module
+import mvp.autotrade_mvp.provider_account_page_chain as page_chain_module
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_absence_semantics import (
@@ -22,6 +23,7 @@ from mvp.autotrade_mvp.provider_account_page_chain import (
     ProviderAccountPageChain,
     ProviderAccountPageChainError,
     issue_provider_account_page_chain,
+    require_current_provider_account_page_chain_authority,
     require_provider_account_page_chain_authority,
 )
 from mvp.autotrade_mvp.provider_account_reconciliation_semantics import (
@@ -92,6 +94,14 @@ def _absence_claims() -> dict[str, str]:
 
 
 class ProviderAccountPageChainTests(unittest.TestCase):
+    def test_page_chain_registrar_is_not_module_global(self):
+        self.assertFalse(
+            hasattr(
+                page_chain_module,
+                "_register_provider_account_page_chain_authority",
+            )
+        )
+
     def _fixture(self, directory: str):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
@@ -331,7 +341,145 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             self.assertEqual(len(value.pages), 1)
             self.assertIsNone(value.pages[0]["request_cursor"])
             self.assertEqual(value.pages[0]["response_next_cursor"], "")
+            self.assertEqual(value.pages[0]["observed_at"], response.observed_at)
+            self.assertEqual(
+                value.pages[0]["journal_sequence"],
+                response.journal_sequence,
+            )
             require_provider_account_page_chain_authority(value)
+
+    def test_current_page_chain_rejects_acquisition_superseded_after_issuance(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="superseded-after-chain",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            value = issue_provider_account_page_chain(
+                absence_semantics=fixture[7],
+                origin_set=origin_set,
+                observations=(self._observation(response, binding),),
+                qualification_registry=fixture[2],
+                surface=SURFACE,
+                at=NOW,
+            )
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-after-issuance",
+                committed_at=NOW,
+            )
+
+            require_provider_account_page_chain_authority(value)
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "not exact current acquisition authority",
+            ):
+                require_current_provider_account_page_chain_authority(
+                    value,
+                    at=NOW,
+                )
+
+    def test_current_page_chain_ignores_rebound_origin_currentness_helper(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="rebound-current-origin-helper",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            value = issue_provider_account_page_chain(
+                absence_semantics=fixture[7],
+                origin_set=origin_set,
+                observations=(self._observation(response, binding),),
+                qualification_registry=fixture[2],
+                surface=SURFACE,
+                at=NOW,
+            )
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-rebound-helper",
+                committed_at=NOW,
+            )
+
+            forged_calls = []
+            original = (
+                page_chain_module.require_current_provider_account_origin_set_authority
+            )
+
+            def forged_current_origin_set_authority(value, *, at):
+                forged_calls.append((value, at))
+                return value
+
+            page_chain_module.require_current_provider_account_origin_set_authority = (
+                forged_current_origin_set_authority
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProviderAccountPageChainError,
+                    "not exact current acquisition authority",
+                ):
+                    require_current_provider_account_page_chain_authority(
+                        value,
+                        at=NOW,
+                    )
+            finally:
+                page_chain_module.require_current_provider_account_origin_set_authority = (
+                    original
+                )
+            self.assertEqual(forged_calls, [])
+
+    def test_current_page_chain_accepts_no_caller_qualification_registry(self):
+        parameters = inspect.signature(
+            require_current_provider_account_page_chain_authority
+        ).parameters
+        self.assertNotIn("qualification_registry", parameters)
+
+    def test_page_chain_rejects_superseded_origin_set_acquisition(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="superseded-origin-set",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            observation = self._observation(response, binding)
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-2",
+                committed_at=NOW,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "origin set is not exact current authority",
+            ):
+                issue_provider_account_page_chain(
+                    absence_semantics=fixture[7],
+                    origin_set=origin_set,
+                    observations=(observation,),
+                    qualification_registry=fixture[2],
+                    surface=SURFACE,
+                    at=NOW,
+                )
 
     def test_missing_provider_cursor_state_fails_closed(self):
         with TemporaryDirectory() as directory:

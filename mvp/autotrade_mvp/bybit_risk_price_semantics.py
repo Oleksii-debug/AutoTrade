@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 
 from research.autotrade_research.artifacts import ArtifactStore
 
@@ -52,6 +53,7 @@ def _install_bybit_risk_price_semantics_composer():
     timezone_value = timezone
     decimal_type = Decimal
     invalid_operation_type = InvalidOperation
+    mapping_proxy_type = MappingProxyType
 
     prepared_verifier = require_canonical_bybit_prepared_submission
     prepared_verifier_code = prepared_verifier.__code__
@@ -74,6 +76,7 @@ def _install_bybit_risk_price_semantics_composer():
             or timezone is not timezone_value
             or Decimal is not decimal_type
             or InvalidOperation is not invalid_operation_type
+            or MappingProxyType is not mapping_proxy_type
             or require_canonical_bybit_prepared_submission is not prepared_verifier
             or require_canonical_bybit_prepared_submission.__code__
             is not prepared_verifier_code
@@ -216,8 +219,10 @@ def _install_bybit_risk_price_semantics_composer():
             raise BybitRiskPriceSemanticsError(
                 "prepared Bybit request lacks canonical issuance provenance"
             ) from error
-        if type(projection) is not type(projection):
-            raise AssertionError("unreachable")
+        if type(projection) is not mapping_proxy_type:
+            raise BybitRiskPriceSemanticsError(
+                "canonical Bybit prepared projection is non-canonical"
+            )
         body = projection.get("body")
         if type(body) is not dict:
             raise BybitRiskPriceSemanticsError(

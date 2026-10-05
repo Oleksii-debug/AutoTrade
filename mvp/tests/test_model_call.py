@@ -2879,6 +2879,130 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 budget.active_reservation(original_attempt_id)
             )
 
+    def test_recovery_fence_cannot_redirect_orchestrator_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+
+            def hostile_fence():
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "recovery fence mutated orchestrator authority",
+            ):
+                orchestrator.recover_reserved_not_started(
+                    spec=call_spec,
+                    recovery_fence=hostile_fence,
+                )
+
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
+    def test_recovery_fence_cannot_redirect_nested_budget_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-recovery.db")
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+            trusted_clock = budget._clock
+            trusted_budget_id = budget.budget_id
+            trusted_environment = budget.environment
+            trusted_ceiling = budget._ceiling
+
+            def hostile_fence():
+                budget.journal = forged_journal
+                budget._clock = lambda: "2099-01-01T00:00:00+00:00"
+                budget.budget_id = "forged-budget"
+                budget.environment = "LIVE"
+                budget._ceiling = Decimal("0")
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"recovery fence mutated orchestrator authority:.*budget\.journal",
+            ):
+                orchestrator.recover_reserved_not_started(
+                    spec=call_spec,
+                    recovery_fence=hostile_fence,
+                )
+
+            self.assertIs(budget.journal, journal)
+            self.assertIs(budget._clock, trusted_clock)
+            self.assertEqual(budget.budget_id, trusted_budget_id)
+            self.assertEqual(budget.environment, trusted_environment)
+            self.assertEqual(budget._ceiling, trusted_ceiling)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
+    def test_recovery_fence_exception_preserves_reservation(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+
+            def broken_fence():
+                raise RuntimeError("lost recovery ownership")
+
+            with self.assertRaisesRegex(ModelCallError, "recovery fence failed"):
+                orchestrator.recover_reserved_not_started(
+                    spec=call_spec,
+                    recovery_fence=broken_fence,
+                )
+
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
     def test_observation_evidence_resolver_cannot_redirect_unknown_settlement(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

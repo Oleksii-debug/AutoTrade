@@ -95,21 +95,21 @@ class ProviderAccountEmptyExclusionTests(unittest.TestCase):
                     at=NOW,
                 )
 
-    def test_different_historical_unknown_cannot_be_substituted(self):
+    def test_foreign_page_chains_cannot_be_substituted(self):
         with TemporaryDirectory() as first, TemporaryDirectory() as second:
             one = self._fixture(first)
             two = self._fixture(second)
             coverage_set = self._coverage_set(one)
             with self.assertRaisesRegex(
                 ProviderAccountEmptyExclusionError,
-                "exact searched historical submission",
+                "page chain does not match exact required coverage component",
             ):
                 issue_provider_account_empty_result_exclusion(
                     coverage_set=coverage_set,
                     page_chains=tuple(
-                        one[6][surface] for surface in sorted(one[6])
+                        two[6][surface] for surface in sorted(two[6])
                     ),
-                    historical_submission=two[5],
+                    historical_submission=one[5],
                     at=NOW,
                 )
 

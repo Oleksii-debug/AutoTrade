@@ -3171,6 +3171,79 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_descriptor_iterable_cannot_redirect_pre_admission_authority(self):
+        class HostileInventory:
+            def __iter__(self_nonlocal):
+                orchestrator.journal = forged_journal
+                budget.journal = forged_journal
+                budget.settle = lambda *_args, **_kwargs: None
+                yield descriptor()
+
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-inventory.db")
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "descriptor inventory mutated orchestrator authority",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=HostileInventory(),
+                    call=lambda *_args: self.fail("hostile inventory reached call boundary"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(budget.journal, journal)
+            self.assertNotIn("settle", vars(budget))
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
+    def test_descriptor_iterable_exception_has_no_durable_side_effect(self):
+        class BrokenInventory:
+            def __iter__(self_nonlocal):
+                raise RuntimeError("inventory source failed")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "descriptor inventory could not be materialized",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=BrokenInventory(),
+                    call=lambda *_args: self.fail("broken inventory reached call boundary"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
     def test_pricing_resolver_cannot_redirect_nested_budget_journal(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

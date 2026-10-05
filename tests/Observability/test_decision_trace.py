@@ -197,6 +197,46 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertNotIn("super-secret", path.read_text(encoding="utf-8"))
             self.assertTrue(store.verify())
 
+    def test_compound_and_camelcase_secret_keys_survive_wp47_convergence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-compound-secret-regression")
+            item["attributes"].update(
+                {
+                    "providerCredentialId": "credential-id-secret",
+                    "authTokenValue": "token-value-secret",
+                    "ApiSecretValue": "api-secret-value",
+                    "privateKeyFingerprint": "private-key-secret",
+                    "credential_id": "direct-credential-secret",
+                    "api_secret_rotation_count": 4,
+                    "token_budget": 8,
+                }
+            )
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "credential-id-secret",
+                "token-value-secret",
+                "api-secret-value",
+                "private-key-secret",
+                "direct-credential-secret",
+            ):
+                self.assertNotIn(leaked, raw)
+
+            attributes = json.loads(raw)["attributes"]
+            for key in (
+                "providerCredentialId",
+                "authTokenValue",
+                "ApiSecretValue",
+                "privateKeyFingerprint",
+                "credential_id",
+            ):
+                self.assertEqual(attributes[key], "[REDACTED]")
+            self.assertEqual(attributes["api_secret_rotation_count"], 4)
+            self.assertEqual(attributes["token_budget"], 8)
+
     def test_reconstruction_requires_all_durable_links(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.simulation_runtime_checkpoint import (
+    AutonomousRuntimeCheckpointError,
     deliver_autonomous_owned_publications,
 )
 
@@ -96,7 +97,6 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
                 )
             )
 
-
     def test_foreign_same_component_type_backlog_cannot_consume_zero_scan_budget(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -151,6 +151,34 @@ class SharedStoreZeroForeignBacklogTests(unittest.TestCase):
                     for item in pending
                 )
             )
+
+    def test_owned_loop_event_with_wrong_topic_is_not_false_acknowledged(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "zero-misrouted-loop-publication"
+            zero_event = _event(
+                aggregate_type="canonical_autonomous_simulation",
+                aggregate_id=run_id,
+                event_type="AutonomousEpisodeProgressed",
+                committed_at=_ZERO_TIME,
+                environment="SIMULATION",
+                host_id="local-simulation",
+            )
+            # Canonical loop writes use autotrade.simulation.events. A durable
+            # row routed elsewhere is not successful ZERO publication evidence.
+            store.append_event(zero_event, outbox_topic="ui.host-events")
+
+            with self.assertRaisesRegex(
+                AutonomousRuntimeCheckpointError,
+                "topic|routing|publication",
+            ):
+                deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            state = store.outbox_delivery_state(zero_event["event_id"])
+            self.assertIsNotNone(state)
+            self.assertEqual(state["topic"], "ui.host-events")
+            self.assertFalse(state["delivered"])
+            self.assertEqual(store.pending_outbox_count(), 1)
 
 
 if __name__ == "__main__":

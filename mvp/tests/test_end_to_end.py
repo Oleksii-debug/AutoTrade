@@ -136,6 +136,35 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertEqual(restarted[-1].position, 0)
             self.assertEqual(restarted[-1].evidence_count, 3)
 
+    def test_invalid_evidence_timestamp_is_rejected_before_journal_creation(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = {
+                "evidence_id": "evidence-invalid-time",
+                "input_hash": "0" * 64,
+                "decision": "HOLD",
+                "decision_reason": "test",
+                "risk_outcome": "hold",
+                "order_id": None,
+                "fill_id": None,
+                "cash": "10000.00000000",
+                "position": "0",
+                "equity": "10000.00000000",
+                "reconciled": True,
+                "recorded_at": "not-a-timestampZ",
+            }
+            with self.assertRaisesRegex(ValueError, "valid ISO-8601"):
+                pipeline_module.handle_journal_event(
+                    root,
+                    "SIM",
+                    evidence,
+                    "0" * 64,
+                )
+            self.assertFalse((root / "journal.sqlite3").exists())
+
+
     def test_missing_evidence_after_checkpoint_is_repaired(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

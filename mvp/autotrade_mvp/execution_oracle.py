@@ -8,7 +8,7 @@ against optimistic quantity, price, fee and causal-time errors.
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from fractions import Fraction
 
 from .exact_decimal import as_fraction, exact_multiply, round_fraction_to_quantum

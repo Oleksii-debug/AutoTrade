@@ -333,6 +333,40 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             self.assertEqual(value.pages[0]["response_next_cursor"], "")
             require_provider_account_page_chain_authority(value)
 
+    def test_page_chain_rejects_superseded_origin_set_acquisition(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="superseded-origin-set",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            observation = self._observation(response, binding)
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-2",
+                committed_at=NOW,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "origin set is not exact current authority",
+            ):
+                issue_provider_account_page_chain(
+                    absence_semantics=fixture[7],
+                    origin_set=origin_set,
+                    observations=(observation,),
+                    qualification_registry=fixture[2],
+                    surface=SURFACE,
+                    at=NOW,
+                )
+
     def test_missing_provider_cursor_state_fails_closed(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)

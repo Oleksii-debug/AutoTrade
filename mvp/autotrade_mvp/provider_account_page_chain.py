@@ -23,7 +23,7 @@ from .provider_account_absence_semantics import (
 from .provider_account_origin_set import (
     ProviderAccountOriginBindingSet,
     ProviderAccountOriginSetError,
-    require_provider_account_origin_set_authority,
+    require_current_provider_account_origin_set_authority,
 )
 from .provider_origin import (
     AuthenticatedReadResponseBinding,
@@ -300,10 +300,13 @@ def issue_provider_account_page_chain(
             "observations must be a non-empty exact tuple"
         )
     try:
-        require_provider_account_origin_set_authority(origin_set)
+        require_current_provider_account_origin_set_authority(
+            origin_set,
+            at=at,
+        )
     except ProviderAccountOriginSetError as error:
         raise ProviderAccountPageChainError(
-            "provider origin set authority is unavailable"
+            "provider origin set is not exact current authority"
         ) from error
 
     if (

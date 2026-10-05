@@ -81,7 +81,9 @@ class VerifyScopeTests(unittest.TestCase):
         focused_command = (
             "python -m unittest "
             "mvp.tests.test_recovery_qualification "
+            "mvp.tests.test_recovery_qualification_authority_ingress "
             "mvp.tests.test_qualification_attestation "
+            "mvp.tests.test_qualification_attestation_authority_ingress "
             "mvp.tests.test_verify_scope -v"
         )
         normalized_workflow = " ".join(text.split())
@@ -95,7 +97,9 @@ class VerifyScopeTests(unittest.TestCase):
             "mvp/autotrade_mvp/qualification_attestation.py",
             "mvp/autotrade_mvp/qualification_trust_policy.json",
             "mvp/tests/test_recovery_qualification.py",
+            "mvp/tests/test_recovery_qualification_authority_ingress.py",
             "mvp/tests/test_qualification_attestation.py",
+            "mvp/tests/test_qualification_attestation_authority_ingress.py",
             "mvp/tests/test_verify_scope.py",
             "autotrade_runtime/artifacts/**",
             "research/autotrade_research/artifacts/**",

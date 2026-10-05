@@ -360,6 +360,10 @@ def _capture_journal_replay_cut(
 def _durable_scope(
     state: VariationMarginState | InverseVariationMarginState,
 ) -> tuple[str, str]:
+    if type(state) not in (VariationMarginState, InverseVariationMarginState):
+        raise TypeError(
+            "state must be exact VariationMarginState or InverseVariationMarginState"
+        )
     version = state.contract.canonical_instrument
     if version is None:
         raise FuturesError("durable settlement requires canonical InstrumentVersion")
@@ -427,18 +431,18 @@ def rebuild_variation_margin_book(
 ) -> EconomicBook:
     """Rebuild economics from the exact event tuple whose evidence was verified."""
 
-    if not isinstance(
-        opening_state,
-        (VariationMarginState, InverseVariationMarginState),
+    if type(opening_state) not in (
+        VariationMarginState,
+        InverseVariationMarginState,
     ):
-        raise TypeError("opening_state must be a variation-margin state")
+        raise TypeError("opening_state must be an exact variation-margin state")
     aggregate_id, _ = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
         evidence_artifact_root,
         evidence_artifact_store,
     )
     cut = _capture_journal_replay_cut(store, aggregate_id)
-    if isinstance(opening_state, VariationMarginState):
+    if type(opening_state) is VariationMarginState:
         _replay_linear_events(opening_state, cut.events, reader)
     else:
         _replay_inverse_events(opening_state, cut.events, reader)
@@ -540,8 +544,8 @@ def _replay_linear_events(
     events: tuple[dict[str, Any], ...],
     authenticated_reader,
 ) -> VariationMarginState:
-    if not isinstance(opening_state, VariationMarginState):
-        raise TypeError("opening_state must be VariationMarginState")
+    if type(opening_state) is not VariationMarginState:
+        raise TypeError("opening_state must be exact VariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
 
@@ -588,6 +592,8 @@ def restore_linear_variation_margin(
 ) -> VariationMarginState:
     """Rebuild and verify linear VM from one accepted journal/evidence cut."""
 
+    if type(opening_state) is not VariationMarginState:
+        raise TypeError("opening_state must be exact VariationMarginState")
     aggregate_id, _ = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
         evidence_artifact_root,
@@ -608,6 +614,8 @@ def commit_linear_variation_margin(
 ) -> tuple[VariationMarginState, Decimal, JournalTransaction | None, bool]:
     """Atomically accept linear VM against one evidence and global-journal cut."""
 
+    if type(opening_state) is not VariationMarginState:
+        raise TypeError("opening_state must be exact VariationMarginState")
     aggregate_id, environment = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
         evidence_artifact_root,
@@ -705,8 +713,8 @@ def _replay_inverse_events(
     events: tuple[dict[str, Any], ...],
     authenticated_reader,
 ) -> InverseVariationMarginState:
-    if not isinstance(opening_state, InverseVariationMarginState):
-        raise TypeError("opening_state must be InverseVariationMarginState")
+    if type(opening_state) is not InverseVariationMarginState:
+        raise TypeError("opening_state must be exact InverseVariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
 
@@ -760,6 +768,8 @@ def restore_inverse_variation_margin(
 ) -> InverseVariationMarginState:
     """Rebuild and verify inverse VM from one accepted journal/evidence cut."""
 
+    if type(opening_state) is not InverseVariationMarginState:
+        raise TypeError("opening_state must be exact InverseVariationMarginState")
     aggregate_id, _ = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
         evidence_artifact_root,
@@ -786,6 +796,8 @@ def commit_inverse_variation_margin(
 ]:
     """Atomically accept inverse VM against one evidence and global-journal cut."""
 
+    if type(opening_state) is not InverseVariationMarginState:
+        raise TypeError("opening_state must be exact InverseVariationMarginState")
     convention = inverse_settlement_convention(opening_state.contract)
     quantum = Decimal(convention.quantum)
     rounding = convention.rounding

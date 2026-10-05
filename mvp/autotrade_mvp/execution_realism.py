@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 from hashlib import sha256
 import json
 from typing import Literal
@@ -18,6 +19,7 @@ from typing import Literal
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
+    bounded_fraction,
     exact_multiply,
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
@@ -27,6 +29,9 @@ from .exact_decimal import (
 
 class ExecutionRealismError(ValueError):
     pass
+
+
+MARKET_PRICE_PROJECTION_POLICY_V1 = "instrument-price-tick-adverse-side-v1"
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -109,6 +114,10 @@ class ExecutionModel:
     impact_bps_at_max_participation: Decimal
     bar_half_spread_bps: Decimal
     scenario_cost_multiplier: Decimal
+    price_tick: Decimal | None = None
+    price_grid_instrument_version: str | None = None
+    price_grid_evidence_sha256: str | None = None
+    price_projection_policy: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.latency_ms) is not int or self.latency_ms < 0:
@@ -131,6 +140,43 @@ class ExecutionModel:
             raise ExecutionRealismError(
                 f"{scenario} scenario_cost_multiplier cannot be below 1"
             )
+
+        grid_values = (
+            self.price_tick,
+            self.price_grid_instrument_version,
+            self.price_grid_evidence_sha256,
+            self.price_projection_policy,
+        )
+        if any(value is not None for value in grid_values) and not all(
+            value is not None for value in grid_values
+        ):
+            raise ExecutionRealismError(
+                "market price-grid evidence must provide tick, instrument, evidence digest and projection policy together"
+            )
+        if all(value is not None for value in grid_values):
+            price_tick = _positive(self.price_tick, name="price_tick")
+            price_grid_instrument_version = _text(
+                self.price_grid_instrument_version,
+                name="price_grid_instrument_version",
+            )
+            price_grid_evidence_sha256 = _digest(
+                self.price_grid_evidence_sha256,
+                name="price_grid_evidence_sha256",
+            )
+            price_projection_policy = _text(
+                self.price_projection_policy,
+                name="price_projection_policy",
+            )
+            if price_projection_policy != MARKET_PRICE_PROJECTION_POLICY_V1:
+                raise ExecutionRealismError(
+                    "unsupported market price projection policy"
+                )
+        else:
+            price_tick = None
+            price_grid_instrument_version = None
+            price_grid_evidence_sha256 = None
+            price_projection_policy = None
+
         object.__setattr__(self, "model_version", _text(self.model_version, name="model_version"))
         object.__setattr__(
             self,
@@ -161,6 +207,22 @@ class ExecutionModel:
             _non_negative(self.bar_half_spread_bps, name="bar_half_spread_bps"),
         )
         object.__setattr__(self, "scenario_cost_multiplier", multiplier)
+        object.__setattr__(self, "price_tick", price_tick)
+        object.__setattr__(
+            self,
+            "price_grid_instrument_version",
+            price_grid_instrument_version,
+        )
+        object.__setattr__(
+            self,
+            "price_grid_evidence_sha256",
+            price_grid_evidence_sha256,
+        )
+        object.__setattr__(
+            self,
+            "price_projection_policy",
+            price_projection_policy,
+        )
 
     @classmethod
     def create(
@@ -178,6 +240,10 @@ class ExecutionModel:
         impact_bps_at_max_participation,
         bar_half_spread_bps=0,
         scenario_cost_multiplier=1,
+        price_tick=None,
+        price_grid_instrument_version=None,
+        price_grid_evidence_sha256=None,
+        price_projection_policy=None,
     ) -> "ExecutionModel":
         if type(latency_ms) is not int or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -220,6 +286,10 @@ class ExecutionModel:
                 name="bar_half_spread_bps",
             ),
             scenario_cost_multiplier=multiplier,
+            price_tick=price_tick,
+            price_grid_instrument_version=price_grid_instrument_version,
+            price_grid_evidence_sha256=price_grid_evidence_sha256,
+            price_projection_policy=price_projection_policy,
         )
 
     @property
@@ -241,6 +311,12 @@ class ExecutionModel:
             "scenario_cost_multiplier": _decimal_text(
                 self.scenario_cost_multiplier
             ),
+            "price_tick": (
+                None if self.price_tick is None else _decimal_text(self.price_tick)
+            ),
+            "price_grid_instrument_version": self.price_grid_instrument_version,
+            "price_grid_evidence_sha256": self.price_grid_evidence_sha256,
+            "price_projection_policy": self.price_projection_policy,
         }
         encoded = json.dumps(
             payload,
@@ -579,6 +655,105 @@ def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
         ) from error
 
 
+def _bounded_rational(value: Fraction, *, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _market_fill_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+    base_price: Decimal,
+    additional_spread_bps: Decimal,
+) -> Decimal:
+    """Project MARKET price with exact rational math and an authoritative price grid."""
+
+    if (
+        model.price_tick is None
+        or model.price_grid_instrument_version is None
+        or model.price_grid_evidence_sha256 is None
+        or model.price_projection_policy is None
+    ):
+        raise ExecutionRealismError(
+            "MARKET execution requires authoritative price-grid projection evidence"
+        )
+    if model.price_grid_instrument_version != order.instrument_version:
+        raise ExecutionRealismError(
+            "MARKET price-grid instrument_version must match order instrument_version"
+        )
+    if model.price_projection_policy != MARKET_PRICE_PROJECTION_POLICY_V1:
+        raise ExecutionRealismError(
+            "unsupported market price projection policy"
+        )
+
+    try:
+        if observation.available_volume > 0 and model.max_participation > 0:
+            participation = _bounded_rational(
+                as_fraction(capacity) / as_fraction(observation.available_volume),
+                name="market participation",
+            )
+            impact_fraction = _bounded_rational(
+                participation / as_fraction(model.max_participation),
+                name="market impact fraction",
+            )
+        else:
+            impact_fraction = Fraction(0, 1)
+
+        impact_scale = min(impact_fraction, Fraction(1, 1))
+        impact_bps = _bounded_rational(
+            as_fraction(model.impact_bps_at_max_participation) * impact_scale,
+            name="market impact bps",
+        )
+        total_bps = _bounded_rational(
+            as_fraction(additional_spread_bps)
+            + as_fraction(model.slippage_bps),
+            name="market base cost bps",
+        )
+        total_bps = _bounded_rational(
+            total_bps + impact_bps,
+            name="market total cost bps",
+        )
+        total_bps = _bounded_rational(
+            total_bps * as_fraction(model.scenario_cost_multiplier),
+            name="scenario-adjusted market cost bps",
+        )
+        price_delta = _bounded_rational(
+            as_fraction(base_price) * total_bps,
+            name="market price delta numerator",
+        )
+        price_delta = _bounded_rational(
+            price_delta / Fraction(10000, 1),
+            name="market price delta",
+        )
+        base_fraction = as_fraction(base_price)
+        raw_fill = _bounded_rational(
+            base_fraction + price_delta
+            if order.side == "BUY"
+            else base_fraction - price_delta,
+            name="raw market fill price",
+        )
+        if raw_fill <= 0:
+            raise ExecutionRealismError(
+                "configured adverse costs produce non-positive execution price"
+            )
+        return round_fraction_to_quantum(
+            raw_fill,
+            model.price_tick,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionRealismError(
+            "MARKET price projection exceeds exact arithmetic resource envelope"
+        ) from error
+
+
 def _capacity_quantity(
     *,
     order_quantity: Decimal,
@@ -866,33 +1041,14 @@ def simulate_execution(
             observation,
             model,
         )
-        participation = (
-            capacity / observation.available_volume
-            if observation.available_volume > 0
-            else Decimal("0")
+        fill_price = _market_fill_price(
+            order=order,
+            observation=observation,
+            model=model,
+            capacity=capacity,
+            base_price=base_price,
+            additional_spread_bps=additional_spread_bps,
         )
-        impact_fraction = (
-            participation / model.max_participation
-            if model.max_participation > 0
-            else Decimal("0")
-        )
-        impact_bps = (
-            model.impact_bps_at_max_participation
-            * min(impact_fraction, Decimal("1"))
-        )
-        total_bps = (
-            additional_spread_bps + model.slippage_bps + impact_bps
-        ) * model.scenario_cost_multiplier
-        price_delta = base_price * total_bps / Decimal("10000")
-        fill_price = (
-            base_price + price_delta
-            if order.side == "BUY"
-            else base_price - price_delta
-        )
-        if fill_price <= 0:
-            raise ExecutionRealismError(
-                "configured adverse costs produce non-positive execution price"
-            )
 
     notional = _exact_product(
         capacity,

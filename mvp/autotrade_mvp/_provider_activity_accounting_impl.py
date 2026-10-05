@@ -4594,6 +4594,7 @@ def commit_provider_fill_with_reservation_consumption(
     order_book: DurableOrderBookProjection | None = None,
     order_event_key: str | None = None,
     order_evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    expected_journal_sequence: int | None = None,
 ) -> bool:
     """Atomically book one provider fill and consume only evidence-derived resources.
 
@@ -4663,9 +4664,13 @@ def commit_provider_fill_with_reservation_consumption(
         committed_at=when,
     )
     if order_book is None:
-        if order_event_key is not None or order_evidence_refs is not None:
+        if (
+            order_event_key is not None
+            or order_evidence_refs is not None
+            or expected_journal_sequence is not None
+        ):
             raise ValueError(
-                "order_event_key/evidence require order_book"
+                "order_event_key/evidence/expected journal sequence require order_book"
             )
         if economic_book.environment in {"PAPER", "LIVE"}:
             raise AccountingConflict(
@@ -4694,6 +4699,13 @@ def commit_provider_fill_with_reservation_consumption(
         raise AccountingConflict(
             "provider-evidenced OMS composition requires client_order_id"
         )
+    if expected_journal_sequence is not None and (
+        type(expected_journal_sequence) is not int
+        or expected_journal_sequence < 0
+    ):
+        raise ValueError(
+            "expected_journal_sequence must be an exact non-negative integer"
+        )
     order_plan = order_book.prepare_record_fill_mutation(
         event_key=order_event_key,
         client_order_id=projected_fill.client_order_id,
@@ -4705,6 +4717,13 @@ def commit_provider_fill_with_reservation_consumption(
         committed_at=when,
         evidence_refs=order_evidence_refs,
     )
+    if (
+        expected_journal_sequence is not None
+        and order_plan.journal_sequence_cut != expected_journal_sequence
+    ):
+        raise AccountingConflict(
+            "journal sequence changed after validated recovery cut"
+        )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,
         reservation_book,

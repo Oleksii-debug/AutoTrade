@@ -256,6 +256,7 @@ class DpapiCurrentUserProtector:
     def __init__(self) -> None:
         if os.name != "nt":
             raise OSError("Windows DPAPI is available only on Windows")
+        self._crypt_authority = self._crypt
 
     @staticmethod
     def _crypt(*, data: bytes, entropy: bytes, decrypt: bool) -> bytes:
@@ -341,14 +342,14 @@ class DpapiCurrentUserProtector:
             raise SecretVaultError("plaintext must be non-empty bytes")
         if not isinstance(entropy, bytes) or not entropy:
             raise SecretVaultError("entropy must be non-empty bytes")
-        return self._crypt(data=plaintext, entropy=entropy, decrypt=False)
+        return self._crypt_authority(data=plaintext, entropy=entropy, decrypt=False)
 
     def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
         if not isinstance(ciphertext, bytes) or not ciphertext:
             raise SecretVaultError("ciphertext must be non-empty bytes")
         if not isinstance(entropy, bytes) or not entropy:
             raise SecretVaultError("entropy must be non-empty bytes")
-        return self._crypt(data=ciphertext, entropy=entropy, decrypt=True)
+        return self._crypt_authority(data=ciphertext, entropy=entropy, decrypt=True)
 
 
 @dataclass(frozen=True)
@@ -416,6 +417,8 @@ class ProtectedCredentialVault:
         if not hasattr(protector, "protect") or not hasattr(protector, "unprotect"):
             raise TypeError("protector must implement protect and unprotect")
         self._protector = protector
+        self._protect = protector.protect
+        self._unprotect = protector.unprotect
         if sys.platform != "win32":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_name(self.path.name + ".lock")
@@ -620,7 +623,7 @@ class ProtectedCredentialVault:
                 purpose=normalized_purpose,
                 generation=generation,
             )
-            ciphertext = self._protector.protect(
+            ciphertext = self._protect(
                 secret_value.encode("utf-8"),
                 entropy=entropy,
             )
@@ -802,7 +805,7 @@ class ProtectedCredentialVault:
             generation=handle.generation,
         )
         try:
-            plaintext = self._protector.unprotect(
+            plaintext = self._unprotect(
                 b64decode(record["ciphertext"], validate=True),
                 entropy=entropy,
             )
@@ -872,7 +875,7 @@ class ProtectedCredentialVault:
                 generation=current.generation,
             )
             try:
-                plaintext = self._protector.unprotect(
+                plaintext = self._unprotect(
                     b64decode(record["ciphertext"], validate=True),
                     entropy=entropy,
                 )
@@ -950,7 +953,7 @@ class ProtectedCredentialVault:
                 generation=current.generation,
             )
             try:
-                raw = self._protector.unprotect(
+                raw = self._unprotect(
                     b64decode(record["ciphertext"], validate=True),
                     entropy=entropy,
                 )
@@ -1014,7 +1017,7 @@ class ProtectedCredentialVault:
             )
             record["handle"] = asdict(next_handle)
             record["ciphertext"] = b64encode(
-                self._protector.protect(
+                self._protect(
                     new_secret_value.encode("utf-8"),
                     entropy=entropy,
                 )

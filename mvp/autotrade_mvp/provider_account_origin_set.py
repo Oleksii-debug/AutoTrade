@@ -305,10 +305,7 @@ def _install_origin_set_authority(
             raise ProviderAccountOriginSetError(
                 "origin-set authority identity collision"
             )
-        value_ref = weakref.ref(
-            value,
-            lambda _ref, object_id=object_id: states.pop(object_id, None),
-        )
+        value_ref = weakref.ref(value)
         states[object_id] = (
             value_ref,
             state,
@@ -436,26 +433,52 @@ def _install_origin_set_authority(
             ) from error
         return accepted
 
-    return register, require, require_current
+    def seal_issuer(issue_impl):
+        def sealed_issue_provider_account_origin_set(
+            *,
+            qualification_registry: DurableProviderQualificationRegistry,
+            account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
+            account_acquisition: SerializedProviderAccountAcquisition,
+            response_bindings: tuple[AuthenticatedReadResponseBinding, ...],
+            at: datetime,
+        ) -> ProviderAccountOriginBindingSet:
+            value, current_acquisition = issue_impl(
+                qualification_registry=qualification_registry,
+                account_acquisition_authority=account_acquisition_authority,
+                account_acquisition=account_acquisition,
+                response_bindings=response_bindings,
+                at=at,
+            )
+            register(
+                value,
+                qualification_registry=qualification_registry,
+                account_acquisition_authority=account_acquisition_authority,
+                account_acquisition=current_acquisition,
+            )
+            return value
+
+        return sealed_issue_provider_account_origin_set
+
+    return seal_issuer, require, require_current
 
 
 (
-    _register_provider_account_origin_set_authority,
+    _seal_provider_account_origin_set_issuer,
     require_provider_account_origin_set_authority,
     require_current_provider_account_origin_set_authority,
 ) = _install_origin_set_authority()
 del _install_origin_set_authority
 
 
-def issue_provider_account_origin_set(
+def _issue_provider_account_origin_set_unregistered(
     *,
     qualification_registry: DurableProviderQualificationRegistry,
     account_acquisition_authority: DurableProviderAccountAcquisitionAuthority,
     account_acquisition: SerializedProviderAccountAcquisition,
     response_bindings: tuple[AuthenticatedReadResponseBinding, ...],
     at: datetime,
-) -> ProviderAccountOriginBindingSet:
-    """Seal exact current Q + acquisition + direct origin bindings, and nothing more."""
+) -> tuple[ProviderAccountOriginBindingSet, SerializedProviderAccountAcquisition]:
+    """Build exact current Q + acquisition + direct origin material before issuance."""
 
     if type(qualification_registry) is not DurableProviderQualificationRegistry:
         raise TypeError(
@@ -587,10 +610,11 @@ def issue_provider_account_origin_set(
         accepted_q.identity.route_semantics_digest,
     )
     object.__setattr__(value, "entries_json", entries_json)
-    _register_provider_account_origin_set_authority(
-        value,
-        qualification_registry=qualification_registry,
-        account_acquisition_authority=account_acquisition_authority,
-        account_acquisition=current_acquisition,
-    )
-    return value
+    return value, current_acquisition
+
+
+issue_provider_account_origin_set = _seal_provider_account_origin_set_issuer(
+    _issue_provider_account_origin_set_unregistered
+)
+del _seal_provider_account_origin_set_issuer
+del _issue_provider_account_origin_set_unregistered

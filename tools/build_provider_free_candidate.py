@@ -65,6 +65,12 @@ def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, s
                                           for path, content in snapshot.items())
         or type(executable) is not str or type(evidence_name) is not str or type(label) is not str):
         raise TypeError('publish evidence inputs must use exact canonical types')
+    evidence_contract = {
+        'Desktop': 'provider-free-desktop-publish',
+        'Host': 'provider-free-host-publish',
+    }.get(label)
+    if evidence_contract is None:
+        raise ValueError('publish evidence label has no selected authority contract: ' + label)
     executable_bytes = snapshot.get(executable)
     if executable_bytes is None:
         raise ValueError(label + ' publish is missing ' + executable)
@@ -75,9 +81,19 @@ def _require_publish_snapshot_evidence(snapshot, *, executable, evidence_name, s
         evidence = json.loads(evidence_bytes.decode('utf-8', errors='strict'))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(label + ' publish evidence is not canonical JSON') from error
-    if (type(evidence) is not dict or evidence.get('source_sha') != source_sha
-        or evidence.get('checked_out_sha') != source_sha or evidence.get('result') != 'PASS'):
-        raise ValueError(label + ' publish evidence differs from the exact product source')
+    github = evidence.get('github') if type(evidence) is dict else None
+    if (type(evidence) is not dict
+        or evidence.get('schema_version') != '1.0.0'
+        or evidence.get('source_sha') != source_sha
+        or evidence.get('checked_out_sha') != source_sha
+        or evidence.get('suite') != evidence_contract
+        or evidence.get('result') != 'PASS'
+        or evidence.get('runner_os') != 'Windows'
+        or evidence.get('python_version') != '3.12.10'
+        or evidence.get('contains_secrets') is not False
+        or type(github) is not dict
+        or github.get('workflow') != 'provider-free-product'):
+        raise ValueError(label + ' publish evidence differs from the selected exact-head build authority')
     return {'path': executable, 'sha256': 'sha256:' + sha256(executable_bytes).hexdigest(), 'bytes': len(executable_bytes)}
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from weakref import ref as weakref_ref
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -117,7 +118,7 @@ def _instrument_ref(request: RiskAuthorityRequest) -> str:
     return f"{instrument_id}@{version}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProductRiskPriceSemanticsBinding:
     """Immutable evidence linking one prepared request to the admitted risk cut."""
 
@@ -453,3 +454,132 @@ class ProductRiskPriceSemanticsComposer:
             price_semantics_digest=binding.price_semantics_digest,
             evidence_refs=refs,
         )
+
+def _install_product_risk_price_semantics_binding_authority(
+    compose_method,
+    bind_snapshot_method,
+):
+    """Retain closure-owned provenance for issued price-semantics bindings."""
+
+    composer_type = ProductRiskPriceSemanticsComposer
+    binding_type = ProductRiskPriceSemanticsBinding
+    binding_ref = weakref_ref
+    compose_code = compose_method.__code__
+    bind_snapshot_code = bind_snapshot_method.__code__
+    binding_init = binding_type.__init__
+    binding_init_code = binding_init.__code__
+    binding_post_init = binding_type.__post_init__
+    binding_post_init_code = binding_post_init.__code__
+    fields = (
+        "provider_id",
+        "account_id",
+        "environment",
+        "provider_environment",
+        "entity_policy_id",
+        "instrument_version",
+        "capability_snapshot_id",
+        "evaluated_at",
+        "side",
+        "quantity",
+        "risk_price",
+        "reduce_only",
+        "order_type",
+        "prepared_body_sha256",
+        "price_semantics_digest",
+        "instrument_evidence_binding",
+        "_factory_token",
+    )
+    bindings: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+
+    def authority_changed() -> None:
+        raise ProductRiskPriceSemanticsError(
+            "price-semantics binding authority changed"
+        )
+
+    def implementation_changed() -> None:
+        if (
+            ProductRiskPriceSemanticsComposer is not composer_type
+            or ProductRiskPriceSemanticsBinding is not binding_type
+            or composer_type.compose is not canonical_compose
+            or composer_type.bind_snapshot is not canonical_bind_snapshot
+            or compose_method.__code__ is not compose_code
+            or bind_snapshot_method.__code__ is not bind_snapshot_code
+            or binding_type.__init__ is not binding_init
+            or binding_init.__code__ is not binding_init_code
+            or binding_type.__post_init__ is not binding_post_init
+            or binding_post_init.__code__ is not binding_post_init_code
+        ):
+            authority_changed()
+
+    def snapshot(value) -> tuple[object, ...]:
+        try:
+            return tuple(object.__getattribute__(value, name) for name in fields)
+        except AttributeError:
+            authority_changed()
+
+    def purge_dead() -> None:
+        for key, (ref, _composer, _expected) in tuple(bindings.items()):
+            if ref() is None:
+                bindings.pop(key, None)
+
+    def require_issued(self, value):
+        implementation_changed()
+        if type(value) is not binding_type:
+            authority_changed()
+        entry = bindings.get(id(value))
+        if entry is None:
+            authority_changed()
+        ref, issuing_composer, expected = entry
+        if ref() is not value or issuing_composer is not self:
+            authority_changed()
+        if snapshot(value) != expected:
+            authority_changed()
+        return value
+
+    def canonical_compose(
+        self,
+        request: RiskAuthorityRequest,
+        prepared_request: BybitPreparedSubmission,
+    ) -> ProductRiskPriceSemanticsBinding:
+        implementation_changed()
+        value = compose_method(self, request, prepared_request)
+        if type(value) is not binding_type:
+            authority_changed()
+        purge_dead()
+        bindings[id(value)] = (
+            binding_ref(value),
+            self,
+            snapshot(value),
+        )
+        require_issued(self, value)
+        return value
+
+    def canonical_bind_snapshot(
+        self,
+        request: RiskAuthorityRequest,
+        snapshot_value: AuthoritativeRiskSnapshot,
+        binding: ProductRiskPriceSemanticsBinding,
+        prepared_request: BybitPreparedSubmission,
+    ) -> AuthoritativeRiskSnapshot:
+        purge_dead()
+        require_issued(self, binding)
+        return bind_snapshot_method(
+            self,
+            request,
+            snapshot_value,
+            binding,
+            prepared_request,
+        )
+
+    return canonical_compose, canonical_bind_snapshot
+
+
+(
+    ProductRiskPriceSemanticsComposer.compose,
+    ProductRiskPriceSemanticsComposer.bind_snapshot,
+) = _install_product_risk_price_semantics_binding_authority(
+    ProductRiskPriceSemanticsComposer.compose,
+    ProductRiskPriceSemanticsComposer.bind_snapshot,
+)
+del _install_product_risk_price_semantics_binding_authority
+

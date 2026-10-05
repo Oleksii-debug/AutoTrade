@@ -521,8 +521,11 @@ class SimulatedExecution:
 
 
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    return lots * lot_size
+    return round_fraction_to_quantum(
+        as_fraction(quantity),
+        lot_size,
+        mode="FLOOR",
+    )
 
 
 def _capacity_quantity(
@@ -534,7 +537,7 @@ def _capacity_quantity(
 ) -> Decimal:
     raw = min(
         order_quantity,
-        observation.available_volume * model.max_participation,
+        exact_multiply(observation.available_volume, model.max_participation),
     )
     return _round_down(raw, lot_size)
 
@@ -837,8 +840,11 @@ def simulate_execution(
                 "configured adverse costs produce non-positive execution price"
             )
 
-    notional = capacity * fill_price
-    fee = max(notional * model.fee_rate, model.minimum_fee)
+    notional = exact_multiply(capacity, fill_price)
+    fee = max(
+        exact_multiply(notional, model.fee_rate),
+        model.minimum_fee,
+    )
     status = "FILLED" if capacity == order.quantity else "PARTIAL"
     return SimulatedExecution(
         status=status,

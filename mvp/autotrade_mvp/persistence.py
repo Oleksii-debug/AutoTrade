@@ -244,108 +244,27 @@ class JournalStore(_JournalStoreImpl):
         self,
         event_id: str,
         *,
-        topic: str,
-    ) -> dict[str, Any]:
-        """Read one event's exact outbox publication and delivery state.
+        topic: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one exact publication while retaining filesystem authority fencing.
 
-        Recovery code must distinguish a legitimately delivered row from a
-        missing/corrupt publication record.  This read keeps the authoritative
-        event envelope and its outbox row in one SQLite snapshot and validates
-        their exact byte binding before reporting delivery state.
+        Event identity is globally unique in the durable outbox, so internal
+        authority owners may omit topic. Supplying topic preserves the stricter
+        event-and-topic lookup used by external recovery paths. Missing rows are
+        represented as None in either form; callers that require publication
+        existence must fail closed explicitly.
         """
 
         identity = require_exact_journal_store_authority(
             self,
             subject="outbox delivery-state store",
         )
-        event_id = JournalStore._require_text(event_id, "event_id")
-        topic = JournalStore._require_text(topic, "topic")
         with journal_store_authority_scope(self, identity):
-            with JournalStore._connect(self) as connection:
-                connection.execute("BEGIN")
-                try:
-                    row = connection.execute(
-                        """
-                        SELECT
-                            outbox.outbox_id,
-                            outbox.event_id,
-                            outbox.topic,
-                            outbox.payload_json AS outbox_payload_json,
-                            outbox.envelope_hash,
-                            outbox.delivered_at,
-                            events.event_type,
-                            events.aggregate_type,
-                            events.aggregate_id,
-                            events.aggregate_version,
-                            events.payload_json AS event_payload_json,
-                            events.payload_hash,
-                            events.committed_at,
-                            events.envelope_json AS event_envelope_json,
-                            events.envelope_hash AS event_envelope_hash,
-                            events.journal_sequence
-                        FROM outbox
-                        JOIN events ON events.event_id = outbox.event_id
-                        WHERE outbox.event_id = ? AND outbox.topic = ?
-                        """,
-                        (event_id, topic),
-                    ).fetchone()
-                    if row is None:
-                        raise ValueError(
-                            "durable outbox publication is missing for bootstrap event"
-                        )
-
-                    raw_outbox_payload = row["outbox_payload_json"]
-                    if not isinstance(raw_outbox_payload, str):
-                        raise ValueError("outbox payload authority is missing")
-                    actual_outbox_hash = _impl._outbox_envelope_digest(
-                        str(row["topic"]),
-                        raw_outbox_payload,
-                    )
-                    if row["envelope_hash"] != actual_outbox_hash:
-                        raise ValueError(
-                            "outbox envelope hash does not match stored payload"
-                        )
-
-                    event_row = {
-                        "event_id": row["event_id"],
-                        "event_type": row["event_type"],
-                        "aggregate_type": row["aggregate_type"],
-                        "aggregate_id": row["aggregate_id"],
-                        "aggregate_version": row["aggregate_version"],
-                        "payload_json": row["event_payload_json"],
-                        "payload_hash": row["payload_hash"],
-                        "committed_at": row["committed_at"],
-                        "envelope_json": row["event_envelope_json"],
-                        "envelope_hash": row["event_envelope_hash"],
-                        "journal_sequence": row["journal_sequence"],
-                    }
-                    event = JournalStore._decode_event_row(event_row)
-                    authoritative_envelope = dict(event)
-                    authoritative_envelope.pop("journal_sequence", None)
-                    authoritative_envelope["aggregate_version"] = str(
-                        authoritative_envelope["aggregate_version"]
-                    )
-                    if _impl.canonical_json(authoritative_envelope) != raw_outbox_payload:
-                        raise ValueError(
-                            "outbox payload does not match authoritative journal event envelope"
-                        )
-
-                    delivered_at = row["delivered_at"]
-                    if delivered_at is not None:
-                        if not isinstance(delivered_at, str) or not delivered_at:
-                            raise ValueError("outbox delivered_at is invalid")
-                    result = {
-                        "outbox_id": str(row["outbox_id"]),
-                        "event_id": event_id,
-                        "topic": topic,
-                        "envelope_hash": str(row["envelope_hash"]),
-                        "delivered": delivered_at is not None,
-                    }
-                    connection.commit()
-                    return result
-                except Exception:
-                    connection.rollback()
-                    raise
+            return _JournalStoreImpl.outbox_delivery_state(
+                self,
+                event_id,
+                topic=topic,
+            )
 
     def load_command_event_batch(
         self,
@@ -789,4 +708,3 @@ def journal_store_authority_scope(
         yield
     finally:
         _JOURNAL_OPERATION_AUTHORITY.reset(token)
-

@@ -437,6 +437,63 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
                 issued,
             )
 
+    def test_issued_origin_set_rejects_class_descriptor_rebinding(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-class-descriptor",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+
+            def hostile_method(*_args, **_kwargs):
+                raise AssertionError("rebound class method must not execute")
+
+            targets = (
+                (type(qualifications), "qualification"),
+                (DurableProviderAccountAcquisitionAuthority, "require_current"),
+                (JournalStore, "whole_store_state_cut"),
+            )
+            for owner, attribute in targets:
+                with self.subTest(owner=owner.__name__, attribute=attribute):
+                    original = getattr(owner, attribute)
+                    setattr(owner, attribute, hostile_method)
+                    try:
+                        with self.assertRaisesRegex(
+                            ProviderAccountOriginSetError,
+                            "class authority changed",
+                        ):
+                            require_current_provider_account_origin_set_authority(
+                                issued,
+                                at=NOW,
+                            )
+                    finally:
+                        setattr(owner, attribute, original)
+
+            self.assertIs(
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                ),
+                issued,
+            )
+
     def test_issued_origin_set_is_not_current_after_q_expiry(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)

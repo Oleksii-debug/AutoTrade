@@ -1524,7 +1524,7 @@ class DurableModelCallOrchestrator:
         # adapter may retain a reference to this orchestrator through its closure,
         # so restore these exact authorities before any post-call durable action
         # and classify any attempted replacement as UNKNOWN.
-        adapter_boundary_refs = {
+        post_start_authority_refs = {
             "budget": self.budget,
             "journal": self.journal,
             "clock": self.clock,
@@ -1532,10 +1532,24 @@ class DurableModelCallOrchestrator:
             "observation_evidence_resolver": self.observation_evidence_resolver,
             "billing_evidence_resolver": self.billing_evidence_resolver,
         }
-        adapter_boundary_values = {
+        post_start_authority_values = {
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+
+        def restore_post_start_authority() -> list[str]:
+            changes: list[str] = []
+            for name, expected in post_start_authority_refs.items():
+                if getattr(self, name, None) is not expected:
+                    changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in post_start_authority_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    changes.append(name)
+                setattr(self, name, expected)
+            return changes
+
         observation_evidence_resolver = self.observation_evidence_resolver
         adapter_error: Exception | None = None
         authority_changes: list[str] = []
@@ -1545,15 +1559,7 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 adapter_error = error
         finally:
-            for name, expected in adapter_boundary_refs.items():
-                if getattr(self, name, None) is not expected:
-                    authority_changes.append(name)
-                setattr(self, name, expected)
-            for name, expected in adapter_boundary_values.items():
-                current = getattr(self, name, None)
-                if type(current) is not type(expected) or current != expected:
-                    authority_changes.append(name)
-                setattr(self, name, expected)
+            authority_changes = restore_post_start_authority()
 
         if authority_changes:
             payload = {
@@ -1779,10 +1785,35 @@ class DurableModelCallOrchestrator:
             "result_schema_id": spec.result_schema_id,
             "schema_valid": None,
         }
+        validator_authority_changes: list[str] = []
         try:
             schema_valid = validate_result(json.loads(result_json))
         except Exception:
             schema_valid = False
+        finally:
+            validator_authority_changes = restore_post_start_authority()
+        if validator_authority_changes:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "validator_mutated_orchestrator_authority:"
+                + ",".join(sorted(validator_authority_changes)),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
         if type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid

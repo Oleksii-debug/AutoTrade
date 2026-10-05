@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 from types import MappingProxyType
 import unittest
@@ -658,6 +658,74 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                 payload=payload,
             )
         self.assertEqual(callbacks, [])
+
+
+    def test_spot_exchange_filters_are_decimal_context_invariant(self):
+        def rules(*, minimum_notional=None):
+            filters = [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0",
+                    "maxPrice": "0",
+                    "tickSize": "0",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.0000000000000000001",
+                    "maxQty": "100",
+                    "stepSize": "0.0000000000000000001",
+                },
+            ]
+            if minimum_notional is not None:
+                filters.append(
+                    {
+                        "filterType": "MIN_NOTIONAL",
+                        "minNotional": minimum_notional,
+                        "applyToMarket": False,
+                        "avgPriceMins": 0,
+                    }
+                )
+            return BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload={"symbol": "BTCUSDT", "filters": filters},
+            )
+
+        def limit_intent(quantity):
+            return BinanceSpotOrderIntent.create(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity=quantity,
+                price="1",
+                time_in_force="GTC",
+            )
+
+        exact_grid = rules()
+        below_minimum = rules(minimum_notional="10")
+        for precision in (5, 50):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    # A large coefficient divided by a tiny step used to make
+                    # Decimal remainder depend on the ambient context.
+                    self.assertIsNone(
+                        exact_grid.validate(
+                            limit_intent("9.9999999999999999999"),
+                            at=NOW,
+                        )
+                    )
+                    # Low precision would round this product to 10 under plain
+                    # Decimal multiplication; exact arithmetic must still
+                    # reject the true 9.999... notional.
+                    with self.assertRaisesRegex(
+                        BinanceSpotAdapterError,
+                        "notional is below exchangeInfo minimum",
+                    ):
+                        below_minimum.validate(
+                            limit_intent("9.9999999999999999999"),
+                            at=NOW,
+                        )
 
 
 if __name__ == "__main__":

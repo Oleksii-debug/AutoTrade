@@ -1,4 +1,5 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+import sys
 import unittest
 
 import mvp.autotrade_mvp.accounting as accounting_module
@@ -448,6 +449,57 @@ class AccountingFoundationTests(unittest.TestCase):
         before = book.audit_digest()
         object.__setattr__(book._transactions[0], "transaction_id", "tampered")
         self.assertNotEqual(book.audit_digest(), before)
+
+    def test_audit_digest_cache_fails_closed_if_transaction_changes_during_digest(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        transaction = book._transactions[0]
+
+        closure = {
+            name: cell.cell_contents
+            for name, cell in zip(
+                EconomicBook.audit_digest.__code__.co_freevars,
+                EconomicBook.audit_digest.__closure__ or (),
+            )
+        }
+        cached_digest = closure["digest_transaction"]
+        target_code = cached_digest.__code__
+        mutated = False
+
+        def trace(frame, event, _arg):
+            nonlocal mutated
+            if (
+                not mutated
+                and event == "line"
+                and frame.f_code is target_code
+                and frame.f_locals.get("transaction") is transaction
+                and "fingerprint" in frame.f_locals
+                and "digest" in frame.f_locals
+            ):
+                object.__setattr__(
+                    transaction,
+                    "transaction_id",
+                    "cash-raced-during-digest",
+                )
+                mutated = True
+            return trace
+
+        previous_trace = sys.gettrace()
+        sys.settrace(trace)
+        try:
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "transaction changed during digest computation",
+            ):
+                book.audit_digest()
+        finally:
+            sys.settrace(previous_trace)
+
+        self.assertTrue(mutated)
 
     def test_audit_digest_rejects_hostile_transaction_container_without_callback(self):
         class HostileList(list):

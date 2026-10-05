@@ -7,9 +7,11 @@ signed-attestation verifier against one exact ArtifactStore generation, then
 parses the authenticated provider campaign payload and derives a content identity
 from all accepted material.
 
-No provider-qualification protocol is source-enabled yet because the canonical
-qualification trust policy is not present on this lineage.  Public issuance is
-therefore intentionally unavailable rather than silently trusting test material.
+The provider-route v1 protocol descriptor is source-owned here, but canonical
+qualification trust policy roots remain separately controlled.  Configuring the
+protocol alone never makes a campaign authoritative: public issuance still must
+cross the canonical signed-attestation trust boundary and remains unavailable
+while that policy is absent.
 """
 from __future__ import annotations
 
@@ -289,10 +291,23 @@ class ProviderQualificationProtocol:
             )
 
 
-# Runtime registration would reintroduce caller-selected trust semantics.  A real
-# provider protocol must be added here together with a reviewed canonical trust
-# policy.  The empty mapping keeps today's lineage fail-closed.
-_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType({})
+# Runtime registration would reintroduce caller-selected protocol semantics.
+# The descriptor below fixes the product-owned protocol/case contract in source;
+# it deliberately does not configure signer roots or a trust-policy file. Those
+# remain a separate independently reviewed authority consumed only by the
+# canonical attestation verifier.
+_PROVIDER_ROUTE_V1 = ProviderQualificationProtocol(
+    key="PROVIDER_ROUTE_V1",
+    domain="PROVIDER",
+    gate="ROUTE_QUALIFICATION",
+    package_id="AUTOTRADE",
+    protocol_id="provider-route-v1",
+    protocol_version="1.0.0",
+    requirement_id="provider-route-required",
+)
+_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType(
+    {_PROVIDER_ROUTE_V1.key: _PROVIDER_ROUTE_V1}
+)
 
 
 def source_provider_qualification_protocol(

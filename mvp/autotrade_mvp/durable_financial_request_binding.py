@@ -291,12 +291,11 @@ def _require_bybit_prepared_request_origin(
         prepared_price_rule_instrument_version,
         prepared_price_semantics_digest,
     ) = _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY(prepared_request)
-    price_authority = (
-        prepared_price_rule_instrument_id,
-        prepared_price_rule_instrument_version,
-        prepared_price_semantics_digest,
-    )
-    if any(value is None for value in price_authority):
+    if (
+        prepared_price_rule_instrument_id is None
+        or prepared_price_rule_instrument_version is None
+        or prepared_price_semantics_digest is None
+    ):
         raise DurableFinancialRequestBindingError(
             "Bybit PAPER/LIVE prepared request lacks authenticated price semantics authority"
         )

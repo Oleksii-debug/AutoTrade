@@ -78,10 +78,13 @@ class VerifyScopeTests(unittest.TestCase):
             text,
         )
         self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
-        self.assertIn(
-            "python -m unittest mvp.tests.test_recovery_qualification -v",
-            text,
+        focused_command = (
+            "python -m unittest "
+            "mvp.tests.test_recovery_qualification "
+            "mvp.tests.test_qualification_attestation "
+            "mvp.tests.test_verify_scope -v"
         )
+        self.assertIn(focused_command, text)
         self.assertIn("tools/write_ci_evidence.py", text)
         self.assertIn("--suite recovery-qualification-foundation", text)
 
@@ -91,6 +94,7 @@ class VerifyScopeTests(unittest.TestCase):
             "mvp/autotrade_mvp/qualification_attestation.py",
             "mvp/autotrade_mvp/qualification_trust_policy.json",
             "mvp/tests/test_recovery_qualification.py",
+            "mvp/tests/test_qualification_attestation.py",
             "mvp/tests/test_verify_scope.py",
             "research/autotrade_research/artifacts/**",
             "tools/write_ci_evidence.py",

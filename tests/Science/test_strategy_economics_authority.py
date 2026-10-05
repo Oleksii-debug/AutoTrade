@@ -236,6 +236,33 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             assessment.unresolved_owners,
         )
 
+    def test_public_structural_binder_rebind_cannot_redirect_assessment(self):
+        item = _proposal()
+        binding = _binding(item)
+        original = economics_authority.bind_strategy_economics
+        calls = []
+
+        def hostile_bind(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("rebound public structural binder executed")
+
+        economics_authority.bind_strategy_economics = hostile_bind
+        try:
+            assessment = assess_strategy_economics_authority(
+                item,
+                binding,
+                instrument_registry=_registry(),
+            )
+        finally:
+            economics_authority.bind_strategy_economics = original
+
+        self.assertEqual(calls, [])
+        self.assertEqual(assessment.status, "INCONCLUSIVE")
+        self.assertEqual(
+            assessment.binding_fingerprint,
+            binding.fingerprint,
+        )
+
     def test_public_registry_exact_rebind_cannot_redirect_assessment(self):
         item = _proposal()
         binding = _binding(item)

@@ -692,15 +692,48 @@ class DurableModelCallOrchestrator:
         resolver_descriptors = tuple(ModelDescriptor(**{
             field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
         }) for item in descriptors)
+        resolver = self.pricing_evidence_resolver
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
         try:
-            snapshot = self.pricing_evidence_resolver(
-                resolver_spec,
-                resolver_descriptors,
+            try:
+                snapshot = resolver(
+                    resolver_spec,
+                    resolver_descriptors,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "pricing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(callback_changes))
             )
-        except Exception as error:
+        if callback_error is not None:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
-            ) from error
+            ) from callback_error
         if type(snapshot) is not PricingEvidenceSnapshot:
             raise ModelCallError(
                 "pricing evidence resolver did not return PricingEvidenceSnapshot"
@@ -1069,15 +1102,47 @@ class DurableModelCallOrchestrator:
             field.name: getattr(binding, field.name)
             for field in fields(ModelCallBinding)
         })
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
         try:
-            evidence = resolver(
-                resolver_observation,
-                resolver_binding,
+            try:
+                evidence = resolver(
+                    resolver_observation,
+                    resolver_binding,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "observation evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(callback_changes))
             )
-        except Exception as error:
+        if callback_error is not None:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
-            ) from error
+            ) from callback_error
         if type(evidence) is not ModelObservationEvidence:
             raise ModelCallError(
                 "observation evidence resolver did not return ModelObservationEvidence"
@@ -2112,16 +2177,49 @@ class DurableModelCallOrchestrator:
                 "durable billing scope cannot be canonicalized"
             ) from error
 
+        resolver = self.billing_evidence_resolver
+        callback_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        callback_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        callback_error: Exception | None = None
+        callback_changes: list[str] = []
         try:
-            evidence = self.billing_evidence_resolver(
-                attempt,
-                billing,
-                frozen_scope,
+            try:
+                evidence = resolver(
+                    attempt,
+                    billing,
+                    frozen_scope,
+                )
+            except Exception as error:
+                callback_error = error
+        finally:
+            for name, expected in callback_refs.items():
+                if getattr(self, name, None) is not expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in callback_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append(name)
+                setattr(self, name, expected)
+        if callback_changes:
+            raise ModelCallError(
+                "billing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(callback_changes))
             )
-        except Exception as error:
+        if callback_error is not None:
             raise ModelCallError(
                 "billing evidence could not be authenticated"
-            ) from error
+            ) from callback_error
         if type(evidence) is not BillingEvidence:
             raise ModelCallError(
                 "billing evidence resolver did not return BillingEvidence"

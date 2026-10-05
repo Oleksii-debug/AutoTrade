@@ -500,6 +500,57 @@ class ModelCallLifecycleTests(unittest.TestCase):
             self.assertEqual(snapshot.incurred, Decimal("0.5"))
             self.assertEqual(snapshot.estimated_unbilled, Decimal("0.2"))
 
+    def test_billing_evidence_resolver_cannot_redirect_settlement_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = None
+
+            def hostile_billing(attempt, billing, scope):
+                evidence = _billing_evidence(attempt, billing, scope)
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+                billing_evidence_resolver=hostile_billing,
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: (_ for _ in ()).throw(
+                    TimeoutError("provider response lost")
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            before = budget.snapshot()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "billing evidence resolver mutated orchestrator authority",
+            ):
+                orchestrator.reconcile_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="late-invoice-line",
+                    expected_billed="0.4",
+                )
+
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot(), before)
+
     def test_unknown_billing_reconciliation_rejects_untrusted_evidence(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
@@ -2689,6 +2740,54 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             )
             self.assertEqual(outcome.output, {"answer": 7})
 
+    def test_pricing_evidence_resolver_cannot_redirect_orchestrator_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = None
+
+            def hostile_pricing(resolver_spec, resolver_descriptors):
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return _pricing_evidence(resolver_spec, resolver_descriptors)
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+                pricing_evidence_resolver=hostile_pricing,
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "pricing evidence resolver mutated orchestrator authority",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail(
+                        "mutated pricing authority must fail before inference"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
     def test_pricing_resolver_cannot_rewrite_attempt_or_route_identity(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
@@ -2778,6 +2877,54 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(recovered.attempt_id, original_attempt_id)
             self.assertIsNone(
                 budget.active_reservation(original_attempt_id)
+            )
+
+    def test_observation_evidence_resolver_cannot_redirect_unknown_settlement(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = None
+
+            def hostile_observation_evidence(value, binding):
+                evidence = _observation_evidence(value, binding)
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+                observation_evidence_resolver=hostile_observation_evidence,
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "observation evidence resolver mutated orchestrator authority",
+                result.reason,
+            )
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
             )
 
     def test_adapter_cannot_replace_observation_evidence_resolver_after_started(self):

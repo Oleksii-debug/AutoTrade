@@ -33,7 +33,10 @@ from uuid import UUID
 from autotrade_runtime.artifacts import ArtifactStore
 
 from .performance_qualification import RuntimeBudgetSpec
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore,
+    require_exact_journal_store_authority,
+)
 from .runtime_target_host_campaign_authority import RuntimeTargetHostCampaignAuthority
 from .runtime_target_host_inventory import PublishedRuntimeTargetHostInventory
 from .runtime_target_host_measurement import (
@@ -54,7 +57,7 @@ from .runtime_target_host_runner import (
     run_declared_target_host_campaign,
 )
 
-_SCHEMA_VERSION = "1.0.0"
+_SCHEMA_VERSION = "1.1.0"
 _EVIDENCE_TYPE = "AUTOTRADE_TARGET_HOST_RESOURCE_EVIDENCE_CURRENT"
 _EVIDENCE_KIND = "RUNTIME_TARGET_HOST_RESOURCE_EVIDENCE_CURRENT"
 _JSON_MEDIA_TYPE = "application/json"
@@ -62,7 +65,6 @@ _RESOURCE_EVIDENCE_STATUS = "COLLECTED_PROCESS_DISK_V1"
 _UNCLOSED_AUTHORITIES = (
     "independent_chronology",
     "provider_source_clock_freshness",
-    "queue_backlog_high_water",
     "signed_terminal_qualification",
 )
 _EVIDENCE_TOKEN = object()
@@ -322,6 +324,28 @@ if type(_disk_usage) is FunctionType:
                 ),
             )
 
+_RESOURCE_JOURNAL_STORE_TYPE = JournalStore
+_RESOURCE_JOURNAL_AUTHORITY_CHECK = require_exact_journal_store_authority
+_RESOURCE_OUTBOX_BACKLOG_CUT = JournalStore.outbox_backlog_cut
+_RESOURCE_OUTBOX_BACKLOG_HIGH_WATER = JournalStore.outbox_backlog_high_water_since
+_RESOURCE_JOURNAL_CALLABLE_AUTHORITY = (
+    (
+        "JournalStore authority verifier",
+        _RESOURCE_JOURNAL_AUTHORITY_CHECK,
+        _capture_callable_authority(_RESOURCE_JOURNAL_AUTHORITY_CHECK),
+    ),
+    (
+        "JournalStore outbox backlog cut",
+        _RESOURCE_OUTBOX_BACKLOG_CUT,
+        _capture_callable_authority(_RESOURCE_OUTBOX_BACKLOG_CUT),
+    ),
+    (
+        "JournalStore outbox backlog high-water",
+        _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER,
+        _capture_callable_authority(_RESOURCE_OUTBOX_BACKLOG_HIGH_WATER),
+    ),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
@@ -408,6 +432,11 @@ class RuntimeTargetHostResourceEvidence:
     measurement_payload_sha256: str
     run_receipt_artifact_id: str
     run_receipt_payload_sha256: str
+    outbox_transition_start_sequence: int
+    outbox_transition_end_sequence: int
+    outbox_backlog_start_pending_count: int
+    outbox_backlog_end_pending_count: int
+    queue_backlog_high_water: int
     reconnect_backlog_remaining: int
     before: RuntimeTargetHostResourceSnapshot
     after: RuntimeTargetHostResourceSnapshot
@@ -468,10 +497,56 @@ class RuntimeTargetHostResourceEvidence:
             raise RuntimeTargetHostResourceEvidenceError(
                 "evidence filesystem capacity changed during target-host run"
             )
-        _non_negative_int(
+        transition_start = _non_negative_int(
+            self.outbox_transition_start_sequence,
+            name="outbox_transition_start_sequence",
+        )
+        transition_end = _non_negative_int(
+            self.outbox_transition_end_sequence,
+            name="outbox_transition_end_sequence",
+        )
+        if transition_end < transition_start:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "outbox transition end cannot precede campaign start"
+            )
+        backlog_start = _non_negative_int(
+            self.outbox_backlog_start_pending_count,
+            name="outbox_backlog_start_pending_count",
+        )
+        backlog_end = _non_negative_int(
+            self.outbox_backlog_end_pending_count,
+            name="outbox_backlog_end_pending_count",
+        )
+        high_water = _non_negative_int(
+            self.queue_backlog_high_water,
+            name="queue_backlog_high_water",
+        )
+        reconnect_backlog = _non_negative_int(
             self.reconnect_backlog_remaining,
             name="reconnect_backlog_remaining",
         )
+        if backlog_end != reconnect_backlog:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "outbox backlog end does not match reconnect backlog authority"
+            )
+        if high_water < max(backlog_start, backlog_end):
+            raise RuntimeTargetHostResourceEvidenceError(
+                "queue backlog high-water is below an observed campaign endpoint"
+            )
+        transition_count = transition_end - transition_start
+        pending_delta = backlog_end - backlog_start
+        if (
+            abs(pending_delta) > transition_count
+            or (transition_count - pending_delta) % 2 != 0
+        ):
+            raise RuntimeTargetHostResourceEvidenceError(
+                "outbox backlog endpoints are incompatible with transition count"
+            )
+        enqueue_count = (transition_count + pending_delta) // 2
+        if high_water > backlog_start + enqueue_count:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "queue backlog high-water exceeds causal enqueue authority"
+            )
         if self.resource_evidence_status != _RESOURCE_EVIDENCE_STATUS:
             raise RuntimeTargetHostResourceEvidenceError(
                 "resource evidence status is not canonical"
@@ -530,6 +605,13 @@ class RuntimeTargetHostResourceEvidence:
             "resource_evidence_status": self.resource_evidence_status,
             "terminal_qualification_eligible": self.terminal_qualification_eligible,
             "unclosed_authorities": list(_UNCLOSED_AUTHORITIES),
+            "outbox_backlog": {
+                "transition_start_sequence": self.outbox_transition_start_sequence,
+                "transition_end_sequence": self.outbox_transition_end_sequence,
+                "start_pending_count": self.outbox_backlog_start_pending_count,
+                "end_pending_count": self.outbox_backlog_end_pending_count,
+                "high_water": self.queue_backlog_high_water,
+            },
             "reconnect_backlog_remaining": self.reconnect_backlog_remaining,
             "before": self.before.payload,
             "after": self.after.payload,
@@ -543,6 +625,7 @@ class RuntimeTargetHostResourceEvidence:
                 "disk_free_delta_bytes": self.disk_free_delta_bytes,
                 "thread_count_start": self.before.thread_count,
                 "thread_count_end": self.after.thread_count,
+                "queue_backlog_high_water": self.queue_backlog_high_water,
             },
         }
 
@@ -638,6 +721,11 @@ _RESOURCE_DESCRIPTOR_SPECS = (
             "measurement_payload_sha256",
             "run_receipt_artifact_id",
             "run_receipt_payload_sha256",
+            "outbox_transition_start_sequence",
+            "outbox_transition_end_sequence",
+            "outbox_backlog_start_pending_count",
+            "outbox_backlog_end_pending_count",
+            "queue_backlog_high_water",
             "reconnect_backlog_remaining",
             "before",
             "after",
@@ -862,6 +950,7 @@ def issue_runtime_target_host_resource_evidence(
     *,
     before: RuntimeTargetHostResourceSnapshot,
     after: RuntimeTargetHostResourceSnapshot,
+    outbox_backlog: dict[str, int],
     _issuer_token: object | None = None,
 ) -> RuntimeTargetHostResourceEvidence:
     """Bind resource counters to the exact retained current-run chain.
@@ -881,6 +970,14 @@ def issue_runtime_target_host_resource_evidence(
         raise TypeError("before must be exact RuntimeTargetHostResourceSnapshot")
     if type(after) is not RuntimeTargetHostResourceSnapshot:
         raise TypeError("after must be exact RuntimeTargetHostResourceSnapshot")
+    if type(outbox_backlog) is not dict or set(outbox_backlog) != {
+        "start_transition_sequence",
+        "end_transition_sequence",
+        "start_pending_count",
+        "end_pending_count",
+        "high_water",
+    }:
+        raise TypeError("outbox_backlog must be exact canonical high-water evidence")
     measurement_digest = run.measurement.digest
     if run.published_measurement.payload_sha256 != measurement_digest:
         raise RuntimeTargetHostResourceEvidenceError(
@@ -906,6 +1003,19 @@ def issue_runtime_target_host_resource_evidence(
         measurement_payload_sha256=measurement_digest,
         run_receipt_artifact_id=run.run_receipt_artifact_id,
         run_receipt_payload_sha256=receipt_digest,
+        outbox_transition_start_sequence=outbox_backlog[
+            "start_transition_sequence"
+        ],
+        outbox_transition_end_sequence=outbox_backlog[
+            "end_transition_sequence"
+        ],
+        outbox_backlog_start_pending_count=outbox_backlog[
+            "start_pending_count"
+        ],
+        outbox_backlog_end_pending_count=outbox_backlog[
+            "end_pending_count"
+        ],
+        queue_backlog_high_water=outbox_backlog["high_water"],
         reconnect_backlog_remaining=run.measurement.reconnect_backlog_remaining,
         before=before,
         after=after,
@@ -989,7 +1099,14 @@ def run_declared_target_host_campaign_with_resources(
         )
     if type(evidence_store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")
+    if type(journal) is not _RESOURCE_JOURNAL_STORE_TYPE:
+        raise TypeError("journal must be exact JournalStore")
 
+    journal_store_type = _RESOURCE_JOURNAL_STORE_TYPE
+    journal_authority_check = _RESOURCE_JOURNAL_AUTHORITY_CHECK
+    outbox_backlog_cut = _RESOURCE_OUTBOX_BACKLOG_CUT
+    outbox_backlog_high_water = _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER
+    journal_callable_states = _RESOURCE_JOURNAL_CALLABLE_AUTHORITY
     store_authority = _capture_artifact_store_authority(evidence_store)
     resource_platform_states = _RESOURCE_PLATFORM_AUTHORITY
     resource_platform_attribute_states = _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY
@@ -1096,6 +1213,49 @@ def run_declared_target_host_campaign_with_resources(
                 ) from error
 
 
+    def require_resource_journal_authority(*, phase: str) -> None:
+        if raw_dict_getitem(module_namespace, "JournalStore") is not journal_store_type:
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource JournalStore type changed " + phase
+            )
+        if (
+            raw_dict_getitem(
+                module_namespace,
+                "require_exact_journal_store_authority",
+            )
+            is not journal_authority_check
+        ):
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource JournalStore authority verifier changed " + phase
+            )
+        if (
+            raw_type_getattribute(
+                journal_store_type,
+                "outbox_backlog_cut",
+            )
+            is not outbox_backlog_cut
+            or raw_type_getattribute(
+                journal_store_type,
+                "outbox_backlog_high_water_since",
+            )
+            is not outbox_backlog_high_water
+        ):
+            raise RuntimeTargetHostResourceEvidenceError(
+                "resource JournalStore backlog authority changed " + phase
+            )
+        for name, function, state in journal_callable_states:
+            try:
+                require_callable(function, state, name=name)
+            except ValueError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource JournalStore executable changed "
+                    f"{phase}: {name}"
+                ) from error
+        journal_authority_check(
+            journal,
+            subject="resource evidence JournalStore",
+        )
+
     def require_resource_class_authority(*, phase: str) -> None:
         for owner, name, descriptor, function, code in descriptor_states:
             namespace = raw_type_getattribute(owner, "__dict__")
@@ -1116,8 +1276,10 @@ def run_declared_target_host_campaign_with_resources(
         for name, function, state in class_function_states:
             require_callable(function, state, name=name)
 
+    require_resource_journal_authority(phase="before target-host run")
     require_resource_platform_authority(phase="before target-host run")
     require_resource_class_authority(phase="before target-host run")
+    backlog_start = outbox_backlog_cut(journal)
     before = capture_snapshot(evidence_root=evidence_store.root)
     run = runner(
         journal=journal,
@@ -1160,6 +1322,7 @@ def run_declared_target_host_campaign_with_resources(
         require_store_state,
         name="resource ArtifactStore verifier",
     )
+    require_resource_journal_authority(phase="during target-host run")
     require_resource_platform_authority(phase="during target-host run")
     require_resource_class_authority(phase="during target-host run")
     if ArtifactStore.publish_bytes is not artifact_publish:
@@ -1184,11 +1347,17 @@ def run_declared_target_host_campaign_with_resources(
     )
     require_callable(runner, runner_state, name="canonical target-host runner")
 
+    backlog_evidence = outbox_backlog_high_water(
+        journal,
+        start_transition_sequence=backlog_start["transition_sequence"],
+        start_pending_count=backlog_start["pending_count"],
+    )
     after = capture_snapshot(evidence_root=evidence_store.root)
     evidence = issue_evidence(
         run,
         before=before,
         after=after,
+        outbox_backlog=backlog_evidence,
         _issuer_token=_ISSUER_TOKEN,
     )
     published = publish_evidence(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -186,49 +187,50 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             (f"{sentinel} (modification)",),
         )
 
-    def test_trusted_protected_sentinel_modification_requires_explicit_authorization(self):
-        sentinel = "control/INDEX.json"
+    def test_trusted_protected_sentinel_modification_requires_exact_path_authorization(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
         result = assess_reconvergence(
             base_paths=[sentinel, "README.md"],
             changes=[Change(status="M", path=sentinel)],
-            allow_protected_sentinel_modification=True,
+            authorized_protected_sentinel_paths=(sentinel,),
         )
 
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
 
-    def test_protected_structure_remains_blocked_with_modification_authorization(self):
-        sentinel = "control/INDEX.json"
-        changes = (
-            Change(status="D", path=sentinel),
-            Change(
-                status="R100",
-                previous_path=sentinel,
-                path="control/INDEX.old.json",
-            ),
-            Change(status="T", path="control/qualification.json"),
-        )
+    def test_protected_modification_authorization_does_not_become_a_directory_scope(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["control/tools/reconvergence_integrity.py"],
+                changes=[
+                    Change(
+                        status="M",
+                        path="control/tools/reconvergence_integrity.py",
+                    )
+                ],
+                authorized_protected_sentinel_paths=("control/tools",),
+            )
 
+    def test_protected_structure_remains_blocked_with_exact_modification_authorization(self):
+        sentinel = "control/INDEX.json"
         result = assess_reconvergence(
-            base_paths=[
-                "control/INDEX.json",
-                "control/qualification.json",
-                "README.md",
-            ],
-            changes=changes,
-            allow_protected_sentinel_modification=True,
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="D", path=sentinel)],
+            authorized_protected_sentinel_paths=(sentinel,),
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("control/INDEX.json", result.protected_violations)
-        self.assertIn(
-            "control/INDEX.json -> control/INDEX.old.json (rename)",
-            result.protected_violations,
-        )
-        self.assertIn(
-            "control/qualification.json (type change)",
-            result.protected_violations,
-        )
+        self.assertIn(sentinel, result.protected_violations)
+
+    def test_malformed_exact_protected_path_authorization_fails_closed(self):
+        for value in ("", "control/*", "../control/INDEX.json", "/control/INDEX.json", "control\\\\INDEX.json", "control/tools/"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    assess_reconvergence(
+                        base_paths=["control/INDEX.json"],
+                        changes=[Change(status="M", path="control/INDEX.json")],
+                        authorized_protected_sentinel_paths=(value,),
+                    )
 
     def test_protected_sentinel_rename_away_fails_closed(self):
         sentinel = "control/INDEX.json"
@@ -360,6 +362,125 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 allowed_scopes=("web/*",),
             )
 
+    def test_module_entrypoint_help_starts_from_repository_root(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "control.tools.reconvergence_integrity",
+                "--help",
+            ],
+            cwd=Path.cwd(),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Fail-closed guard", result.stdout)
+
+    def test_module_entrypoint_assesses_temporary_git_repository(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            (root / "README.md").write_text("root
+", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "root")
+            base_sha = git("rev-parse", "HEAD")
+
+            (root / "README.md").write_text("child
+", encoding="utf-8")
+            git("commit", "-am", "child")
+            head_sha = git("rev-parse", "HEAD")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                    "--cwd",
+                    str(root),
+                ],
+                cwd=Path.cwd(),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Reconvergence tree guard passed.", result.stdout)
+
+    def test_module_entrypoint_rejects_diverged_temporary_git_repository(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            (root / "README.md").write_text("base
+", encoding="utf-8")
+            git("add", "README.md")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            git("checkout", "-b", "stale-rebuild")
+            (root / "README.md").write_text("stale
+", encoding="utf-8")
+            git("commit", "-am", "stale")
+            head_sha = git("rev-parse", "HEAD")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                    "--cwd",
+                    str(root),
+                ],
+                cwd=Path.cwd(),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("head is not descended from exact base revision", result.stdout)
+
     def test_canonical_workflow_authorizes_protected_sentinel_changes_only_for_repo_owner(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"
@@ -367,10 +488,17 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("github.repository_owner", workflow)
         self.assertIn("github.event.pull_request.user.login", workflow)
         self.assertIn(
-            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION",
+            "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS",
             workflow,
         )
-        self.assertIn("--allow-protected-sentinel-modification", workflow)
+        self.assertIn(
+            ".github/workflows/reconvergence-integrity.yml",
+            workflow,
+        )
+        self.assertIn(
+            "control/tools/reconvergence_integrity.py",
+            workflow,
+        )
         self.assertNotIn("github.event.pull_request.body", workflow)
         self.assertNotIn("github.event.pull_request.title", workflow)
 
@@ -382,6 +510,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertNotIn("edited", workflow)
+        self.assertNotIn("--allow-protected-sentinel-modification", workflow)
 
 
 

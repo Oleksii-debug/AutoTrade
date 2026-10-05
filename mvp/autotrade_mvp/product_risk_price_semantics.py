@@ -346,6 +346,7 @@ class ProductRiskPriceSemanticsComposer:
         request: RiskAuthorityRequest,
         snapshot: AuthoritativeRiskSnapshot,
         binding: ProductRiskPriceSemanticsBinding,
+        prepared_request: BybitPreparedSubmission,
     ) -> AuthoritativeRiskSnapshot:
         """Attach semantics to an already-authoritative base snapshot.
 
@@ -363,9 +364,18 @@ class ProductRiskPriceSemanticsComposer:
             raise TypeError(
                 "binding must be exact ProductRiskPriceSemanticsBinding"
             )
+        if type(prepared_request) is not _PREPARED_TYPE:
+            raise TypeError(
+                "prepared_request must be exact BybitPreparedSubmission"
+            )
         if object.__getattribute__(binding, "_factory_token") is not _FACTORY_TOKEN:
             raise ProductRiskPriceSemanticsError(
                 "price-semantics binding provenance changed"
+            )
+        _REQUIRE_PREPARED(prepared_request)
+        if prepared_request.body_sha256 != binding.prepared_body_sha256:
+            raise ProductRiskPriceSemanticsError(
+                "prepared request differs from issued price-semantics binding"
             )
 
         expected = (

@@ -7,6 +7,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.model_budget_journal as model_budget_module
 from mvp.autotrade_mvp.model_budget_journal import DurableModelBudget
 from mvp.autotrade_mvp.model_gateway import (
     ModelDescriptor,
@@ -109,6 +110,51 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertEqual(Clock.truth_calls, 0)
             self.assertGreaterEqual(Clock.call_count, 1)
             self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
+
+    def test_clock_cannot_redirect_cleanup_through_module_budget_alias(self):
+        class DecoyBudget:
+            restore_calls = 0
+
+            @staticmethod
+            def _restore_clock_authority(*_args, **_kwargs):
+                DecoyBudget.restore_calls += 1
+                raise AssertionError("clock redirected budget cleanup")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            canonical_budget = model_budget_module.DurableModelBudget
+
+            def hostile_clock():
+                model_budget_module.DurableModelBudget = DecoyBudget
+                return NOW
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*module\.DurableModelBudget",
+                ):
+                    canonical_budget(
+                        journal=journal,
+                        budget_id="policy-module-alias-clock",
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=hostile_clock,
+                    )
+            finally:
+                model_budget_module.DurableModelBudget = canonical_budget
+
+            self.assertEqual(DecoyBudget.restore_calls, 0)
+            self.assertIs(
+                model_budget_module.DurableModelBudget,
+                canonical_budget,
+            )
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "policy-module-alias-clock",
+                ),
+                [],
+            )
 
     def test_initialization_clock_cannot_shadow_journal_append(self):
         with TemporaryDirectory() as directory:

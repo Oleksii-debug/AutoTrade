@@ -255,6 +255,8 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         )
         self.assertIn("admission_id", bound_arguments)
         self.assertIn("action", bound_arguments)
+        self.assertIn("prepared_request", bound_arguments)
+        self.assertNotIn("request", bound_arguments)
         self.assertNotIn("authority", bound_arguments)
         self.assertNotIn("binding", bound_arguments)
         self.assertNotIn("authority_check", bound_arguments)

@@ -363,6 +363,22 @@ def _build_model_budget_journal_authority_accessors():
     ] = {}
     lock = RLock()
 
+    def is_registered(value: object) -> bool:
+        if type(value) is not DurableModelBudget:
+            return False
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return False
+            current = entry[0]()
+            if current is value:
+                return True
+            if current is None:
+                bindings.pop(object_id, None)
+                return False
+            raise ValueError("model budget authority identity collision")
+
     def initialize(value: object, journal: object) -> None:
         if type(value) is not DurableModelBudget:
             raise TypeError("model budget must be exact DurableModelBudget")
@@ -475,7 +491,7 @@ def _build_model_budget_journal_authority_accessors():
             expected_clock,
         )
 
-    return initialize, require, scope
+    return is_registered, initialize, require, scope
 
 
 class DurableModelBudget:
@@ -495,6 +511,8 @@ class DurableModelBudget:
         environment: str,
         clock: Callable[[], str] | None = None,
     ) -> None:
+        if _model_budget_authority_is_registered(self):
+            raise ValueError("model budget journal authority is already established")
         _require_model_budget_journal_authority(journal)
         self.journal = journal
         self.budget_id = _text(budget_id, name="budget_id")
@@ -934,6 +952,7 @@ class DurableModelBudget:
                     "_require_model_budget_journal_class_authority",
                     "_require_model_budget_journal_authority",
                     "require_exact_journal_store_authority",
+                    "_model_budget_authority_is_registered",
                     "_initialize_model_budget_journal_authority",
                     "_require_model_budget_bound_journal",
                     "_model_budget_authority_scope",
@@ -1728,6 +1747,7 @@ class DurableModelBudget:
 
 
 (
+    _model_budget_authority_is_registered,
     _initialize_model_budget_journal_authority,
     _require_model_budget_bound_journal,
     _model_budget_authority_scope,

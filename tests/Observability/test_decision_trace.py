@@ -153,6 +153,66 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                 store.records()
 
+    def test_bool_and_int_retries_are_not_semantically_conflated(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            original = evidence_trace("decision-json-type")
+            original["attributes"]["semantic_value"] = True
+            self.assertTrue(store.append(original))
+
+            conflicting = evidence_trace("decision-json-type")
+            conflicting["attributes"]["semantic_value"] = 1
+            with self.assertRaisesRegex(ValueError, "different decision content"):
+                store.append(conflicting)
+
+    def test_tuple_diagnostics_normalize_to_json_arrays_idempotently(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-tuple-roundtrip")
+            item["attributes"]["levels"] = ("one", "two")
+
+            self.assertTrue(store.append(item))
+            self.assertFalse(store.append(item))
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["attributes"]["levels"], ["one", "two"])
+
+    def test_append_rejects_store_owned_chain_fields(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            for field, value in (
+                ("recorded_at", "2000-01-01T00:00:00+00:00"),
+                ("previous_hash", "0" * 64),
+                ("record_hash", "1" * 64),
+            ):
+                with self.subTest(field=field):
+                    item = evidence_trace("decision-owned-" + field)
+                    item[field] = value
+                    with self.assertRaisesRegex(ValueError, "store-owned fields"):
+                        store.append(item)
+                    self.assertFalse(path.exists())
+
+    def test_accessible_export_rejects_polymorphic_trace_id_before_callbacks(self):
+        calls = []
+
+        class ExplodingStr(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("trace-id callback must not execute")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("trace-id equality callback must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(evidence_trace("decision-export-ingress"))
+            with self.assertRaisesRegex(ValueError, "exact non-empty string"):
+                store.accessible_export(ExplodingStr("decision-export-ingress"))
+
+        self.assertEqual(calls, [])
+
     def test_append_waits_for_shared_cross_process_writer_lock(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"
@@ -443,6 +503,33 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite number"):
             backlog.record("queue.delay", ExplodingFloat(1.0))
         self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_labels_reject_non_finite_json_values_at_ingress(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "JSON compliant",
+            ):
+                backlog.record("queue.delay", 1.0, diagnostic=invalid)
+        self.assertEqual(backlog.snapshot(), ())
+
+    def test_metric_snapshot_is_detached_from_internal_redacted_state(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        backlog.record(
+            "queue.delay",
+            1.0,
+            nested={"safe": "ok", "token": "super-secret"},
+        )
+
+        first = backlog.snapshot()
+        self.assertEqual(first[0]["labels"]["nested"]["token"], "[REDACTED]")
+        first[0]["labels"]["nested"]["safe"] = "caller-mutated"
+        first[0]["labels"]["nested"]["token"] = "caller-injected-secret"
+
+        second = backlog.snapshot()
+        self.assertEqual(second[0]["labels"]["nested"]["safe"], "ok")
+        self.assertEqual(second[0]["labels"]["nested"]["token"], "[REDACTED]")
 
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)

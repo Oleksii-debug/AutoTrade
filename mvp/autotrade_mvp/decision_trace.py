@@ -234,7 +234,9 @@ def _redact(value: Any) -> Any:
     if type(value) is list:
         return [_redact(item) for item in value]
     if type(value) is tuple:
-        return tuple(_redact(item) for item in value)
+        # JSON has arrays, not tuples. Normalize before hashing/persistence so
+        # an identical retry compares equal to the durable round-trip.
+        return [_redact(item) for item in value]
     if value is None or type(value) in (bool, int, float):
         return value
     if isinstance(value, (str, Mapping, list, tuple, int, float)):
@@ -457,6 +459,12 @@ class DecisionTraceStore:
         """Append one trace under the canonical cross-process writer lock."""
 
         prepared = _redact(trace)
+        store_owned = {"recorded_at", "previous_hash", "record_hash"} & set(prepared)
+        if store_owned:
+            raise ValueError(
+                "decision trace contains store-owned fields: "
+                + ", ".join(sorted(store_owned))
+            )
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
         with durable_path_lock(self.path):
@@ -471,9 +479,10 @@ class DecisionTraceStore:
                 raise ValueError("Existing decision trace chain is corrupt")
 
             trace_id = prepared["trace_id"]
+            prepared_semantics = canonical_json(prepared)
             for existing in records:
                 if existing.get("trace_id") == trace_id:
-                    if _semantic_payload(existing) != prepared:
+                    if canonical_json(_semantic_payload(existing)) != prepared_semantics:
                         raise ValueError(
                             "trace_id already exists with different decision content"
                         )
@@ -614,6 +623,8 @@ class DecisionTraceStore:
     ) -> str:
         """Return a linear view that never presents caller claims as verified evidence."""
 
+        if type(trace_id) is not str or not trace_id.strip():
+            raise ValueError("trace_id must be an exact non-empty string")
         if (available_event_ids is None) != (available_evidence_ids is None):
             raise ValueError(
                 "available_event_ids and available_evidence_ids must be supplied together"
@@ -751,11 +762,17 @@ class BoundedMetricBacklog:
             or not isfinite(value)
         ):
             raise ValueError("metric value must be a finite number")
+        redacted_labels = _redact(dict(labels))
+        # Metric labels must be immediately JSON-safe. Otherwise a NaN/Inf label
+        # can enter the bounded queue and make later diagnostic export fail.
+        canonical_json(redacted_labels)
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(
-            {"name": name.strip(), "value": value, "labels": _redact(dict(labels))}
+            {"name": name.strip(), "value": value, "labels": redacted_labels}
         )
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:
-        return tuple(self._items)
+        # Never expose mutable references owned by the backlog. JSON round-trip
+        # yields detached built-in diagnostic values and preserves redaction.
+        return tuple(json.loads(canonical_json(item)) for item in self._items)

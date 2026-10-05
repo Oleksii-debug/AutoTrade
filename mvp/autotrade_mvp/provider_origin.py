@@ -149,8 +149,14 @@ def _exact_text(value: object, *, name: str) -> str:
 
 
 def _utc_text(value: object, *, name: str) -> str:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ProviderOriginError(f"{name} must be exact timezone-aware datetime")
+    # Exact datetime is not enough: a caller-controlled tzinfo subclass can
+    # execute code through utcoffset()/astimezone() before provider-origin
+    # authority has been established.  stdlib timezone (including fixed
+    # offsets) is inert at this trust ingress.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderOriginError(
+            f"{name} must be exact datetime with exact datetime.timezone tzinfo"
+        )
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 

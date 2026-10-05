@@ -600,6 +600,18 @@ def prepare_order_submission(
     )
     if point is None:
         raise ProviderCoreError("at must be timezone-aware")
+    normalized_family = _text(product_family, name="product_family").upper()
+    if normalized_family == "MARGIN":
+        # Bybit MARGIN maps to spot isLeverage=1 and can borrow. Generic
+        # ORDER_WRITE capability is not evidence of current spot-margin mode,
+        # collateral eligibility, leverage or borrow quota. Keep the pure
+        # payload serializer available for deterministic fixtures, but never
+        # issue a canonical executable prepared request until those financial
+        # authorities are composed explicitly.
+        raise ProviderCoreError(
+            "Bybit MARGIN canonical preparation requires dedicated "
+            "spot-margin borrow/collateral authority"
+        )
     normalized_type = _text(order_type, name="order_type").upper()
     normalized_tif = _text(time_in_force, name="time_in_force").upper()
     if not capability.admits(
@@ -612,7 +624,7 @@ def prepare_order_submission(
             "exact capability evidence does not admit this Bybit order"
         )
     body = build_order_payload(
-        product_family=product_family,
+        product_family=normalized_family,
         symbol=symbol,
         side=side,
         order_type=order_type,

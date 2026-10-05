@@ -240,6 +240,29 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
 
+    def test_canonical_preparation_refuses_margin_without_borrow_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated spot-margin borrow/collateral authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="MARGIN",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="margin-authority-required",
+                time_in_force="GTC",
+            )
+
     def test_derivative_scope_maps_reduce_only_and_verified_hedge_mode(self):
         payload = build_order_payload(
             product_family="LINEAR_DERIVATIVES",

@@ -2857,6 +2857,94 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 "ModelCallUnknown",
             )
 
+    def test_adapter_cannot_rewrite_remaining_post_call_authorities(self):
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_pricing = orchestrator.pricing_evidence_resolver
+            trusted_billing = orchestrator.billing_evidence_resolver
+            trusted_started_lease_seconds = orchestrator.started_lease_seconds
+            trusted_owner_token = orchestrator.owner_token
+            call_spec = spec()
+
+            def mutating_adapter(*_args):
+                orchestrator.pricing_evidence_resolver = lambda *_: object()
+                orchestrator.billing_evidence_resolver = lambda *_: object()
+                orchestrator.started_lease_seconds = 1
+                orchestrator.owner_token = "forged-owner"
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("billing_evidence_resolver", result.reason)
+            self.assertIn("pricing_evidence_resolver", result.reason)
+            self.assertIn("started_lease_seconds", result.reason)
+            self.assertIn("owner_token", result.reason)
+            self.assertIs(orchestrator.pricing_evidence_resolver, trusted_pricing)
+            self.assertIs(orchestrator.billing_evidence_resolver, trusted_billing)
+            self.assertEqual(
+                orchestrator.started_lease_seconds,
+                trusted_started_lease_seconds,
+            )
+            self.assertEqual(orchestrator.owner_token, trusted_owner_token)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_validator_cannot_redirect_post_call_authorities_before_settlement(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            def mutating_validator(_value):
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return True
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_: observation(),
+                validate_result=mutating_validator,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "validator_mutated_orchestrator_authority:",
+                result.reason,
+            )
+            self.assertIn("budget", result.reason)
+            self.assertIn("journal", result.reason)
+            self.assertIn("clock", result.reason)
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+            self.assertEqual(
+                orchestrator._events(result.attempt_id)[-1]["event_type"],
+                "ModelCallUnknown",
+            )
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

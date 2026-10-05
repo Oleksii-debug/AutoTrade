@@ -1167,6 +1167,10 @@ class BinanceSpotSymbolRules:
             symbol_payload,
             name="exchangeInfo symbol payload",
         )
+        _exact_decoded_json_tree(
+            symbol_payload,
+            name="exchangeInfo symbol payload",
+        )
         instrument = _text(instrument_version, name="instrument_version")
         symbol = _text(symbol_payload.get("symbol"), name="symbol")
         if symbol != symbol.upper():

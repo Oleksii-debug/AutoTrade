@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.dotnet_package_rights import (
+    ROOT,
     package_rights_blockers,
     verify_restored_package_rights,
 )
@@ -23,10 +24,10 @@ def _write_project(root: Path) -> Path:
     project = root / "src" / "App" / "App.csproj"
     project.parent.mkdir(parents=True)
     project.write_text(
-        """<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n"
         "  <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>\n"
         "  <ItemGroup><PackageReference Include=\"Example.Package\" Version=\"1.2.3\" /></ItemGroup>\n"
-        "</Project>\n""".replace('"\n        "', ""),
+        "</Project>\n",
         encoding="utf-8",
     )
     (project.parent / "packages.lock.json").write_text(
@@ -83,19 +84,25 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
     packages = root / "packages"
     package = packages / "example.package" / "1.2.3"
     package.mkdir(parents=True)
-    (package / "example.package.1.2.3.nupkg.sha512").write_text(_HASH, encoding="ascii")
+    (package / "example.package.1.2.3.nupkg.sha512").write_text(
+        _HASH,
+        encoding="ascii",
+    )
     (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
     (package / "NOTICE.txt").write_text("required notice\n", encoding="utf-8")
     (package / "example.package.nuspec").write_text(
-        """<?xml version=\"1.0\"?>
-<package><metadata><id>Example.Package</id><version>1.2.3</version><license type=\"file\">LICENSE.txt</license></metadata></package>
-""",
+        "<?xml version=\"1.0\"?>\n"
+        "<package><metadata><id>Example.Package</id><version>1.2.3</version>"
+        "<license type=\"file\">LICENSE.txt</license></metadata></package>\n",
         encoding="utf-8",
     )
     return packages
 
 
 class DotnetPackageRightsTests(unittest.TestCase):
+    def test_repository_locked_graph_has_exact_rights_coverage(self):
+        self.assertEqual(package_rights_blockers(ROOT), [])
+
     def test_missing_rights_record_blocks_locked_package(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

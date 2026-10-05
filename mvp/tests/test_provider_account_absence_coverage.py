@@ -51,12 +51,10 @@ from mvp.autotrade_mvp.provider_selection import select_provider
 from mvp.tests.provider_qualification_test_support import (
     ExactQualificationProjectionHarness,
 )
-from mvp.tests.test_provider_account_origin_set import (
-    ProviderAccountOriginSetTests,
-)
 from mvp.tests.test_provider_account_page_chain import (
     ENDPOINT,
     SURFACE,
+    ProviderAccountPageChainTests,
     _absence_claims,
 )
 from mvp.tests.test_provider_route_reads import verified_read_capability
@@ -322,19 +320,21 @@ class ProviderAccountAbsenceCoverageTests(unittest.TestCase):
             acquisition_request_id="absence-coverage-acquisition-1",
             committed_at=NOW,
         )
-        origin_fixture = (
-            None,
+        page_chain_fixture = (
             journal,
-            origin,
+            capabilities,
             qualifications,
+            route,
+            origin,
             acquisition_authority,
             acquisition,
-            binding,
+            None,
         )
-        response = ProviderAccountOriginSetTests._direct_binding(
+        response = ProviderAccountPageChainTests._direct_response(
             self,
-            origin_fixture,
-            directory,
+            page_chain_fixture,
+            binding,
+            body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
             marker="absence-coverage-root",
         )
         observation = observe_provider_origin_json_response(

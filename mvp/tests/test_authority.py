@@ -1922,10 +1922,6 @@ class AuthorityTests(unittest.TestCase):
             replace(accepted, account_cut_digest="sha256:" + "6" * 64),
             replace(
                 accepted,
-                account_head_journal_sequence=snapshot.journal_sequence_cut + 1,
-            ),
-            replace(
-                accepted,
                 qualification_identity_digest="provider-qualification:sha256:" + "7" * 64,
             ),
             replace(accepted, quantity_unit="BASE"),

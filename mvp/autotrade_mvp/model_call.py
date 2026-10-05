@@ -681,8 +681,22 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         descriptors: tuple[ModelDescriptor, ...],
     ) -> PricingEvidenceSnapshot:
+        # Evidence callbacks are not authority over the caller's deterministic
+        # attempt identity or the route descriptor graph. Give the resolver
+        # detached, revalidated values so object.__setattr__ mutation of frozen
+        # dataclasses cannot rewrite the authoritative copies after attempt_id
+        # or routing identity has been established.
+        resolver_spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
+        resolver_descriptors = tuple(ModelDescriptor(**{
+            field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
+        }) for item in descriptors)
         try:
-            snapshot = self.pricing_evidence_resolver(spec, descriptors)
+            snapshot = self.pricing_evidence_resolver(
+                resolver_spec,
+                resolver_descriptors,
+            )
         except Exception as error:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
@@ -714,7 +728,7 @@ class DurableModelCallOrchestrator:
         )
         if as_of > now:
             raise ModelCallError("pricing evidence is from the future")
-        if now > valid_until:
+        if now >= valid_until:
             raise ModelCallError("pricing evidence has expired")
         expected_keys = {
             (item.provider_id, item.model_id, item.revision) for item in descriptors
@@ -1040,8 +1054,26 @@ class DurableModelCallOrchestrator:
         resolver: ObservationEvidenceResolver,
     ) -> ModelObservationEvidence:
         expected = self._observation_digest(observation, binding)
+        # The authenticator may inspect evidence inputs, but it must not be able
+        # to mutate the authoritative observation/binding graph retained by this
+        # attempt. Deep-copy JSON output and reseal all scalar dataclass fields.
+        resolver_observation_values = {
+            field.name: getattr(observation, field.name)
+            for field in fields(ModelCallObservation)
+        }
+        resolver_observation_values["output"] = json.loads(
+            canonical_json(resolver_observation_values["output"])
+        )
+        resolver_observation = ModelCallObservation(**resolver_observation_values)
+        resolver_binding = ModelCallBinding(**{
+            field.name: getattr(binding, field.name)
+            for field in fields(ModelCallBinding)
+        })
         try:
-            evidence = resolver(observation, binding)
+            evidence = resolver(
+                resolver_observation,
+                resolver_binding,
+            )
         except Exception as error:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
@@ -1818,8 +1850,14 @@ class DurableModelCallOrchestrator:
         The caller must provide the existing canonical host/recovery fence. This
         method does not invent a second ownership authority.
         """
-        if not isinstance(spec, ModelCallSpec):
+        if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        # Fence callbacks may capture caller-owned objects in closures. Freeze
+        # recovery identity before invoking the fence so it cannot redirect the
+        # reservation lookup by mutating a frozen ModelCallSpec.
+        spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
         recovery_fence()

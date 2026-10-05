@@ -113,9 +113,9 @@ class JournalBackedHostCommandStore:
     @staticmethod
     def _required_text(command: Mapping[str, object], field: str) -> str:
         value = command.get(field)
-        if not isinstance(value, str) or not value.strip():
+        if type(value) is not str or not str.strip(value):
             raise ValueError(f"{field} must be a non-empty string")
-        return value.strip()
+        return str.strip(value)
 
     @staticmethod
     def _command_result(value: Mapping[str, object]) -> CommandResult:

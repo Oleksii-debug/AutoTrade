@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -26,6 +26,7 @@ from .market_data import (
     _issue_book_stream_policy_binding,
     _issue_qualified_book_range_admission,
 )
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -66,14 +67,10 @@ def _text(value: object, *, name: str) -> str:
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise BinanceSpotAdapterError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise BinanceSpotAdapterError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise BinanceSpotAdapterError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise BinanceSpotAdapterError(f"{name} must be a bounded exact decimal") from error
     if positive and result <= 0:
         raise BinanceSpotAdapterError(f"{name} must be positive")
     return result

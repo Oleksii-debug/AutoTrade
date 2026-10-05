@@ -1315,6 +1315,14 @@ _PRICE_SEMANTICS_METADATA_KNOWN_BY = InstrumentRegistry._metadata_known_by
 _PRICE_SEMANTICS_METADATA_KNOWN_BY_CODE = InstrumentRegistry._metadata_known_by.__code__
 _PRICE_SEMANTICS_VALIDATE_PRICE = InstrumentVersion.validate_price
 _PRICE_SEMANTICS_VALIDATE_PRICE_CODE = InstrumentVersion.validate_price.__code__
+_PRICE_SEMANTICS_DECIMAL = _decimal
+_PRICE_SEMANTICS_DECIMAL_CODE = _decimal.__code__
+_PRICE_SEMANTICS_EXACT_MULTIPLE = _is_exact_multiple
+_PRICE_SEMANTICS_EXACT_MULTIPLE_CODE = _is_exact_multiple.__code__
+_PRICE_SEMANTICS_PARSE_DECIMAL = parse_bounded_exact_decimal
+_PRICE_SEMANTICS_PARSE_DECIMAL_CODE = parse_bounded_exact_decimal.__code__
+_PRICE_SEMANTICS_IS_EXACT_MULTIPLE = is_exact_decimal_multiple
+_PRICE_SEMANTICS_IS_EXACT_MULTIPLE_CODE = is_exact_decimal_multiple.__code__
 _PRICE_SEMANTICS_METADATA_BINDING = InstrumentVersion.metadata_evidence_binding
 _PRICE_SEMANTICS_METADATA_BINDING_CODE = InstrumentVersion.metadata_evidence_binding.__code__
 _PRICE_SEMANTICS_VERSIONS_FOR = _registry_versions_for
@@ -1373,6 +1381,14 @@ def authenticated_price_semantics_digest(
         is not _PRICE_SEMANTICS_METADATA_KNOWN_BY_CODE
         or InstrumentVersion.validate_price is not _PRICE_SEMANTICS_VALIDATE_PRICE
         or InstrumentVersion.validate_price.__code__ is not _PRICE_SEMANTICS_VALIDATE_PRICE_CODE
+        or _decimal is not _PRICE_SEMANTICS_DECIMAL
+        or _decimal.__code__ is not _PRICE_SEMANTICS_DECIMAL_CODE
+        or _is_exact_multiple is not _PRICE_SEMANTICS_EXACT_MULTIPLE
+        or _is_exact_multiple.__code__ is not _PRICE_SEMANTICS_EXACT_MULTIPLE_CODE
+        or parse_bounded_exact_decimal is not _PRICE_SEMANTICS_PARSE_DECIMAL
+        or parse_bounded_exact_decimal.__code__ is not _PRICE_SEMANTICS_PARSE_DECIMAL_CODE
+        or is_exact_decimal_multiple is not _PRICE_SEMANTICS_IS_EXACT_MULTIPLE
+        or is_exact_decimal_multiple.__code__ is not _PRICE_SEMANTICS_IS_EXACT_MULTIPLE_CODE
         or InstrumentVersion.metadata_evidence_binding
         is not _PRICE_SEMANTICS_METADATA_BINDING
         or InstrumentVersion.metadata_evidence_binding.__code__

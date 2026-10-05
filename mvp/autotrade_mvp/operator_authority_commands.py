@@ -2,9 +2,9 @@
 
 The retained legacy module remains byte-identical for pre-existing actions. The
 CONFIRM_INTENT implementation is retained separately and this final shim adds
-one terminal invariant: a durable AuthorityConfirmationAdded is successful host
-proof only when the same pending intent was durably claimed by the exact
-accepted confirmation id and authenticated actor.
+terminal invariants that are independently reconstructable from durable journal
+chronology: exact pending claim, accepted authority successor, and the bound
+RiskPolicy activation episode immediately before confirmation.
 """
 
 from __future__ import annotations
@@ -13,8 +13,15 @@ from typing import Mapping
 
 from . import operator_authority_commands_confirm_impl as _confirm_impl
 from . import operator_authority_commands_legacy as _legacy
+from .pending_intent_financial_binding import (
+    DurablePendingIntentFinancialBindingRegistry,
+)
 from .pending_intents import DurablePendingIntentRegistry, PendingIntentError
 from .persistence import JournalStore
+from .risk_policy_authority import (
+    DurableRiskPolicyRegistry,
+    RiskPolicyScope,
+)
 
 
 OperatorAuthorityConflict = _confirm_impl.OperatorAuthorityConflict
@@ -22,12 +29,6 @@ AuthorityExecutionResult = _confirm_impl.AuthorityExecutionResult
 authenticated_host_actor_scope = _confirm_impl.authenticated_host_actor_scope
 
 
-# Retain installed authority callables once. The CONFIRM implementation resolves
-# its private _resolved_confirmation global at call time, so merely assigning a
-# hardened resolver into that module is not sufficient: a late rebind could
-# otherwise remove pending-claim proof. The exported Host callables below are
-# built from closures whose authority tuple is not present in their public
-# signature and therefore cannot be supplied or replaced by a caller.
 _base_resolved_confirmation = _confirm_impl._resolved_confirmation
 _BASE_EXECUTE_OPERATOR_AUTHORITY_ACTION = (
     _confirm_impl.execute_operator_authority_action
@@ -43,13 +44,27 @@ _BASE_CANONICAL_OPERATOR_PAYLOAD = _confirm_impl.canonical_operator_payload
 _CANONICAL_HOST_ACTION = _confirm_impl.canonical_host_action
 _PENDING_INTENT_REGISTRY = DurablePendingIntentRegistry
 _PENDING_INTENT_READ = DurablePendingIntentRegistry._read
+_PENDING_INTENT_EVENTS = DurablePendingIntentRegistry._events
+_BINDING_REGISTRY = DurablePendingIntentFinancialBindingRegistry
+_BINDING_LOAD = DurablePendingIntentFinancialBindingRegistry._load
+_RISK_REGISTRY = DurableRiskPolicyRegistry
+_RISK_RESOLVE = DurableRiskPolicyRegistry.resolve_current
+_RISK_SCOPE = RiskPolicyScope
+_JOURNAL_LOAD_EVENTS = JournalStore.load_events
 _CONFIRM_INTENT = _confirm_impl.CONFIRM_INTENT
 
 
 def _make_resolved_confirmation(
     base_resolved,
-    registry_type,
+    pending_registry_type,
     pending_read,
+    pending_events,
+    binding_registry_type,
+    binding_load,
+    risk_registry_type,
+    risk_resolve,
+    risk_scope_type,
+    journal_load_events,
     conflict_type,
 ):
     def resolved_confirmation(
@@ -63,7 +78,8 @@ def _make_resolved_confirmation(
         confirmation_id = payload.get("confirmation_id")
         actor_id = payload.get("actor_id")
         try:
-            pending, claim = pending_read(registry_type(journal), pending_id)
+            pending_registry = pending_registry_type(journal)
+            pending, claim = pending_read(pending_registry, pending_id)
         except (TypeError, ValueError, PendingIntentError) as error:
             raise conflict_type(
                 "CONFIRM_INTENT pending claim proof is unavailable"
@@ -80,6 +96,90 @@ def _make_resolved_confirmation(
             raise conflict_type(
                 "CONFIRM_INTENT durable authority event lacks exact pending claim proof"
             )
+
+        # Reconstruct chronology independently of the mutable implementation
+        # module. A claim written after a confirmation is not causation, and an
+        # authority event later than accepted_version+1 proves intervening
+        # authority state rather than the accepted command's exact successor.
+        try:
+            pending_history = pending_events(pending_registry, pending_id)
+            claim_events = [
+                event
+                for event in pending_history
+                if event.get("event_type")
+                == "PendingFinancialIntentConfirmationClaimed"
+                and event.get("payload") == claim
+            ]
+            authority_history = journal_load_events(
+                journal,
+                "authority_state",
+                "canonical",
+            )
+            confirmation_events = [
+                event
+                for event in authority_history
+                if event.get("event_type") == "AuthorityConfirmationAdded"
+                and type(event.get("payload")) is dict
+                and event["payload"].get("confirmation_id") == confirmation_id
+            ]
+            if len(claim_events) != 1 or len(confirmation_events) != 1:
+                raise conflict_type(
+                    "CONFIRM_INTENT durable causal events are missing or ambiguous"
+                )
+            claim_sequence = claim_events[0].get("journal_sequence")
+            confirmation_event = confirmation_events[0]
+            confirmation_sequence = confirmation_event.get("journal_sequence")
+            confirmation_version = confirmation_event.get("aggregate_version")
+            raw_expected_version = payload.get("expected_authority_version")
+            if (
+                type(claim_sequence) is not int
+                or claim_sequence < 1
+                or type(confirmation_sequence) is not int
+                or confirmation_sequence < 2
+                or claim_sequence >= confirmation_sequence
+                or type(confirmation_version) is not int
+                or type(raw_expected_version) is not str
+                or not raw_expected_version.isdigit()
+                or confirmation_version != int(raw_expected_version) + 1
+            ):
+                raise conflict_type(
+                    "CONFIRM_INTENT durable chronology is outside accepted authority cut"
+                )
+
+            binding_registry = binding_registry_type(journal)
+            binding = binding_load(binding_registry, pending_id)
+            raw_scope = binding.risk_policy_scope
+            if type(raw_scope) is not dict:
+                raise conflict_type(
+                    "CONFIRM_INTENT durable risk policy scope is malformed"
+                )
+            scope = risk_scope_type(**dict(raw_scope))
+            immediate_predecessor_policy = risk_resolve(
+                risk_registry_type(journal),
+                scope,
+                journal_sequence_cut=confirmation_sequence - 1,
+            )
+            if (
+                immediate_predecessor_policy.registration_event_id
+                != binding.risk_policy_registration_event_id
+                or immediate_predecessor_policy.activation_event_id
+                != binding.risk_policy_activation_event_id
+                or immediate_predecessor_policy.identity.policy_id
+                != binding.risk_policy_id
+                or immediate_predecessor_policy.identity.version
+                != binding.risk_policy_version
+                or immediate_predecessor_policy.identity.content_digest
+                != binding.risk_policy_content_digest
+            ):
+                raise conflict_type(
+                    "CONFIRM_INTENT bound RiskPolicy episode was not active immediately before confirmation"
+                )
+        except conflict_type:
+            raise
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise conflict_type(
+                "CONFIRM_INTENT durable causal chronology cannot be reconstructed"
+            ) from error
         return result
 
     return resolved_confirmation
@@ -89,12 +189,16 @@ _resolved_confirmation = _make_resolved_confirmation(
     _base_resolved_confirmation,
     _PENDING_INTENT_REGISTRY,
     _PENDING_INTENT_READ,
+    _PENDING_INTENT_EVENTS,
+    _BINDING_REGISTRY,
+    _BINDING_LOAD,
+    _RISK_REGISTRY,
+    _RISK_RESOLVE,
+    _RISK_SCOPE,
+    _JOURNAL_LOAD_EVENTS,
     OperatorAuthorityConflict,
 )
 
-# Keep direct callers of the retained implementation hardened too. The Host
-# exports below independently retain _resolved_confirmation, so a later rebind
-# of this implementation-module name cannot weaken the durable Host path.
 _confirm_impl._resolved_confirmation = _resolved_confirmation
 
 canonical_operator_payload = _BASE_CANONICAL_OPERATOR_PAYLOAD

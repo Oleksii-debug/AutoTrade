@@ -2654,13 +2654,117 @@ def allocate_evidence_bound_objective_targets(
     cannot be compared against a return rate from a different time interval.
     """
 
-    def snapshot_mapping(value, *, name: str):
-        if not isinstance(value, Mapping):
-            raise TypeError(f"{name} must be a mapping")
-        snapshot = dict(value)
-        for key in dict.keys(snapshot):
-            if type(key) is not str:
-                raise TypeError(f"{name} keys must be exact built-in strings")
+    module_namespace = globals()
+    raw_dict_getitem = dict.__getitem__
+    raw_getattribute = object.__getattribute__
+    builtin_dict = dict
+    builtin_tuple = tuple
+    builtin_type = type
+    builtin_str = str
+    builtin_isinstance = isinstance
+    builtin_type_error = TypeError
+    builtin_value_error = ValueError
+    mapping_type = Mapping
+
+    trust_callables = (
+        ("_text", _text, raw_getattribute(_text, "__code__")),
+        ("_instant", _instant, raw_getattribute(_instant, "__code__")),
+        (
+            "_resolve_allocation_evidence",
+            _resolve_allocation_evidence,
+            raw_getattribute(_resolve_allocation_evidence, "__code__"),
+        ),
+        (
+            "_candidate_evidence_matches",
+            _candidate_evidence_matches,
+            raw_getattribute(_candidate_evidence_matches, "__code__"),
+        ),
+        (
+            "_payload_text",
+            _payload_text,
+            raw_getattribute(_payload_text, "__code__"),
+        ),
+        (
+            "_payload_decimal",
+            _payload_decimal,
+            raw_getattribute(_payload_decimal, "__code__"),
+        ),
+        (
+            "_payload_nonnegative_int",
+            _payload_nonnegative_int,
+            raw_getattribute(_payload_nonnegative_int, "__code__"),
+        ),
+        ("_decimal", _decimal, raw_getattribute(_decimal, "__code__")),
+        (
+            "normalize_allocation_valuation",
+            normalize_allocation_valuation,
+            raw_getattribute(normalize_allocation_valuation, "__code__"),
+        ),
+        (
+            "_allocation_payload_snapshot",
+            _allocation_payload_snapshot,
+            raw_getattribute(_allocation_payload_snapshot, "__code__"),
+        ),
+        (
+            "_exact_fx_monetary_conversion",
+            _exact_fx_monetary_conversion,
+            raw_getattribute(_exact_fx_monetary_conversion, "__code__"),
+        ),
+        ("_exact_add", _exact_add, raw_getattribute(_exact_add, "__code__")),
+        ("_exact_sum", _exact_sum, raw_getattribute(_exact_sum, "__code__")),
+        (
+            "allocate_objective_targets",
+            allocate_objective_targets,
+            raw_getattribute(allocate_objective_targets, "__code__"),
+        ),
+        (
+            "_allocation_policy_digest",
+            _allocation_policy_digest,
+            raw_getattribute(_allocation_policy_digest, "__code__"),
+        ),
+        (
+            "_objective_search_config_digest",
+            _objective_search_config_digest,
+            raw_getattribute(_objective_search_config_digest, "__code__"),
+        ),
+        (
+            "_allocation_decision_digest",
+            _allocation_decision_digest,
+            raw_getattribute(_allocation_decision_digest, "__code__"),
+        ),
+        (
+            "_normalize_current_scope_mapping",
+            _normalize_current_scope_mapping,
+            raw_getattribute(_normalize_current_scope_mapping, "__code__"),
+        ),
+    )
+    trust_types = (
+        ("AllocationPolicy", AllocationPolicy),
+        ("ObjectiveCandidate", ObjectiveCandidate),
+        ("AllocationCandidate", AllocationCandidate),
+        (
+            "EvidenceBoundObjectiveAllocationResult",
+            EvidenceBoundObjectiveAllocationResult,
+        ),
+    )
+
+    def snapshot_mapping(
+        value,
+        *,
+        name: str,
+        _mapping_type=mapping_type,
+        _dict_type=builtin_dict,
+        _type=builtin_type,
+        _str_type=builtin_str,
+        _isinstance=builtin_isinstance,
+        _type_error=builtin_type_error,
+    ):
+        if not _isinstance(value, _mapping_type):
+            raise _type_error(f"{name} must be a mapping")
+        snapshot = _dict_type(value)
+        for key in _dict_type.keys(snapshot):
+            if _type(key) is not _str_type:
+                raise _type_error(f"{name} keys must be exact built-in strings")
         return snapshot
 
     # Materialize every caller-owned container before validating any evidence.
@@ -2682,15 +2786,58 @@ def allocate_evidence_bound_objective_targets(
         resolved_evidence,
         name="resolved_evidence",
     )
-    stress_source_evidence = tuple(stress_source_evidence)
-    materialized = tuple(candidates)
+    stress_source_evidence = builtin_tuple(stress_source_evidence)
+    materialized = builtin_tuple(candidates)
 
-    if type(policy) is not AllocationPolicy:
+    # Snapshotting caller-owned mappings/sequences is intentionally allowed to
+    # execute their protocol callbacks. Those callbacks must not be able to
+    # retarget the financial/provenance helpers that run after the snapshot.
+    # Built-ins used below are resolved through Python's module/builtins lookup.
+    # A snapshot callback must not be able to create a module shadow that gains
+    # execution after this trust checkpoint.
+    for builtin_name in (
+        "any",
+        "dict",
+        "isinstance",
+        "iter",
+        "len",
+        "next",
+        "set",
+        "sorted",
+        "str",
+        "tuple",
+        "type",
+        "TypeError",
+        "ValueError",
+    ):
+        if builtin_name in module_namespace:
+            raise builtin_value_error(
+                "allocation proposal builtin authority changed during input snapshot: "
+                + builtin_name
+            )
+
+    for binding_name, authority, authority_code in trust_callables:
+        if (
+            raw_dict_getitem(module_namespace, binding_name) is not authority
+            or raw_getattribute(authority, "__code__") is not authority_code
+        ):
+            raise builtin_value_error(
+                "allocation proposal trust helper changed during input snapshot: "
+                + binding_name
+            )
+    for binding_name, authority in trust_types:
+        if raw_dict_getitem(module_namespace, binding_name) is not authority:
+            raise builtin_value_error(
+                "allocation proposal trust type changed during input snapshot: "
+                + binding_name
+            )
+
+    if builtin_type(policy) is not AllocationPolicy:
         raise TypeError("policy must be exact AllocationPolicy")
     for item in materialized:
-        if type(item) is not ObjectiveCandidate:
+        if builtin_type(item) is not ObjectiveCandidate:
             raise TypeError("all candidates must be exact ObjectiveCandidate values")
-        if type(item.candidate) is not AllocationCandidate:
+        if builtin_type(item.candidate) is not AllocationCandidate:
             raise TypeError(
                 "objective candidate must contain exact AllocationCandidate"
             )
@@ -2707,10 +2854,6 @@ def allocate_evidence_bound_objective_targets(
         decision_time,
         name="allocation decision_time",
     ).isoformat().replace("+00:00", "Z")
-    if not isinstance(resolved_evidence, Mapping):
-        raise TypeError("resolved_evidence must be a mapping")
-
-    materialized = tuple(candidates)
     symbols = tuple(item.candidate.symbol for item in materialized)
     if len(symbols) != len(set(symbols)):
         raise ValueError("objective candidate symbols must be unique")

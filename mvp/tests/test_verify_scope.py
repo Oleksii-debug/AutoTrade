@@ -89,6 +89,7 @@ class VerifyScopeTests(unittest.TestCase):
             "docs/qualification/recovery/WP59_PROTOCOL_EVIDENCE.md",
             "mvp/autotrade_mvp/recovery_qualification.py",
             "mvp/autotrade_mvp/qualification_attestation.py",
+            "mvp/autotrade_mvp/qualification_trust_policy.json",
             "mvp/tests/test_recovery_qualification.py",
             "mvp/tests/test_verify_scope.py",
             "research/autotrade_research/artifacts/**",

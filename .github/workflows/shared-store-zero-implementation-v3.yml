@@ -1,0 +1,127 @@
+name: shared-store-zero-implementation-v3
+
+on:
+  push:
+    branches:
+      - fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+    paths:
+      - .github/workflows/shared-store-zero-implementation-v3.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shared-store-zero-implementation-v3
+  cancel-in-progress: true
+
+jobs:
+  implement-and-prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Apply bounded ZERO authority patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          checkpoint_path = Path('mvp/autotrade_mvp/simulation_runtime_checkpoint.py')
+          checkpoint = checkpoint_path.read_text(encoding='utf-8')
+
+          helper = '''\n\ndef _autonomous_publication_owned(\n    item: Mapping[str, object],\n    *,\n    run_id: str,\n) -> bool:\n    payload = item.get("payload")\n    if type(payload) is not dict:\n        raise AutonomousRuntimeCheckpointError(\n            "pending outbox payload is not a canonical event envelope"\n        )\n    aggregate_type = payload.get("aggregate_type")\n    aggregate_id = payload.get("aggregate_id")\n    if aggregate_type == "canonical_autonomous_simulation":\n        return aggregate_id == run_id\n    return (\n        aggregate_type in _COMPONENT_AGGREGATE_TYPES\n        and payload.get("environment") == "SIMULATION"\n        and payload.get("host_id") == "local-simulation"\n    )\n\n\ndef _autonomous_owned_pending_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> tuple[dict[str, object], ...]:\n    pending = JournalStore.pending_outbox(store, limit=1000)\n    if (\n        len(pending) == 1000\n        and JournalStore.pending_outbox_count(store) > len(pending)\n    ):\n        raise AutonomousRuntimeCheckpointError(\n            "runtime checkpoint publication ownership scan exceeded bounded outbox window"\n        )\n    return tuple(\n        item\n        for item in pending\n        if _autonomous_publication_owned(item, run_id=run_id)\n    )\n\n\ndef deliver_autonomous_owned_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> None:\n    """Acknowledge only publications owned by the closed ZERO authority scope."""\n    for item in _autonomous_owned_pending_publications(store, run_id=run_id):\n        JournalStore.mark_outbox_delivered(\n            store,\n            item["outbox_id"],\n            expected_envelope_hash=item["envelope_hash"],\n        )\n'''
+          marker = '\n\ndef _stable_runtime_components(\n'
+          assert checkpoint.count(marker) == 1
+          checkpoint = checkpoint.replace(marker, helper + marker, 1)
+
+          old_pending = '''    before = JournalStore.whole_store_state_cut(store)\n\n    pending = JournalStore.pending_outbox_count(store)\n    if pending and not (\n        completion_preimage is not None\n        and pending == 1\n        and [item["event_id"] for item in JournalStore.pending_outbox(store, limit=2)]\n        == [completion_preimage[0]]\n    ):\n        raise AutonomousRuntimeCheckpointError(\n            "runtime checkpoint requires a fully delivered outbox cut"\n        )\n'''
+          new_pending = '''    before = JournalStore.whole_store_state_cut(store)\n\n    owned_pending = _autonomous_owned_pending_publications(store, run_id=run_id)\n    if owned_pending:\n        if completion_preimage is None:\n            raise AutonomousRuntimeCheckpointError(\n                "runtime checkpoint requires all ZERO-owned publications delivered"\n            )\n        terminal_id, _receipt_prior_cut = completion_preimage\n        if (\n            len(owned_pending) != 1\n            or owned_pending[0].get("event_id") != terminal_id\n        ):\n            raise AutonomousRuntimeCheckpointError(\n                "runtime checkpoint completion preimage has a foreign ZERO publication"\n            )\n'''
+          assert checkpoint.count(old_pending) == 1
+          checkpoint = checkpoint.replace(old_pending, new_pending, 1)
+
+          old_capture = '''    captured_cut = before\n    if completion_preimage is not None:\n        terminal_id, captured_cut = completion_preimage\n        if not loop_events or loop_events[-1]["event_id"] != terminal_id:\n            raise AutonomousRuntimeCheckpointError("completion checkpoint is not the terminal loop event")\n        loop_events = loop_events[:-1]\n'''
+          new_capture = '''    if completion_preimage is not None:\n        terminal_id, _receipt_prior_cut = completion_preimage\n        if not loop_events or loop_events[-1]["event_id"] != terminal_id:\n            raise AutonomousRuntimeCheckpointError("completion checkpoint is not the terminal loop event")\n        loop_events = loop_events[:-1]\n'''
+          assert checkpoint.count(old_capture) == 1
+          checkpoint = checkpoint.replace(old_capture, new_capture, 1)
+
+          old_common = '''    common = {\n        "cut": captured_cut,\n        "journal_store_identity": store_identity,\n'''
+          new_common = '''    scoped_cut = {\n        "loop_events": _digest(loop_events),\n        "authority_events": {\n            aggregate_type: _digest(events)\n            for aggregate_type, events in sorted(authority_events.items())\n        },\n        "owned_pending_publications": [\n            {\n                "event_id": item["event_id"],\n                "topic": item["topic"],\n                "envelope_hash": item["envelope_hash"],\n            }\n            for item in owned_pending\n            if completion_preimage is None\n        ],\n    }\n    common = {\n        "cut": scoped_cut,\n        "journal_store_identity": store_identity,\n'''
+          assert checkpoint.count(old_common) == 1
+          checkpoint = checkpoint.replace(old_common, new_common, 1)
+
+          old_cut = '''            "kind": "autonomous-runtime-common-cut-v1",\n            "cut": captured_cut,\n            "components": components,\n'''
+          new_cut = '''            "kind": "autonomous-runtime-owned-cut-v2",\n            "cut": scoped_cut,\n            "components": components,\n'''
+          assert checkpoint.count(old_cut) == 1
+          checkpoint = checkpoint.replace(old_cut, new_cut, 1)
+
+          old_repair = '''    prior_cut = receipt["prior_cut"]\n    expected = {"journal_sequence": prior_cut["journal_sequence"] + 1,\n                "counts": dict(prior_cut["counts"])}\n    for name in ("events", "outbox", "command_dedupe"):\n        expected["counts"][name] += 1\n    if (terminal["journal_sequence"] != expected["journal_sequence"]\n            or JournalStore.whole_store_state_cut(store) != expected):\n        raise AutonomousRuntimeCheckpointError("completion checkpoint does not match current authorities")\n'''
+          new_repair = '''    prior_cut = receipt["prior_cut"]\n    expected_terminal_sequence = prior_cut["journal_sequence"] + 1\n    if terminal["journal_sequence"] != expected_terminal_sequence:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal event is not the authorized next journal event"\n        )\n    terminal_publication = JournalStore.outbox_delivery_state(\n        store,\n        terminal["event_id"],\n        topic="autotrade.simulation.events",\n    )\n'''
+          assert checkpoint.count(old_repair) == 1
+          checkpoint = checkpoint.replace(old_repair, new_repair, 1)
+
+          old_delivery = '''    for item in JournalStore.pending_outbox(store, limit=2):\n        if item["event_id"] != terminal["event_id"]:\n            raise AutonomousRuntimeCheckpointError("completion checkpoint has foreign pending publication")\n        JournalStore.mark_outbox_delivered(\n            store, item["outbox_id"], expected_envelope_hash=item["envelope_hash"],\n            expected_journal_sequence=expected["journal_sequence"],\n            expected_whole_store_counts=expected["counts"],\n        )\n'''
+          new_delivery = '''    if not terminal_publication["delivered"]:\n        JournalStore.mark_outbox_delivered(\n            store,\n            terminal_publication["outbox_id"],\n            expected_envelope_hash=terminal_publication["envelope_hash"],\n        )\n        terminal_publication = JournalStore.outbox_delivery_state(\n            store,\n            terminal["event_id"],\n            topic="autotrade.simulation.events",\n        )\n    if not terminal_publication["delivered"]:\n        raise AutonomousRuntimeCheckpointError(\n            "completion checkpoint terminal publication remains undelivered"\n        )\n'''
+          assert checkpoint.count(old_delivery) == 1
+          checkpoint = checkpoint.replace(old_delivery, new_delivery, 1)
+          checkpoint_path.write_text(checkpoint, encoding='utf-8')
+
+          session_path = Path('mvp/autotrade_mvp/simulation_session.py')
+          session = session_path.read_text(encoding='utf-8')
+          loop_marker = '\n\ndef _loop_event(\n'
+          assert session.count(loop_marker) == 1
+          wrapper = '''\n\ndef _deliver_autonomous_owned_publications(\n    store: JournalStore,\n    *,\n    run_id: str,\n) -> None:\n    from .simulation_runtime_checkpoint import deliver_autonomous_owned_publications\n\n    deliver_autonomous_owned_publications(store, run_id=run_id)\n'''
+          session = session.replace(loop_marker, wrapper + loop_marker, 1)
+          lines = session.splitlines(keepends=True)
+          rewritten = []
+          index = 0
+          drains = 0
+          while index < len(lines):
+              if lines[index].strip() == 'for item in store.pending_outbox(limit=1000):':
+                  indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+                  expected = [
+                      'store.mark_outbox_delivered(',
+                      'item["outbox_id"],',
+                      'expected_envelope_hash=item["envelope_hash"],',
+                      ')',
+                  ]
+                  actual = [lines[index + offset].strip() for offset in range(1, 5)]
+                  assert actual == expected, actual
+                  rewritten.append(indent + '_deliver_autonomous_owned_publications(store, run_id=run_id)\n')
+                  index += 5
+                  drains += 1
+                  continue
+              rewritten.append(lines[index])
+              index += 1
+          assert drains == 4, f'expected four global outbox drains, found {drains}'
+          session = ''.join(rewritten)
+          session = session.replace(
+              'Deliver existing publications before freezing the completion preimage.',
+              'Deliver existing ZERO-owned publications before freezing the completion preimage.',
+          )
+          session = session.replace(
+              'every publication in this terminal cut',
+              'every ZERO-owned publication in this terminal cut',
+          )
+          session_path.write_text(session, encoding='utf-8')
+      - name: Install test dependencies
+        run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Prove shared-store checkpoint and outbox ownership
+        run: python -m unittest mvp.tests.test_shared_store_zero_checkpoint_outbox -v
+      - name: Prove checkpoint regressions
+        run: python -m unittest discover -s mvp/tests -p 'test_*checkpoint*.py' -v
+      - name: Prove simulation session regressions
+        run: python -m unittest discover -s mvp/tests -p 'test_*simulation_session*.py' -v
+      - name: Commit implementation and remove temporary worker
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/shared-store-zero-implementation-v3.yml
+          git add mvp/autotrade_mvp/simulation_runtime_checkpoint.py mvp/autotrade_mvp/simulation_session.py
+          git commit -m 'Fix: scope ZERO checkpoint and outbox ownership'
+          git push origin HEAD:fix/shared-store-zero-checkpoint-outbox-20261005-sol56

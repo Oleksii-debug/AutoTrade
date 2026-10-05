@@ -30,6 +30,7 @@ from .instruments import (
     AuthenticatedPriceSemanticsEvidence,
     InstrumentRegistry,
     InstrumentRegistryError,
+    InstrumentVersion,
     authenticated_price_semantics_evidence,
 )
 from .provider_core import ProviderCoreError
@@ -44,6 +45,7 @@ def _install_bybit_risk_price_semantics_composer():
     snapshot_type = AuthoritativeRiskSnapshot
     prepared_type = BybitPreparedSubmission
     registry_type = InstrumentRegistry
+    version_type = InstrumentVersion
     artifact_store_type = ArtifactStore
     evidence_type = AuthenticatedPriceSemanticsEvidence
 
@@ -61,6 +63,12 @@ def _install_bybit_risk_price_semantics_composer():
     prepared_projection_code = prepared_projection.__code__
     price_composer = authenticated_price_semantics_evidence
     price_composer_code = price_composer.__code__
+    instrument_at_known = registry_type.at_known
+    instrument_at_known_code = instrument_at_known.__code__
+    validate_quantity = version_type.validate_quantity
+    validate_quantity_code = validate_quantity.__code__
+    metadata_binding = version_type.metadata_evidence_binding
+    metadata_binding_code = metadata_binding.__code__
 
     def require_executable_authority() -> None:
         if (
@@ -68,6 +76,7 @@ def _install_bybit_risk_price_semantics_composer():
             or AuthoritativeRiskSnapshot is not snapshot_type
             or BybitPreparedSubmission is not prepared_type
             or InstrumentRegistry is not registry_type
+            or InstrumentVersion is not version_type
             or ArtifactStore is not artifact_store_type
             or AuthenticatedPriceSemanticsEvidence is not evidence_type
             or replace is not replace_value
@@ -85,6 +94,12 @@ def _install_bybit_risk_price_semantics_composer():
             or authenticated_price_semantics_evidence is not price_composer
             or authenticated_price_semantics_evidence.__code__
             is not price_composer_code
+            or registry_type.at_known is not instrument_at_known
+            or registry_type.at_known.__code__ is not instrument_at_known_code
+            or version_type.validate_quantity is not validate_quantity
+            or version_type.validate_quantity.__code__ is not validate_quantity_code
+            or version_type.metadata_evidence_binding is not metadata_binding
+            or version_type.metadata_evidence_binding.__code__ is not metadata_binding_code
         ):
             raise BybitRiskPriceSemanticsError(
                 "Bybit risk price-semantics executable authority changed"
@@ -343,6 +358,45 @@ def _install_bybit_risk_price_semantics_composer():
         if body.get("symbol") != evidence.provider_symbol:
             raise BybitRiskPriceSemanticsError(
                 "prepared Bybit symbol differs from authenticated instrument metadata"
+            )
+
+        # Quantity is already part of the evaluated risk intent, so production
+        # composition must prove that exact value is valid under the same causal
+        # InstrumentVersion that authenticated the price semantics. Never round
+        # here: changing quantity after risk evaluation would require a fresh
+        # risk decision.
+        try:
+            quantity_version = instrument_at_known(
+                instrument_registry,
+                canonical_request.instrument_version.instrument_id,
+                point,
+                knowledge_cutoff=point,
+                artifact_store=artifact_store,
+            )
+            if type(quantity_version) is not version_type:
+                raise BybitRiskPriceSemanticsError(
+                    "quantity-grid lookup returned non-canonical instrument version"
+                )
+            if (
+                quantity_version.version
+                != canonical_request.instrument_version.version
+                or metadata_binding(quantity_version)
+                != evidence.instrument_metadata_binding
+            ):
+                raise BybitRiskPriceSemanticsError(
+                    "instrument authority changed during quantity-grid composition"
+                )
+            exact_quantity = validate_quantity(
+                quantity_version,
+                canonical_request.risk_intent.quantity,
+            )
+        except (InstrumentRegistryError, TypeError, ValueError) as error:
+            raise BybitRiskPriceSemanticsError(
+                "authenticated instrument quantity semantics cannot be composed"
+            ) from error
+        if exact_quantity != canonical_request.risk_intent.quantity:
+            raise BybitRiskPriceSemanticsError(
+                "quantity validation changed the already-risked quantity"
             )
 
         if (

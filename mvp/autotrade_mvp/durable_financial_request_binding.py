@@ -62,6 +62,18 @@ _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code
 _CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
 _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
 _BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_BINDING_PAYLOAD_BASE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "admission_id",
+        "binding_id",
+        "journal_store_identity_digest",
+        "material",
+    }
+)
+_BINDING_PAYLOAD_PRODUCTION_FIELDS = (
+    _BINDING_PAYLOAD_BASE_FIELDS | {"provider_request_origin"}
+)
 _BYBIT_TRIGGER_PROTECTION_KEYS = (
     "triggerDirection",
     "triggerPrice",
@@ -867,15 +879,13 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        expected_fields = {
-            "schema_version",
-            "admission_id",
-            "binding_id",
-            "journal_store_identity_digest",
-            "material",
-        }
+        payload_fields = frozenset(payload)
         if (
-            set(payload) != expected_fields
+            payload_fields
+            not in (
+                _BINDING_PAYLOAD_BASE_FIELDS,
+                _BINDING_PAYLOAD_PRODUCTION_FIELDS,
+            )
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")

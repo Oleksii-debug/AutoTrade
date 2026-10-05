@@ -1,0 +1,340 @@
+name: temp-zero-scope-alias-conflicts
+
+on:
+  push:
+    branches:
+      - test/shared-store-zero-foreign-backlog-20261005-v2-sol56
+    paths:
+      - .github/workflows/temp-zero-scope-alias-conflicts.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply guarded ownership hardening
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mvp/autotrade_mvp/simulation_runtime_checkpoint.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_helpers = '''def _payload_scope_value(
+              payload: Mapping[str, object],
+              key: str,
+          ) -> object | None:
+              """Resolve common durable scope layouts without guessing from unrelated fields."""
+
+              if key in payload:
+                  return payload.get(key)
+              scope = payload.get("scope")
+              if type(scope) is dict and key in scope:
+                  return scope.get(key)
+              identity = payload.get("identity")
+              if type(identity) is dict:
+                  identity_scope = identity.get("scope")
+                  if type(identity_scope) is dict and key in identity_scope:
+                      return identity_scope.get(key)
+              request = payload.get("request")
+              if type(request) is dict and key in request:
+                  return request.get(key)
+              return None
+
+
+          def _payload_provider_id(payload: Mapping[str, object]) -> object | None:
+              """Resolve the canonical provider id plus the durable submission `provider` alias."""
+
+              provider_id = _payload_scope_value(payload, "provider_id")
+              if provider_id is not None:
+                  return provider_id
+              provider = _payload_scope_value(payload, "provider")
+              return provider if type(provider) is str else None
+
+
+          def _component_environment(event: Mapping[str, object]) -> object | None:
+              payload = event.get("payload")
+              payload = payload if type(payload) is dict else {}
+              environment = event.get("environment")
+              return environment if environment is not None else _payload_scope_value(payload, "environment")
+
+
+          def _component_host_id(event: Mapping[str, object]) -> object | None:
+              payload = event.get("payload")
+              payload = payload if type(payload) is dict else {}
+              host_id = event.get("host_id")
+              return host_id if host_id is not None else _payload_scope_value(payload, "host_id")
+          '''
+          new_helpers = '''def _payload_scope_values(
+              payload: Mapping[str, object],
+              key: str,
+          ) -> tuple[object, ...]:
+              """Collect every explicit non-null scope marker across durable layouts.
+
+              Ownership is a security boundary: a locally matching marker must never hide
+              a contradictory marker in another supported envelope layout.
+              """
+
+              values: list[object] = []
+
+              def append(mapping: object) -> None:
+                  if type(mapping) is dict and key in mapping:
+                      value = mapping.get(key)
+                      if value is not None:
+                          values.append(value)
+
+              append(payload)
+              append(payload.get("scope"))
+              identity = payload.get("identity")
+              if type(identity) is dict:
+                  append(identity.get("scope"))
+              append(payload.get("request"))
+              return tuple(values)
+
+
+          def _payload_scope_value(
+              payload: Mapping[str, object],
+              key: str,
+          ) -> object | None:
+              """Resolve the first marker for legacy callers; authority checks inspect all."""
+
+              values = _payload_scope_values(payload, key)
+              return values[0] if values else None
+
+
+          def _payload_provider_ids(payload: Mapping[str, object]) -> tuple[object, ...]:
+              """Collect canonical provider ids plus the durable submission alias."""
+
+              return (
+                  *_payload_scope_values(payload, "provider_id"),
+                  *_payload_scope_values(payload, "provider"),
+              )
+
+
+          def _payload_provider_id(payload: Mapping[str, object]) -> object | None:
+              """Resolve one provider marker for compatibility; authority checks inspect all."""
+
+              providers = _payload_provider_ids(payload)
+              return providers[0] if providers else None
+
+
+          def _component_scope_values(
+              event: Mapping[str, object],
+              key: str,
+          ) -> tuple[object, ...]:
+              payload = event.get("payload")
+              payload = payload if type(payload) is dict else {}
+              values: list[object] = []
+              if key in event and event.get(key) is not None:
+                  values.append(event.get(key))
+              values.extend(_payload_scope_values(payload, key))
+              return tuple(values)
+
+
+          def _component_environment(event: Mapping[str, object]) -> object | None:
+              values = _component_scope_values(event, "environment")
+              return values[0] if values else None
+
+
+          def _component_host_id(event: Mapping[str, object]) -> object | None:
+              values = _component_scope_values(event, "host_id")
+              return values[0] if values else None
+          '''
+
+          old_foreign = '''def _component_event_definitively_foreign(
+              event: Mapping[str, object],
+              *,
+              financial_scope: Mapping[str, str] | None = None,
+          ) -> bool:
+              """Exclude only component facts that prove they belong outside ZERO.
+
+              Durable component schemas predate universal host/provider field names. A
+              missing marker therefore remains checkpoint authority (fail closed), while
+              explicit environment/account/provider/host conflicts are foreign. Both
+              product-owned simulation writers (`local-simulation` and `local-mvp`) are
+              accepted; production or other hosts remain excluded.
+              """
+
+              payload = event.get("payload")
+              payload = payload if type(payload) is dict else {}
+              environment = _component_environment(event)
+              if environment is not None and environment != "SIMULATION":
+                  return True
+
+              if environment is None:
+                  environments = payload.get("environments")
+                  if type(environments) in {list, tuple} and "SIMULATION" not in environments:
+                      return True
+
+              host_id = _component_host_id(event)
+              if host_id is not None and host_id not in _LOCAL_COMPONENT_HOST_IDS:
+                  return True
+
+              if financial_scope is not None:
+                  account_id = _payload_scope_value(payload, "account_id")
+                  if account_id is not None and account_id != financial_scope["account_id"]:
+                      return True
+                  provider_id = _payload_provider_id(payload)
+                  if provider_id is not None and provider_id != financial_scope["provider_id"]:
+                      return True
+              return False
+          '''
+          new_foreign = '''def _component_event_definitively_foreign(
+              event: Mapping[str, object],
+              *,
+              financial_scope: Mapping[str, str] | None = None,
+          ) -> bool:
+              """Exclude any component fact carrying an explicit foreign scope marker.
+
+              Durable schemas expose scope through several compatible layouts. Every
+              explicit marker is authoritative for conflict detection so a matching alias
+              cannot mask a contradictory account, provider, environment, or host value.
+              Missing markers remain checkpoint authority; positive publication ownership
+              is enforced separately.
+              """
+
+              payload = event.get("payload")
+              payload = payload if type(payload) is dict else {}
+              environments = _component_scope_values(event, "environment")
+              if any(value != "SIMULATION" for value in environments):
+                  return True
+
+              supported_environments = payload.get("environments")
+              if (
+                  type(supported_environments) in {list, tuple}
+                  and "SIMULATION" not in supported_environments
+              ):
+                  return True
+
+              hosts = _component_scope_values(event, "host_id")
+              if any(value not in _LOCAL_COMPONENT_HOST_IDS for value in hosts):
+                  return True
+
+              if financial_scope is not None:
+                  accounts = _payload_scope_values(payload, "account_id")
+                  if any(value != financial_scope["account_id"] for value in accounts):
+                      return True
+                  providers = _payload_provider_ids(payload)
+                  if any(value != financial_scope["provider_id"] for value in providers):
+                      return True
+              return False
+          '''
+
+          old_positive = '''def _component_event_has_positive_run_scope(
+              event: Mapping[str, object],
+              *,
+              financial_scope: Mapping[str, str],
+          ) -> bool:
+              """Require positive environment/account proof; optional provider must agree."""
+
+              if _component_event_definitively_foreign(
+                  event,
+                  financial_scope=financial_scope,
+              ):
+                  return False
+              payload = event.get("payload")
+              if type(payload) is not dict:
+                  return False
+
+              environment = _component_environment(event)
+              if environment is None:
+                  environments = payload.get("environments")
+                  if (
+                      type(environments) not in {list, tuple}
+                      or financial_scope["environment"] not in environments
+                  ):
+                      return False
+              elif environment != financial_scope["environment"]:
+                  return False
+
+              account_id = _payload_scope_value(payload, "account_id")
+              if account_id != financial_scope["account_id"]:
+                  return False
+              provider_id = _payload_provider_id(payload)
+              if provider_id is not None and provider_id != financial_scope["provider_id"]:
+                  return False
+              return True
+          '''
+          new_positive = '''def _component_event_has_positive_run_scope(
+              event: Mapping[str, object],
+              *,
+              financial_scope: Mapping[str, str],
+          ) -> bool:
+              """Require positive run scope with no contradictory durable alias."""
+
+              if _component_event_definitively_foreign(
+                  event,
+                  financial_scope=financial_scope,
+              ):
+                  return False
+              payload = event.get("payload")
+              if type(payload) is not dict:
+                  return False
+
+              environments = _component_scope_values(event, "environment")
+              if environments:
+                  if any(value != financial_scope["environment"] for value in environments):
+                      return False
+              else:
+                  supported_environments = payload.get("environments")
+                  if (
+                      type(supported_environments) not in {list, tuple}
+                      or financial_scope["environment"] not in supported_environments
+                  ):
+                      return False
+
+              accounts = _payload_scope_values(payload, "account_id")
+              if not accounts or any(
+                  value != financial_scope["account_id"] for value in accounts
+              ):
+                  return False
+              providers = _payload_provider_ids(payload)
+              if any(value != financial_scope["provider_id"] for value in providers):
+                  return False
+              return True
+          '''
+
+          replacements = (
+              (old_helpers, new_helpers, 'scope helper block'),
+              (old_foreign, new_foreign, 'foreign-scope predicate'),
+              (old_positive, new_positive, 'positive-scope predicate'),
+          )
+          for old, new, label in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one source match, found {count}')
+              text = text.replace(old, new)
+          path.write_text(text, encoding='utf-8')
+
+          test = Path('mvp/tests/test_zero_scope_alias_conflicts.py')
+          test.write_text('''"""Adversarial regressions for contradictory ZERO durable scope aliases."""\nfrom pathlib import Path\nfrom tempfile import TemporaryDirectory\nimport unittest\nfrom uuid import uuid4\n\nfrom mvp.autotrade_mvp.persistence import JournalStore, payload_digest\nfrom mvp.autotrade_mvp.simulation_runtime_checkpoint import (\n    _runtime_scope_snapshot,\n    deliver_autonomous_owned_publications,\n)\n\n_TIME = "2026-10-05T00:00:00Z"\n\n\ndef _event(*, aggregate_type, aggregate_id, event_type, payload=None, environment=None, host_id=None):\n    body = {} if payload is None else dict(payload)\n    event = {\n        "event_id": str(uuid4()),\n        "event_type": event_type,\n        "aggregate_type": aggregate_type,\n        "aggregate_id": aggregate_id,\n        "aggregate_version": "1",\n        "payload": body,\n        "payload_hash": payload_digest(body),\n        "committed_at": _TIME,\n    }\n    if environment is not None:\n        event["environment"] = environment\n    if host_id is not None:\n        event["host_id"] = host_id\n    return event\n\n\ndef _start(store, run_id):\n    event = _event(\n        aggregate_type="canonical_autonomous_simulation",\n        aggregate_id=run_id,\n        event_type="AutonomousSimulationStarted",\n        environment="SIMULATION",\n        host_id="local-simulation",\n        payload={\n            "protocol": {\n                "financial_scope": {\n                    "account_id": "zero-account",\n                    "provider_id": "SIMULATED",\n                    "environment": "SIMULATION",\n                }\n            }\n        },\n    )\n    store.append_event(event, outbox_topic="autotrade.simulation.events")\n    return event\n\n\nclass ZeroScopeAliasConflictTests(unittest.TestCase):\n    def _assert_foreign_publication_remains_pending(self, event, topic):\n        with TemporaryDirectory() as directory:\n            store = JournalStore(Path(directory) / "journal.sqlite3")\n            run_id = "alias-conflict-run"\n            _start(store, run_id)\n            store.append_event(event, outbox_topic=topic)\n            before, _, _ = _runtime_scope_snapshot(store, run_id=run_id)\n            deliver_autonomous_owned_publications(store, run_id=run_id)\n            state = store.outbox_delivery_state(event["event_id"])\n            self.assertIsNotNone(state)\n            self.assertFalse(state["delivered"])\n            after, _, authority = _runtime_scope_snapshot(store, run_id=run_id)\n            self.assertEqual(after, before)\n            self.assertNotIn(\n                event["event_id"],\n                {\n                    item["event_id"]\n                    for items in authority.values()\n                    for item in items\n                },\n            )\n\n    def test_local_envelope_cannot_mask_foreign_payload_environment(self):\n        event = _event(\n            aggregate_type="economic_book",\n            aggregate_id="environment-conflict",\n            event_type="EconomicTransactionBooked",\n            environment="SIMULATION",\n            host_id="local-simulation",\n            payload={\n                "environment": "PAPER",\n                "account_id": "zero-account",\n                "provider_id": "SIMULATED",\n            },\n        )\n        self._assert_foreign_publication_remains_pending(\n            event, "autotrade.economic.events"\n        )\n\n    def test_direct_account_cannot_mask_foreign_nested_account(self):\n        event = _event(\n            aggregate_type="economic_book",\n            aggregate_id="account-conflict",\n            event_type="EconomicTransactionBooked",\n            payload={\n                "environment": "SIMULATION",\n                "account_id": "zero-account",\n                "provider_id": "SIMULATED",\n                "scope": {"account_id": "other-account"},\n            },\n        )\n        self._assert_foreign_publication_remains_pending(\n            event, "autotrade.economic.events"\n        )\n\n    def test_provider_id_cannot_mask_conflicting_submission_provider_alias(self):\n        event = _event(\n            aggregate_type="submission_attempt",\n            aggregate_id="provider-conflict",\n            event_type="SubmissionPrepared",\n            environment="SIMULATION",\n            host_id="local-mvp",\n            payload={\n                "environment": "SIMULATION",\n                "account_id": "zero-account",\n                "provider_id": "SIMULATED",\n                "provider": "FOREIGN",\n            },\n        )\n        self._assert_foreign_publication_remains_pending(\n            event, "autotrade.submission.events"\n        )\n\n    def test_local_envelope_host_cannot_mask_foreign_payload_host(self):\n        event = _event(\n            aggregate_type="submission_attempt",\n            aggregate_id="host-conflict",\n            event_type="SubmissionPrepared",\n            environment="SIMULATION",\n            host_id="local-mvp",\n            payload={\n                "environment": "SIMULATION",\n                "host_id": "production-host",\n                "account_id": "zero-account",\n                "provider": "SIMULATED",\n            },\n        )\n        self._assert_foreign_publication_remains_pending(\n            event, "autotrade.submission.events"\n        )\n\n    def test_consistent_duplicate_scope_aliases_retain_positive_ownership(self):\n        with TemporaryDirectory() as directory:\n            store = JournalStore(Path(directory) / "journal.sqlite3")\n            run_id = "consistent-alias-run"\n            _start(store, run_id)\n            event = _event(\n                aggregate_type="economic_book",\n                aggregate_id="consistent-aliases",\n                event_type="EconomicTransactionBooked",\n                environment="SIMULATION",\n                host_id="local-simulation",\n                payload={\n                    "environment": "SIMULATION",\n                    "host_id": "local-simulation",\n                    "account_id": "zero-account",\n                    "provider_id": "SIMULATED",\n                    "scope": {\n                        "account_id": "zero-account",\n                        "provider_id": "SIMULATED",\n                        "environment": "SIMULATION",\n                    },\n                    "request": {\n                        "account_id": "zero-account",\n                        "provider_id": "SIMULATED",\n                        "environment": "SIMULATION",\n                    },\n                },\n            )\n            store.append_event(event, outbox_topic="autotrade.economic.events")\n            deliver_autonomous_owned_publications(store, run_id=run_id)\n            state = store.outbox_delivery_state(event["event_id"])\n            self.assertIsNotNone(state)\n            self.assertTrue(state["delivered"])\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+          PY
+      - name: Compile touched Python
+        shell: bash
+        run: |
+          python -m py_compile mvp/autotrade_mvp/simulation_runtime_checkpoint.py mvp/tests/test_zero_scope_alias_conflicts.py
+      - name: Run adversarial scope regressions
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m unittest discover -s mvp/tests -p 'test_zero_scope_alias_conflicts.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_zero_runtime_scope_ownership.py' -v
+      - name: Publish verified patch and remove harness
+        shell: bash
+        run: |
+          git config user.name 'Oleksii-debug'
+          git config user.email 'oleksiy.az.09@gmail.com'
+          git rm .github/workflows/temp-zero-scope-alias-conflicts.yml
+          git add mvp/autotrade_mvp/simulation_runtime_checkpoint.py mvp/tests/test_zero_scope_alias_conflicts.py
+          git commit -m 'Harden ZERO scope alias conflict authority'
+          git push origin HEAD:${GITHUB_REF_NAME}

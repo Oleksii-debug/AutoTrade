@@ -4,8 +4,13 @@ from datetime import datetime, timedelta, timezone, tzinfo
 import unittest
 
 from mvp.autotrade_mvp.durable_provider_qualification import (
+    DurableProviderQualificationRegistry,
     ProviderQualificationError,
     _point,
+)
+from mvp.autotrade_mvp.provider_domain import ProviderFinancialScope
+from mvp.autotrade_mvp.provider_qualification_current_scope import (
+    ProviderQualificationCurrentScope,
 )
 
 
@@ -24,6 +29,22 @@ class _ExecutableTimezone(tzinfo):
         raise AssertionError("caller timezone tzname executed")
 
 
+def _scope() -> ProviderQualificationCurrentScope:
+    return ProviderQualificationCurrentScope(
+        provider_scope=ProviderFinancialScope(
+            provider_id="BYBIT",
+            runtime_environment="PAPER",
+            provider_environment="TESTNET",
+            entity_policy_id="POLICY",
+        ),
+        product_family="SPOT",
+        adapter_source_git_sha="0" * 40,
+        packaged_artifact_digest="sha256:" + "0" * 64,
+        protocol_id="provider-q",
+        protocol_version="1",
+    )
+
+
 class ProviderQualificationTimeIngressTests(unittest.TestCase):
     def test_exact_datetime_with_executable_timezone_is_rejected_without_callback(self):
         hostile = _ExecutableTimezone()
@@ -33,6 +54,25 @@ class ProviderQualificationTimeIngressTests(unittest.TestCase):
             _point(value, name="at")
 
         self.assertEqual(hostile.calls, 0)
+
+    def test_public_current_rejects_executable_timezone_before_history_access(self):
+        hostile = _ExecutableTimezone()
+        value = datetime(2026, 10, 5, 18, 0, tzinfo=hostile)
+        registry = object.__new__(DurableProviderQualificationRegistry)
+        history_calls = 0
+
+        def fail_history(*, journal_sequence_cut=None):
+            nonlocal history_calls
+            history_calls += 1
+            raise AssertionError("durable history read before time ingress rejection")
+
+        registry._history = fail_history
+
+        with self.assertRaises(ProviderQualificationError):
+            registry.current(scope=_scope(), at=value)
+
+        self.assertEqual(hostile.calls, 0)
+        self.assertEqual(history_calls, 0)
 
     def test_exact_builtin_timezones_remain_supported_and_normalize_to_utc(self):
         values = (

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from unicodedata import category as unicode_category
 
 from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
 from autotrade_runtime.strict_json import strict_json_loads
@@ -257,6 +258,25 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _accessible_inline_text(value: str) -> str:
+    """Keep diagnostic export values on one unambiguous visual/speech line."""
+
+    if type(value) is not str:
+        raise ValueError("accessible diagnostic text must be an exact string")
+    rendered: list[str] = []
+    for character in value:
+        if unicode_category(character) in {"Cc", "Cf", "Zl", "Zp"}:
+            codepoint = ord(character)
+            rendered.append(
+                f"\\u{codepoint:04x}"
+                if codepoint <= 0xFFFF
+                else f"\\U{codepoint:08x}"
+            )
+        else:
+            rendered.append(character)
+    return "".join(rendered)
 
 
 def _exact_identity_set(value: object, *, name: str) -> set[str]:
@@ -673,19 +693,25 @@ class DecisionTraceStore:
             )
 
         lines = [
-            f"Decision trace: {record['trace_id']}",
+            f"Decision trace: {_accessible_inline_text(record['trace_id'])}",
             f"Evidence status: {evidence_status}",
             evidence_note,
-            f"Strategy: {record['strategy_version']}",
-            f"Decision: {record['decision']}",
-            f"Reason: {record['decision_reason']}",
-            f"Risk outcome: {record['risk_outcome']}",
+            f"Strategy: {_accessible_inline_text(record['strategy_version'])}",
+            f"Decision: {_accessible_inline_text(record['decision'])}",
+            f"Reason: {_accessible_inline_text(record['decision_reason'])}",
+            f"Risk outcome: {_accessible_inline_text(record['risk_outcome'])}",
         ]
         correlation_id = record.get("correlation_id")
         if correlation_id:
-            lines.append(f"Correlation: {correlation_id}")
-        lines.append(f"Source SHA: {record.get('source_sha') or 'unavailable'}")
-        lines.append(f"Build: {record.get('build_id') or 'unavailable'}")
+            lines.append(f"Correlation: {_accessible_inline_text(correlation_id)}")
+        lines.append(
+            "Source SHA: "
+            + _accessible_inline_text(record.get("source_sha") or "unavailable")
+        )
+        lines.append(
+            "Build: "
+            + _accessible_inline_text(record.get("build_id") or "unavailable")
+        )
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])
@@ -693,7 +719,10 @@ class DecisionTraceStore:
         if event_ids:
             for item in event_ids:
                 digest = event_digests.get(item)
-                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+                lines.append(
+                    f"- {_accessible_inline_text(item)}"
+                    + (f" sha256 {digest}" if digest else "")
+                )
         else:
             lines.append("- none")
 
@@ -702,7 +731,10 @@ class DecisionTraceStore:
         if evidence_refs:
             for item in evidence_refs:
                 digest = evidence_digests.get(item)
-                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+                lines.append(
+                    f"- {_accessible_inline_text(item)}"
+                    + (f" sha256 {digest}" if digest else "")
+                )
         else:
             lines.append("- none")
 
@@ -710,7 +742,10 @@ class DecisionTraceStore:
         attributes = record.get("attributes", {})
         if attributes:
             for key in sorted(attributes):
-                lines.append(f"- {key}: {canonical_json(attributes[key])}")
+                lines.append(
+                    f"- {_accessible_inline_text(key)}: "
+                    + _accessible_inline_text(canonical_json(attributes[key]))
+                )
         else:
             lines.append("- none")
         return "\n".join(lines) + "\n"

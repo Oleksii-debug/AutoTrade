@@ -2,7 +2,9 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+import mvp.autotrade_mvp.windows_secrets as windows_secrets
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
 
@@ -19,6 +21,19 @@ class DeterministicProtector:
         return ciphertext[len(expected):][::-1]
 
 
+class DeterministicDpapiProtector(windows_secrets.DpapiCurrentUserProtector):
+    PREFIX = b"dpapi-crypt-authority-test-v1:"
+
+    @staticmethod
+    def _crypt(*, data: bytes, entropy: bytes, decrypt: bool) -> bytes:
+        marker = DeterministicDpapiProtector.PREFIX + sha256(entropy).digest()
+        if decrypt:
+            if not data.startswith(marker):
+                raise OSError("scope entropy mismatch")
+            return data[len(marker):][::-1]
+        return marker + data[::-1]
+
+
 class VaultProtectorAuthorityTests(unittest.TestCase):
     def _scope(self):
         return {
@@ -28,6 +43,27 @@ class VaultProtectorAuthorityTests(unittest.TestCase):
             "environment": "PAPER",
             "purpose": "TRADE",
         }
+
+    def test_post_construction_dpapi_crypt_reassignment_cannot_replace_authority(self):
+        with patch.object(windows_secrets.os, "name", "nt"):
+            protector = DeterministicDpapiProtector()
+
+        def hostile_crypt(*, data: bytes, entropy: bytes, decrypt: bool) -> bytes:
+            raise AssertionError("post-construction DPAPI crypt reassignment was used")
+
+        protector._crypt = hostile_crypt
+        with patch.object(
+            DeterministicDpapiProtector,
+            "_crypt",
+            staticmethod(hostile_crypt),
+        ):
+            entropy = b"frozen-dpapi-authority"
+            ciphertext = protector.protect(b"top-secret", entropy=entropy)
+            self.assertNotEqual(ciphertext, b"top-secret")
+            self.assertEqual(
+                protector.unprotect(ciphertext, entropy=entropy),
+                b"top-secret",
+            )
 
     def test_post_construction_protector_reassignment_cannot_replace_read_authority(self):
         with TemporaryDirectory() as directory:

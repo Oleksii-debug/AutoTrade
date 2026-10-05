@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 import mvp.autotrade_mvp.runtime_target_host_resource_evidence as resource_evidence_module
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.runtime_target_host_campaign_authority import (
     RuntimeTargetHostCampaignAuthority,
 )
@@ -419,6 +420,86 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             manifest["sha256"],
             result.published_resource_evidence.payload_sha256,
         )
+
+    def test_resource_cut_closes_before_backlog_replay_failure(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(
+            monotonic_ns=200,
+            process_cpu_ns=40,
+            peak_rss_bytes=101_000,
+            io_read_bytes=1_100,
+            io_write_bytes=2_200,
+            disk_free_bytes=7_999_500,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            journal = JournalStore(Path(root) / "journal.sqlite")
+            store = ArtifactStore(Path(root) / "evidence")
+
+            def runner_with_tampered_backlog(**_kwargs):
+                payload = {"kind": "resource-cut-order"}
+                journal.append_event(
+                    {
+                        "event_id": "evt-resource-cut-order",
+                        "event_type": "ResourceCutOrderObserved",
+                        "aggregate_type": "resource-cut-order-test",
+                        "aggregate_id": "resource-cut-order",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-10-05T18:00:00+00:00",
+                    },
+                    outbox_topic="events",
+                )
+                connection = sqlite3.connect(journal.path)
+                try:
+                    connection.execute(
+                        """
+                        UPDATE outbox_backlog_transitions
+                        SET pending_count = 9
+                        WHERE transition_sequence = 1
+                        """
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                return run
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                    side_effect=(before, after),
+                ) as capture,
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    side_effect=runner_with_tampered_backlog,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "transition pending count conflicts with replayed authority",
+                ):
+                    run_declared_target_host_campaign_with_resources(
+                        journal=journal,
+                        evidence_store=store,
+                        spec=object(),
+                        authority_id="resource-authority",
+                        research_plan_id="resource-research-plan",
+                        financial_operations={},
+                        research_operations={},
+                        inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                        measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                        run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                        resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                    )
+
+            # Even a failing durable high-water replay is post-campaign
+            # qualification work. The inherited post-workload resource cut must
+            # already have closed before that replay begins.
+            self.assertEqual(capture.call_count, 2)
+            with self.assertRaises(FileNotFoundError):
+                store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
 
     def test_wrapper_rejects_callback_mutation_of_resource_evidence_class(self):
         run = _run_result()

@@ -1,0 +1,676 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+import copy
+import inspect
+import pickle
+import sys
+from tempfile import TemporaryDirectory
+import unittest
+
+from mvp.autotrade_mvp import admitted_financial_request_authority as admitted_module
+from mvp.autotrade_mvp import durable_financial_request_binding as durable_binding_module
+from mvp.autotrade_mvp import financial_binding_dispatch as dispatch_module
+from mvp.autotrade_mvp.admitted_financial_request_authority import (
+    AdmittedFinancialRequestAuthority,
+    AdmittedFinancialRequestAuthorityError,
+    AdmittedFinancialRequestAuthorityIssuer,
+)
+from mvp.autotrade_mvp.financial_binding_dispatch import financial_submission_scope
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.tests.test_financial_binding_dispatch import FinancialBindingDispatchTests
+
+
+class _ExplosiveMapping(Mapping):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller mapping callback executed")
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+    def __iter__(self):
+        return self._explode()
+
+    def __len__(self):
+        return self._explode()
+
+
+class _ExplosiveDict(dict):
+    def __init__(self, value) -> None:
+        dict.__init__(self, value)
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller dict callback executed")
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+    def __iter__(self):
+        return self._explode()
+
+    def items(self):
+        return self._explode()
+
+    def keys(self):
+        return self._explode()
+
+    def values(self):
+        return self._explode()
+
+
+class _ExplosiveList(list):
+    def __init__(self, value) -> None:
+        list.__init__(self, value)
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller list callback executed")
+
+    def __iter__(self):
+        return self._explode()
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+
+class _ExplosiveText(str):
+    def __new__(cls, value):
+        instance = str.__new__(cls, value)
+        instance.calls = 0
+        return instance
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller text callback executed")
+
+    def __str__(self):
+        return self._explode()
+
+    def strip(self, *_args, **_kwargs):
+        return self._explode()
+
+    def encode(self, *_args, **_kwargs):
+        return self._explode()
+
+
+def _explosive_json_digest(_value):
+    raise AssertionError("rebound digest executed")
+
+
+def _explosive_registry_resolve(_self, _admission_id):
+    raise AssertionError("rebound registry resolve executed")
+
+
+def _explosive_material_from_payload(_value):
+    raise AssertionError("rebound registry helper executed")
+
+
+def _explosive_submission_scope(*, admission_id, material):
+    del admission_id, material
+    raise AssertionError("rebound submission scope executed")
+
+
+class _IssuerSubclass(AdmittedFinancialRequestAuthorityIssuer):
+    __slots__ = ()
+
+
+class _ExplosiveIssuerSubclass(AdmittedFinancialRequestAuthorityIssuer):
+    __slots__ = ("calls",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _registry(self):
+        self.calls += 1
+        raise AssertionError("caller issuer override executed")
+
+
+class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def _bound_case(store: JournalStore):
+        fixture = FinancialBindingDispatchTests(methodName="runTest")
+        return fixture._bound_case(store)
+
+    def test_issuer_seals_exact_durable_financial_identity(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+
+            authority = issuer.issue(admitted.admission_id)
+            identity = issuer.identity(authority)
+
+            self.assertEqual(identity.admission_id, admitted.admission_id)
+            self.assertEqual(identity.binding_id, material.binding_id)
+            self.assertEqual(identity.risk_snapshot_id, material.risk_snapshot_id)
+            self.assertEqual(identity.risk_decision_id, material.risk_decision_id)
+            self.assertEqual(identity.account_cut_id, material.account_cut_id)
+            self.assertEqual(
+                identity.qualification_identity_digest,
+                material.qualification_identity_digest,
+            )
+            self.assertEqual(
+                identity.capability_snapshot_id,
+                material.capability_snapshot_id,
+            )
+            self.assertEqual(identity.provider_scope_digest, material.provider_scope_digest)
+            self.assertEqual(identity.request_sha256, material.request_sha256)
+            self.assertEqual(
+                identity.submission_scope_digest,
+                material.submission_scope_digest,
+            )
+
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+            resolved = issuer.require_exact_request(
+                authority,
+                request=request,
+                submission_scope=scope,
+            )
+            self.assertEqual(resolved, material)
+
+    def test_public_constructor_and_object_new_forge_are_not_minting_paths(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "issued",
+            ):
+                AdmittedFinancialRequestAuthority()
+
+            forged = object.__new__(AdmittedFinancialRequestAuthority)
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "not issued",
+            ):
+                issuer.require_exact_request(
+                    forged,
+                    request=request,
+                    submission_scope=scope,
+                )
+
+    def test_issuer_subclass_cannot_initialize_or_mint_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "issuer must be exact",
+            ):
+                _IssuerSubclass(store)
+
+            hostile = _ExplosiveIssuerSubclass()
+            with self.assertRaisesRegex(
+                TypeError,
+                "issuer must be exact",
+            ):
+                hostile.issue("admission:forged")
+            self.assertEqual(hostile.calls, 0)
+
+    def test_private_resolver_rejects_issuer_subclass_before_override_dispatch(self) -> None:
+        hostile = _ExplosiveIssuerSubclass()
+        forged = object.__new__(AdmittedFinancialRequestAuthority)
+        with self.assertRaisesRegex(
+            TypeError,
+            "issuer must be exact",
+        ):
+            hostile._resolved(forged)
+        self.assertEqual(hostile.calls, 0)
+
+    def test_authority_is_bound_to_one_issuer_instance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            first = AdmittedFinancialRequestAuthorityIssuer(store)
+            second = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = first.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "another issuer",
+            ):
+                second.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope=scope,
+                )
+
+    def test_request_or_submission_scope_drift_fails_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            changed_request = {
+                **request,
+                "body": {**request["body"], "quantity": "2"},
+            }
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "request digest",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=changed_request,
+                    submission_scope=scope,
+                )
+
+            changed_scope = {**scope, "capability_snapshot_id": "retargeted"}
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "submission scope",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope=changed_scope,
+                )
+
+    def test_copy_pickle_and_mutation_do_not_duplicate_or_retarget_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, _material, _request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+
+            with self.assertRaises(AdmittedFinancialRequestAuthorityError):
+                copy.copy(authority)
+            with self.assertRaises(AdmittedFinancialRequestAuthorityError):
+                copy.deepcopy(authority)
+            with self.assertRaises(AdmittedFinancialRequestAuthorityError):
+                pickle.dumps(authority)
+            with self.assertRaises(AttributeError):
+                authority.binding_id = "financial-request:sha256:" + "0" * 64
+
+    def test_polymorphic_request_and_scope_are_rejected_without_callbacks(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            hostile_request = _ExplosiveMapping()
+            with self.assertRaisesRegex(TypeError, "request must be an exact dict"):
+                issuer.require_exact_request(
+                    authority,
+                    request=hostile_request,
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_request.calls, 0)
+
+            hostile_scope = _ExplosiveMapping()
+            with self.assertRaisesRegex(TypeError, "submission_scope must be an exact dict"):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope=hostile_scope,
+                )
+            self.assertEqual(hostile_scope.calls, 0)
+
+    def test_nested_polymorphic_json_values_are_rejected_without_callbacks(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            hostile_dict = _ExplosiveDict(request["body"])
+            with self.assertRaisesRegex(TypeError, "request.body"):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "body": hostile_dict},
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_dict.calls, 0)
+
+            hostile_list = _ExplosiveList(["one"])
+            with self.assertRaisesRegex(TypeError, "request.tags"):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "tags": hostile_list},
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_list.calls, 0)
+
+            hostile_text = _ExplosiveText("1")
+            with self.assertRaisesRegex(TypeError, "request.body.quantity"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": hostile_text},
+                    },
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_text.calls, 0)
+
+            hostile_scope_dict = _ExplosiveDict(
+                {"request_sha256": material.request_sha256}
+            )
+            with self.assertRaisesRegex(TypeError, "submission_scope.extra"):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": hostile_scope_dict},
+                )
+            self.assertEqual(hostile_scope_dict.calls, 0)
+
+    def test_noncanonical_json_scalars_and_keys_fail_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            with self.assertRaisesRegex(TypeError, "request.body.quantity"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": 1.0},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(TypeError, "request.body keys"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], 1: "forbidden"},
+                    },
+                    submission_scope=scope,
+                )
+
+    def test_malformed_unicode_fails_as_financial_authority_error_before_digest(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+            malformed = "\ud800"
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": malformed},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], malformed: "forbidden"},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": malformed},
+                )
+
+    def test_cyclic_exact_json_is_rejected_before_digest_recursion(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            cyclic_dict = {}
+            cyclic_dict["self"] = cyclic_dict
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "acyclic JSON value",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "extra": cyclic_dict},
+                    submission_scope=scope,
+                )
+
+            cyclic_list = []
+            cyclic_list.append(cyclic_list)
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "acyclic JSON value",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": cyclic_list},
+                )
+
+            shared = {"value": "one"}
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "request digest differs",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "shared_left": shared,
+                        "shared_right": shared,
+                    },
+                    submission_scope=scope,
+                )
+
+    def test_deep_acyclic_json_fails_as_authority_error_not_recursion_error(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            nested = []
+            for _ in range(sys.getrecursionlimit() + 50):
+                nested = [nested]
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "too deeply nested",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "extra": nested},
+                    submission_scope=scope,
+                )
+
+    def test_admission_id_requires_canonical_utf8_before_registry_lookup(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.issue("\ud800")
+
+    def test_local_digest_rebinding_and_code_mutation_fail_before_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            original = admitted_module._json_digest
+            admitted_module._json_digest = _explosive_json_digest
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "_json_digest executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                admitted_module._json_digest = original
+
+            original_code = original.__code__
+            original.__code__ = _explosive_json_digest.__code__
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "_json_digest executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                original.__code__ = original_code
+
+            self.assertIs(admitted_module._json_digest, original)
+
+    def test_registry_executable_rebinding_fails_before_forged_resolve(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, _material, _request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+
+            registry_type = durable_binding_module.DurableFinancialRequestBindingRegistry
+            original_resolve = registry_type.resolve
+            registry_type.resolve = _explosive_registry_resolve
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "registry resolve executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                registry_type.resolve = original_resolve
+
+            original_helper = durable_binding_module._material_from_payload
+            durable_binding_module._material_from_payload = _explosive_material_from_payload
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "durable binding _material_from_payload executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                durable_binding_module._material_from_payload = original_helper
+
+    def test_submission_scope_rebinding_fails_before_forged_scope_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            original = dispatch_module.financial_submission_scope
+            dispatch_module.financial_submission_scope = _explosive_submission_scope
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "financial submission scope financial_submission_scope executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                dispatch_module.financial_submission_scope = original
+
+    def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
+        parameters = inspect.signature(
+            AdmittedFinancialRequestAuthorityIssuer.issue
+        ).parameters
+        self.assertEqual(tuple(parameters), ("self", "admission_id"))
+        for forbidden in (
+            "material",
+            "binding_id",
+            "risk_snapshot_id",
+            "risk_decision_id",
+            "account_cut_id",
+            "qualification_identity_digest",
+            "capability_snapshot_id",
+            "provider_scope_digest",
+            "request_sha256",
+            "submission_scope_digest",
+        ):
+            self.assertNotIn(forbidden, parameters)
+
+
+if __name__ == "__main__":
+    unittest.main()

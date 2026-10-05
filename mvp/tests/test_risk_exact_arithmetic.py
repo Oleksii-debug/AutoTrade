@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp import risk as risk_module
 from mvp.autotrade_mvp.risk import (
@@ -741,6 +742,53 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 capability_allowed=True,
                 borrow_available=True,
             )
+
+    def test_bound_risk_uses_the_same_resealed_state_version_after_evaluation(self):
+        original_context = exact_context()
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        original_evaluate = risk_module.evaluate_risk
+
+        def mutate_caller_context_after_evaluation(
+            call_intent,
+            call_context,
+            call_policy,
+            **kwargs,
+        ):
+            decision = original_evaluate(
+                call_intent,
+                call_context,
+                call_policy,
+                **kwargs,
+            )
+            object.__setattr__(original_context, "state_version", 999)
+            return decision
+
+        with patch.object(
+            risk_module,
+            "evaluate_risk",
+            side_effect=mutate_caller_context_after_evaluation,
+        ):
+            decision = risk_module.evaluate_bound_risk(
+                intent,
+                original_context,
+                policy(),
+                intent_hash="intent",
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"POSITION:ABC": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
+        self.assertEqual(original_context.state_version, 999)
+        self.assertEqual(decision.state_version, 7)
 
     def test_ratio_domain_error_is_not_misreported_as_resource_exhaustion(self):
         with self.assertRaisesRegex(

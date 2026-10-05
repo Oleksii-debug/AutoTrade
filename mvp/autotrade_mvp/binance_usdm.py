@@ -52,9 +52,12 @@ class BinanceUsdmAdapterError(ProviderCoreError):
 
 
 def _text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise BinanceUsdmAdapterError(f"{name} is required")
-    return value.strip()
+    stripped = value.strip()
+    if not stripped:
+        raise BinanceUsdmAdapterError(f"{name} is required")
+    return stripped
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
@@ -247,10 +250,10 @@ def prepare_order_request(
 ) -> BinanceUsdmPreparedRequest:
     """Prepare but never sign or send a USD-M order."""
 
-    if not isinstance(intent, BinanceUsdmOrderIntent):
-        raise TypeError("intent must be BinanceUsdmOrderIntent")
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(intent) is not BinanceUsdmOrderIntent:
+        raise TypeError("intent must be exact BinanceUsdmOrderIntent")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
 
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)

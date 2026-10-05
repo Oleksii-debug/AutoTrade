@@ -775,10 +775,14 @@ def _make_scoped_economic_facade(
 del _make_scoped_economic_facade
 
 
-class ScopedEconomicBook:
-    """Account/environment-bound facade over the canonical EconomicBook."""
-
-    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+def _make_scoped_economic_init(
+    expected_type,
+    bind_owner,
+    economic_book_type,
+    normalize_name,
+    environments,
+):
+    """Seal scoped-book construction dependencies against later rebinding."""
 
     def __init__(
         self,
@@ -787,16 +791,28 @@ class ScopedEconomicBook:
         account_id: str,
         transactions: Iterable[JournalTransaction] = (),
     ):
-        normalized_environment = _name(environment, field="environment").upper()
-        if normalized_environment not in self._ENVIRONMENTS:
+        if type(self) is not expected_type:
+            raise TypeError("scoped economic authority requires exact ScopedEconomicBook")
+        normalized_environment = normalize_name(
+            environment,
+            field="environment",
+        ).upper()
+        if normalized_environment not in environments:
             raise ValueError("unsupported environment")
-        normalized_account = _name(account_id, field="account_id")
-        book = EconomicBook(transactions)
-        if type(self) is ScopedEconomicBook:
-            _bind_scoped_economic_book_owner(self, normalized_environment, normalized_account, book)
-        self.environment = normalized_environment
-        self.account_id = normalized_account
-        self._book = book
+        normalized_account = normalize_name(account_id, field="account_id")
+        book = economic_book_type(transactions)
+        bind_owner(self, normalized_environment, normalized_account, book)
+        object.__setattr__(self, "environment", normalized_environment)
+        object.__setattr__(self, "account_id", normalized_account)
+        object.__setattr__(self, "_book", book)
+
+    return __init__
+
+
+class ScopedEconomicBook:
+    """Account/environment-bound facade over the canonical EconomicBook."""
+
+    _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
     transactions = _scoped_transactions
     append = _scoped_append
@@ -816,6 +832,16 @@ del _scoped_cash
 del _scoped_position
 del _scoped_fee_expense
 del _scoped_audit_digest
+
+
+ScopedEconomicBook.__init__ = _make_scoped_economic_init(
+    ScopedEconomicBook,
+    _bind_scoped_economic_book_owner,
+    EconomicBook,
+    _name,
+    ScopedEconomicBook._ENVIRONMENTS,
+)
+del _make_scoped_economic_init
 
 
 def book_external_cash_flow(

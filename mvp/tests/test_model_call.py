@@ -1521,6 +1521,50 @@ class ModelCallLifecycleTests(unittest.TestCase):
             self.assertEqual(repeated.status, "NOT_SENT")
             self.assertEqual(calls, [])
 
+    def test_recovery_fence_cannot_rewrite_reserved_attempt_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            original_attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+
+            def mutating_fence():
+                object.__setattr__(
+                    call_spec,
+                    "policy_id",
+                    "fence-mutated-policy",
+                )
+
+            restarted = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            recovered = restarted.recover_reserved_not_started(
+                spec=call_spec,
+                recovery_fence=mutating_fence,
+            )
+
+            self.assertEqual(recovered.status, "NOT_SENT")
+            self.assertEqual(recovered.attempt_id, original_attempt_id)
+            self.assertIsNone(
+                budget.active_reservation(original_attempt_id)
+            )
+
     def test_pricing_evidence_change_cannot_rebind_existing_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

@@ -83,8 +83,14 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise BinanceSpotAdapterError(f"{name} must be timezone-aware")
+    # Provider admission must not execute caller-controlled datetime/tzinfo
+    # callbacks before the instant becomes canonical authority.  Exact stdlib
+    # datetime + datetime.timezone keeps UTC/fixed-offset inputs supported while
+    # rejecting polymorphic datetime and custom tzinfo objects fail-closed.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise BinanceSpotAdapterError(
+            f"{name} must be an exact timezone-aware datetime"
+        )
     return value.astimezone(timezone.utc)
 
 

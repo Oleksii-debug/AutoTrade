@@ -1128,6 +1128,41 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_submission_parser_rejects_unissued_exact_observation_clone(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-clone",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        clone = object.__new__(ProviderSubmissionObservation)
+        for name in (
+            "response_binding",
+            "endpoint",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "evidence_ref",
+            "payload",
+        ):
+            object.__setattr__(
+                clone,
+                name,
+                object.__getattribute__(observation, name),
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "observation authority is unavailable",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=clone,
+            )
+
     def test_submission_parser_never_dispatches_observation_getattribute(self):
         attempt, prepared, observation = self._durable_write_observation(
             {

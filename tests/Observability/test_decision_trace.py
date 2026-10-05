@@ -55,6 +55,104 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_constructor_rejects_pathlike_callbacks_before_execution(self):
+        calls = []
+
+        class ExplodingPath:
+            def __fspath__(self):
+                calls.append("fspath")
+                raise AssertionError("caller path callback must not execute")
+
+        class ExplodingStr(str):
+            def __fspath__(self):
+                calls.append("str-fspath")
+                raise AssertionError("string-subclass path callback must not execute")
+
+        with self.assertRaisesRegex(TypeError, "exact str or pathlib Path"):
+            DecisionTraceStore(ExplodingPath())
+        with self.assertRaisesRegex(TypeError, "exact str or pathlib Path"):
+            DecisionTraceStore(ExplodingStr("decision-traces.jsonl"))
+        self.assertEqual(calls, [])
+
+    def test_diagnostic_scalar_subclasses_and_objects_fail_before_callbacks(self):
+        calls = []
+
+        class ExplodingInt(int):
+            def __repr__(self):
+                calls.append("int-repr")
+                raise AssertionError("caller integer callback must not execute")
+
+            def __str__(self):
+                calls.append("int-str")
+                raise AssertionError("caller integer callback must not execute")
+
+        class ExplodingObject:
+            def __repr__(self):
+                calls.append("object-repr")
+                raise AssertionError("caller object callback must not execute")
+
+            def __str__(self):
+                calls.append("object-str")
+                raise AssertionError("caller object callback must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            hostile_number = evidence_trace("decision-hostile-number")
+            hostile_number["attributes"]["score"] = ExplodingInt(7)
+            with self.assertRaisesRegex(ValueError, "JSON scalars"):
+                store.append(hostile_number)
+            self.assertFalse(path.exists())
+
+            hostile_object = evidence_trace("decision-hostile-object")
+            hostile_object["attributes"]["object"] = ExplodingObject()
+            with self.assertRaisesRegex(ValueError, "JSON scalars"):
+                store.append(hostile_object)
+            self.assertFalse(path.exists())
+
+        self.assertEqual(calls, [])
+
+    def test_noncanonical_jsonl_bytes_fail_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-noncanonical"))
+            raw = path.read_text(encoding="utf-8")
+            path.write_text(raw.replace("{", "{ ", 1), encoding="utf-8")
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
+    def test_blank_row_and_missing_final_newline_fail_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-canonical-row"))
+            raw = path.read_text(encoding="utf-8")
+
+            path.write_text(raw.rstrip("\n"), encoding="utf-8")
+            self.assertFalse(store.verify())
+
+            path.write_text(raw + "\n", encoding="utf-8")
+            self.assertFalse(store.verify())
+
+    def test_duplicate_key_textual_tamper_fails_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-duplicate-key"))
+            raw = path.read_text(encoding="utf-8")
+            tampered = raw.replace(
+                "{",
+                '{"trace_id":"shadow-duplicate",',
+                1,
+            )
+            path.write_text(tampered, encoding="utf-8")
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
     def test_append_waits_for_shared_cross_process_writer_lock(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

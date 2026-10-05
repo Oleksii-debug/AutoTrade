@@ -236,7 +236,7 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
 
             baseline = snapshot(req)
             refs = dict(baseline.evidence_refs.items())
-            refs["INSTRUMENT"] = "instrument-metadata-binding"
+            refs["INSTRUMENT"] = "sha256:" + "9" * 64
             bound = snapshot(
                 req,
                 price_semantics_digest=D7,
@@ -265,6 +265,23 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                 "missing evidence dimensions: INSTRUMENT",
             ):
                 snapshot(req, price_semantics_digest=D7)
+
+    def test_snapshot_rejects_noncanonical_instrument_evidence_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            req = request(issue(store))
+            base = snapshot(req)
+            refs = dict(base.evidence_refs.items())
+            refs["INSTRUMENT"] = "instrument-metadata-binding"
+            with self.assertRaisesRegex(
+                ValueError,
+                "INSTRUMENT evidence must be canonical",
+            ):
+                snapshot(
+                    req,
+                    price_semantics_digest=D7,
+                    evidence_refs=refs,
+                )
 
     def test_snapshot_rejects_noncanonical_price_semantics_digest(self):
         with TemporaryDirectory() as directory:

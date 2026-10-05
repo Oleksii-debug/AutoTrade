@@ -342,6 +342,101 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
                 issued,
             )
 
+    def test_issued_origin_set_rejects_qualification_registry_evidence_rebinding(self):
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            first_fixture = self._fixture(first)
+            second_fixture = self._fixture(second)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = first_fixture
+            second_qualifications = second_fixture[3]
+            response = self._direct_binding(
+                first_fixture,
+                first,
+                marker="currentness-registry-evidence",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+
+            original_evidence_store = qualifications.evidence_store
+            try:
+                qualifications.evidence_store = second_qualifications.evidence_store
+                with self.assertRaisesRegex(
+                    ProviderAccountOriginSetError,
+                    "qualification registry authority changed",
+                ):
+                    require_current_provider_account_origin_set_authority(
+                        issued,
+                        at=NOW,
+                    )
+            finally:
+                qualifications.evidence_store = original_evidence_store
+
+            self.assertIs(
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                ),
+                issued,
+            )
+
+    def test_issued_origin_set_rejects_qualification_registry_method_shadow(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-registry-method-shadow",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+
+            qualifications.qualification = lambda *_args, **_kwargs: None
+            try:
+                with self.assertRaisesRegex(
+                    ProviderAccountOriginSetError,
+                    "qualification registry authority changed",
+                ):
+                    require_current_provider_account_origin_set_authority(
+                        issued,
+                        at=NOW,
+                    )
+            finally:
+                del qualifications.qualification
+
+            self.assertIs(
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                ),
+                issued,
+            )
+
     def test_issued_origin_set_is_not_current_after_q_expiry(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)

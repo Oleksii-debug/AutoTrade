@@ -1369,6 +1369,21 @@ def _install_authenticated_price_semantics_authority():
     json_dumps = json.dumps
     json_dumps_code = getattr(json_dumps, "__code__", None)
     sha256_function = sha256
+    decimal_text = _decimal_text
+    decimal_text_code = _decimal_text.__code__
+    utc_text = _utc_text
+    utc_text_code = _utc_text.__code__
+    thaw_jsonish = _thaw_jsonish
+    thaw_jsonish_code = _thaw_jsonish.__code__
+    dataclass_fields = fields
+    dataclass_fields_code = fields.__code__
+    to_contract_dict = version_type.to_contract_dict
+    to_contract_dict_code = to_contract_dict.__code__
+    version_init = version_type.__init__
+    version_init_code = version_init.__code__
+    settlement_convention_type = SettlementConvention
+    settlement_payload = settlement_convention_type.payload
+    settlement_payload_code = settlement_payload.__code__
 
     def require_executable_authority() -> None:
         if (
@@ -1411,6 +1426,21 @@ def _install_authenticated_price_semantics_authority():
             or json.dumps is not json_dumps
             or getattr(json_dumps, "__code__", None) is not json_dumps_code
             or sha256 is not sha256_function
+            or version_type.to_contract_dict is not to_contract_dict
+            or version_type.to_contract_dict.__code__ is not to_contract_dict_code
+            or version_type.__init__ is not version_init
+            or version_type.__init__.__code__ is not version_init_code
+            or _decimal_text is not decimal_text
+            or _decimal_text.__code__ is not decimal_text_code
+            or _utc_text is not utc_text
+            or _utc_text.__code__ is not utc_text_code
+            or _thaw_jsonish is not thaw_jsonish
+            or _thaw_jsonish.__code__ is not thaw_jsonish_code
+            or fields is not dataclass_fields
+            or fields.__code__ is not dataclass_fields_code
+            or SettlementConvention is not settlement_convention_type
+            or SettlementConvention.payload is not settlement_payload
+            or SettlementConvention.payload.__code__ is not settlement_payload_code
         ):
             raise InstrumentRegistryError(
                 "instrument price-semantics executable authority changed"

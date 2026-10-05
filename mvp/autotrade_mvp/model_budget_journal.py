@@ -490,7 +490,7 @@ class DurableModelBudget:
         module_globals = globals()
 
         # The injected clock is caller-owned code. Freeze the executable state
-        # and every module binding consulted by the two trusted helpers before
+        # and every module binding consulted by the trusted helper graph before
         # yielding control. In-place function-code poisoning preserves function
         # identity, so class/module alias checks alone cannot detect it.
         object_getattribute = object.__getattribute__
@@ -514,6 +514,16 @@ class DurableModelBudget:
             ("__defaults__", object_getattribute(clock_text, "__defaults__")),
             ("__kwdefaults__", object_getattribute(clock_text, "__kwdefaults__")),
         )
+
+        code_type = type(restore_function_state[0][1])
+
+        def referenced_names(code) -> tuple[str, ...]:
+            names = list(code.co_names)
+            for constant in code.co_consts:
+                if type(constant) is code_type:
+                    names.extend(referenced_names(constant))
+            return tuple(names)
+
         runtime_names = tuple(
             dict.fromkeys(
                 (
@@ -523,8 +533,8 @@ class DurableModelBudget:
                     "ValueError",
                     "set",
                     "sorted",
-                    *restore_function_state[0][1].co_names,
-                    *clock_text_function_state[0][1].co_names,
+                    *referenced_names(restore_function_state[0][1]),
+                    *referenced_names(clock_text_function_state[0][1]),
                 )
             )
         )

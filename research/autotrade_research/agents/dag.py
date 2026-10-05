@@ -488,7 +488,28 @@ def aggregate_specialists(
         available_inputs=raw_available,
         total_budget=total_budget,
     )
-    if plan != canonical_plan:
+    # Never dispatch through DagPlan.__eq__: the canonical class is public
+    # Python state and can be monkey-patched after a plan was created. Compare
+    # detached, already-readmitted fields through object.__getattribute__
+    # instead, so class-level equality rebinding cannot self-authenticate a
+    # forged schedule.
+    plan_state = (
+        object.__getattribute__(plan, "input_snapshot_id"),
+        object.__getattribute__(plan, "scheduled_roles"),
+        object.__getattribute__(plan, "skipped_roles"),
+        object.__getattribute__(plan, "reserved_cost"),
+        object.__getattribute__(plan, "available_inputs"),
+        object.__getattribute__(plan, "total_budget"),
+    )
+    canonical_plan_state = (
+        object.__getattribute__(canonical_plan, "input_snapshot_id"),
+        object.__getattribute__(canonical_plan, "scheduled_roles"),
+        object.__getattribute__(canonical_plan, "skipped_roles"),
+        object.__getattribute__(canonical_plan, "reserved_cost"),
+        object.__getattribute__(canonical_plan, "available_inputs"),
+        object.__getattribute__(canonical_plan, "total_budget"),
+    )
+    if plan_state != canonical_plan_state:
         raise SpecialistDagError(
             "DagPlan does not match canonical planner output for this context"
         )

@@ -93,6 +93,72 @@ class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
             restarted = self._vault(path)
             self.assertEqual(self._resolve(restarted, rotated), "rotated-secret")
 
+    def test_json_module_attribute_retargeting_cannot_change_frozen_authority(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials.json"
+            vault = self._vault(path)
+            handle = vault.register(
+                handle_id="cred-json-attributes",
+                owner_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value="original-secret",
+            )
+            corrupt_path = Path(directory) / "corrupt-credentials.json"
+            corrupt_path.write_text("{not-valid-json", encoding="utf-8")
+
+            imported_json = windows_secrets.json
+            original_loads = imported_json.loads
+            original_dumps = imported_json.dumps
+            original_decode_error = imported_json.JSONDecodeError
+            try:
+                imported_json.loads = HostileJsonModule.loads
+                imported_json.dumps = HostileJsonModule.dumps
+                imported_json.JSONDecodeError = HostileJsonModule.JSONDecodeError
+
+                restarted = self._vault(path)
+                self.assertEqual(self._resolve(restarted, handle), "original-secret")
+                rotated = restarted.rotate(
+                    handle,
+                    execution_identity="windows-user-1",
+                    new_secret_value="rotated-secret",
+                )
+                self.assertEqual(self._resolve(restarted, rotated), "rotated-secret")
+
+                second_path = Path(directory) / "second-credentials.json"
+                second_vault = self._vault(second_path)
+                second_handle = second_vault.register(
+                    handle_id="cred-json-attributes-second",
+                    owner_identity="windows-user-1",
+                    account_id="paper-1",
+                    provider="SIMULATED",
+                    environment="PAPER",
+                    purpose="TRADE",
+                    secret_value="second-secret",
+                )
+                self.assertEqual(
+                    self._resolve(second_vault, second_handle),
+                    "second-secret",
+                )
+
+                with self.assertRaisesRegex(
+                    windows_secrets.SecretVaultError,
+                    "corrupt or unreadable",
+                ):
+                    self._vault(corrupt_path)
+            finally:
+                imported_json.loads = original_loads
+                imported_json.dumps = original_dumps
+                imported_json.JSONDecodeError = original_decode_error
+
+            restarted_after_restore = self._vault(path)
+            self.assertEqual(
+                self._resolve(restarted_after_restore, rotated),
+                "rotated-secret",
+            )
+
     def test_json_module_rebinding_cannot_bypass_corrupt_vault_fail_closed(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "credentials.json"

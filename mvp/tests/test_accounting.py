@@ -487,13 +487,44 @@ class AccountingFoundationTests(unittest.TestCase):
         # must be irrelevant to the cache selected by product construction.
         self.assertFalse(hasattr(accounting_module, "_transaction_digest_cache"))
         self.assertFalse(hasattr(accounting_module, "_cached_transaction_digest"))
+        original_payload_digest = accounting_module.payload_digest
+        original_transaction_digest = accounting_module.transaction_digest
         accounting_module._transaction_digest_cache = {fingerprint: forged}
         accounting_module._transaction_digest_cache_lock = object()
         accounting_module._cached_transaction_digest = lambda _transaction: forged
+        accounting_module.payload_digest = lambda _payload: forged
+        accounting_module.transaction_digest = lambda _transaction: forged
         try:
             self.assertEqual(book.audit_digest(), expected)
             self.assertNotEqual(book.audit_digest(), forged)
+
+            # Exercise a cache miss after the hostile module rebinding. The
+            # selected memoizer must retain the original transaction digest
+            # function, and that function must retain the original payload
+            # digest primitive rather than resolving the rebound global.
+            second_transaction = book_external_cash_flow(
+                transaction_id="cash-2",
+                cause_event_id="deposit-2",
+                currency="USD",
+                amount="50",
+            )
+            second_expected = original_payload_digest(
+                {
+                    "schema_version": "1.0.0",
+                    "transactions": [
+                        {
+                            "transaction_id": "cash-2",
+                            "digest": original_transaction_digest(second_transaction),
+                        }
+                    ],
+                }
+            )
+            second_book = EconomicBook((second_transaction,))
+            self.assertEqual(second_book.audit_digest(), second_expected)
+            self.assertNotEqual(second_book.audit_digest(), forged)
         finally:
+            accounting_module.payload_digest = original_payload_digest
+            accounting_module.transaction_digest = original_transaction_digest
             del accounting_module._transaction_digest_cache
             del accounting_module._transaction_digest_cache_lock
             del accounting_module._cached_transaction_digest

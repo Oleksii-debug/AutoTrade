@@ -1,5 +1,8 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 import unittest
+
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
@@ -63,7 +66,103 @@ def top(**overrides):
     return LiquidityObservation.create(**values)
 
 
+def canonical_instrument(*, price_tick="0.05"):
+    return InstrumentVersion(
+        instrument_id="11111111-1111-4111-8111-111111111111",
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="ABC",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal(price_tick),
+        quantity_step=Decimal("1"),
+        minimum_quantity=Decimal("1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
 class ExecutionRealismTests(unittest.TestCase):
+    def test_market_model_factory_binds_canonical_instrument_price_tick(self):
+        instrument_version = canonical_instrument(price_tick="0.05")
+        configured = model(
+            price_quantum=None,
+            price_projection_policy_id=None,
+            price_projection_policy_version=None,
+            price_grid_instrument_version=None,
+        )
+        # Rebuild using only non-grid model assumptions; the factory owns the grid.
+        rebuilt = ExecutionModel.create_for_instrument_version(
+            instrument_version=instrument_version,
+            model_version=configured.model_version,
+            calibration_sha256=configured.calibration_sha256,
+            data_fidelity=configured.data_fidelity,
+            scenario=configured.scenario,
+            latency_ms=configured.latency_ms,
+            fee_rate=configured.fee_rate,
+            minimum_fee=configured.minimum_fee,
+            max_participation=configured.max_participation,
+            slippage_bps=configured.slippage_bps,
+            impact_bps_at_max_participation=configured.impact_bps_at_max_participation,
+            bar_half_spread_bps=configured.bar_half_spread_bps,
+            scenario_cost_multiplier=configured.scenario_cost_multiplier,
+        )
+        self.assertEqual(rebuilt.price_quantum, Decimal("0.05"))
+        self.assertEqual(
+            rebuilt.price_grid_instrument_version,
+            "11111111-1111-4111-8111-111111111111@1",
+        )
+        self.assertEqual(
+            rebuilt.price_grid_instrument_binding,
+            instrument_version.metadata_evidence_binding()[7:],
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price grid is authoritative from instrument_version",
+        ):
+            ExecutionModel.create_for_instrument_version(
+                instrument_version=instrument_version,
+                price_grid_instrument_binding="sha256:" + "0" * 64,
+                model_version=configured.model_version,
+                calibration_sha256=configured.calibration_sha256,
+                data_fidelity=configured.data_fidelity,
+                scenario=configured.scenario,
+                latency_ms=configured.latency_ms,
+                fee_rate=configured.fee_rate,
+                minimum_fee=configured.minimum_fee,
+                max_participation=configured.max_participation,
+                slippage_bps=configured.slippage_bps,
+                impact_bps_at_max_participation=configured.impact_bps_at_max_participation,
+                bar_half_spread_bps=configured.bar_half_spread_bps,
+                scenario_cost_multiplier=configured.scenario_cost_multiplier,
+            )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price grid is authoritative from instrument_version",
+        ):
+            ExecutionModel.create_for_instrument_version(
+                instrument_version=instrument_version,
+                price_quantum=Decimal("0.01"),
+                model_version=configured.model_version,
+                calibration_sha256=configured.calibration_sha256,
+                data_fidelity=configured.data_fidelity,
+                scenario=configured.scenario,
+                latency_ms=configured.latency_ms,
+                fee_rate=configured.fee_rate,
+                minimum_fee=configured.minimum_fee,
+                max_participation=configured.max_participation,
+                slippage_bps=configured.slippage_bps,
+                impact_bps_at_max_participation=configured.impact_bps_at_max_participation,
+                bar_half_spread_bps=configured.bar_half_spread_bps,
+                scenario_cost_multiplier=configured.scenario_cost_multiplier,
+            )
+
     def test_cross_instrument_liquidity_cannot_execute_order(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

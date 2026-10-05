@@ -196,29 +196,151 @@ jobs:
           )
           PY
 
-      - name: Verify exact-store and sender-gate recovery authority
+      - name: Materialize durable clock-incident generation and recovery binding
         shell: bash
         run: |
           set -euo pipefail
-          export PYTHONPATH="$PWD/mvp:$PWD"
+          git fetch --no-tags origin cd31b13559e21f6bf32757561dd677995355f900
+          git show cd31b13559e21f6bf32757561dd677995355f900:mvp/autotrade_mvp/recovery_clock_incident.py > mvp/autotrade_mvp/recovery_clock_incident.py
+          git show cd31b13559e21f6bf32757561dd677995355f900:mvp/tests/test_recovery_clock_incident_chronology.py > mvp/tests/test_recovery_clock_incident_chronology.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mvp/autotrade_mvp/recovery.py')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f'expected one clock-incident preimage, found {count}: {old[:100]!r}'
+                  )
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness\n',
+              'from .recovery_clock_incident import (\n'
+              '    append_clock_trust_transition,\n'
+              '    clock_incident_generation as durable_clock_incident_generation,\n'
+              '    clock_trusted_after_replay,\n'
+              ')\n'
+              'from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness\n',
+          )
+
+          replace_once(
+              '        self.storage_writable = True\n'
+              '        self.clock_trusted = True\n'
+              '        self.provider_reconciled = False\n',
+              '        self.storage_writable = True\n'
+              '        self.clock_trusted = (\n'
+              '            True\n'
+              '            if owner_store is None\n'
+              '            else clock_trusted_after_replay(\n'
+              '                owner_store,\n'
+              '                owner_scope=self._owner_scope,\n'
+              '            )\n'
+              '        )\n'
+              '        self.provider_reconciled = False\n',
+          )
+
+          path_anchor = (
+              '    @property\n'
+              '    def durable_owner_store_path(self) -> Path | None:\n'
+              '        """Return the selected journal path backing sender fencing, if durable."""\n\n'
+              '        if self._owner_store is None:\n'
+              '            return None\n'
+              '        self._journal_store_authority()\n'
+              '        return Path(self._selected_journal_identity().canonical_path)\n'
+          )
+          replace_once(
+              path_anchor,
+              path_anchor
+              + '\n'
+              + '    @property\n'
+              + '    def clock_incident_generation(self) -> int:\n'
+              + '        """Return the durable clock invalidation generation, not UTC authority."""\n\n'
+              + '        if self._owner_store is None:\n'
+              + '            return 0\n'
+              + '        return durable_clock_incident_generation(\n'
+              + '            self._journal_store_authority(),\n'
+              + '            owner_scope=self._owner_scope,\n'
+              + '        )\n',
+          )
+
+          replace_once(
+              '    def set_clock_trusted(self, trusted: bool) -> None:\n'
+              '        if type(trusted) is not bool:\n'
+              '            raise TypeError("trusted must be a boolean")\n'
+              '        self.clock_trusted = trusted\n',
+              '    def set_clock_trusted(\n'
+              '        self,\n'
+              '        trusted: bool,\n'
+              '        *,\n'
+              '        reason_code: str | None = None,\n'
+              '        evidence_ref: str | None = None,\n'
+              '    ) -> None:\n'
+              '        if type(trusted) is not bool:\n'
+              '            raise TypeError("trusted must be a boolean")\n'
+              '        if self._owner_store is not None and trusted != self.clock_trusted:\n'
+              '            if self.owner is None:\n'
+              '                raise PermissionError(\n'
+              '                    "Durable clock trust transition requires an active recovery owner"\n'
+              '                )\n'
+              '            append_clock_trust_transition(\n'
+              '                self._journal_store_authority(),\n'
+              '                owner_scope=self._owner_scope,\n'
+              '                owner_id=self.owner.owner_id,\n'
+              '                owner_epoch=self.owner.epoch,\n'
+              '                trusted=trusted,\n'
+              '                reason_code=(\n'
+              '                    reason_code\n'
+              '                    if reason_code is not None\n'
+              '                    else (\n'
+              '                        "clock-trust-restored"\n'
+              '                        if trusted\n'
+              '                        else "clock-untrusted"\n'
+              '                    )\n'
+              '                ),\n'
+              '                evidence_ref=evidence_ref,\n'
+              '                committed_at=self._now(),\n'
+              '            )\n'
+              '        self.clock_trusted = trusted\n',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify recovery authority through durable clock incidents
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD:$PWD/mvp:$PWD/research"
           python -m py_compile \
             mvp/autotrade_mvp/recovery.py \
             mvp/autotrade_mvp/sender_gate.py \
+            mvp/autotrade_mvp/recovery_clock_incident.py \
             mvp/tests/test_recovery_store_authority_current.py \
-            mvp/tests/test_recovery_sender_gate_current.py
-          python -m unittest discover -s mvp/tests -p 'test_recovery_store_authority_current.py' -v
-          python -m unittest discover -s mvp/tests -p 'test_recovery_sender_gate_current.py' -v
-          python -m unittest discover -s mvp/tests -p 'test_recovery_durable_unknown_restart.py' -v
-          python -m unittest discover -s mvp/tests -p 'test_runtime_failure_control.py' -v
+            mvp/tests/test_recovery_sender_gate_current.py \
+            mvp/tests/test_recovery_clock_incident_chronology.py
+          PYTHONPATH="$PWD/mvp:$PWD" python -m unittest discover -s mvp/tests -p 'test_recovery_store_authority_current.py' -v
+          PYTHONPATH="$PWD/mvp:$PWD" python -m unittest discover -s mvp/tests -p 'test_recovery_sender_gate_current.py' -v
+          python -m unittest mvp.tests.test_recovery_clock_incident_chronology -v
+          PYTHONPATH="$PWD/mvp:$PWD" python -m unittest discover -s mvp/tests -p 'test_recovery_durable_unknown_restart.py' -v
+          PYTHONPATH="$PWD/mvp:$PWD" python -m unittest discover -s mvp/tests -p 'test_runtime_failure_control.py' -v
 
-      - name: Commit bounded reconvergence and remove one-shot transport
+      - name: Commit bounded chronology prerequisite and remove one-shot transport
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add mvp/autotrade_mvp/recovery.py mvp/tests/test_recovery_store_authority_current.py
+          git add \
+            mvp/autotrade_mvp/recovery.py \
+            mvp/autotrade_mvp/recovery_clock_incident.py \
+            mvp/tests/test_recovery_store_authority_current.py \
+            mvp/tests/test_recovery_clock_incident_chronology.py
           git rm .github/workflows/wp48-current-recovery-journal-authority.yml
           git diff --cached --check
-          git commit -m "fix: reconverge recovery journal and sender-gate authority"
+          git commit -m "fix: reconverge durable recovery chronology prerequisite"
           git push origin HEAD:${GITHUB_REF_NAME}

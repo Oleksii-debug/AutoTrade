@@ -54,6 +54,7 @@ from mvp.autotrade_mvp.provider_transport import (
     SignedHttpRequest,
     UrllibJsonWireClient,
     _exact_trading_response,
+    _bybit_exact_trading_response,
     _binance_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
@@ -4761,6 +4762,7 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         for status, body in (
             (200, b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1","orderLinkId":"bybit-order-1"}}'),
             (429, b'{"retCode":10006,"retMsg":"rate limit","result":{}}'),
+            (503, b'{"retCode":10016,"retMsg":"server error","result":{}}'),
         ):
             with self.subTest(status=status):
                 events = []
@@ -4770,8 +4772,8 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 class FakeOpener:
                     def open(self, request, *, timeout):
                         calls.append((request, timeout))
-                        if status == 429:
-                            raise HTTPError(request.full_url, status, "rate limit", {}, stream)
+                        if status != 200:
+                            raise HTTPError(request.full_url, status, "provider error", {}, stream)
                         return stream
 
                 client = UrllibJsonWireClient(max_response_bytes=256)
@@ -4788,13 +4790,45 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 self.assertEqual(type(exact.response_bytes), bytes)
                 self.assertEqual(exact.response_bytes, body)
                 self.assertEqual(exact.http_status, status)
-                self.assertEqual(exact.payload["retCode"], 0 if status == 200 else 10006)
+                expected_ret_code = {200: 0, 429: 10006, 503: 10016}[status]
+                self.assertEqual(exact.payload["retCode"], expected_ret_code)
+                self.assertEqual(exact.requires_reconciliation, status == 503)
+                if status == 503:
+                    self.assertEqual(
+                        exact.ambiguity_reason,
+                        "bybit_http_5xx_execution_unknown",
+                    )
                 self.assertEqual(stream.read_sizes, [257])
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(events, [
                     "capability", "resolve", "capability", "guard",
                 ])
+
+    def test_bybit_5xx_classifier_preserves_exact_evidence_and_marks_unknown(self):
+        raw = b'{"retCode":10016,"retMsg":"server error","result":{}}'
+        for status in (500, 502, 503, 599):
+            with self.subTest(status=status):
+                exact = _bybit_exact_trading_response(
+                    TradingWireResponse(http_status=status, body=raw)
+                )
+                self.assertEqual(exact.response_bytes, raw)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(
+                    exact.ambiguity_reason,
+                    "bybit_http_5xx_execution_unknown",
+                )
+
+        accepted = _bybit_exact_trading_response(
+            TradingWireResponse(
+                http_status=200,
+                body=b'{"retCode":0,"retMsg":"OK","result":{}}',
+            )
+        )
+        self.assertFalse(accepted.requires_reconciliation)
+        self.assertIsNone(accepted.ambiguity_reason)
+
 
     def test_typed_wire_status_rejects_int_subclasses_before_comparison_callbacks(self):
         # Exact response CLASS is not enough: a malicious subclass nested

@@ -1186,6 +1186,23 @@ def _exact_trading_response(
     )
 
 
+def _bybit_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Preserve post-send Bybit 5xx uncertainty for reconciliation."""
+
+    exact = _exact_trading_response(value)
+    status = exact.http_status
+    if status is not None and 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_http_5xx_execution_unknown",
+        )
+    return exact
+
+
 def _binance_exact_trading_response(
     value: object,
 ) -> ExactJsonTransportResponse:
@@ -3762,7 +3779,7 @@ class BybitV5HttpTransport:
             # Shared production urllib returns typed status+body, while legacy
             # injected diagnostic wire clients may return exact raw bytes.
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            return _bybit_exact_trading_response(wire_response)
 
 
 class BybitV5AuthenticatedReadSigner:

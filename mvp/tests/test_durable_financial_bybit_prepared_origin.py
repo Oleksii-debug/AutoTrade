@@ -639,6 +639,7 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 "InstrumentRegistryError",
                 "TypeError",
                 "ValueError",
+                "re",
             ):
                 with self.subTest(name=name):
                     calls = []
@@ -676,6 +677,37 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                                 reduce_only=False,
                             )
                     self.assertEqual(calls, [])
+
+            calls = []
+
+            def forged_fullmatch(*_args, **_kwargs):
+                calls.append("re.fullmatch")
+                return None
+
+            with patch.object(bybit_module.re, "fullmatch", forged_fullmatch):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "prepared submission authority changed",
+                ):
+                    prepare_order_submission(
+                        capability=capability,
+                        at=READ_AT,
+                        provider_environment="TESTNET",
+                        product_family="LINEAR_DERIVATIVES",
+                        symbol="BTCUSDT",
+                        side="BUY",
+                        order_type="LIMIT",
+                        quantity="2",
+                        client_order_id="regex-shadow",
+                        time_in_force="GTC",
+                        price="30000",
+                        price_semantics_registry=registry,
+                        price_semantics_artifact_store=artifact_store,
+                        price_semantics_instrument_version=instrument_ref,
+                        entity_policy_id=material.entity_policy_id,
+                        reduce_only=False,
+                    )
+            self.assertEqual(calls, [])
 
 
     def test_exact_type_clone_without_canonical_issuance_is_rejected(self):

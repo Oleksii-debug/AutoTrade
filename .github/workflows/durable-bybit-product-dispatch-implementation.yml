@@ -1,5 +1,6 @@
 name: durable-bybit-product-dispatch-implementation
 
+# revision 2: structural preflight executes no registry/issuer callback before #1713 mint authority checks
 on:
   push:
     branches:

@@ -1,11 +1,8 @@
 """Frozen canonical financing-component evidence for WP-63 cost composition.
 
-This module does not create a second financing ledger and does not claim a complete
-ablation cost.  It composes the existing ``DurableFinancingBook`` revision owner
-with the existing historical ``ProviderEconomicCut`` owner at one exact global
-JournalStore visibility cut.  The result is one re-verifiable financing component
-whose numeric charge is owned by the financing revision authority and whose
-postings are proven present in the same historical provider-economic prefix.
+The resolver composes the existing DurableFinancingBook revision owner with the
+existing ProviderEconomicCut owner at one exact JournalStore visibility cut.  It
+never creates a second ledger and never claims a complete ablation cost.
 """
 
 from __future__ import annotations
@@ -21,27 +18,27 @@ from .durable_financing import (
     DurableFinancingBook,
     FinancingConflict,
     _decimal_text,
+    _event_from_payload,
+    _record_exact,
     _revision_book_digest,
 )
-from .financing import FinancingEvent
+from .financing import FinancingEvent, FinancingRevisionBook
 from .persistence import (
     JournalStore,
     JournalStoreIdentity,
     require_exact_journal_store_identity,
 )
-from .provider_activity_accounting import (
-    DurableProviderEconomicBook,
-    ProviderEconomicCut,
-    reverify_provider_economic_cut,
-)
+from .provider_activity_accounting import DurableProviderEconomicBook, ProviderEconomicCut
 
 
 _FINANCING_EVENTS_RAW = DurableFinancingBook.__dict__["_events"]
 _FINANCING_REPLAY_RAW = DurableFinancingBook.__dict__["_book_from_durable_events"]
 _FINANCING_ECONOMIC_TX_RAW = DurableFinancingBook.__dict__["_economic_transaction"]
+_FINANCING_AGGREGATE_ID_RAW = DurableFinancingBook.__dict__["_aggregate_id"]
 _ECONOMIC_EVENTS_RAW = DurableProviderEconomicBook.__dict__["_events"]
 _RESOLVE_ECONOMIC_CUT_RAW = DurableProviderEconomicBook.__dict__["resolve_historical_cut"]
-_REVERIFY_ECONOMIC_CUT = reverify_provider_economic_cut
+_EVENT_FROM_PAYLOAD = _event_from_payload
+_RECORD_EXACT = _record_exact
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVIDENCE_KIND = "CANONICAL_FINANCING_COMPONENT"
 
@@ -53,19 +50,19 @@ def _text(value: object, *, name: str) -> str:
 
 
 def _digest(value: object, *, name: str) -> str:
-    text = _text(value, name=name)
-    if _SHA256.fullmatch(text) is None:
+    value = _text(value, name=name)
+    if _SHA256.fullmatch(value) is None:
         raise FinancingConflict(f"{name} must be an exact canonical sha256 digest")
-    return text
+    return value
 
 
-def _positive_int(value: object, *, name: str) -> int:
+def _positive(value: object, *, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise FinancingConflict(f"{name} must be an exact positive integer")
     return value
 
 
-def _store_identity_material(identity: JournalStoreIdentity) -> dict[str, object]:
+def _store_material(identity: JournalStoreIdentity) -> dict[str, object]:
     require_exact_journal_store_identity(
         identity,
         subject="ablation financing evidence store identity",
@@ -88,6 +85,7 @@ def _assert_owner(owner: DurableFinancingBook) -> None:
         ("_events", _FINANCING_EVENTS_RAW),
         ("_book_from_durable_events", _FINANCING_REPLAY_RAW),
         ("_economic_transaction", _FINANCING_ECONOMIC_TX_RAW),
+        ("_aggregate_id", _FINANCING_AGGREGATE_ID_RAW),
     ):
         if DurableFinancingBook.__dict__.get(name) is not expected:
             raise FinancingConflict(
@@ -109,40 +107,33 @@ def _assert_owner(owner: DurableFinancingBook) -> None:
             "durable financing owner shadows canonical methods: " + ", ".join(shadowed)
         )
     store = state.get("store")
-    economic_book = state.get("economic_book")
-    if type(store) is not JournalStore:
-        raise FinancingConflict("durable financing JournalStore is not canonical")
-    if type(economic_book) is not DurableProviderEconomicBook:
-        raise FinancingConflict("durable financing economic owner is not canonical")
-    if economic_book.store is not store:
-        # Existing constructor permits a distinct JournalStore object only when it
-        # resolves to the same backing generation.  For authority composition we
-        # deliberately require the exact selected object so reads cannot split.
+    economic = state.get("economic_book")
+    if type(store) is not JournalStore or type(economic) is not DurableProviderEconomicBook:
+        raise FinancingConflict("durable financing authorities are not canonical")
+    if economic.store is not store:
         raise FinancingConflict(
             "ablation financing evidence requires one exact JournalStore object"
         )
     if (
-        state.get("provider_id") != economic_book.provider_id
-        or state.get("account_id") != economic_book.account_id
-        or state.get("environment") != economic_book.environment
+        state.get("provider_id") != economic.provider_id
+        or state.get("account_id") != economic.account_id
+        or state.get("environment") != economic.environment
     ):
         raise FinancingConflict(
             "durable financing scope does not match provider economic authority"
         )
     if DurableProviderEconomicBook.__dict__.get("_events") is not _ECONOMIC_EVENTS_RAW:
-        raise FinancingConflict(
-            "provider economic event reader changed after financing composition"
-        )
+        raise FinancingConflict("provider economic event reader changed after composition")
     if (
         DurableProviderEconomicBook.__dict__.get("resolve_historical_cut")
         is not _RESOLVE_ECONOMIC_CUT_RAW
     ):
         raise FinancingConflict(
-            "provider economic historical-cut executable changed after financing composition"
+            "provider economic historical-cut executable changed after composition"
         )
 
 
-def _canonical_material(
+def _material(
     *,
     store_identity: JournalStoreIdentity,
     provider_id: str,
@@ -160,14 +151,14 @@ def _canonical_material(
     current_final_charge: str,
     revision_book_digest: str,
     contributing_transactions: tuple[tuple[str, str], ...],
-    provider_economic_cut_digest: str,
-    provider_economic_resulting_book_digest: str,
+    provider_economic_cut_digest: str | None,
+    provider_economic_resulting_book_digest: str | None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
         "evidence_kind": _EVIDENCE_KIND,
         "terminal_cost_composite": False,
-        "store_identity": _store_identity_material(store_identity),
+        "store_identity": _store_material(store_identity),
         "provider_id": provider_id,
         "account_id": account_id,
         "environment": environment,
@@ -188,7 +179,7 @@ def _canonical_material(
     }
 
 
-def _evidence_digest(material: dict[str, object]) -> str:
+def _hash(material: dict[str, object]) -> str:
     raw = json.dumps(
         material,
         sort_keys=True,
@@ -219,8 +210,8 @@ class ResolvedAblationFinancingComponentEvidence:
     current_final_charge: Decimal
     revision_book_digest: str
     contributing_transactions: tuple[tuple[str, str], ...]
-    provider_economic_cut_digest: str
-    provider_economic_resulting_book_digest: str
+    provider_economic_cut_digest: str | None
+    provider_economic_resulting_book_digest: str | None
     evidence_digest: str
 
     def __post_init__(self) -> None:
@@ -230,60 +221,53 @@ class ResolvedAblationFinancingComponentEvidence:
             raise FinancingConflict(
                 "financing component cannot claim terminal cost-composite authority"
             )
-        _store_identity_material(self.store_identity)
+        _store_material(self.store_identity)
         for name in (
-            "provider_id",
-            "account_id",
-            "environment",
-            "charge_id",
-            "aggregate_id",
-            "event_id",
-            "unit",
+            "provider_id", "account_id", "environment", "charge_id",
+            "aggregate_id", "event_id", "unit",
         ):
             _text(getattr(self, name), name=name)
         for name in (
-            "aggregate_version",
-            "journal_sequence",
-            "visibility_journal_sequence",
-            "revision",
+            "aggregate_version", "journal_sequence",
+            "visibility_journal_sequence", "revision",
         ):
-            _positive_int(getattr(self, name), name=name)
+            _positive(getattr(self, name), name=name)
         if self.journal_sequence > self.visibility_journal_sequence:
-            raise FinancingConflict(
-                "financing event cannot follow its frozen visibility cut"
-            )
+            raise FinancingConflict("financing event follows its frozen visibility cut")
         if type(self.current_final_charge) is not Decimal:
             raise FinancingConflict("current_final_charge must be exact Decimal")
         if not self.current_final_charge.is_finite() or self.current_final_charge < 0:
-            raise FinancingConflict(
-                "current_final_charge must be finite and non-negative"
-            )
+            raise FinancingConflict("current_final_charge must be finite and non-negative")
         _digest(self.payload_hash, name="payload_hash")
         _digest(self.revision_book_digest, name="revision_book_digest")
-        _digest(self.provider_economic_cut_digest, name="provider_economic_cut_digest")
-        _digest(
-            self.provider_economic_resulting_book_digest,
-            name="provider_economic_resulting_book_digest",
-        )
         if type(self.contributing_transactions) is not tuple:
             raise FinancingConflict("contributing_transactions must be an exact tuple")
-        transaction_ids: list[str] = []
+        ids: list[str] = []
         for item in self.contributing_transactions:
             if type(item) is not tuple or len(item) != 2:
-                raise FinancingConflict(
-                    "contributing financing transaction entry is not canonical"
-                )
-            transaction_ids.append(_text(item[0], name="transaction_id"))
+                raise FinancingConflict("contributing transaction entry is not canonical")
+            ids.append(_text(item[0], name="transaction_id"))
             _digest(item[1], name="transaction_digest")
-        if len(transaction_ids) != len(set(transaction_ids)):
+        if len(ids) != len(set(ids)):
+            raise FinancingConflict("contributing transactions contain duplicate identity")
+        if self.contributing_transactions:
+            _digest(self.provider_economic_cut_digest, name="provider_economic_cut_digest")
+            _digest(
+                self.provider_economic_resulting_book_digest,
+                name="provider_economic_resulting_book_digest",
+            )
+        elif (
+            self.provider_economic_cut_digest is not None
+            or self.provider_economic_resulting_book_digest is not None
+        ):
             raise FinancingConflict(
-                "contributing financing transactions contain duplicate identity"
+                "zero-posting financing evidence cannot claim unrelated economic-cut authority"
             )
         _digest(self.evidence_digest, name="evidence_digest")
         ResolvedAblationFinancingComponentEvidence.verify_integrity(self)
 
     def verify_integrity(self) -> None:
-        material = _canonical_material(
+        material = _material(
             store_identity=self.store_identity,
             provider_id=self.provider_id,
             account_id=self.account_id,
@@ -301,24 +285,21 @@ class ResolvedAblationFinancingComponentEvidence:
             revision_book_digest=self.revision_book_digest,
             contributing_transactions=self.contributing_transactions,
             provider_economic_cut_digest=self.provider_economic_cut_digest,
-            provider_economic_resulting_book_digest=(
-                self.provider_economic_resulting_book_digest
-            ),
+            provider_economic_resulting_book_digest=self.provider_economic_resulting_book_digest,
         )
-        if self.evidence_digest != _evidence_digest(material):
+        if self.evidence_digest != _hash(material):
             raise FinancingConflict(
                 "financing component evidence digest does not match canonical material"
             )
 
 
-def _visible_prefix(events: list[dict[str, object]], visibility: int) -> list[dict[str, object]]:
-    visible: list[dict[str, object]] = []
+def _visible(events: list[dict[str, object]], visibility: int) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
     for event in events:
-        sequence = event.get("journal_sequence")
-        _positive_int(sequence, name="journal_sequence")
+        sequence = _positive(event.get("journal_sequence"), name="journal_sequence")
         if sequence <= visibility:
-            visible.append(event)
-    return visible
+            result.append(event)
+    return result
 
 
 def resolve_ablation_financing_component_evidence(
@@ -328,34 +309,31 @@ def resolve_ablation_financing_component_evidence(
     expected_aggregate_version: int,
     visibility_journal_sequence: int | None = None,
 ) -> ResolvedAblationFinancingComponentEvidence:
-    """Resolve the latest financing revision visible at one exact durable cut."""
+    """Resolve the latest FINAL financing revision visible at one durable cut."""
 
     _assert_owner(owner)
     charge = _text(charge_id, name="charge_id")
-    expected_version = _positive_int(
+    expected_version = _positive(
         expected_aggregate_version,
         name="expected_aggregate_version",
     )
-    store = object.__getattribute__(owner, "store")
+    state = object.__getattribute__(owner, "__dict__")
+    store = state["store"]
+    economic_book = state["economic_book"]
     identity = require_exact_journal_store_identity(
         store.store_identity,
         subject="ablation financing evidence JournalStore",
     )
-    current_sequence = JournalStore.current_journal_sequence(store)
-    if visibility_journal_sequence is None:
-        visibility = current_sequence
-    else:
-        visibility = _positive_int(
-            visibility_journal_sequence,
-            name="visibility_journal_sequence",
-        )
-        if visibility > current_sequence:
-            raise FinancingConflict(
-                "financing visibility cut is beyond durable journal"
-            )
+    current = JournalStore.current_journal_sequence(store)
+    visibility = (
+        current
+        if visibility_journal_sequence is None
+        else _positive(visibility_journal_sequence, name="visibility_journal_sequence")
+    )
+    if visibility > current:
+        raise FinancingConflict("financing visibility cut is beyond durable journal")
 
-    events = _FINANCING_EVENTS_RAW(owner, charge)
-    visible = _visible_prefix(events, visibility)
+    visible = _visible(_FINANCING_EVENTS_RAW(owner, charge), visibility)
     if not visible:
         raise FinancingConflict("financing charge has no state at visibility cut")
     terminal = visible[-1]
@@ -370,44 +348,33 @@ def resolve_ablation_financing_component_evidence(
     latest = book.latest(charge)
     if type(latest) is not FinancingEvent:
         raise FinancingConflict("financing visible prefix has no canonical latest event")
-    if latest.revision != expected_version:
+    if latest.kind != "FINAL":
         raise FinancingConflict(
-            "financing revision identity does not match durable aggregate version"
+            "financing component is not mature FINAL evidence at visibility cut"
         )
-    final_charge = book.final_charge(charge)
-    if type(final_charge) is not Decimal:
-        raise FinancingConflict("financing final charge is not canonical Decimal")
 
-    aggregate_id = owner._aggregate_id(charge)
+    aggregate_id = _FINANCING_AGGREGATE_ID_RAW(owner, charge)
     contributions: list[tuple[str, str]] = []
     replay_history: list[FinancingEvent] = []
-    from .financing import FinancingRevisionBook
-    from .durable_financing import _record_exact
-
+    final_charge = Decimal("0")
     for durable in visible:
         payload = durable.get("payload")
         if type(payload) is not dict:
             raise FinancingConflict("financing durable payload is not canonical")
-        candidate = FinancingEvent.create(
-            charge_id=payload.get("charge_id"),
-            revision=payload.get("revision"),
-            kind=payload.get("kind"),
-            effective_at=payload.get("effective_at"),
-            available_at=payload.get("available_at"),
-            unit=payload.get("unit"),
-            amount=payload.get("amount"),
-            source_account=payload.get("source_account"),
-            evidence_ref=payload.get("evidence_ref"),
-        )
+        candidate = _EVENT_FROM_PAYLOAD(payload)
         partial = FinancingRevisionBook(replay_history)
-        update = _record_exact(partial, candidate)
+        update = _RECORD_EXACT(partial, candidate)
         replay_history = list(partial.events)
+        final_charge = update.current_final_charge
         if update.economic_delta != 0:
-            event_id = _text(durable.get("event_id"), name="financing event_id")
+            durable_event_id = _text(
+                durable.get("event_id"),
+                name="financing event_id",
+            )
             transaction = _FINANCING_ECONOMIC_TX_RAW(
                 owner,
                 aggregate_id=aggregate_id,
-                event_id=event_id,
+                event_id=durable_event_id,
                 event=candidate,
                 economic_delta=update.economic_delta,
             )
@@ -415,16 +382,18 @@ def resolve_ablation_financing_component_evidence(
                 (transaction.transaction_id, transaction_digest(transaction))
             )
 
-    economic_book = object.__getattribute__(owner, "economic_book")
-    economic_events = _ECONOMIC_EVENTS_RAW(economic_book)
-    economic_visible = _visible_prefix(economic_events, visibility)
-    if contributions and not economic_visible:
-        raise FinancingConflict(
-            "financing component lacks provider economics at visibility cut"
+    economic_cut_digest: str | None = None
+    economic_book_digest: str | None = None
+    if contributions:
+        economic_visible = _visible(_ECONOMIC_EVENTS_RAW(economic_book), visibility)
+        if not economic_visible:
+            raise FinancingConflict(
+                "financing component lacks provider economics at visibility cut"
+            )
+        economic_version = _positive(
+            economic_visible[-1].get("aggregate_version"),
+            name="economic aggregate_version",
         )
-    if economic_visible:
-        economic_version = economic_visible[-1].get("aggregate_version")
-        _positive_int(economic_version, name="economic aggregate_version")
         economic_cut = _RESOLVE_ECONOMIC_CUT_RAW(
             economic_book,
             economic_version,
@@ -432,28 +401,27 @@ def resolve_ablation_financing_component_evidence(
         )
         if type(economic_cut) is not ProviderEconomicCut:
             raise FinancingConflict("provider economic historical cut is not canonical")
-        economic_index = dict(economic_cut.transaction_digests)
+        index = dict(economic_cut.transaction_digests)
         for transaction_id, digest in contributions:
-            if economic_index.get(transaction_id) != digest:
+            if index.get(transaction_id) != digest:
                 raise FinancingConflict(
                     "financing transaction is absent from frozen provider economic cut"
                 )
-    else:
-        raise FinancingConflict(
-            "financing component requires a provider economic cut at visibility"
-        )
+        economic_cut_digest = economic_cut.cut_digest
+        economic_book_digest = economic_cut.resulting_book_digest
 
-    terminal_sequence = _positive_int(
+    terminal_sequence = _positive(
         terminal.get("journal_sequence"),
         name="terminal journal_sequence",
     )
     event_id = _text(terminal.get("event_id"), name="terminal event_id")
     payload_hash = _digest(terminal.get("payload_hash"), name="terminal payload_hash")
-    material = _canonical_material(
+    revision_digest = _revision_book_digest(list(book.events))
+    material = _material(
         store_identity=identity,
-        provider_id=owner.provider_id,
-        account_id=owner.account_id,
-        environment=owner.environment,
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
         charge_id=charge,
         aggregate_id=aggregate_id,
         aggregate_version=expected_version,
@@ -464,18 +432,18 @@ def resolve_ablation_financing_component_evidence(
         revision=latest.revision,
         unit=latest.unit,
         current_final_charge=_decimal_text(final_charge),
-        revision_book_digest=_revision_book_digest(list(book.events)),
+        revision_book_digest=revision_digest,
         contributing_transactions=tuple(contributions),
-        provider_economic_cut_digest=economic_cut.cut_digest,
-        provider_economic_resulting_book_digest=economic_cut.resulting_book_digest,
+        provider_economic_cut_digest=economic_cut_digest,
+        provider_economic_resulting_book_digest=economic_book_digest,
     )
     return ResolvedAblationFinancingComponentEvidence(
         evidence_kind=_EVIDENCE_KIND,
         terminal_cost_composite=False,
         store_identity=identity,
-        provider_id=owner.provider_id,
-        account_id=owner.account_id,
-        environment=owner.environment,
+        provider_id=state["provider_id"],
+        account_id=state["account_id"],
+        environment=state["environment"],
         charge_id=charge,
         aggregate_id=aggregate_id,
         aggregate_version=expected_version,
@@ -486,11 +454,11 @@ def resolve_ablation_financing_component_evidence(
         revision=latest.revision,
         unit=latest.unit,
         current_final_charge=final_charge,
-        revision_book_digest=_revision_book_digest(list(book.events)),
+        revision_book_digest=revision_digest,
         contributing_transactions=tuple(contributions),
-        provider_economic_cut_digest=economic_cut.cut_digest,
-        provider_economic_resulting_book_digest=economic_cut.resulting_book_digest,
-        evidence_digest=_evidence_digest(material),
+        provider_economic_cut_digest=economic_cut_digest,
+        provider_economic_resulting_book_digest=economic_book_digest,
+        evidence_digest=_hash(material),
     )
 
 

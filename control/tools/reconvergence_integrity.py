@@ -101,6 +101,11 @@ def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
         if not status:
             raise ValueError(f"Malformed Git name-status record: {line!r}")
         if kind in {"R", "C"}:
+            if len(status) == 1 or not status[1:].isdigit():
+                raise ValueError(f"Malformed rename/copy status: {line!r}")
+        elif len(status) != 1:
+            raise ValueError(f"Malformed Git name-status record: {line!r}")
+        if kind in {"R", "C"}:
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
             previous_path = _require_repo_relative_path(
@@ -174,9 +179,13 @@ def assess_reconvergence(
     authorized_protected_paths = _normalized_exact_paths(
         authorized_protected_sentinel_paths
     )
+    if not authorized_protected_paths.issubset(PROTECTED_SENTINELS):
+        raise ValueError(
+            "protected sentinel authorization must name only canonical protected sentinels"
+        )
     if not authorized_protected_paths.issubset(protected_sentinels):
         raise ValueError(
-            "protected sentinel authorization must name only protected sentinels"
+            "protected sentinel authorization must name active protected sentinels"
         )
 
     normalized_base = tuple(dict.fromkeys(base_paths))

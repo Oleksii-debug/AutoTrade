@@ -518,6 +518,9 @@ class ProviderAccountSurfaceCoverage:
 
 
 def _install_surface_coverage_authority():
+    page_chain_authority = require_provider_account_page_chain_authority
+    current_page_chain_authority = require_current_provider_account_page_chain_authority
+    historical_unknown_authority = require_historical_unknown_submission_authority
     states: dict[
         int,
         tuple[
@@ -600,8 +603,8 @@ def _install_surface_coverage_authority():
                 "provider surface coverage source authority is unavailable"
             )
         try:
-            require_provider_account_page_chain_authority(page_chain)
-            require_historical_unknown_submission_authority(historical)
+            page_chain_authority(page_chain)
+            historical_unknown_authority(historical)
         except (
             ProviderAccountPageChainError,
             ProviderAccountAbsenceCoverageError,
@@ -630,11 +633,11 @@ def _install_surface_coverage_authority():
                 "provider surface coverage source authority is unavailable"
             )
         try:
-            require_current_provider_account_page_chain_authority(
+            current_page_chain_authority(
                 page_chain,
                 at=at,
             )
-            require_historical_unknown_submission_authority(historical)
+            historical_unknown_authority(historical)
         except (
             ProviderAccountPageChainError,
             ProviderAccountAbsenceCoverageError,

@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import credential_transition_receipt as transition_module
 from mvp.autotrade_mvp import recovery_takeover as takeover_module
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, SnapshotConsistencyEvidence, reconcile_account
@@ -134,6 +135,19 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
         self.assertEqual(result.target_owner.owner_id, "host-b")
         self.assertEqual(calls, [])
 
+    def _assert_object_authority_rebind_is_ignored(self, target, attribute: str) -> None:
+        calls = []
+
+        def rebound(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError(f"pre-call snapshot authority executed: {attribute}")
+
+        with patch.object(target, attribute, new=rebound):
+            result = self._execute()
+
+        self.assertEqual(result.target_owner.owner_id, "host-b")
+        self.assertEqual(calls, [])
+
     def test_private_canonical_window_rebind_before_call_is_never_executed(self) -> None:
         self._assert_private_authority_rebind_is_ignored(
             "_CANONICAL_TAKEOVER_AUTHORITY_WINDOW"
@@ -201,6 +215,49 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
         self._assert_private_authority_rebind_is_ignored(
             "_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT"
         )
+
+    def test_snapshot_lock_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_object_authority_rebind_is_ignored(
+            takeover_module, "_exclusive_file_lock"
+        )
+
+    def test_snapshot_vault_load_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_object_authority_rebind_is_ignored(
+            ProtectedCredentialVault, "_load"
+        )
+
+    def test_snapshot_vault_handle_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_object_authority_rebind_is_ignored(
+            ProtectedCredentialVault, "_handle"
+        )
+
+    def test_snapshot_transition_section_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_object_authority_rebind_is_ignored(
+            transition_module, "_authority_section"
+        )
+
+    def test_snapshot_transition_parser_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_object_authority_rebind_is_ignored(
+            transition_module, "_parse_receipt"
+        )
+
+    def test_snapshot_transition_key_rebind_before_call_is_ignored(self) -> None:
+        with patch.object(
+            transition_module,
+            "_AUTHORITY_KEY",
+            "alternate_transition_authority",
+        ):
+            result = self._execute()
+        self.assertEqual(result.target_owner.owner_id, "host-b")
+
+    def test_snapshot_private_transition_key_rebind_before_call_is_ignored(self) -> None:
+        with patch.object(
+            transition_module,
+            "_CANONICAL_AUTHORITY_KEY",
+            "alternate_transition_authority",
+        ):
+            result = self._execute()
+        self.assertEqual(result.target_owner.owner_id, "host-b")
 
     def test_phase_two_callback_cannot_retarget_phase_three_takeover_window(self) -> None:
         calls = []

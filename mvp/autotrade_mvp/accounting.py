@@ -653,7 +653,7 @@ del _make_economic_book_audit_digest
 del _cached_transaction_digest
 
 
-def _scoped_economic_owner_operations():
+def _scoped_economic_owner_operations(*, _weakref_ref=weakref.ref):
     owners = {}
     lock = RLock()
 
@@ -666,11 +666,11 @@ def _scoped_economic_owner_operations():
             if current is not None and current[0]() is value:
                 raise AccountingConflict("immutable scoped-book owner is already initialized")
             owners[id(value)] = (
-                weakref.ref(value),
+                _weakref_ref(value),
                 type(value),
                 environment,
                 account_id,
-                weakref.ref(book),
+                _weakref_ref(book),
                 type(book),
             )
 
@@ -851,6 +851,12 @@ ScopedEconomicBook.__init__ = _make_scoped_economic_init(
     ScopedEconomicBook._ENVIRONMENTS,
 )
 del _make_scoped_economic_init
+
+# The constructor and facade now own the only writer/reader closures. Leaving
+# same-named module globals would let a caller mint registry entries for an
+# object created with object.__new__ or substitute later owner reads.
+del _bind_scoped_economic_book_owner
+del _require_scoped_economic_book_owner
 
 
 def book_external_cash_flow(

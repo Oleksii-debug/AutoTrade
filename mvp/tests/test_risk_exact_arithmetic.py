@@ -753,6 +753,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
             expected_state_version=7,
         )
         original_evaluate = risk_module.evaluate_risk
+        reservation_requirements = {"POSITION:ABC": "1"}
 
         def mutate_caller_context_after_evaluation(
             call_intent,
@@ -767,6 +768,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 **kwargs,
             )
             object.__setattr__(original_context, "state_version", 999)
+            reservation_requirements["POSITION:ABC"] = "9"
             return decision
 
         with patch.object(
@@ -781,14 +783,19 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 intent_hash="intent",
                 policy_version=1,
                 reservation_version=0,
-                reservation_requirements={"POSITION:ABC": "1"},
+                reservation_requirements=reservation_requirements,
                 capability_snapshot_id="capability",
                 evaluated_at="2026-10-05T10:00:00Z",
                 valid_until="2026-10-05T10:01:00Z",
             )
 
         self.assertEqual(original_context.state_version, 999)
+        self.assertEqual(reservation_requirements["POSITION:ABC"], "9")
         self.assertEqual(decision.state_version, 7)
+        self.assertEqual(
+            dict(decision.reservation_requirements or ()),
+            {"POSITION:ABC": Decimal("1")},
+        )
 
     def test_ratio_domain_error_is_not_misreported_as_resource_exhaustion(self):
         with self.assertRaisesRegex(

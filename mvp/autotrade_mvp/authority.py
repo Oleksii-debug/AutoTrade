@@ -80,6 +80,41 @@ def _text(value: str, *, name: str) -> str:
     return value.strip()
 
 
+def _optional_digest(value: object, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or len(value) != 71
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ValueError(f"{name} must be sha256:<64-lower-hex> or None")
+    return value
+
+
+def _optional_namespaced_digest(
+    value: object,
+    *,
+    name: str,
+    prefix: str,
+) -> str | None:
+    if value is None:
+        return None
+    expected_length = len(prefix) + 64
+    if (
+        not isinstance(value, str)
+        or not value.startswith(prefix)
+        or len(value) != expected_length
+        or any(
+            character not in "0123456789abcdef"
+            for character in value[len(prefix):]
+        )
+    ):
+        raise ValueError(f"{name} must be {prefix}<64-lower-hex> or None")
+    return value
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -1575,6 +1610,12 @@ class AuthoritativeRiskSnapshot:
     entity_policy_id: str | None = None
     instrument_family: str | None = None
     price_semantics_digest: str | None = None
+    account_cut_id: str | None = None
+    account_cut_digest: str | None = None
+    account_head_journal_sequence: int | None = None
+    qualification_identity_digest: str | None = None
+    quantity_unit: str | None = None
+    equivalent_exposure_digest: str | None = None
 
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
@@ -1586,6 +1627,64 @@ class AuthoritativeRiskSnapshot:
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("authoritative risk environment is unsupported")
         price_semantics_digest = self.price_semantics_digest
+        accepted_account_cut_id = _optional_namespaced_digest(
+            self.account_cut_id,
+            name="authoritative risk account_cut_id",
+            prefix="provider-account-cut:sha256:",
+        )
+        accepted_account_cut_digest = _optional_digest(
+            self.account_cut_digest,
+            name="authoritative risk account_cut_digest",
+        )
+        accepted_account_head = self.account_head_journal_sequence
+        if accepted_account_head is not None:
+            if (
+                not isinstance(accepted_account_head, int)
+                or isinstance(accepted_account_head, bool)
+                or accepted_account_head < 0
+            ):
+                raise ValueError(
+                    "authoritative risk account_head_journal_sequence must be a non-negative integer or None"
+                )
+            if accepted_account_head > self.journal_sequence_cut:
+                raise ValueError(
+                    "authoritative risk account head cannot be newer than financial cut"
+                )
+        accepted_qualification = _optional_namespaced_digest(
+            self.qualification_identity_digest,
+            name="authoritative risk qualification_identity_digest",
+            prefix="provider-qualification:sha256:",
+        )
+        accepted_quantity_unit = self.quantity_unit
+        if accepted_quantity_unit is not None:
+            if (
+                not isinstance(accepted_quantity_unit, str)
+                or not accepted_quantity_unit.strip()
+                or accepted_quantity_unit != accepted_quantity_unit.strip()
+                or accepted_quantity_unit.upper() != accepted_quantity_unit
+            ):
+                raise ValueError(
+                    "authoritative risk quantity_unit must be canonical uppercase text or None"
+                )
+        accepted_exposure = _optional_digest(
+            self.equivalent_exposure_digest,
+            name="authoritative risk equivalent_exposure_digest",
+        )
+        accepted_account_cut_fields = (
+            accepted_account_cut_id,
+            accepted_account_cut_digest,
+            accepted_account_head,
+            accepted_qualification,
+            accepted_quantity_unit,
+            accepted_exposure,
+        )
+        if any(value is not None for value in accepted_account_cut_fields) and any(
+            value is None for value in accepted_account_cut_fields
+        ):
+            raise ValueError(
+                "authoritative risk account/Q/instrument evidence must be complete"
+            )
+
         if price_semantics_digest is not None:
             if (
                 type(price_semantics_digest) is not str
@@ -1775,6 +1874,16 @@ class AuthoritativeRiskSnapshot:
             "price_semantics_digest",
             price_semantics_digest,
         )
+        object.__setattr__(self, "account_cut_id", accepted_account_cut_id)
+        object.__setattr__(self, "account_cut_digest", accepted_account_cut_digest)
+        object.__setattr__(self, "account_head_journal_sequence", accepted_account_head)
+        object.__setattr__(
+            self,
+            "qualification_identity_digest",
+            accepted_qualification,
+        )
+        object.__setattr__(self, "quantity_unit", accepted_quantity_unit)
+        object.__setattr__(self, "equivalent_exposure_digest", accepted_exposure)
         object.__setattr__(
             self,
             "evidence_refs",
@@ -1796,6 +1905,18 @@ class AuthoritativeRiskSnapshot:
                if resolved_risk_policy is not None else {}),
             **({"price_semantics_digest": self.price_semantics_digest}
                if self.price_semantics_digest is not None else {}),
+            **(
+                {
+                    "account_cut_id": self.account_cut_id,
+                    "account_cut_digest": self.account_cut_digest,
+                    "account_head_journal_sequence": self.account_head_journal_sequence,
+                    "qualification_identity_digest": self.qualification_identity_digest,
+                    "quantity_unit": self.quantity_unit,
+                    "equivalent_exposure_digest": self.equivalent_exposure_digest,
+                }
+                if self.account_cut_id is not None
+                else {}
+            ),
             "context_fingerprint": _risk_context_fingerprint(self.context),
             "context_state_version": self.context.state_version,
             "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),

@@ -174,6 +174,34 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
             "_CANONICAL_JOURNAL_GET_EVENT"
         )
 
+    def test_payload_digest_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored("payload_digest")
+
+    def test_revoke_receipt_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "revoke_trade_credential_with_receipt"
+        )
+
+    def test_verify_receipt_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "verify_trade_credential_transition_receipt"
+        )
+
+    def test_private_payload_digest_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_PAYLOAD_DIGEST"
+        )
+
+    def test_private_revoke_receipt_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_REVOKE_TRADE_CREDENTIAL_WITH_RECEIPT"
+        )
+
+    def test_private_verify_receipt_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT"
+        )
+
     def test_phase_two_callback_cannot_retarget_phase_three_takeover_window(self) -> None:
         calls = []
 

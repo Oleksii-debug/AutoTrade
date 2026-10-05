@@ -17,9 +17,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Bind recovery to exact JournalStore generation
+      - name: Bind recovery to exact JournalStore and canonical sender gate
         shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
           from pathlib import Path
 
@@ -30,7 +31,9 @@ jobs:
               global text
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'expected one recovery preimage, found {count}: {old[:90]!r}')
+                  raise SystemExit(
+                      f'expected one recovery preimage, found {count}: {old[:100]!r}'
+                  )
               text = text.replace(old, new, 1)
 
           replace_once(
@@ -40,6 +43,7 @@ jobs:
               '    payload_digest,\n'
               '    require_exact_journal_store_authority,\n'
               ')\n'
+              'from .sender_gate import journal_sender_gate\n'
               'from .store_identity import (\n'
               '    JournalStoreIdentity,\n'
               '    require_exact_journal_store_identity,\n'
@@ -148,27 +152,73 @@ jobs:
               '            store,\n',
           )
 
+          replace_once(
+              '        normalized_owner = owner_id.strip()\n'
+              '        durable = self._latest_durable_owner()\n'
+              '        if durable is not None:\n'
+              '            raise PermissionError(\n'
+              '                "Existing durable owner requires explicit takeover evidence"\n'
+              '            )\n'
+              '        candidate = OwnerFence(owner_id=normalized_owner, epoch=1)\n'
+              '        self._append_durable_owner(candidate)\n'
+              '        self.owner = candidate\n'
+              '        self.state = HostState.RECOVERING\n'
+              '        self.provider_reconciled = False\n'
+              '        self.reason_codes = {"startup_reconciliation_required"}\n'
+              '        self._recover_scoped_submission_uncertainty_from_owner_scope()\n'
+              '        return self.owner\n',
+              '        normalized_owner = owner_id.strip()\n'
+              '        with journal_sender_gate(self._owner_store):\n'
+              '            durable = self._latest_durable_owner()\n'
+              '            if self._owner_store is not None and durable is not None:\n'
+              '                raise PermissionError(\n'
+              '                    "Durable owner already exists; independently authorized takeover is required"\n'
+              '                )\n'
+              '            next_epoch = 1 if durable is None else durable.epoch + 1\n'
+              '            candidate = OwnerFence(\n'
+              '                owner_id=normalized_owner,\n'
+              '                epoch=next_epoch,\n'
+              '            )\n'
+              '            self._append_durable_owner(candidate)\n'
+              '            self.owner = candidate\n'
+              '            self.state = HostState.RECOVERING\n'
+              '            self.provider_reconciled = False\n'
+              '            self.reason_codes = {"startup_reconciliation_required"}\n'
+              '            self._recover_scoped_submission_uncertainty_from_owner_scope()\n'
+              '            return self.owner\n',
+          )
+
           path.write_text(text, encoding='utf-8')
 
-          Path('mvp/tests/test_recovery_store_authority_current.py').write_text('''from __future__ import annotations\n\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nfrom autotrade_mvp.persistence import JournalStore\nfrom autotrade_mvp.recovery import RecoveryController\n\n\nclass RecoveryStoreAuthorityTests(unittest.TestCase):\n    def _store(self, root: str) -> JournalStore:\n        return JournalStore(Path(root) / "journal.sqlite3")\n\n    def test_journalstore_subclass_cannot_be_recovery_authority(self) -> None:\n        class HostileStore(JournalStore):\n            pass\n        forged = object.__new__(HostileStore)\n        with self.assertRaises(TypeError):\n            RecoveryController(owner_store=forged, owner_scope="PAPER:acct")\n\n    def test_selected_physical_identity_is_retained(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            self.assertEqual(controller.durable_owner_store_identity, store.store_identity)\n            self.assertEqual(controller.durable_owner_store_path, Path(store.store_identity.canonical_path))\n\n    def test_instance_method_shadow_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            store.load_events = lambda *args, **kwargs: []\n            with self.assertRaises(TypeError):\n                controller.durable_owner_chain()\n\n    def test_lost_physical_identity_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            store._store_identity = None\n            with self.assertRaises(RuntimeError):\n                controller.durable_owner_chain()\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+          Path('mvp/tests/test_recovery_store_authority_current.py').write_text(
+              '''from __future__ import annotations\n\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nfrom autotrade_mvp.persistence import JournalStore\nfrom autotrade_mvp.recovery import RecoveryController\n\n\nclass RecoveryStoreAuthorityTests(unittest.TestCase):\n    def _store(self, root: str) -> JournalStore:\n        return JournalStore(Path(root) / "journal.sqlite3")\n\n    def test_journalstore_subclass_cannot_be_recovery_authority(self) -> None:\n        class HostileStore(JournalStore):\n            pass\n        forged = object.__new__(HostileStore)\n        with self.assertRaises(TypeError):\n            RecoveryController(owner_store=forged, owner_scope="PAPER:acct")\n\n    def test_selected_physical_identity_is_retained(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            self.assertEqual(controller.durable_owner_store_identity, store.store_identity)\n            self.assertEqual(controller.durable_owner_store_path, Path(store.store_identity.canonical_path))\n\n    def test_instance_method_shadow_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            store.load_events = lambda *args, **kwargs: []\n            with self.assertRaises(TypeError):\n                controller.durable_owner_chain()\n\n    def test_lost_physical_identity_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(owner_store=store, owner_scope="PAPER:acct")\n            store._store_identity = None\n            with self.assertRaises(RuntimeError):\n                controller.durable_owner_chain()\n\n\nif __name__ == "__main__":\n    unittest.main()\n''',
+              encoding='utf-8',
+          )
           PY
 
-      - name: Verify focused recovery authority
+      - name: Verify exact-store and sender-gate recovery authority
         shell: bash
         run: |
+          set -euo pipefail
           export PYTHONPATH="$PWD/mvp:$PWD"
-          python -m py_compile mvp/autotrade_mvp/recovery.py mvp/tests/test_recovery_store_authority_current.py
+          python -m py_compile \
+            mvp/autotrade_mvp/recovery.py \
+            mvp/autotrade_mvp/sender_gate.py \
+            mvp/tests/test_recovery_store_authority_current.py \
+            mvp/tests/test_recovery_sender_gate_current.py
           python -m unittest discover -s mvp/tests -p 'test_recovery_store_authority_current.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_recovery_sender_gate_current.py' -v
           python -m unittest discover -s mvp/tests -p 'test_recovery_durable_unknown_restart.py' -v
           python -m unittest discover -s mvp/tests -p 'test_runtime_failure_control.py' -v
 
       - name: Commit bounded reconvergence and remove one-shot transport
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add mvp/autotrade_mvp/recovery.py mvp/tests/test_recovery_store_authority_current.py
           git rm .github/workflows/wp48-current-recovery-journal-authority.yml
           git diff --cached --check
-          git commit -m "fix: bind recovery to exact JournalStore authority"
+          git commit -m "fix: reconverge recovery journal and sender-gate authority"
           git push origin HEAD:${GITHUB_REF_NAME}

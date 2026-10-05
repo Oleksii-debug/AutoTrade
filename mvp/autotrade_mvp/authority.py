@@ -84,7 +84,7 @@ def _optional_digest(value: object, *, name: str) -> str | None:
     if value is None:
         return None
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value.startswith("sha256:")
         or len(value) != 71
         or any(character not in "0123456789abcdef" for character in value[7:])
@@ -103,7 +103,7 @@ def _optional_namespaced_digest(
         return None
     expected_length = len(prefix) + 64
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value.startswith(prefix)
         or len(value) != expected_length
         or any(
@@ -1658,7 +1658,7 @@ class AuthoritativeRiskSnapshot:
         accepted_quantity_unit = self.quantity_unit
         if accepted_quantity_unit is not None:
             if (
-                not isinstance(accepted_quantity_unit, str)
+                type(accepted_quantity_unit) is not str
                 or not accepted_quantity_unit.strip()
                 or accepted_quantity_unit != accepted_quantity_unit.strip()
                 or accepted_quantity_unit.upper() != accepted_quantity_unit

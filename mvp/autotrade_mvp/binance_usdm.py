@@ -338,8 +338,8 @@ def parse_order_ack(
 
     aid = _uuid(attempt_id, name="attempt_id")
     cid = validate_client_order_id(client_order_id)
-    if not isinstance(response, Mapping):
-        raise BinanceUsdmAdapterError("response must be an object")
+    if type(response) is not dict:
+        raise BinanceUsdmAdapterError("response must be an exact decoded object")
 
     echoed = validate_client_order_id(response.get("clientOrderId"))
     if echoed != cid:
@@ -349,7 +349,7 @@ def parse_order_ack(
 
     symbol = _provider_symbol(response.get("symbol"), name="response.symbol")
     order_id = response.get("orderId")
-    if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
+    if type(order_id) is not int or order_id < 0:
         raise BinanceUsdmAdapterError(
             "response.orderId must be a non-negative integer"
         )

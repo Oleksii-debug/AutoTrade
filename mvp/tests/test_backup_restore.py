@@ -565,6 +565,41 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(any(root.glob(".autotrade-backup-*")))
 
+    def test_source_change_during_publication_rename_aborts_commit(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            self.assertTrue(checkpoint.is_file())
+            original_replace = backup_module.os.replace
+            injected = False
+
+            def replace_after_source_change(source, destination):
+                nonlocal injected
+                if Path(destination) == target and not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_during_publication":true}\n',
+                        encoding="utf-8",
+                    )
+                return original_replace(source, destination)
+
+            with patch.object(
+                backup_module.os,
+                "replace",
+                side_effect=replace_after_source_change,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
     def test_source_aba_during_copy_cannot_publish_transient_generation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

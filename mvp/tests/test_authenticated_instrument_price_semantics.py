@@ -18,7 +18,7 @@ from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.durable_financial_request_binding import (
     _require_admitted_price_semantics,
 )
-from mvp.tests.test_financial_send_authority import D7, financial_binding
+from mvp.tests.test_financial_send_authority import D7, binding
 from mvp.tests.test_instruments import (
     A,
     B,
@@ -207,7 +207,7 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
             self.assertEqual(
                 _require_admitted_price_semantics(
                     bound.evidence_payload(),
-                    financial_binding(),
+                    binding(),
                 ),
                 D7,
             )

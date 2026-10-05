@@ -93,6 +93,32 @@ class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
             restarted = self._vault(path)
             self.assertEqual(self._resolve(restarted, rotated), "rotated-secret")
 
+    def test_json_module_rebinding_cannot_suppress_durable_revocation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "credentials.json"
+            vault = self._vault(path)
+            handle = vault.register(
+                handle_id="cred-json-revocation",
+                owner_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value="revocable-secret",
+            )
+
+            with patch.object(windows_secrets, "json", HostileJsonModule):
+                vault.revoke(
+                    handle,
+                    execution_identity="windows-user-1",
+                )
+                with self.assertRaisesRegex(PermissionError, "unavailable"):
+                    self._resolve(vault, handle)
+
+            restarted = self._vault(path)
+            with self.assertRaisesRegex(PermissionError, "unavailable"):
+                self._resolve(restarted, handle)
+
     def test_json_module_attribute_retargeting_cannot_change_frozen_authority(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "credentials.json"

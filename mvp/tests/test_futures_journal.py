@@ -161,6 +161,24 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
         )
 
+    def test_inverse_durable_detachment_preserves_terminal_policy_authority(self):
+        contract = self._contract(payoff="INVERSE")
+        detached = futures_journal_module._detached_durable_contract(contract)
+        policy = futures_journal_module.inverse_settlement_convention(detached)
+        self.assertEqual(policy.quantum, "0.00000001")
+        self.assertEqual(policy.rounding, "HALF_EVEN")
+
+        object.__setattr__(
+            contract.canonical_instrument.settlement_convention,
+            "quantum",
+            "1",
+        )
+        with self.assertRaisesRegex(
+            FuturesError,
+            "settlement convention changed after contract admission",
+        ):
+            futures_journal_module._detached_durable_contract(contract)
+
     def test_provider_settlement_receipt_is_context_independent(self):
         contract = self._contract()
         observed = []

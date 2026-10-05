@@ -1047,8 +1047,26 @@ class DurableModelCallOrchestrator:
         binding: ModelCallBinding,
     ) -> ModelObservationEvidence:
         expected = self._observation_digest(observation, binding)
+        # The authenticator may inspect evidence inputs, but it must not be able
+        # to mutate the authoritative observation/binding graph retained by this
+        # attempt. Deep-copy JSON output and reseal all scalar dataclass fields.
+        resolver_observation_values = {
+            field.name: getattr(observation, field.name)
+            for field in fields(ModelCallObservation)
+        }
+        resolver_observation_values["output"] = json.loads(
+            canonical_json(resolver_observation_values["output"])
+        )
+        resolver_observation = ModelCallObservation(**resolver_observation_values)
+        resolver_binding = ModelCallBinding(**{
+            field.name: getattr(binding, field.name)
+            for field in fields(ModelCallBinding)
+        })
         try:
-            evidence = self.observation_evidence_resolver(observation, binding)
+            evidence = self.observation_evidence_resolver(
+                resolver_observation,
+                resolver_binding,
+            )
         except Exception as error:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
@@ -1527,8 +1545,16 @@ class DurableModelCallOrchestrator:
             descriptor=descriptor,
             pricing_evidence_digest=pricing_evidence_digest,
         )
+        # The inference adapter receives a detached binding. A frozen
+        # dataclass can still be altered via object.__setattr__; allowing the
+        # adapter to mutate the authoritative binding would let later evidence
+        # bind a different attempt/model identity than the durable route.
+        adapter_binding = ModelCallBinding(**{
+            field.name: getattr(binding, field.name)
+            for field in fields(ModelCallBinding)
+        })
         try:
-            observation = call(binding, cancelled)
+            observation = call(adapter_binding, cancelled)
         except ModelCallNotSent:
             # Once ModelCallStarted is durable, the injected adapter is inside
             # the possibly-billed boundary. Its own exception type is not an

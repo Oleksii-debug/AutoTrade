@@ -316,6 +316,21 @@ class VerticalSliceTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     run_vertical_slice([100, 101, 102, 103], directory, **kwargs)
 
+    def test_financial_configuration_rejects_noncanonical_symbol_text(self):
+        for symbol in (" SIM", "SIM ", " SIM ", "\tSIM", "SIM\n"):
+            with self.subTest(symbol=repr(symbol)), TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "symbol must be non-empty canonical text",
+                ):
+                    run_vertical_slice(
+                        [100, 101, 102, 103],
+                        directory,
+                        symbol=symbol,
+                    )
+                self.assertEqual(list(Path(directory).iterdir()), [])
+
+
     def test_financial_configuration_rejects_hostile_scalar_subclasses_before_use(self):
         class HostileText(str):
             def strip(self, *args, **kwargs):

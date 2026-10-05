@@ -11,6 +11,8 @@ from mvp.autotrade_mvp.qualification_attestation import (
     AcceptedQualificationAttestation,
     EvidenceArtifactRef,
     QualificationScope,
+    QualificationTrustError,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
 )
 import mvp.autotrade_mvp.recovery_qualification as recovery_qualification_module
@@ -149,6 +151,7 @@ def qualify(
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    canonical_error=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -227,10 +230,15 @@ def qualify(
                 release_artifact_id=policy.release_artifact_id,
                 release_artifact_sha256=policy.release_artifact_sha256,
             )
+            verifier_kwargs = (
+                {"return_value": accepted}
+                if canonical_error is None
+                else {"side_effect": canonical_error}
+            )
             with patch.object(
                 recovery_qualification_module,
                 "verify_canonical_qualification_attestation",
-                return_value=accepted,
+                **verifier_kwargs,
             ) as verify_canonical:
                 decision = qualify_recovery_release(
                     policy=policy,
@@ -364,6 +372,38 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             decision.qualification_trust_root_id.startswith("sha256:")
         )
         self.assertFalse(decision.authorizes_trading)
+
+    def test_canonical_trust_unavailable_remains_inconclusive(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            canonical_error=QualificationTrustUnavailable(
+                "canonical policy unavailable"
+            ),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            decision.blockers,
+        )
+        self.assertIsNone(decision.qualification_attestation_id)
+
+    def test_invalid_canonical_trust_remains_inconclusive_without_fallback(self):
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            canonical_error=QualificationTrustError(
+                "attestation is not authorized by canonical trust root"
+            ),
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            decision.blockers,
+        )
+        self.assertIsNone(decision.qualification_policy_id)
 
     def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):
         decision = qualify(

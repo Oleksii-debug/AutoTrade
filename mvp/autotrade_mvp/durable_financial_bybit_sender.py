@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from .bybit_v5 import BybitPreparedSubmission, guarded_order_projection
 from .dispatch import DispatchOutcome
 from .durable_financial_request_binding import DurableFinancialRequestBindingRegistry
 from .durable_financial_send_issuance import issue_persisted_financial_send_authority
@@ -28,6 +29,11 @@ _FACTORY_TOKEN = object()
 _ISSUER_TYPE = FinancialSendAuthorityIssuer
 _REGISTRY_TYPE = DurableFinancialRequestBindingRegistry
 _SENDER_TYPE = FinanciallyBoundBybitOrderSender
+_PREPARED_TYPE = BybitPreparedSubmission
+_PREPARED_PROJECTION = guarded_order_projection
+_PREPARED_PROJECTION_CODE = getattr(_PREPARED_PROJECTION, "__code__", None)
+if _PREPARED_PROJECTION_CODE is None:
+    raise RuntimeError("canonical Bybit prepared-request projection is unavailable")
 _MINT_PERSISTED_AUTHORITY = issue_persisted_financial_send_authority
 _MINT_PERSISTED_AUTHORITY_CODE = _MINT_PERSISTED_AUTHORITY.__code__
 _SENDER_DISPATCH_FUNCTION = _SENDER_TYPE.__dict__.get("dispatch")
@@ -47,6 +53,17 @@ def _require_module_authority() -> None:
         )
     if FinanciallyBoundBybitOrderSender is not _SENDER_TYPE:
         raise DurableFinancialBybitSenderError("financial Bybit sender type authority changed")
+    if BybitPreparedSubmission is not _PREPARED_TYPE:
+        raise DurableFinancialBybitSenderError(
+            "Bybit prepared-request type authority changed"
+        )
+    if (
+        guarded_order_projection is not _PREPARED_PROJECTION
+        or _PREPARED_PROJECTION.__code__ is not _PREPARED_PROJECTION_CODE
+    ):
+        raise DurableFinancialBybitSenderError(
+            "Bybit prepared-request projection executable authority changed"
+        )
     if (
         issue_persisted_financial_send_authority is not _MINT_PERSISTED_AUTHORITY
         or _MINT_PERSISTED_AUTHORITY.__code__ is not _MINT_PERSISTED_AUTHORITY_CODE
@@ -200,15 +217,25 @@ class DurableFinanciallyBoundBybitOrderSender:
         attempt_id: str,
         intent_id: str,
         intent_hash: str,
-        request: Mapping[str, Any],
+        prepared_request: BybitPreparedSubmission,
         now: str,
         client_id_max_length: int = 36,
         client_id_format: str = "TOKEN",
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        """Resolve the persisted admitted request, mint, then dispatch exact request."""
+        """Resolve durable authority and dispatch one canonical adapter-prepared request."""
 
         self._require_current()
+        if type(prepared_request) is not _PREPARED_TYPE:
+            raise TypeError(
+                "prepared_request must be exact BybitPreparedSubmission"
+            )
+        # Freeze the canonical adapter projection before any registry/issuer
+        # executable can run. Later callbacks cannot retarget the caller object
+        # or replace the adapter projection used by this attempt.
+        request = dict(_PREPARED_PROJECTION(prepared_request))
+        _require_module_authority()
+
         # The #1713 adapter performs the executable-authority and durable store
         # generation checks before it executes any registry/issuer authority.
         authority = _MINT_PERSISTED_AUTHORITY(

@@ -150,7 +150,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             )
             path.write_text(tampered, encoding="utf-8")
             self.assertFalse(store.verify())
-            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                 store.records()
 
     def test_append_waits_for_shared_cross_process_writer_lock(self):

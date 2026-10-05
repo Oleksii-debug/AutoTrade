@@ -337,6 +337,31 @@ def assert_conservative_execution(
             raise ExecutionOracleError("fee cannot be negative")
 
         if order.order_type == "MARKET":
+            if model.data_fidelity == "BAR":
+                if observation.bar_high is None or observation.bar_low is None:
+                    raise ExecutionOracleError("BAR market fill lacks price bounds")
+                reference = (
+                    observation.bar_high
+                    if order.side == "BUY"
+                    else observation.bar_low
+                )
+            else:
+                if observation.bid is None or observation.ask is None:
+                    raise ExecutionOracleError("market fill lacks bid/ask evidence")
+                reference = (
+                    observation.ask
+                    if order.side == "BUY"
+                    else observation.bid
+                )
+            if order.side == "BUY" and result.fill_price < reference:
+                raise ExecutionOracleError(
+                    "market buy result is more favorable than executable reference"
+                )
+            if order.side == "SELL" and result.fill_price > reference:
+                raise ExecutionOracleError(
+                    "market sell result is more favorable than executable reference"
+                )
+
             expected_market_price = _oracle_market_fill_price(
                 order=order,
                 observation=observation,

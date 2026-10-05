@@ -8,6 +8,9 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import admitted_financial_request_authority as admitted_module
+from mvp.autotrade_mvp import durable_financial_request_binding as durable_binding_module
+from mvp.autotrade_mvp import financial_binding_dispatch as dispatch_module
 from mvp.autotrade_mvp.admitted_financial_request_authority import (
     AdmittedFinancialRequestAuthority,
     AdmittedFinancialRequestAuthorityError,
@@ -95,6 +98,23 @@ class _ExplosiveText(str):
 
     def encode(self, *_args, **_kwargs):
         return self._explode()
+
+
+def _explosive_json_digest(_value):
+    raise AssertionError("rebound digest executed")
+
+
+def _explosive_registry_resolve(_self, _admission_id):
+    raise AssertionError("rebound registry resolve executed")
+
+
+def _explosive_material_from_payload(_value):
+    raise AssertionError("rebound registry helper executed")
+
+
+def _explosive_submission_scope(*, admission_id, material):
+    del admission_id, material
+    raise AssertionError("rebound submission scope executed")
 
 
 class _IssuerSubclass(AdmittedFinancialRequestAuthorityIssuer):
@@ -532,6 +552,105 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                 "valid canonical UTF-8",
             ):
                 issuer.issue("\ud800")
+
+    def test_local_digest_rebinding_and_code_mutation_fail_before_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            original = admitted_module._json_digest
+            admitted_module._json_digest = _explosive_json_digest
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "_json_digest executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                admitted_module._json_digest = original
+
+            original_code = original.__code__
+            original.__code__ = _explosive_json_digest.__code__
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "_json_digest executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                original.__code__ = original_code
+
+            self.assertIs(admitted_module._json_digest, original)
+
+    def test_registry_executable_rebinding_fails_before_forged_resolve(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, _material, _request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+
+            registry_type = durable_binding_module.DurableFinancialRequestBindingRegistry
+            original_resolve = registry_type.resolve
+            registry_type.resolve = _explosive_registry_resolve
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "registry resolve executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                registry_type.resolve = original_resolve
+
+            original_helper = durable_binding_module._material_from_payload
+            durable_binding_module._material_from_payload = _explosive_material_from_payload
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "durable binding _material_from_payload executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                durable_binding_module._material_from_payload = original_helper
+
+    def test_submission_scope_rebinding_fails_before_forged_scope_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            original = dispatch_module.financial_submission_scope
+            dispatch_module.financial_submission_scope = _explosive_submission_scope
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "financial submission scope financial_submission_scope executable authority changed",
+                ):
+                    issuer.require_exact_request(
+                        authority,
+                        request=request,
+                        submission_scope=scope,
+                    )
+            finally:
+                dispatch_module.financial_submission_scope = original
 
     def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
         parameters = inspect.signature(

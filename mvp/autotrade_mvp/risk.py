@@ -1600,6 +1600,49 @@ def validate_bound_risk_decision(decision: RiskDecision, *, now: str) -> None:
         raise ValueError("risk_decision is expired")
 
 
+def _reseal_bound_risk_context(context: RiskContext) -> RiskContext:
+    """Freeze the caller context before evaluation and durable state binding."""
+
+    if type(context) is not RiskContext:
+        raise TypeError("context must be RiskContext; exact RiskContext type required")
+    return RiskContext.create(
+        state_version=context.state_version,
+        equity=context.equity,
+        positions=context.positions,
+        marks=context.marks,
+        reserved_position_delta=context.reserved_position_delta,
+        daily_pnl=context.daily_pnl,
+        drawdown_fraction=context.drawdown_fraction,
+        market_data_age_seconds=context.market_data_age_seconds,
+        fx_age_seconds=context.fx_age_seconds,
+        fx_required=context.fx_required,
+        margin_headroom=context.margin_headroom,
+        capability_allowed=context.capability_allowed,
+        borrow_available=context.borrow_available,
+        stress_scenarios=context.stress_scenarios,
+        stress_scenario_labels=context.stress_scenario_labels,
+        tail_scenarios=context.tail_scenarios,
+        liquidation_headroom=context.liquidation_headroom,
+        liquidation_scope=context.liquidation_scope,
+        liquidation_headroom_evidence=context.liquidation_headroom_evidence,
+        decision_time=context.decision_time,
+        asset_buckets=context.asset_buckets,
+        venues=context.venues,
+        liquidity_capacity=context.liquidity_capacity,
+        factor_loadings=context.factor_loadings,
+        spread_fraction=context.spread_fraction,
+        slippage_fraction=context.slippage_fraction,
+        clock_age_seconds=context.clock_age_seconds,
+        settlement_allowed=context.settlement_allowed,
+        option_deliverable_verified=context.option_deliverable_verified,
+        option_exercise_cash_required=context.option_exercise_cash_required,
+        option_exercise_cash_available=context.option_exercise_cash_available,
+        futures_delivery_headroom_seconds=context.futures_delivery_headroom_seconds,
+        equivalent_exposure_per_unit=context.equivalent_exposure_per_unit,
+        instrument_types=context.instrument_types,
+    )
+
+
 def evaluate_bound_risk(
     intent: RiskIntent,
     context: RiskContext,
@@ -1624,15 +1667,16 @@ def evaluate_bound_risk(
         raise ValueError(
             "caller-selected evidence_store cannot bind financial risk"
         )
+    sealed_context = _reseal_bound_risk_context(context)
     decision = evaluate_risk(
         intent,
-        context,
+        sealed_context,
         policy,
     )
     return bind_risk_decision(
         decision,
         intent_hash=intent_hash,
-        state_version=context.state_version,
+        state_version=sealed_context.state_version,
         policy_version=policy_version,
         reservation_version=reservation_version,
         reservation_requirements=reservation_requirements,

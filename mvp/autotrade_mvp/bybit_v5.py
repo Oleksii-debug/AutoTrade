@@ -794,6 +794,13 @@ def _install_bybit_prepared_submission_authority(
     datetime_type = datetime
     timezone_type = timezone
     instrument_registry_type = InstrumentRegistry
+    instrument_registry_error_type = InstrumentRegistryError
+    uuid_type = UUID
+    canonical_str = str
+    canonical_int = int
+    canonical_any = any
+    type_error_type = TypeError
+    value_error_type = ValueError
     price_semantics_authority = authenticated_price_semantics_digest
     price_semantics_authority_code = price_semantics_authority.__code__
     prepared_ref = weakref_ref
@@ -846,6 +853,13 @@ def _install_bybit_prepared_submission_authority(
             or CapabilitySnapshot is not capability_type
             or BybitPreparedSubmission is not prepared_type
             or InstrumentRegistry is not instrument_registry_type
+            or InstrumentRegistryError is not instrument_registry_error_type
+            or UUID is not uuid_type
+            or str is not canonical_str
+            or int is not canonical_int
+            or any is not canonical_any
+            or TypeError is not type_error_type
+            or ValueError is not value_error_type
             or authenticated_price_semantics_digest is not price_semantics_authority
             or canonical_getattr(price_semantics_authority, "__code__", None)
             is not price_semantics_authority_code

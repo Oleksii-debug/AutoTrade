@@ -617,6 +617,67 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                         )
                 self.assertEqual(calls, [])
 
+    def test_price_semantics_primitives_are_pinned_before_builder_callbacks(self):
+        material = financial_binding()
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = _bybit_price_registry(material, directory)
+            instrument_ref = (
+                f"{material.instrument_id}@{material.instrument_version}"
+            )
+
+            for name in (
+                "UUID",
+                "str",
+                "int",
+                "any",
+                "InstrumentRegistryError",
+                "TypeError",
+                "ValueError",
+            ):
+                with self.subTest(name=name):
+                    calls = []
+
+                    def forged(*_args, **_kwargs):
+                        calls.append(name)
+                        return None
+
+                    with patch.object(
+                        bybit_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ProviderCoreError,
+                            "prepared submission authority changed",
+                        ):
+                            prepare_order_submission(
+                                capability=capability,
+                                at=READ_AT,
+                                provider_environment="TESTNET",
+                                product_family="LINEAR_DERIVATIVES",
+                                symbol="BTCUSDT",
+                                side="BUY",
+                                order_type="LIMIT",
+                                quantity="2",
+                                client_order_id="primitive-shadow",
+                                time_in_force="GTC",
+                                price="30000",
+                                price_semantics_registry=registry,
+                                price_semantics_artifact_store=artifact_store,
+                                price_semantics_instrument_version=instrument_ref,
+                                entity_policy_id=material.entity_policy_id,
+                                reduce_only=False,
+                            )
+                    self.assertEqual(calls, [])
+
+
     def test_exact_type_clone_without_canonical_issuance_is_rejected(self):
         material, prepared = canonical_case()
         forged = object.__new__(BybitPreparedSubmission)

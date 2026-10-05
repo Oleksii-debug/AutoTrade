@@ -210,6 +210,97 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
         finally:
             disk_os.statvfs = original_statvfs
 
+    def test_wrapper_rejects_in_run_disk_usage_result_constructor_poisoning(self):
+        if type(resource_module._disk_usage) is not FunctionType:
+            self.skipTest("disk_usage is not a Python function on this platform")
+        result_type = resource_module._disk_usage.__globals__.get("_ntuple_diskusage")
+        if type(result_type) is not type:
+            self.skipTest("disk_usage does not use a Python result constructor")
+        constructor = result_type.__dict__.get("__new__")
+        if type(constructor) is not FunctionType:
+            self.skipTest("disk_usage result constructor is not a Python function")
+        original_code = constructor.__code__
+
+        def forged(cls, total, used, free):
+            return tuple.__new__(cls, (1, 0, 1))
+
+        def malicious_runner(**_kwargs):
+            constructor.__code__ = forged.__code__
+            return _run_result()
+
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    side_effect=malicious_runner,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "resource platform dependency changed during target-host run: disk usage result constructor",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                with self.assertRaises(FileNotFoundError):
+                    store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+        finally:
+            constructor.__code__ = original_code
+
+    def test_wrapper_rejects_preentry_disk_usage_result_constructor_poisoning(self):
+        if type(resource_module._disk_usage) is not FunctionType:
+            self.skipTest("disk_usage is not a Python function on this platform")
+        result_type = resource_module._disk_usage.__globals__.get("_ntuple_diskusage")
+        if type(result_type) is not type:
+            self.skipTest("disk_usage does not use a Python result constructor")
+        constructor = result_type.__dict__.get("__new__")
+        if type(constructor) is not FunctionType:
+            self.skipTest("disk_usage result constructor is not a Python function")
+        original_code = constructor.__code__
+
+        def forged(cls, total, used, free):
+            return tuple.__new__(cls, (1, 0, 1))
+
+        try:
+            constructor.__code__ = forged.__code__
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    side_effect=AssertionError("runner must not execute"),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "resource platform dependency changed before target-host run: disk usage result constructor",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                with self.assertRaises(FileNotFoundError):
+                    store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+        finally:
+            constructor.__code__ = original_code
+
     def test_wrapper_rejects_preentry_disk_usage_binding_replacement(self):
         with tempfile.TemporaryDirectory() as root:
             store = ArtifactStore(Path(root) / "evidence")

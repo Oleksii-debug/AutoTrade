@@ -148,7 +148,10 @@ class ConfirmPendingIntentTests(unittest.TestCase):
 
             self.assertEqual(result.confirmation_id, "host-command-1")
             self.assertEqual(result.actor_id, "owner-1")
-            self.assertEqual(result.pending_intent.notional, result.financial_binding and result.pending_intent.notional)
+            self.assertEqual(
+                result.pending_intent.intent_hash,
+                result.financial_binding.intent_hash,
+            )
 
             restarted = AuthorityService(JournalStore(store.path))
             confirmation = restarted._confirmations["host-command-1"]
@@ -158,11 +161,11 @@ class ConfirmPendingIntentTests(unittest.TestCase):
             self.assertEqual(confirmation.notional, result.pending_intent.notional)
             self.assertIsNotNone(confirmation.financial_binding_hash)
 
-    def test_claim_then_crash_retry_finishes_same_confirmation(self) -> None:
+    def test_claim_then_crash_recovers_after_pending_expiry(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             pending_registry, _risk_registry, _scope = self._setup(store)
-            point = NOW + timedelta(seconds=2)
+            claim_time = NOW + timedelta(seconds=2)
 
             pending_registry.claim_confirmation(
                 "pending-confirm-1",
@@ -172,13 +175,16 @@ class ConfirmPendingIntentTests(unittest.TestCase):
                 environment="PAPER",
                 policy_id="authority-policy-1",
                 authority_policy_version=3,
-                at=point,
+                at=claim_time,
             )
             self.assertNotIn(
                 "host-command-crash",
                 AuthorityService(store)._confirmations,
             )
 
+            # The pending record expired at NOW + 10 minutes. The exact durable
+            # claim must still permit recovery of the same host operation.
+            recovery_time = NOW + timedelta(minutes=11)
             recovered = confirm_pending_intent(
                 store,
                 pending_intent_id="pending-confirm-1",
@@ -186,7 +192,7 @@ class ConfirmPendingIntentTests(unittest.TestCase):
                 actor_id="owner-1",
                 account_id="acct-1",
                 environment="PAPER",
-                accepted_at=point,
+                accepted_at=recovery_time,
             )
             self.assertEqual(recovered.confirmation_id, "host-command-crash")
             self.assertIn(
@@ -201,7 +207,7 @@ class ConfirmPendingIntentTests(unittest.TestCase):
                 actor_id="owner-1",
                 account_id="acct-1",
                 environment="PAPER",
-                accepted_at=point + timedelta(seconds=20),
+                accepted_at=recovery_time + timedelta(seconds=20),
             )
             self.assertEqual(retry, recovered)
 

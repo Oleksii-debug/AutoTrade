@@ -544,6 +544,96 @@ def _append_evidence(path: Path, evidence: dict) -> bool:
     return True
 
 
+def _repair_interrupted_replay(
+    root: Path,
+    state: dict,
+    *,
+    symbol: str,
+    financial_configuration_hash: str,
+) -> None:
+    """Repair only the latest incomplete replay tail before new financial work."""
+
+    ids = state.get("evidence_ids", [])
+    records = state.get("evidence_records", {})
+    if type(ids) is not list or type(records) is not dict:
+        raise ValueError("Corrupt checkpoint replay authority")
+    if len(ids) != len(set(ids)) or set(ids) != set(records):
+        raise ValueError("Corrupt checkpoint replay evidence identity")
+    if not ids:
+        return
+
+    ordered: list[tuple[datetime, str, dict]] = []
+    for evidence_id in ids:
+        record = records.get(evidence_id)
+        if (
+            type(evidence_id) is not str
+            or not evidence_id
+            or type(record) is not dict
+            or record.get("evidence_id") != evidence_id
+            or record.get("financial_configuration_hash")
+            != financial_configuration_hash
+        ):
+            raise ValueError("Corrupt checkpoint replay evidence")
+        try:
+            timestamp = datetime.fromisoformat(
+                _utc_z(record["recorded_at"]).replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Corrupt checkpoint replay chronology") from error
+        ordered.append((timestamp, evidence_id, record))
+
+    latest_instant = max(item[0] for item in ordered)
+    latest = [item for item in ordered if item[0] == latest_instant]
+    if len(latest) != 1:
+        raise ValueError("Checkpoint replay chronology is ambiguous")
+    _instant, latest_id, latest_record = latest[0]
+    expected_ids = set(ids)
+
+    evidence_path = root / "learning-evidence.jsonl"
+    missing_evidence = {
+        evidence_id
+        for evidence_id in ids
+        if _find_evidence(evidence_path, evidence_id) is None
+    }
+    if missing_evidence - {latest_id}:
+        raise ValueError("Historical learning evidence is incomplete before latest episode")
+
+    journal_path = root / "journal.sqlite3"
+    journal_ids: set[str] = set()
+    if journal_path.is_file():
+        store = JournalStore(journal_path)
+        for event in store.load_events("simulation_portfolio", symbol):
+            if type(event) is not dict:
+                raise ValueError("Corrupt simulation journal replay event")
+            payload = event.get("payload")
+            evidence_id = (
+                payload.get("evidence_id")
+                if type(payload) is dict
+                else None
+            )
+            if type(evidence_id) is not str or evidence_id in journal_ids:
+                raise ValueError("Corrupt simulation journal evidence identity")
+            journal_ids.add(evidence_id)
+    if journal_ids - expected_ids:
+        raise ValueError("Simulation journal contains unknown replay evidence")
+    missing_journal = expected_ids - journal_ids
+    if missing_journal - {latest_id}:
+        raise ValueError("Historical simulation journal is incomplete before latest episode")
+
+    if latest_id in missing_evidence:
+        _append_evidence(evidence_path, latest_record)
+    if latest_id in missing_journal:
+        handle_journal_event(
+            root,
+            symbol,
+            latest_record,
+            financial_configuration_hash,
+        )
+
+    if not verify_replay(root):
+        raise ValueError("Durable replay state is invalid before resume")
+
+
 def _persist_intent(path: Path, intent: OrderIntent) -> None:
     payload = {**asdict(intent), "quantity": str(intent.quantity), "price": str(intent.price)}
     if path.exists():
@@ -994,6 +1084,12 @@ def run_vertical_slice(
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
     if resumed:
         _require_checkpoint_configuration(state, financial_configuration)
+        _repair_interrupted_replay(
+            root,
+            state,
+            symbol=symbol,
+            financial_configuration_hash=financial_configuration_hash,
+        )
     elif _has_residual_durable_state(root):
         raise ValueError(
             "Durable state exists without exact financial configuration identity"

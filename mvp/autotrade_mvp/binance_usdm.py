@@ -8,7 +8,7 @@ reconciliation contracts. Order acknowledgement is never execution evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -30,6 +30,7 @@ from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 _MAX_UNIX_MILLIS = 253_402_300_799_999
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_PREPARED_REQUEST_TOKEN = object()
 
 
 BINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
@@ -239,8 +240,13 @@ class BinanceUsdmPreparedRequest:
     body: Mapping[str, str]
     capability_snapshot_id: str
     documentation_refs: tuple[str, ...]
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceUsdmAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
         object.__setattr__(
             self,
             "body",
@@ -286,41 +292,52 @@ def prepare_order_request(
         raise TypeError("intent must be exact BinanceUsdmOrderIntent")
     if type(capability) is not CapabilitySnapshot:
         raise TypeError("capability must be exact CapabilitySnapshot")
+    canonical_intent = BinanceUsdmOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        symbol=intent.symbol,
+        side=intent.side,
+        order_type=intent.order_type,
+        quantity=intent.quantity,
+        price=intent.price,
+        time_in_force=intent.time_in_force,
+        position_side=intent.position_side,
+        reduce_only=intent.reduce_only,
+    )
 
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":
         raise BinanceUsdmAdapterError("capability belongs to another provider")
-    if capability.instrument_version != intent.instrument_version:
+    if capability.instrument_version != canonical_intent.instrument_version:
         raise BinanceUsdmAdapterError(
             "capability instrument version does not match intent"
         )
     if not capability.admits(
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force or "NONE",
+        order_type=canonical_intent.order_type,
+        time_in_force=canonical_intent.time_in_force or "NONE",
         permission_scope="ORDER_WRITE",
     ):
         raise BinanceUsdmAdapterError(
             "exact capability evidence does not admit this order"
         )
 
-    _require_position_mode(capability=capability, intent=intent)
+    _require_position_mode(capability=capability, intent=canonical_intent)
 
     body: dict[str, str] = {
-        "symbol": intent.symbol,
-        "side": intent.side,
-        "type": intent.order_type,
-        "quantity": _decimal_text(intent.quantity),
+        "symbol": canonical_intent.symbol,
+        "side": canonical_intent.side,
+        "type": canonical_intent.order_type,
+        "quantity": _decimal_text(canonical_intent.quantity),
         "newClientOrderId": client_id,
         "newOrderRespType": "ACK",
-        "positionSide": intent.position_side,
+        "positionSide": canonical_intent.position_side,
     }
-    if intent.price is not None:
-        body["price"] = _decimal_text(intent.price)
-    if intent.time_in_force is not None:
-        body["timeInForce"] = intent.time_in_force
-    if intent.reduce_only:
+    if canonical_intent.price is not None:
+        body["price"] = _decimal_text(canonical_intent.price)
+    if canonical_intent.time_in_force is not None:
+        body["timeInForce"] = canonical_intent.time_in_force
+    if canonical_intent.reduce_only:
         body["reduceOnly"] = "true"
 
     # timestamp, recvWindow, API key and signature belong to the separately
@@ -330,6 +347,7 @@ def prepare_order_request(
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         documentation_refs=BINANCE_USDM_DOCS,
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 

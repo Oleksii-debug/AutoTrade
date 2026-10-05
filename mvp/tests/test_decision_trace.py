@@ -199,6 +199,45 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertIn("[REDACTED]", persisted["json_digest"])
             self.assertIn("[REDACTED]", persisted["quoted_key_with_spaces"])
 
+    def test_polymorphic_trace_inputs_fail_closed_before_callbacks(self):
+        calls = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("caller mapping callback must not execute")
+
+        class HostileStr(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("caller string callback must not execute")
+
+            def lower(self):
+                calls.append("lower")
+                raise AssertionError("caller string callback must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(HostileDict(trace("trace-hostile-root")))
+            self.assertFalse(path.exists())
+
+            hostile_attributes = trace("trace-hostile-attributes")
+            hostile_attributes["attributes"] = HostileDict({"safe": "value"})
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_attributes)
+            self.assertFalse(path.exists())
+
+            hostile_text = trace("trace-hostile-text")
+            hostile_text["trace_id"] = HostileStr("trace-hostile-text")
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_text)
+            self.assertFalse(path.exists())
+
+        self.assertEqual(calls, [])
+
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

@@ -89,8 +89,14 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client secret": "client-value",
                 "Authorization-Header": "Bearer value",
                 "x-api-key": "key-value",
+                "apiKey": "camel-key-value",
                 "private-key-pem": "pem-value",
+                "credential": "credential-value",
+                "credentialId": "credential-id-value",
+                "proxyAuthorization": "proxy-auth-value",
                 "token_budget": 100,
+                "tokenBudget": 101,
+                "apiSecretRotationCount": 7,
             }
             store.append(item)
             persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -101,10 +107,16 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client secret",
                 "Authorization-Header",
                 "x-api-key",
+                "apiKey",
                 "private-key-pem",
+                "credential",
+                "credentialId",
+                "proxyAuthorization",
             ):
                 self.assertEqual(attributes[key], "[REDACTED]")
             self.assertEqual(attributes["token_budget"], 100)
+            self.assertEqual(attributes["tokenBudget"], 101)
+            self.assertEqual(attributes["apiSecretRotationCount"], 7)
             raw = path.read_text(encoding="utf-8")
             for leaked in (
                 "access-value",
@@ -112,7 +124,11 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client-value",
                 "Bearer value",
                 "key-value",
+                "camel-key-value",
                 "pem-value",
+                "credential-value",
+                "credential-id-value",
+                "proxy-auth-value",
             ):
                 self.assertNotIn(leaked, raw)
 
@@ -250,6 +266,57 @@ class DecisionTraceStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exact built-in"):
                 store.append(hostile_source)
             self.assertFalse(path.exists())
+
+        self.assertEqual(calls, [])
+
+    def test_reconstruction_rejects_executable_availability_before_callbacks(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("caller availability iterator must not execute")
+
+            def __len__(self):
+                calls.append("len")
+                raise AssertionError("caller availability truthiness must not execute")
+
+        class HostileIdentity(str):
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("caller identity hash must not execute")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("caller identity equality must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-availability"))
+
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=HostileList(),
+                    available_evidence_ids=["evidence-1"],
+                )
+
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.accessible_export(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=HostileList(),
+                )
+
+            hostile_identity = HostileIdentity("evidence-1")
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact strings"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=[hostile_identity],
+                )
 
         self.assertEqual(calls, [])
 

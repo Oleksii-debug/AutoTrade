@@ -201,7 +201,7 @@ class SubmissionResponseBinding:
             (self.client_order_id, "client_order_id"),
             (self.account_id, "account_id"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None:
             raise ValueError("request_hash must be a canonical SHA-256 digest")
@@ -304,15 +304,15 @@ def submission_attempt_aggregate_id(
     """Return the canonical durable aggregate identity for one send attempt."""
 
     normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
+        environment.strip().upper() if type(environment) is str else ""
     )
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError(
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(attempt_id, str) or not attempt_id.strip():
+    if type(attempt_id) is not str or not attempt_id.strip():
         raise ValueError("attempt_id is required")
     return "submission-attempt:" + _identity_digest(
         normalized_environment,
@@ -330,16 +330,16 @@ def submission_intent_aggregate_id(
 ) -> str:
     """Return one durable financial-send identity for one economic intent."""
 
-    if not isinstance(provider, str) or not provider.strip():
+    if type(provider) is not str or not provider.strip():
         raise ValueError("provider is required")
     normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
+        environment.strip().upper() if type(environment) is str else ""
     )
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(intent_id, str) or not intent_id.strip():
+    if type(intent_id) is not str or not intent_id.strip():
         raise ValueError("intent_id is required")
     return "submission-intent:" + _identity_digest(
         provider.strip().lower(),
@@ -566,16 +566,16 @@ def stable_client_order_id(
     max_length: int = 32,
     client_id_format: str = "TOKEN",
 ) -> str:
-    if not isinstance(provider, str) or not provider.strip():
+    if type(provider) is not str or not provider.strip():
         raise ValueError("provider is required")
-    if not isinstance(intent_id, str) or not intent_id.strip():
+    if type(intent_id) is not str or not intent_id.strip():
         raise ValueError("intent_id is required")
-    normalized_environment = environment.strip().upper() if isinstance(environment, str) else ""
+    normalized_environment = environment.strip().upper() if type(environment) is str else ""
     if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
         raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-    if not isinstance(account_id, str) or not account_id.strip():
+    if type(account_id) is not str or not account_id.strip():
         raise ValueError("account_id is required")
-    if not isinstance(client_id_format, str):
+    if type(client_id_format) is not str:
         raise TypeError("client_id_format must be text")
     normalized_format = client_id_format.strip().upper()
     if normalized_format not in {"TOKEN", "UUID"}:
@@ -605,7 +605,7 @@ def stable_client_order_id(
 
 
 def _instant(value: str) -> datetime:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError("now must be an ISO timestamp")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -698,11 +698,11 @@ class GuardedDispatcher:
         ) = _canonical_journal_authority_snapshot(store)
         self.store = store
         normalized_environment = (
-            environment.strip().upper() if isinstance(environment, str) else ""
+            environment.strip().upper() if type(environment) is str else ""
         )
         if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not account_id.strip():
             raise ValueError("account_id is required")
         self.environment = normalized_environment
         self.account_id = account_id.strip()
@@ -919,7 +919,7 @@ class GuardedDispatcher:
             (intent_hash, "intent_hash"),
             (provider, "provider"),
         ):
-            if not isinstance(value, str) or not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")

@@ -293,9 +293,16 @@ class JournalBackedHostCommandStore:
                 "expected_state_version must be a canonical Sequence"
             )
         request_origin = self._request_origin_provider()
-        if not isinstance(request_origin, str) or not request_origin.strip():
+        if type(request_origin) is not str or not str.strip(request_origin):
             raise PermissionError("Current request origin is unavailable")
-        if not self._session_validator(session, actor, request_origin.strip(), action):
+        normalized_origin = str.strip(request_origin)
+        authorized = self._session_validator(
+            session,
+            actor,
+            normalized_origin,
+            action,
+        )
+        if authorized is not True:
             raise PermissionError(
                 "Session is not authorized for actor, request origin, and action"
             )

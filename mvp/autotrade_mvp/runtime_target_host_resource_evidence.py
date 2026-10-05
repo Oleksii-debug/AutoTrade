@@ -306,6 +306,23 @@ if type(_disk_usage) is FunctionType:
             )
 
 
+_RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY = ()
+if type(_disk_usage) is FunctionType:
+    _disk_usage_result_type = _disk_usage.__globals__.get("_ntuple_diskusage")
+    if type(_disk_usage_result_type) is type:
+        _disk_usage_result_new = vars(_disk_usage_result_type).get("__new__")
+        if type(_disk_usage_result_new) is FunctionType:
+            _RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY = (
+                (
+                    "disk usage result constructor",
+                    _disk_usage_result_type,
+                    "__new__",
+                    _disk_usage_result_new,
+                    _capture_callable_authority(_disk_usage_result_new),
+                ),
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
     process_id: int
@@ -976,6 +993,9 @@ def run_declared_target_host_campaign_with_resources(
     store_authority = _capture_artifact_store_authority(evidence_store)
     resource_platform_states = _RESOURCE_PLATFORM_AUTHORITY
     resource_platform_attribute_states = _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY
+    resource_platform_class_function_states = (
+        _RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY
+    )
     capture_snapshot = capture_runtime_target_host_resource_snapshot
     issue_evidence = issue_runtime_target_host_resource_evidence
     publish_evidence = publish_runtime_target_host_resource_evidence
@@ -1047,6 +1067,33 @@ def run_declared_target_host_campaign_with_resources(
                     "resource platform dependency changed "
                     f"{phase}: {dependency_name}"
                 )
+
+
+        for (
+            dependency_name,
+            owner,
+            attribute_name,
+            function,
+            function_state,
+        ) in resource_platform_class_function_states:
+            namespace = raw_type_getattribute(owner, "__dict__")
+            current = raw_descriptor_getitem(namespace, attribute_name)
+            if current is not function:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
+            try:
+                require_callable(
+                    function,
+                    function_state,
+                    name=f"resource platform dependency {dependency_name}",
+                )
+            except ValueError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                ) from error
 
 
     def require_resource_class_authority(*, phase: str) -> None:

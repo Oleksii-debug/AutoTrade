@@ -847,6 +847,8 @@ class DurableModelCallOrchestrator:
         ],
         module_globals=globals(),
         dataclass_fields=fields,
+        json_module=json,
+        json_loads=json.loads,
         journal_class_authority_changes=_model_journal_class_authority_changes,
         journal_authority_guard=require_exact_journal_store_authority,
     ) -> list[str]:
@@ -897,6 +899,23 @@ class DurableModelCallOrchestrator:
                 module_globals,
                 "fields",
                 dataclass_fields,
+            )
+
+        current_json = dict.get(module_globals, "json")
+        if current_json is not json_module:
+            changes.append("module.json")
+            dict.__setitem__(
+                module_globals,
+                "json",
+                json_module,
+            )
+        current_json_loads = dict.get(vars(json_module), "loads")
+        if current_json_loads is not json_loads:
+            changes.append("module.json.loads")
+            dict.__setitem__(
+                vars(json_module),
+                "loads",
+                json_loads,
             )
 
         current_journal_helper = dict.get(

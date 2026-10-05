@@ -33,6 +33,7 @@ def model(**overrides):
         price_quantum="0.01",
         price_projection_policy_id="ADVERSE_PRICE_GRID",
         price_projection_policy_version=1,
+        price_grid_instrument_version="ABC@v1",
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

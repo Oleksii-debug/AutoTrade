@@ -1551,8 +1551,75 @@ class DurableModelCallOrchestrator:
             )
 
         cancelled = cancel_requested or (lambda: False)
+        cancel_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        cancel_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        cancel_error: Exception | None = None
+        cancel_changes: list[str] = []
+        try:
+            try:
+                cancelled_before_start = cancelled()
+            except Exception as error:
+                cancel_error = error
+        finally:
+            for name, expected in cancel_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    cancel_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in cancel_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    cancel_changes.append(name)
+                setattr(self, name, expected)
+
+        if cancel_changes:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "cancel_callback_mutated_orchestrator_authority:"
+                + ",".join(sorted(cancel_changes)),
+                "released": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallNotSent",
+                version=2,
+                payload=payload,
+            )
+            self.budget.release(attempt_id)
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+        if cancel_error is not None:
+            raise cancel_error
+        if type(cancelled_before_start) is not bool:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "cancel_callback_returned_non_boolean",
+                "released": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallNotSent",
+                version=2,
+                payload=payload,
+            )
+            self.budget.release(attempt_id)
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+
         # The cancellation callback may consume time; check time afterwards.
-        cancelled_before_start = cancelled()
         temporal_reason = self._temporal_reason(prepared_payload, request)
         if cancelled_before_start or temporal_reason is not None:
             payload = {
@@ -1876,10 +1943,57 @@ class DurableModelCallOrchestrator:
             "result_schema_id": spec.result_schema_id,
             "schema_valid": None,
         }
+        validator_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        validator_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        validator_changes: list[str] = []
         try:
-            schema_valid = validate_result(json.loads(result_json))
-        except Exception:
-            schema_valid = False
+            try:
+                schema_valid = validate_result(json.loads(result_json))
+            except Exception:
+                schema_valid = False
+        finally:
+            for name, expected in validator_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    validator_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in validator_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    validator_changes.append(name)
+                setattr(self, name, expected)
+
+        if validator_changes:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "result_validator_mutated_orchestrator_authority:"
+                + ",".join(sorted(validator_changes)),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
         if type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
@@ -1925,7 +2039,46 @@ class DurableModelCallOrchestrator:
         })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
-        recovery_fence()
+        recovery_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        recovery_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        recovery_error: Exception | None = None
+        recovery_changes: list[str] = []
+        try:
+            try:
+                recovery_fence()
+            except Exception as error:
+                recovery_error = error
+        finally:
+            for name, expected in recovery_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    recovery_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in recovery_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    recovery_changes.append(name)
+                setattr(self, name, expected)
+        if recovery_changes:
+            error = ModelCallError(
+                "recovery fence mutated orchestrator authority:"
+                + ",".join(sorted(recovery_changes))
+            )
+            if recovery_error is not None:
+                raise error from recovery_error
+            raise error
+        if recovery_error is not None:
+            raise recovery_error
+
         attempt_id = self.attempt_id(spec)
         events = self._events(attempt_id)
         if events:

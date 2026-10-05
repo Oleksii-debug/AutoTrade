@@ -152,6 +152,40 @@ class VerticalSliceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checkpoint fill quantity"):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_market_data_rejects_oversized_text_before_decimal_construction(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with patch.object(
+            pipeline_module,
+            "Decimal",
+            side_effect=AssertionError("unbounded Decimal construction"),
+        ):
+            with self.assertRaisesRegex(ValueError, "finite and positive"):
+                pipeline_module.handle_market_data(["1e999999"])
+
+    def test_market_data_rejects_hostile_scalar_subclasses_without_virtual_conversion(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        class HostileStr(str):
+            def __str__(self):
+                raise AssertionError("hostile str conversion")
+
+        class HostileFloat(float):
+            def __str__(self):
+                raise AssertionError("hostile float conversion")
+
+        class HostileInt(int):
+            def __str__(self):
+                raise AssertionError("hostile int conversion")
+
+        for value in (HostileStr("100"), HostileFloat(100.0), HostileInt(100)):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "exact float, str, int or Decimal",
+                ):
+                    pipeline_module.handle_market_data([value])
+
     def test_cash_limit_and_invalid_configuration(self):
         with TemporaryDirectory() as directory:
             rejected = run_vertical_slice([100, 101, 102, 103], directory, initial_cash="10")

@@ -63,9 +63,15 @@ def _checkpoint_decimal(value: object, *, name: str) -> Decimal:
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
     normalized: list[Decimal] = []
     for value in prices:
+        if type(value) is float:
+            presentation: object = str(value)
+        elif type(value) in (str, int, Decimal):
+            presentation = value
+        else:
+            raise ValueError("Prices must be exact float, str, int or Decimal values")
         try:
-            numeric = Decimal(str(value))
-        except (ValueError, ArithmeticError) as error:
+            numeric = parse_bounded_exact_decimal(presentation)
+        except (ValueError, ArithmeticError, TypeError) as error:
             raise ValueError("Prices must be finite and positive") from error
         if not numeric.is_finite() or numeric <= 0:
             raise ValueError("Prices must be finite and positive")

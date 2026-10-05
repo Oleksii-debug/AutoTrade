@@ -95,21 +95,29 @@ def _utc(value: datetime, *, name: str) -> datetime:
 
 
 def _millis(value: object, *, name: str) -> str:
-    if isinstance(value, bool):
-        raise BinanceSpotAdapterError(f"{name} must be an integer millisecond timestamp")
-    try:
+    if type(value) is int:
+        raw = value
+    elif type(value) is str and value.isdigit():
         raw = int(value)
-    except (TypeError, ValueError) as error:
-        raise BinanceSpotAdapterError(f"{name} must be an integer millisecond timestamp") from error
-    if raw < 0 or str(raw) != str(value).strip():
-        raise BinanceSpotAdapterError(f"{name} must be a non-negative integer millisecond timestamp")
+        if str(raw) != value:
+            raise BinanceSpotAdapterError(
+                f"{name} must be a non-negative integer millisecond timestamp"
+            )
+    else:
+        raise BinanceSpotAdapterError(
+            f"{name} must be an integer millisecond timestamp"
+        )
+    if raw < 0:
+        raise BinanceSpotAdapterError(
+            f"{name} must be a non-negative integer millisecond timestamp"
+        )
     seconds, remainder = divmod(raw, 1000)
     instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _nonnegative_int(value: object, *, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise BinanceSpotAdapterError(f"{name} must be a non-negative integer")
     return value
 
@@ -1640,8 +1648,8 @@ def parse_account_trades(
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated exact-byte account-trade read to unique fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
     try:
         observation.require_scope(
             provider_id="BINANCE",

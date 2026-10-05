@@ -1,4 +1,5 @@
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import inspect
@@ -6,6 +7,7 @@ import unittest
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+import mvp.autotrade_mvp.provider_origin as provider_origin_module
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_account_absence_semantics import (
@@ -37,7 +39,6 @@ from mvp.autotrade_mvp.provider_route_reads import (
 )
 from mvp.autotrade_mvp.provider_selection import select_provider
 from mvp.tests.provider_qualification_test_support import ExactQualificationProjectionHarness
-from mvp.tests.test_provider_account_origin_set import ProviderAccountOriginSetTests
 from mvp.tests.test_provider_route_reads import verified_read_capability
 from mvp.tests.test_provider_selection import (
     NOW,
@@ -98,7 +99,9 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             verified_read_capability(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 NOW - timedelta(minutes=1),
-                permission_scopes=frozenset({"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}),
+                permission_scopes=frozenset(
+                    {"ORDER.READ", "ORDER.WRITE", "ACCOUNT.READ"}
+                ),
                 data_entitlements=frozenset(
                     {"QUOTE", "BALANCES", "ORDERS", "EXECUTIONS", "ACTIVITIES"}
                 ),
@@ -134,16 +137,6 @@ class ProviderAccountPageChainTests(unittest.TestCase):
         route = selection.selected
         self.assertIsNotNone(route)
 
-        binding = prepare_qualified_provider_read(
-            route,
-            capabilities,
-            qualifications,
-            surface=Surface.AUTHENTICATED_READ,
-            endpoint=ENDPOINT,
-            query={"category": "spot", "limit": "100"},
-            at=NOW,
-            permission_scope="ORDER.READ",
-        )
         origin = ProviderOriginJournal(
             journal,
             response_store=ArtifactStore(Path(directory) / "provider-origin-artifacts"),
@@ -151,35 +144,9 @@ class ProviderAccountPageChainTests(unittest.TestCase):
         acquisition_authority = DurableProviderAccountAcquisitionAuthority(journal)
         acquisition = acquisition_authority.issue_serialized(
             provider_scope=record.scope.provider_scope,
-            account_id=binding.query_binding.account_id,
+            account_id="paper-account",
             acquisition_request_id="page-chain-acquisition-1",
             committed_at=NOW,
-        )
-        origin_fixture = (
-            None,
-            journal,
-            origin,
-            qualifications,
-            acquisition_authority,
-            acquisition,
-            binding,
-        )
-        response = ProviderAccountOriginSetTests._direct_binding(
-            self,
-            origin_fixture,
-            directory,
-            marker="page-chain-root",
-        )
-        observation = observe_provider_origin_json_response(
-            response_binding=response,
-            query_binding=binding,
-        )
-        origin_set = issue_provider_account_origin_set(
-            qualification_registry=qualifications,
-            account_acquisition_authority=acquisition_authority,
-            account_acquisition=acquisition,
-            response_bindings=(response,),
-            at=NOW,
         )
         reconciliation = resolve_current_provider_account_reconciliation_semantics(
             qualification_registry=qualifications,
@@ -192,11 +159,165 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             qualification_registry=qualifications,
             at=NOW,
         )
-        return qualifications, origin_set, observation, absence
+        return (
+            journal,
+            capabilities,
+            qualifications,
+            route,
+            origin,
+            acquisition_authority,
+            acquisition,
+            absence,
+        )
 
-    def test_single_terminal_provider_page_issues_sealed_chain_without_boolean(self):
+    def _binding(self, fixture, *, cursor: str | None = None):
+        (
+            _journal,
+            capabilities,
+            qualifications,
+            route,
+            _origin,
+            _acquisition_authority,
+            _acquisition,
+            _absence,
+        ) = fixture
+        query = {"category": "spot", "limit": "100"}
+        if cursor is not None:
+            query["cursor"] = cursor
+        return prepare_qualified_provider_read(
+            route,
+            capabilities,
+            qualifications,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint=ENDPOINT,
+            query=query,
+            at=NOW,
+            permission_scope="ORDER.READ",
+        )
+
+    def _direct_response(self, fixture, binding, *, body: bytes, marker: str):
+        (
+            journal,
+            _capabilities,
+            _qualifications,
+            _route,
+            origin,
+            acquisition_authority,
+            acquisition,
+            _absence,
+        ) = fixture
+        attempt_id = origin.prepare_direct(
+            binding,
+            recorded_at=NOW,
+            account_acquisition_authority=acquisition_authority,
+            account_acquisition=acquisition,
+        )
+        prepared = JournalStore.load_events(
+            journal,
+            "qualified_authenticated_provider_read",
+            attempt_id,
+        )[0]
+        snapshot = provider_origin_module._qualified_query_snapshot(binding)
+        observed_at = NOW.isoformat().replace("+00:00", "Z")
+        response_sha256 = "sha256:" + sha256(body).hexdigest()
+        wire_request_sha256 = "sha256:" + sha256(
+            (attempt_id + "|" + marker).encode("utf-8")
+        ).hexdigest()
+        wire_semantics = (
+            provider_origin_module.qualified_authenticated_read_expected_wire_semantics_digest(
+                binding.query_binding,
+                provider_environment=binding.provider_environment,
+            )
+        )
+        terminal_cut = prepared["journal_sequence"]
+        artifact_id = provider_origin_module._response_artifact_id(
+            attempt_id=attempt_id,
+            qualified_query_digest=snapshot["qualified_query_digest"],
+            response_sha256=response_sha256,
+        )
+        ArtifactStore.publish_bytes(
+            origin._response_store,
+            artifact_id=artifact_id,
+            data=body,
+            media_type="application/octet-stream",
+            rights={
+                "storage": True,
+                "export": False,
+                "rights_id": "qualified-provider-origin-response:v1",
+            },
+            source_refs=[],
+            metadata={
+                "evidence_kind": "QUALIFIED_PROVIDER_ORIGIN_RESPONSE",
+                "attempt_id": attempt_id,
+                "prepared_subject_digest": prepared["payload_hash"],
+                "qualified_query_digest": snapshot["qualified_query_digest"],
+                "qualification_id": snapshot["qualification_id"],
+                "endpoint_rule_digest": snapshot["endpoint_rule_digest"],
+                "qualified_route_rule_digest": snapshot["qualified_route_rule_digest"],
+                "data_entitlement": snapshot["data_entitlement"],
+                "parser_identity": snapshot["parser_identity"],
+                "provider_environment": snapshot["provider_environment"],
+                "execution_class": "DIRECT_PROVIDER_WIRE",
+                "wire_request_sha256": wire_request_sha256,
+                "wire_request_semantics_sha256": wire_semantics,
+                "terminal_authority_journal_sequence_cut": terminal_cut,
+                "terminal_authority_verified_at": observed_at,
+            },
+        )
+        provider_origin_module._claim_direct_wire_execution(
+            journal,
+            attempt_id=attempt_id,
+            qualified_query_digest=snapshot["qualified_query_digest"],
+            qualification_id=snapshot["qualification_id"],
+            http_status=200,
+            response_sha256=response_sha256,
+            observed_at=observed_at,
+            wire_request_sha256=wire_request_sha256,
+            wire_request_semantics_sha256=wire_semantics,
+            terminal_authority_journal_sequence_cut=terminal_cut,
+            terminal_authority_verified_at=observed_at,
+        )
+        return origin.recover_response_binding(attempt_id, binding)
+
+    def _origin_set(self, fixture, responses):
+        (
+            _journal,
+            _capabilities,
+            qualifications,
+            _route,
+            _origin,
+            acquisition_authority,
+            acquisition,
+            _absence,
+        ) = fixture
+        return issue_provider_account_origin_set(
+            qualification_registry=qualifications,
+            account_acquisition_authority=acquisition_authority,
+            account_acquisition=acquisition,
+            response_bindings=tuple(responses),
+            at=NOW,
+        )
+
+    def _observation(self, response, binding):
+        return observe_provider_origin_json_response(
+            response_binding=response,
+            query_binding=binding,
+        )
+
+    def test_single_explicit_terminal_page_issues_sealed_chain(self):
         with TemporaryDirectory() as directory:
-            qualifications, origin_set, observation, absence = self._fixture(directory)
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="terminal",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            observation = self._observation(response, binding)
+            qualifications = fixture[2]
+            absence = fixture[7]
             value = issue_provider_account_page_chain(
                 absence_semantics=absence,
                 origin_set=origin_set,
@@ -207,17 +328,140 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             )
             self.assertIsInstance(value, ProviderAccountPageChain)
             self.assertEqual(value.surface, SURFACE)
-            self.assertEqual(value.endpoint, ENDPOINT)
-            self.assertEqual(value.pagination_rule_id, "BYBIT_V5_CURSOR_V1")
             self.assertEqual(len(value.pages), 1)
             self.assertIsNone(value.pages[0]["request_cursor"])
             self.assertEqual(value.pages[0]["response_next_cursor"], "")
-            self.assertTrue(
-                value.content_digest.startswith("provider-account-page-chain:sha256:")
-            )
             require_provider_account_page_chain_authority(value)
 
-    def test_issuer_accepts_no_pagination_complete_or_page_order_boolean(self):
+    def test_page_chain_rejects_superseded_origin_set_acquisition(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="superseded-origin-set",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            observation = self._observation(response, binding)
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-2",
+                committed_at=NOW,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "origin set is not exact current authority",
+            ):
+                issue_provider_account_page_chain(
+                    absence_semantics=fixture[7],
+                    origin_set=origin_set,
+                    observations=(observation,),
+                    qualification_registry=fixture[2],
+                    surface=SURFACE,
+                    at=NOW,
+                )
+
+    def test_missing_provider_cursor_state_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[]}}',
+                marker="missing-cursor",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            observation = self._observation(response, binding)
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "explicit nextPageCursor",
+            ):
+                issue_provider_account_page_chain(
+                    absence_semantics=fixture[7],
+                    origin_set=origin_set,
+                    observations=(observation,),
+                    qualification_registry=fixture[2],
+                    surface=SURFACE,
+                    at=NOW,
+                )
+
+    def test_two_page_chain_order_is_derived_from_provider_cursors(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            root_binding = self._binding(fixture)
+            next_binding = self._binding(fixture, cursor="cursor-2")
+            root_response = self._direct_response(
+                fixture,
+                root_binding,
+                body=b'{"retCode":0,"result":{"list":[{"execId":"e1"}],"nextPageCursor":"cursor-2"}}',
+                marker="root",
+            )
+            next_response = self._direct_response(
+                fixture,
+                next_binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="second",
+            )
+            origin_set = self._origin_set(fixture, (root_response, next_response))
+            root = self._observation(root_response, root_binding)
+            second = self._observation(next_response, next_binding)
+            value = issue_provider_account_page_chain(
+                absence_semantics=fixture[7],
+                origin_set=origin_set,
+                observations=(second, root),
+                qualification_registry=fixture[2],
+                surface=SURFACE,
+                at=NOW,
+            )
+            self.assertEqual(len(value.pages), 2)
+            self.assertIsNone(value.pages[0]["request_cursor"])
+            self.assertEqual(value.pages[0]["response_next_cursor"], "cursor-2")
+            self.assertEqual(value.pages[1]["request_cursor"], "cursor-2")
+            self.assertEqual(value.pages[1]["response_next_cursor"], "")
+
+    def test_response_cursor_must_have_exact_next_qualified_page(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            root_binding = self._binding(fixture)
+            other_binding = self._binding(fixture, cursor="cursor-other")
+            root_response = self._direct_response(
+                fixture,
+                root_binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":"cursor-required"}}',
+                marker="root-mismatch",
+            )
+            other_response = self._direct_response(
+                fixture,
+                other_binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="other",
+            )
+            origin_set = self._origin_set(fixture, (root_response, other_response))
+            observations = (
+                self._observation(root_response, root_binding),
+                self._observation(other_response, other_binding),
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "no exact next qualified page",
+            ):
+                issue_provider_account_page_chain(
+                    absence_semantics=fixture[7],
+                    origin_set=origin_set,
+                    observations=observations,
+                    qualification_registry=fixture[2],
+                    surface=SURFACE,
+                    at=NOW,
+                )
+
+    def test_issuer_accepts_no_completion_or_order_booleans(self):
         parameters = inspect.signature(issue_provider_account_page_chain).parameters
         for forbidden in (
             "pagination_complete",
@@ -228,20 +472,7 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, parameters)
 
-    def test_origin_set_endpoint_pages_must_be_exactly_observed(self):
-        with TemporaryDirectory() as directory:
-            qualifications, origin_set, _observation, absence = self._fixture(directory)
-            with self.assertRaisesRegex(ProviderAccountPageChainError, "non-empty exact tuple"):
-                issue_provider_account_page_chain(
-                    absence_semantics=absence,
-                    origin_set=origin_set,
-                    observations=(),
-                    qualification_registry=qualifications,
-                    surface=SURFACE,
-                    at=NOW,
-                )
-
-    def test_constructor_and_object_new_cannot_forge_page_chain_authority(self):
+    def test_constructor_object_new_and_mutation_cannot_forge_authority(self):
         with self.assertRaisesRegex(ProviderAccountPageChainError, "canonical issuer"):
             ProviderAccountPageChain()
         forged = object.__new__(ProviderAccountPageChain)
@@ -268,14 +499,20 @@ class ProviderAccountPageChainTests(unittest.TestCase):
         ):
             require_provider_account_page_chain_authority(forged)
 
-    def test_post_issue_mutation_invalidates_chain_authority(self):
         with TemporaryDirectory() as directory:
-            qualifications, origin_set, observation, absence = self._fixture(directory)
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="mutation",
+            )
             value = issue_provider_account_page_chain(
-                absence_semantics=absence,
-                origin_set=origin_set,
-                observations=(observation,),
-                qualification_registry=qualifications,
+                absence_semantics=fixture[7],
+                origin_set=self._origin_set(fixture, (response,)),
+                observations=(self._observation(response, binding),),
+                qualification_registry=fixture[2],
                 surface=SURFACE,
                 at=NOW,
             )

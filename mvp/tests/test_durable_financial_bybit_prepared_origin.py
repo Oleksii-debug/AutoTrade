@@ -3,6 +3,7 @@ import inspect
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import bybit_v5 as bybit_module
 from mvp.autotrade_mvp import durable_financial_request_binding as binding_module
 from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
@@ -18,6 +19,7 @@ from mvp.autotrade_mvp.durable_financial_request_binding import (
     _require_bybit_prepared_request_origin,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 from mvp.tests.test_financial_send_authority import (
     D8,
@@ -228,7 +230,12 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         ):
             _require_bybit_prepared_request_origin(material, forged)
         with self.assertRaisesRegex(
-            Exception,
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            require_canonical_bybit_prepared_submission(forged)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
             "prepared submission authority changed",
         ):
             guarded_order_projection(forged)
@@ -260,6 +267,26 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 "provenance authority changed",
             ):
                 _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(calls, [])
+
+    def test_shared_projection_pins_provenance_verifier(self):
+        _material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return _prepared
+
+        with patch.object(
+            bybit_module,
+            "require_canonical_bybit_prepared_submission",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "verifier authority changed",
+            ):
+                guarded_order_projection(prepared)
         self.assertEqual(calls, [])
 
     def test_projection_rebinding_fails_before_forged_projection_executes(self):

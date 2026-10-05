@@ -686,7 +686,10 @@ def _install_bybit_prepared_submission_authority(
             authority_changed()
 
     def require_canonical_bybit_prepared_submission(value):
-        if type(value) is not prepared_type or BybitPreparedSubmission is not prepared_type:
+        if (
+            type(value) is not prepared_type
+            or BybitPreparedSubmission is not prepared_type
+        ):
             authority_changed()
         binding = bindings.get(id(value))
         if binding is None:
@@ -695,7 +698,10 @@ def _install_bybit_prepared_submission_authority(
         if bound_ref() is not value:
             authority_changed()
         current = snapshot(value)
-        if current[1] is not expected[1] or current[:1] + current[2:] != expected[:1] + expected[2:]:
+        if (
+            current[1] is not expected[1]
+            or current[:1] + current[2:] != expected[:1] + expected[2:]
+        ):
             authority_changed()
         if type(current[1]) is not MappingProxyType:
             authority_changed()
@@ -718,7 +724,10 @@ def _install_bybit_prepared_submission_authority(
         position_side: str | None = None,
         position_idx: int | None = None,
     ) -> BybitPreparedSubmission:
-        if type(capability) is not capability_type or CapabilitySnapshot is not capability_type:
+        if (
+            type(capability) is not capability_type
+            or CapabilitySnapshot is not capability_type
+        ):
             raise ProviderCoreError(
                 "Bybit preparation requires exact CapabilitySnapshot authority"
             )
@@ -727,7 +736,11 @@ def _install_bybit_prepared_submission_authority(
         if getattr(builder, "__code__", None) is not builder_code:
             authority_changed()
         function_authorities = (
-            (build_order_payload, canonical_build_order_payload, canonical_build_order_payload_code),
+            (
+                build_order_payload,
+                canonical_build_order_payload,
+                canonical_build_order_payload_code,
+            ),
             (_text, canonical_text, canonical_text_code),
             (_decimal_text, canonical_decimal_text, canonical_decimal_text_code),
             (_client_order_id, canonical_client_order_id, canonical_client_order_id_code),
@@ -743,7 +756,10 @@ def _install_bybit_prepared_submission_authority(
             ),
         )
         for current, expected, code in function_authorities:
-            if current is not expected or getattr(expected, "__code__", None) is not code:
+            if (
+                current is not expected
+                or getattr(expected, "__code__", None) is not code
+            ):
                 authority_changed()
 
         prepared = builder(
@@ -791,13 +807,33 @@ _unissued_prepare_order_submission = prepare_order_submission
 del _unissued_prepare_order_submission
 del _install_bybit_prepared_submission_authority
 
+_CANONICAL_PREPARED_SUBMISSION_VERIFIER = (
+    require_canonical_bybit_prepared_submission
+)
+_CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE = (
+    require_canonical_bybit_prepared_submission.__code__
+)
+
 
 def guarded_order_projection(
     prepared_request: BybitPreparedSubmission,
 ) -> Mapping[str, object]:
     """Project canonical Bybit preparation into the shared guarded transport seam."""
 
-    require_canonical_bybit_prepared_submission(prepared_request)
+    if (
+        require_canonical_bybit_prepared_submission
+        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER
+        or getattr(
+            _CANONICAL_PREPARED_SUBMISSION_VERIFIER,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE
+    ):
+        raise ProviderCoreError(
+            "Bybit prepared submission verifier authority changed"
+        )
+    _CANONICAL_PREPARED_SUBMISSION_VERIFIER(prepared_request)
     return MappingProxyType(
         {
             "endpoint": prepared_request.endpoint,

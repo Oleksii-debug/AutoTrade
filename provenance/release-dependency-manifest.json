@@ -70,7 +70,7 @@
       "license": "MIT",
       "name": "CryptoExchange.Net",
       "release_distribution_state": "BLOCKED",
-      "repository": "JKorf/WhiteBit.Net",
+      "repository": "JKorf/CryptoExchange.Net",
       "revision": "cecfbcba48b84ff56109c7d1c67f548ba0eabf22",
       "source_import_allowed": "PREFER_DIRECT_DEPENDENCY_AFTER_EXACT_GRAPH_QUALIFICATION"
     },

@@ -705,6 +705,15 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -725,6 +734,15 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append(name)
                 setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
         if callback_changes:
             raise ModelCallError(
                 "pricing evidence resolver mutated orchestrator authority:"
@@ -1114,6 +1132,15 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -1134,6 +1161,15 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append(name)
                 setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
         if callback_changes:
             raise ModelCallError(
                 "observation evidence resolver mutated orchestrator authority:"
@@ -1633,6 +1669,15 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        adapter_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        adapter_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
         observation_evidence_resolver = self.observation_evidence_resolver
         adapter_error: Exception | None = None
         authority_changes: list[str] = []
@@ -1651,6 +1696,15 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     authority_changes.append(name)
                 setattr(self, name, expected)
+            for name, expected in adapter_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in adapter_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
 
         if authority_changes:
             payload = {
@@ -2190,6 +2244,15 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        budget_callback_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        budget_callback_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
         callback_error: Exception | None = None
         callback_changes: list[str] = []
         try:
@@ -2211,6 +2274,15 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append(name)
                 setattr(self, name, expected)
+            for name, expected in budget_callback_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in budget_callback_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    callback_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
         if callback_changes:
             raise ModelCallError(
                 "billing evidence resolver mutated orchestrator authority:"

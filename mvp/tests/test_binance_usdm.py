@@ -786,5 +786,30 @@ class BinanceUsdmTemporalIngressTests(unittest.TestCase):
             request.body["newClientOrderId"], "at-usdm-fixed-offset"
         )
 
+class BinanceUsdmWriteAdmissionRevalidationTests(unittest.TestCase):
+    def test_direct_intent_constructor_cannot_bypass_market_price_invariant(self):
+        forged = BinanceUsdmOrderIntent(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            price=Decimal("40000"),
+            time_in_force=None,
+            position_side="BOTH",
+            reduce_only=False,
+        )
+
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "MARKET order must not carry limit price",
+        ):
+            prepare_order_request(
+                forged,
+                client_order_id="usdm-direct-constructor",
+                capability=capability(),
+                at=NOW,
+            )
+
 if __name__ == "__main__":
     unittest.main()

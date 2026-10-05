@@ -1,0 +1,174 @@
+name: WP48 current recovery journal authority
+
+on:
+  push:
+    branches:
+      - wp48/current-product-recovery-journal-authority-20261005-sol56-g89
+
+permissions:
+  contents: write
+
+jobs:
+  reconverge:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bind recovery to exact JournalStore generation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('mvp/autotrade_mvp/recovery.py')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one recovery preimage, found {count}: {old[:90]!r}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'from .persistence import JournalStore, payload_digest\n',
+              'from .persistence import (\n'
+              '    JournalStore,\n'
+              '    payload_digest,\n'
+              '    require_exact_journal_store_authority,\n'
+              ')\n'
+              'from .store_identity import (\n'
+              '    JournalStoreIdentity,\n'
+              '    require_exact_journal_store_identity,\n'
+              ')\n',
+          )
+
+          replace_once(
+              '        if owner_store is not None and not isinstance(owner_store, JournalStore):\n'
+              '            raise TypeError("owner_store must be JournalStore or None")\n'
+              '        if not isinstance(owner_scope, str) or not owner_scope.strip():\n'
+              '            raise ValueError("owner_scope is required")\n'
+              '        self._owner_store = owner_store\n'
+              '        self._owner_scope = owner_scope.strip()\n',
+              '        if not isinstance(owner_scope, str) or not owner_scope.strip():\n'
+              '            raise ValueError("owner_scope is required")\n'
+              '        self._owner_store = owner_store\n'
+              '        self._owner_store_identity: JournalStoreIdentity | None = (\n'
+              '            None\n'
+              '            if owner_store is None\n'
+              '            else require_exact_journal_store_authority(\n'
+              '                owner_store,\n'
+              '                subject="recovery owner JournalStore",\n'
+              '            )\n'
+              '        )\n'
+              '        self._owner_scope = owner_scope.strip()\n',
+          )
+
+          replace_once(
+              '    @property\n'
+              '    def durable_owner_store_path(self) -> Path | None:\n'
+              '        """Return the exact journal path backing sender fencing, if durable."""\n\n'
+              '        return None if self._owner_store is None else self._owner_store.path\n',
+              '    def _selected_journal_identity(self) -> JournalStoreIdentity:\n'
+              '        identity = self._owner_store_identity\n'
+              '        if identity is None:\n'
+              '            raise PermissionError("Recovery controller has no durable journal authority")\n'
+              '        return require_exact_journal_store_identity(\n'
+              '            identity,\n'
+              '            subject="selected recovery journal identity",\n'
+              '        )\n\n'
+              '    def _journal_store_authority(self) -> JournalStore:\n'
+              '        if self._owner_store is None:\n'
+              '            raise PermissionError("Recovery controller has no durable journal authority")\n'
+              '        expected = self._selected_journal_identity()\n'
+              '        identity = require_exact_journal_store_authority(\n'
+              '            self._owner_store,\n'
+              '            subject="recovery owner JournalStore",\n'
+              '        )\n'
+              '        if identity != expected:\n'
+              '            raise PermissionError("recovery journal authority changed")\n'
+              '        return self._owner_store\n\n'
+              '    @property\n'
+              '    def durable_owner_store_identity(self) -> JournalStoreIdentity | None:\n'
+              '        """Return the pinned physical JournalStore identity, if durable."""\n\n'
+              '        if self._owner_store is None:\n'
+              '            return None\n'
+              '        self._journal_store_authority()\n'
+              '        return self._selected_journal_identity()\n\n'
+              '    @property\n'
+              '    def durable_owner_store_path(self) -> Path | None:\n'
+              '        """Return the selected journal path backing sender fencing, if durable."""\n\n'
+              '        if self._owner_store is None:\n'
+              '            return None\n'
+              '        self._journal_store_authority()\n'
+              '        return Path(self._selected_journal_identity().canonical_path)\n',
+          )
+
+          replace_once(
+              '        events = self._owner_store.load_events(\n'
+              '            self._OWNER_AGGREGATE_TYPE,\n'
+              '            self._owner_scope,\n'
+              '        )\n',
+              '        store = self._journal_store_authority()\n'
+              '        events = JournalStore.load_events(\n'
+              '            store,\n'
+              '            self._OWNER_AGGREGATE_TYPE,\n'
+              '            self._owner_scope,\n'
+              '        )\n',
+          )
+
+          replace_once(
+              '        self._owner_store.append_event(\n'
+              '            {\n',
+              '        store = self._journal_store_authority()\n'
+              '        JournalStore.append_event(\n'
+              '            store,\n'
+              '            {\n',
+          )
+
+          replace_once(
+              '        events = self._owner_store.load_events_by_aggregate_type(\n'
+              '            "submission_attempt"\n'
+              '        )\n',
+              '        store = self._journal_store_authority()\n'
+              '        events = JournalStore.load_events_by_aggregate_type(\n'
+              '            store,\n'
+              '            "submission_attempt",\n'
+              '        )\n',
+          )
+
+          replace_once(
+              '        checkpoint = load_reconciliation_checkpoint_for_readiness(\n'
+              '            self._owner_store,\n',
+              '        store = self._journal_store_authority()\n'
+              '        checkpoint = load_reconciliation_checkpoint_for_readiness(\n'
+              '            store,\n',
+          )
+
+          path.write_text(text, encoding='utf-8')
+
+          test = Path('mvp/tests/test_recovery_store_authority_current.py')
+          test.write_text('''from __future__ import annotations\n\nimport tempfile\nimport unittest\nfrom pathlib import Path\n\nfrom autotrade_mvp.persistence import JournalStore\nfrom autotrade_mvp.recovery import RecoveryController\n\n\nclass RecoveryStoreAuthorityTests(unittest.TestCase):\n    def _store(self, root: str) -> JournalStore:\n        return JournalStore(Path(root) / "journal.sqlite3")\n\n    def test_journalstore_subclass_cannot_be_recovery_authority(self) -> None:\n        class HostileStore(JournalStore):\n            pass\n\n        forged = object.__new__(HostileStore)\n        with self.assertRaises(TypeError):\n            RecoveryController(owner_store=forged, owner_scope="PAPER:acct")\n\n    def test_selected_physical_identity_is_retained(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(\n                owner_store=store,\n                owner_scope="PAPER:acct",\n            )\n            self.assertEqual(controller.durable_owner_store_identity, store.store_identity)\n            self.assertEqual(\n                controller.durable_owner_store_path,\n                Path(store.store_identity.canonical_path),\n            )\n\n    def test_instance_method_shadow_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(\n                owner_store=store,\n                owner_scope="PAPER:acct",\n            )\n            store.load_events = lambda *args, **kwargs: []\n            with self.assertRaises(TypeError):\n                controller.durable_owner_chain()\n\n    def test_lost_physical_identity_fails_before_recovery_read(self) -> None:\n        with tempfile.TemporaryDirectory() as root:\n            store = self._store(root)\n            controller = RecoveryController(\n                owner_store=store,\n                owner_scope="PAPER:acct",\n            )\n            store._store_identity = None\n            with self.assertRaises(RuntimeError):\n                controller.durable_owner_chain()\n\n\nif __name__ == "__main__":\n    unittest.main()\n''', encoding='utf-8')
+          PY
+
+      - name: Verify focused recovery authority
+        shell: bash
+        run: |
+          export PYTHONPATH="$PWD/mvp:$PWD"
+          python -m py_compile mvp/autotrade_mvp/recovery.py mvp/tests/test_recovery_store_authority_current.py
+          python -m unittest discover -s mvp/tests -p 'test_recovery_store_authority_current.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_recovery_durable_unknown_restart.py' -v
+          python -m unittest discover -s mvp/tests -p 'test_runtime_failure_control.py' -v
+
+      - name: Commit bounded reconvergence
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mvp/autotrade_mvp/recovery.py mvp/tests/test_recovery_store_authority_current.py
+          git diff --cached --check
+          git commit -m "fix: bind recovery to exact JournalStore authority"
+          git push origin HEAD:${GITHUB_REF_NAME}

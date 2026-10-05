@@ -25,12 +25,12 @@ from mvp.tests.test_model_call import (
     observation,
     orchestrator_for,
     request_for,
-    spec,
 )
 
 
 class AblationModelComputeComponentEvidenceTests(unittest.TestCase):
     def _budget(self, root: Path, *, budget_id: str = "model-policy-budget") -> DurableModelBudget:
+        root.mkdir(parents=True, exist_ok=True)
         return DurableModelBudget(
             journal=JournalStore(root / (budget_id + ".sqlite3")),
             budget_id=budget_id,
@@ -232,13 +232,39 @@ class AblationModelComputeComponentEvidenceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "shadows canonical event reader",
+                "shadows canonical methods",
             ):
                 resolve_ablation_model_compute_component_evidence(
                     budget,
                     calls,
                     fact,
                 )
+
+    def test_shadowed_aggregate_identity_cannot_retarget_currency_authority(self):
+        calls_seen: list[str] = []
+        with TemporaryDirectory() as directory:
+            budget, calls, _spec, request = self._observed_call(Path(directory))
+            fact = resolve_ablation_model_compute_cost_fact(
+                budget,
+                request_id=request.request_id,
+                expected_aggregate_version=3,
+            )
+            object.__setattr__(
+                calls,
+                "_aggregate_id",
+                lambda *_args: calls_seen.append("hostile") or "foreign-aggregate",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "shadows canonical methods",
+            ):
+                resolve_ablation_model_compute_component_evidence(
+                    budget,
+                    calls,
+                    fact,
+                )
+            self.assertEqual(calls_seen, [])
 
 
 if __name__ == "__main__":

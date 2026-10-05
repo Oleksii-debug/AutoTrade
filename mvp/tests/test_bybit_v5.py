@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
@@ -239,6 +239,46 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["qty"], "2.5")
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
+
+    def test_canonical_preparation_rejects_executable_tzinfo_before_callback(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        callbacks = []
+
+        class ExecutableTimezone(tzinfo):
+            def utcoffset(self, _dt):
+                callbacks.append("utcoffset")
+                return timedelta(0)
+
+            def dst(self, _dt):
+                callbacks.append("dst")
+                return timedelta(0)
+
+            def tzname(self, _dt):
+                callbacks.append("tzname")
+                return "forged"
+
+        at = datetime(2026, 9, 24, 20, tzinfo=ExecutableTimezone())
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "exact stdlib timezone",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=at,
+                provider_environment="DEMO",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="tzinfo-authority-required",
+                time_in_force="GTC",
+            )
+        self.assertEqual(callbacks, [])
 
     def test_canonical_preparation_refuses_margin_without_borrow_authority(self):
         capability = submission_write_capability(

@@ -94,6 +94,14 @@ def _absence_claims() -> dict[str, str]:
 
 
 class ProviderAccountPageChainTests(unittest.TestCase):
+    def test_page_chain_registrar_is_not_module_global(self):
+        self.assertFalse(
+            hasattr(
+                page_chain_module,
+                "_register_provider_account_page_chain_authority",
+            )
+        )
+
     def _fixture(self, directory: str):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)

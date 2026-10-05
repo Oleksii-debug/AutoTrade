@@ -588,8 +588,18 @@ class AccountingFoundationTests(unittest.TestCase):
             self.assertEqual(hostile_calls, [])
             self.assertEqual(scoped.environment, "PAPER")
             self.assertEqual(scoped.account_id, "acct-1")
+            self.assertIs(
+                type(object.__getattribute__(scoped, "__dict__")["_book"]),
+                original_book_type,
+            )
+
+            # _name is a broader EconomicBook dependency; restore it after the
+            # constructor assertion while retaining the hostile class/book/bind
+            # module aliases so the facade read still proves retained owner
+            # type and canonical book type authority.
+            accounting_module._name = original_name
             self.assertEqual(scoped.cash("USD"), Decimal("100"))
-            self.assertIs(type(object.__getattribute__(scoped, "__dict__")["_book"]), original_book_type)
+            self.assertEqual(hostile_calls, [])
         finally:
             accounting_module.ScopedEconomicBook = original_class
             accounting_module.EconomicBook = original_book_type

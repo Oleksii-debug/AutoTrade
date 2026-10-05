@@ -3713,6 +3713,48 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_model_clock_cannot_shadow_journal_append_before_durable_event(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            holder = {}
+            forged_calls = []
+
+            def hostile_clock():
+                orchestrator = holder["orchestrator"]
+                orchestrator.journal.append_event = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged")
+                )
+                return NOW_TEXT
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=hostile_clock,
+            )
+            holder["orchestrator"] = orchestrator
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"clock mutated orchestrator authority:.*journal\.append_event",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail(
+                        "inference must not run after hostile chronology"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(forged_calls, [])
+            self.assertNotIn("append_event", journal.__dict__)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
     def test_adapter_class_rebinding_is_restored_before_dynamic_dispatch(self):
         class HostileOrchestrator(DurableModelCallOrchestrator):
             __slots__ = ()

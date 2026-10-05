@@ -755,7 +755,7 @@ def _common_inputs(
     )
 
 
-def execute_durable_takeover(
+def _execute_durable_takeover_impl(
     controller: RecoveryController,
     *,
     new_owner_id: str,
@@ -764,16 +764,16 @@ def execute_durable_takeover(
     execution_identity: str,
     reconciliation_id: str,
     provider_id: str,
+    _installed_authority: tuple,
 ) -> DurableTakeoverResult:
     """Issue or resume one freeze-first durable owner takeover."""
 
-    takeover_window = _CANONICAL_TAKEOVER_AUTHORITY_WINDOW
-    record_credential_transition_anchor = (
-        _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR
-    )
-    require_credential_transition_anchor = (
-        _CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR
-    )
+    (
+        takeover_window,
+        record_credential_transition_anchor,
+        require_credential_transition_anchor,
+        journal_current_sequence,
+    ) = _installed_authority
 
     (
         store,
@@ -1071,7 +1071,7 @@ def execute_durable_takeover(
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
-        owner_validation_journal_sequence = _CANONICAL_JOURNAL_CURRENT_SEQUENCE(
+        owner_validation_journal_sequence = journal_current_sequence(
             store
         )
         pending = _pending_for_scope(
@@ -1243,3 +1243,44 @@ def execute_durable_takeover(
                 events[2]["event_id"]
             ),
         )
+
+
+def _bind_execute_durable_takeover(implementation, installed_authority):
+    """Install the public takeover entrypoint with immutable authority callables."""
+
+    def execute_durable_takeover(
+        controller: RecoveryController,
+        *,
+        new_owner_id: str,
+        vault: ProtectedCredentialVault,
+        handle: PersistentCredentialHandle,
+        execution_identity: str,
+        reconciliation_id: str,
+        provider_id: str,
+    ) -> DurableTakeoverResult:
+        return implementation(
+            controller,
+            new_owner_id=new_owner_id,
+            vault=vault,
+            handle=handle,
+            execution_identity=execution_identity,
+            reconciliation_id=reconciliation_id,
+            provider_id=provider_id,
+            _installed_authority=installed_authority,
+        )
+
+    execute_durable_takeover.__name__ = "execute_durable_takeover"
+    execute_durable_takeover.__qualname__ = "execute_durable_takeover"
+    execute_durable_takeover.__doc__ = implementation.__doc__
+    return execute_durable_takeover
+
+
+execute_durable_takeover = _bind_execute_durable_takeover(
+    _execute_durable_takeover_impl,
+    (
+        _CANONICAL_TAKEOVER_AUTHORITY_WINDOW,
+        _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR,
+        _CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR,
+        _CANONICAL_JOURNAL_CURRENT_SEQUENCE,
+    ),
+)

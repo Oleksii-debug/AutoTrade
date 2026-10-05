@@ -72,6 +72,12 @@ def _start_event(*, run_id: str):
     )
 
 
+def _append_start(store: JournalStore, *, run_id: str):
+    event = _start_event(run_id=run_id)
+    store.append_event(event, outbox_topic="autotrade.simulation.events")
+    return event
+
+
 def _submission_prepared(
     *,
     aggregate_id: str,
@@ -117,7 +123,7 @@ class ZeroRuntimeAggregateScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "owned-checkpoint-aggregate"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:owned-checkpoint"
             prepared = _submission_prepared(
                 aggregate_id=aggregate_id,
@@ -139,7 +145,7 @@ class ZeroRuntimeAggregateScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "foreign-checkpoint-aggregate"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:foreign-checkpoint"
             prepared = _submission_prepared(
                 aggregate_id=aggregate_id,
@@ -158,7 +164,7 @@ class ZeroRuntimeAggregateScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "provider-conflict-aggregate"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:provider-conflict"
             prepared = _submission_prepared(
                 aggregate_id=aggregate_id,
@@ -171,6 +177,11 @@ class ZeroRuntimeAggregateScopeTests(unittest.TestCase):
 
             deliver_autonomous_owned_publications(store, run_id=run_id)
 
+            start_state = store.outbox_delivery_state(
+                store.load_events("canonical_autonomous_simulation", run_id)[0]["event_id"]
+            )
+            self.assertIsNotNone(start_state)
+            self.assertTrue(start_state["delivered"])
             for event in (prepared, sending):
                 state = store.outbox_delivery_state(event["event_id"])
                 self.assertIsNotNone(state)
@@ -180,7 +191,7 @@ class ZeroRuntimeAggregateScopeTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "host-conflict-aggregate"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:host-conflict"
             prepared = _submission_prepared(
                 aggregate_id=aggregate_id,

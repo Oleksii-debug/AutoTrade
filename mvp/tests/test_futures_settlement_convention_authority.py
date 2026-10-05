@@ -176,6 +176,8 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
         version = inverse_future(settlement_convention=supplied)
         object.__setattr__(supplied,"quantum","1")
         contract = FuturesContract.from_instrument_version(version)
+
+        object.__setattr__(version.settlement_convention,"quantum","1")
         policy = inverse_settlement_convention(contract)
         self.assertEqual(policy.quantum,"0.00000001")
         for precision in (2,8,80):
@@ -183,9 +185,22 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
                 context.prec=precision
                 self.assertEqual(settle_fraction(Fraction(1,1100),quantum=policy.quantum,
                     rounding=policy.rounding),Decimal("0.00090909"))
-        object.__setattr__(version.settlement_convention,"instrument_version",2)
-        with self.assertRaises(FuturesError):
-            inverse_settlement_convention(contract)
+
+        for name, value in (("quantum","1"), ("rounding","DOWN")):
+            with self.subTest(name=name):
+                fresh = FuturesContract.from_instrument_version(
+                    inverse_future(settlement_convention=settlement_convention())
+                )
+                object.__setattr__(
+                    fresh.canonical_instrument.settlement_convention,
+                    name,
+                    value,
+                )
+                with self.assertRaisesRegex(
+                    FuturesError,
+                    "settlement convention changed after contract admission",
+                ):
+                    inverse_settlement_convention(fresh)
 
     def test_inverse_booking_does_not_accept_free_caller_quantization_policy(self):
         parameters = signature(settle_and_book_inverse_variation_margin).parameters

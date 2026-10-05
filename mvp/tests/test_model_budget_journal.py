@@ -143,6 +143,60 @@ class DurableModelBudgetTests(unittest.TestCase):
                 [],
             )
 
+    def test_initialization_clock_restores_class_dispatch_before_journal_write(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            restore_descriptor = vars(DurableModelBudget)["_restore_clock_authority"]
+            canonical_load_events = JournalStore.load_events
+            forged_calls = []
+
+            def hostile_clock():
+                DurableModelBudget._restore_clock_authority = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged-restore")
+                )
+                JournalStore.load_events = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged-load")
+                )
+                return NOW
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*"
+                    r"DurableModelBudget\._restore_clock_authority",
+                ) as caught:
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id="policy-hostile-class-clock",
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=hostile_clock,
+                    )
+
+                self.assertIn("JournalStore.load_events", str(caught.exception))
+                self.assertEqual(forged_calls, [])
+                self.assertIs(
+                    vars(DurableModelBudget)["_restore_clock_authority"],
+                    restore_descriptor,
+                )
+                self.assertIs(JournalStore.load_events, canonical_load_events)
+                self.assertNotIn("load_events", JournalStore.__dict__)
+                self.assertEqual(
+                    journal.load_events(
+                        "model_budget",
+                        "policy-hostile-class-clock",
+                    ),
+                    [],
+                )
+            finally:
+                type.__setattr__(
+                    DurableModelBudget,
+                    "_restore_clock_authority",
+                    restore_descriptor,
+                )
+                if "load_events" in JournalStore.__dict__:
+                    type.__delattr__(JournalStore, "load_events")
+
     def test_commit_clock_cannot_redirect_budget_or_journal_authority(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

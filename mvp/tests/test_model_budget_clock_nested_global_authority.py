@@ -89,6 +89,49 @@ class ModelBudgetClockNestedGlobalAuthorityTests(unittest.TestCase):
                 [],
             )
 
+    def test_clock_cannot_shadow_exception_handler_before_raising(self):
+        had_exception_binding = "Exception" in vars(budget_module)
+        original_exception_binding = vars(budget_module).get("Exception")
+        alias_restored = False
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                budget_module.Exception = int
+                raise RuntimeError("hostile clock failure")
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "model budget clock mutated authority",
+                ) as captured:
+                    budget_module.DurableModelBudget(
+                        journal=journal,
+                        budget_id="clock-exception-shadow-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+                self.assertIsInstance(captured.exception.__cause__, RuntimeError)
+            finally:
+                if had_exception_binding:
+                    alias_restored = (
+                        vars(budget_module).get("Exception")
+                        is original_exception_binding
+                    )
+                    budget_module.Exception = original_exception_binding
+                else:
+                    alias_restored = "Exception" not in vars(budget_module)
+                    if "Exception" in vars(budget_module):
+                        delattr(budget_module, "Exception")
+
+            self.assertTrue(alias_restored)
+            self.assertEqual(
+                journal.load_events("model_budget", "clock-exception-shadow-budget"),
+                [],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

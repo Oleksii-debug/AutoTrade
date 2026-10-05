@@ -14,12 +14,26 @@ from types import MappingProxyType
 from uuid import UUID
 
 from autotrade_research.evaluation.ablation import CanonicalAblationOutcomeEvidence
-from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
+from autotrade_research.memory.episodes import (
+    CoveragePopulationSnapshot,
+    ExperienceMemory,
+    MemoryIntegrityError,
+)
 from autotrade_research.memory.reconciled_outcome import (
     ReconciledOutcomeFactEvidence,
+    _assert_memory_authority,
+    _verify_fact_integrity,
     resolve_reconciled_outcome_fact,
     reverify_reconciled_outcome_fact,
 )
+
+
+_ASSERT_MEMORY_AUTHORITY = _assert_memory_authority
+_VERIFY_FACT_INTEGRITY = _verify_fact_integrity
+_RESOLVE_RECONCILED_FACT = resolve_reconciled_outcome_fact
+_REVERIFY_RECONCILED_FACT = reverify_reconciled_outcome_fact
+_COVERAGE_READ = ExperienceMemory.coverage_population_snapshot
+_COVERAGE_VERIFY = CoveragePopulationSnapshot.verify_integrity
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -91,7 +105,7 @@ class BoundReconciledAblationOutcome:
             raise TypeError(
                 "reconciled_fact must be exact ReconciledOutcomeFactEvidence"
             )
-        ReconciledOutcomeFactEvidence.verify_integrity(self.reconciled_fact)
+        _VERIFY_FACT_INTEGRITY(self.reconciled_fact)
         if self.population_unit_id != self.reconciled_fact.episode_id:
             raise MemoryIntegrityError(
                 "ablation population unit does not match reconciled outcome episode"
@@ -128,8 +142,7 @@ def bind_ablation_outcome_to_reconciled_fact(
     recomputed from ExperienceMemory for the same population unit and frozen cut.
     """
 
-    if type(memory) is not ExperienceMemory:
-        raise TypeError("memory must be exact ExperienceMemory")
+    _ASSERT_MEMORY_AUTHORITY(memory)
     if type(outcome) is not CanonicalAblationOutcomeEvidence:
         raise TypeError("outcome must be exact CanonicalAblationOutcomeEvidence")
     if type(causal_cutoff) is not datetime:
@@ -144,7 +157,7 @@ def bind_ablation_outcome_to_reconciled_fact(
             "superseded ablation outcome cannot bind at the selected causal cut"
         )
 
-    fact = resolve_reconciled_outcome_fact(
+    fact = _RESOLVE_RECONCILED_FACT(
         memory,
         episode_id=outcome.population_unit_id,
         causal_cutoff=cutoff,
@@ -152,20 +165,25 @@ def bind_ablation_outcome_to_reconciled_fact(
         task=task,
         instrument_family=instrument_family,
     )
-    reverify_reconciled_outcome_fact(memory, fact)
+    _REVERIFY_RECONCILED_FACT(memory, fact)
     if outcome.utility_evidence_digest != fact.evidence_digest:
         raise MemoryIntegrityError(
             "ablation utility evidence digest does not match canonical reconciled outcome fact"
         )
 
-    snapshot = ExperienceMemory.coverage_population_snapshot(
+    _ASSERT_MEMORY_AUTHORITY(memory)
+    snapshot = _COVERAGE_READ(
         memory,
         causal_cutoff=cutoff,
         granted_permissions=set(granted_permissions),
         task=task,
         instrument_family=instrument_family,
     )
-    snapshot.verify_integrity()
+    if type(snapshot) is not CoveragePopulationSnapshot:
+        raise MemoryIntegrityError(
+            "canonical memory returned a non-canonical coverage snapshot"
+        )
+    _COVERAGE_VERIFY(snapshot)
     if snapshot.root_hash != fact.population_root_hash:
         raise MemoryIntegrityError(
             "reconciled outcome population changed during ablation binding"
@@ -206,6 +224,7 @@ def bind_ablation_outcome_to_reconciled_fact(
         raise MemoryIntegrityError(
             "ablation outcome was not available by selected causal cut"
         )
+    _ASSERT_MEMORY_AUTHORITY(memory)
 
     return BoundReconciledAblationOutcome(
         case_id=outcome.case_id,

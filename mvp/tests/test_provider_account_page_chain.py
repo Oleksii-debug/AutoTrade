@@ -369,9 +369,14 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             ):
                 require_current_provider_account_page_chain_authority(
                     value,
-                    qualification_registry=fixture[2],
                     at=NOW,
                 )
+
+    def test_current_page_chain_accepts_no_caller_qualification_registry(self):
+        parameters = inspect.signature(
+            require_current_provider_account_page_chain_authority
+        ).parameters
+        self.assertNotIn("qualification_registry", parameters)
 
     def test_page_chain_rejects_superseded_origin_set_acquisition(self):
         with TemporaryDirectory() as directory:

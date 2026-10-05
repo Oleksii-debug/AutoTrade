@@ -224,6 +224,27 @@ class ProviderQualificationAuthorityTests(unittest.TestCase):
         with self.assertRaises(ProviderQualificationUnavailable):
             source_provider_qualification_protocol("TEST_PROVIDER_V1")
 
+    def test_source_provider_route_v1_protocol_is_fixed_in_product_source(self):
+        protocol = source_provider_qualification_protocol("PROVIDER_ROUTE_V1")
+
+        self.assertEqual(protocol.key, "PROVIDER_ROUTE_V1")
+        self.assertEqual(protocol.domain, "PROVIDER")
+        self.assertEqual(protocol.gate, "ROUTE_QUALIFICATION")
+        self.assertEqual(protocol.package_id, "AUTOTRADE")
+        self.assertEqual(protocol.protocol_id, "provider-route-v1")
+        self.assertEqual(protocol.protocol_version, "1.0.0")
+        self.assertEqual(protocol.requirement_id, "provider-route-required")
+        self.assertEqual(
+            protocol.campaign_evidence_kind,
+            "PROVIDER_QUALIFICATION_CAMPAIGN",
+        )
+
+    def test_unknown_protocol_remains_unavailable(self):
+        with self.assertRaises(ProviderQualificationUnavailable):
+            source_provider_qualification_protocol(
+                "UNCONFIGURED_PROVIDER_ROUTE_V2"
+            )
+
     def test_campaign_requires_exact_source_owned_case_universe(self):
         payload = _campaign_payload()
         payload["required_cases"] = sorted(REQUIRED_QUALIFICATION_CASES)[:-1]

@@ -53,6 +53,36 @@ def write_bound_host_publish(publish, source_sha, *, host_bytes=b'MZ-host',
 
 
 class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
+    def test_candidate_composition_matches_windows_bundle_metadata_contract(self):
+        source_sha = "a" * 40
+        components = [
+            {
+                "path": "dependency-lock.json",
+                "sha256": "sha256:" + "1" * 64,
+            },
+            {
+                "path": "sbom.json",
+                "sha256": "sha256:" + "2" * 64,
+            },
+        ]
+
+        composition = candidate._candidate_composition(source_sha, components)
+
+        self.assertEqual(
+            composition["schema_compatibility"],
+            {"minimum": "1.0.0", "maximum": "1.0.x"},
+        )
+        self.assertEqual(
+            composition["runtime"],
+            {
+                "architecture": "x64",
+                "runtime_identifier": "win-x64",
+                "minimum_windows_version": "10.0.22621",
+            },
+        )
+        self.assertEqual(composition["source_sha"], source_sha)
+        self.assertIs(composition["components"], components)
+
     def test_stage_source_uses_canonical_exact_git_reader(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

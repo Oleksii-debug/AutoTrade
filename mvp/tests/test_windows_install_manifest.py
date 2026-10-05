@@ -2,14 +2,15 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 import zipfile
 
-import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import autotrade_runtime.artifacts.durable_publish as durable_publish_module
 import tools.build_windows_install_manifest as installer_manifest_module
-from tools.build_windows_bundle import build_bundle
+from tools.build_windows_bundle import _RELEASE_RUNTIME_REQUIRED, build_bundle
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
     build_installer_input_manifest,
@@ -17,7 +18,14 @@ from tools.build_windows_install_manifest import (
 )
 
 
-SOURCE_SHA = "a" * 40
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_SHA = subprocess.run(
+    ["git", "rev-parse", "HEAD"],
+    cwd=REPOSITORY_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
 
 
 class WindowsInstallerInputManifestTests(unittest.TestCase):
@@ -27,6 +35,9 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.staging = self.root / "staging"
         self.staging.mkdir()
+        # The exact-source runtime publisher requires the nested artifact
+        # namespace to be prepared by the private product staging layout.
+        (self.staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
         (self.staging / "AutoTrade.Desktop.exe").write_bytes(b"desktop")
         (self.staging / "contracts").mkdir()
         (self.staging / "contracts" / "manifest.json").write_text(
@@ -56,24 +67,36 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
     def composition(self):
         components = []
+        runtime_descriptors = {
+            descriptor.path: descriptor
+            for descriptor in _RELEASE_RUNTIME_REQUIRED
+        }
         for path in sorted(self.staging.rglob("*")):
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(self.staging).as_posix()
-            if relative == "dependency-lock.json":
-                kind = "dependency-lock"
-            elif relative == "sbom.spdx.json":
-                kind = "sbom"
-            elif relative.endswith(".exe"):
-                kind = "runtime"
+            descriptor = runtime_descriptors.get(relative)
+            if descriptor is not None:
+                component_id = descriptor.component_id
+                kind = descriptor.kind
+                version = "source-controlled"
             else:
-                kind = "asset"
+                component_id = relative.replace("/", "-")
+                version = "1.0.0"
+                if relative == "dependency-lock.json":
+                    kind = "dependency-lock"
+                elif relative == "sbom.spdx.json":
+                    kind = "sbom"
+                elif relative.endswith(".exe"):
+                    kind = "runtime"
+                else:
+                    kind = "asset"
             components.append(
                 {
-                    "component_id": relative.replace("/", "-"),
+                    "component_id": component_id,
                     "kind": kind,
                     "path": relative,
-                    "version": "1.0.0",
+                    "version": version,
                     "sha256": "sha256:" + sha256(path.read_bytes()).hexdigest(),
                 }
             )
@@ -537,6 +560,46 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         ):
             verify_release_bundle(tampered)
 
+    def test_executable_string_subclasses_fail_before_bundle_verification(self):
+        class HostileText(str):
+            callbacks = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile strip callback executed")
+
+            def upper(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("hostile upper callback executed")
+
+        cases = (
+            ("target_framework", HostileText("net10.0-windows")),
+            ("runtime_mode", HostileText("FRAMEWORK_DEPENDENT")),
+            ("runtime_prerequisite", HostileText(".NET 10 Windows Desktop Runtime")),
+        )
+        for field, hostile in cases:
+            with self.subTest(field=field):
+                HostileText.callbacks = 0
+                arguments = {
+                    "bundle": self.root / "must-not-be-read.zip",
+                    "output": self.root / f"{field}.json",
+                    "target_framework": "net10.0-windows",
+                    "runtime_mode": "FRAMEWORK_DEPENDENT",
+                    "runtime_prerequisite": ".NET 10 Windows Desktop Runtime",
+                }
+                arguments[field] = hostile
+                with patch.object(
+                    installer_manifest_module,
+                    "verify_release_bundle",
+                ) as verify_release:
+                    with self.assertRaisesRegex(
+                        InstallerManifestError,
+                        "is required",
+                    ):
+                        build_installer_input_manifest(**arguments)
+                verify_release.assert_not_called()
+                self.assertEqual(HostileText.callbacks, 0)
+
     def test_runtime_prerequisite_policy_is_explicit(self):
         bundle = self.release_bundle()
         with self.assertRaisesRegex(
@@ -743,6 +806,52 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(InstallerManifestError, pattern):
                     verify_release_bundle(tampered)
 
+    def test_tampered_schema_compatibility_range_is_rejected(self):
+        source = self.release_bundle()
+        cases = (
+            (
+                "minimum",
+                "latest",
+                "schema minimum must use major.minor.patch",
+            ),
+            (
+                "maximum",
+                "1.x",
+                "schema maximum must use major.minor.patch or major.minor.x",
+            ),
+            (
+                "inverted",
+                {"minimum": "2.0.0", "maximum": "1.9.x"},
+                "schema compatibility maximum precedes minimum",
+            ),
+        )
+        for name, value, expected in cases:
+            with self.subTest(name=name):
+                tampered = self.root / f"schema-{name}.zip"
+
+                def mutate(entries, name=name, value=value):
+                    result = []
+                    for entry, payload in entries:
+                        if entry != "bundle-manifest.json":
+                            result.append((entry, payload))
+                            continue
+                        manifest = json.loads(payload)
+                        if name == "inverted":
+                            manifest["composition"]["schema_compatibility"] = value
+                        else:
+                            manifest["composition"]["schema_compatibility"][name] = value
+                        result.append(
+                            (
+                                entry,
+                                json.dumps(manifest, sort_keys=True).encode("utf-8"),
+                            )
+                        )
+                    return result
+
+                self.rewrite_zip(source, tampered, mutate)
+                with self.assertRaisesRegex(InstallerManifestError, expected):
+                    verify_release_bundle(tampered)
+
     def test_semantically_valid_composition_tamper_breaks_canonical_digest(self):
         source = self.release_bundle()
         for case in ("schema-range", "minimum-windows"):
@@ -838,15 +947,16 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             "sha256:" + sha256(bundle.read_bytes()).hexdigest(),
         )
         paths = [item["target_relative_path"] for item in verified["files"]]
-        self.assertEqual(
-            paths,
+        expected_paths = sorted(
             [
                 "AutoTrade.Desktop.exe",
                 "contracts/manifest.json",
                 "dependency-lock.json",
                 "sbom.spdx.json",
-            ],
+                *(descriptor.path for descriptor in _RELEASE_RUNTIME_REQUIRED),
+            ]
         )
+        self.assertEqual(paths, expected_paths)
 
 
     def tamper_manifest_path(self, source, destination, new_path):

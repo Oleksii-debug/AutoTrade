@@ -25,6 +25,7 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_abs,
+    exact_add,
     exact_multiply,
     exact_subtract,
     parse_bounded_exact_decimal,
@@ -607,6 +608,81 @@ def _require_consumable_option_position(
         )
 
 
+def _project_delivery_asset_position_after_reversal(
+    *,
+    economic_cut: EconomicBookCut,
+    instrument: str,
+    old_active_transactions: tuple[JournalTransaction, ...],
+) -> Decimal:
+    """Project deliverable inventory after reversing prior lifecycle economics.
+
+    A prior EXPIRY legitimately has no underlying posting, while an
+    EXERCISE/ASSIGNMENT can have one or more deliverable postings.  Borrow safety
+    therefore cannot reuse the option-retirement projection, which intentionally
+    requires exactly one option-position posting per prior transaction.
+    """
+
+    projected = economic_cut.position(instrument)
+    for transaction in old_active_transactions:
+        matching = tuple(
+            item
+            for item in transaction.postings
+            if item.ledger_account == f"POSITION:{instrument}"
+            and item.asset_or_currency == instrument
+        )
+        for item in matching:
+            try:
+                projected = exact_subtract(projected, item.signed_amount)
+            except ExactDecimalError as error:
+                raise OptionLifecycleConflict(
+                    "physical delivery correction exceeds exact-decimal resource authority"
+                ) from error
+    return projected
+
+
+def _require_physical_delivery_borrow_safety(
+    *,
+    economic_cut: EconomicBookCut,
+    observation: OptionLifecycleObservation,
+    version: InstrumentVersion,
+    old_active_transactions: tuple[JournalTransaction, ...],
+) -> None:
+    """Fail closed before physical delivery widens an unqualified short asset.
+
+    WP-30 does not yet own an atomic prepared borrow mutation.  Until that
+    canonical authority is composed, a lifecycle event may consume already-held
+    deliverable inventory but must not create or deepen a short underlying
+    position and only then attempt to obtain borrow capacity afterward.
+    """
+
+    contract = _contract_from_version(version)
+    if contract.settlement_method != "PHYSICAL" or observation.event_kind == "EXPIRY":
+        return
+    obligation = physical_exercise_obligation(
+        contract,
+        signed_contracts=observation.signed_contracts,
+    )
+    for asset_id, delivery_delta in obligation.asset_quantities:
+        if delivery_delta >= 0:
+            continue
+        current = _project_delivery_asset_position_after_reversal(
+            economic_cut=economic_cut,
+            instrument=asset_id,
+            old_active_transactions=old_active_transactions,
+        )
+        try:
+            resulting = exact_add(current, delivery_delta)
+        except ExactDecimalError as error:
+            raise OptionLifecycleConflict(
+                "physical delivery position exceeds exact-decimal resource authority"
+            ) from error
+        if resulting < 0 and resulting < current:
+            raise OptionLifecycleConflict(
+                "physical option delivery would widen short underlying exposure "
+                "without atomic borrow authority"
+            )
+
+
 class DurableOptionLifecycleAuthority:
     """Exactly-once lifecycle-to-economics bridge over canonical authorities."""
 
@@ -920,6 +996,12 @@ class DurableOptionLifecycleAuthority:
                 )
 
         _require_consumable_option_position(
+            economic_cut=economic_cut,
+            observation=observation,
+            version=version,
+            old_active_transactions=old_active_transactions,
+        )
+        _require_physical_delivery_borrow_safety(
             economic_cut=economic_cut,
             observation=observation,
             version=version,

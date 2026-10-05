@@ -12,7 +12,7 @@ import re
 import sys
 import zipfile
 
-from research.autotrade_research.artifacts.durable_publish import (
+from autotrade_runtime.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,
@@ -21,6 +21,11 @@ from research.autotrade_research.artifacts.durable_publish import (
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     canonical_packaged_qualification_trust_policy_digest,
+)
+from tools.stage_windows_foundation import FoundationStagingError
+from tools.stage_windows_release_runtime import (
+    _RELEASE_RUNTIME_REQUIRED,
+    stage_windows_release_runtime,
 )
 
 
@@ -60,6 +65,7 @@ WINDOWS_RESERVED_STEMS = frozenset(
     | {f"com{index}" for index in range(1, 10)}
     | {f"lpt{index}" for index in range(1, 10)}
 )
+WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class BundleError(ValueError):
@@ -67,7 +73,7 @@ class BundleError(ValueError):
 
 
 def _required_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise BundleError(f"{name} is required")
     return value.strip()
 
@@ -83,6 +89,16 @@ def _safe_relative(path: Path, root: Path) -> str:
 def _windows_path_key(relative: str) -> str:
     normalized: list[str] = []
     for part in PurePosixPath(relative).parts:
+        if "\\" in part:
+            raise BundleError(
+                f"bundle contains Windows separator in path segment: {relative}"
+            )
+        if any(char in part for char in '*?"<>|') or any(
+            ord(char) < 32 for char in part
+        ):
+            raise BundleError(
+                f"bundle contains Windows-forbidden path character: {relative}"
+            )
         if part.endswith((" ", ".")):
             raise BundleError(
                 f"bundle contains Windows-unsafe trailing space/dot segment: {relative}"
@@ -98,6 +114,96 @@ def _windows_path_key(relative: str) -> str:
             )
         normalized.append(part.casefold())
     return "/".join(normalized)
+
+
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Return whether a no-follow Windows stat identifies a reparse point."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise BundleError("Windows file attributes are invalid")
+    return bool(attributes & WINDOWS_REPARSE_POINT)
+
+
+def _reject_windows_reparse(path: Path, observed: os.stat_result) -> None:
+    if _has_windows_reparse_point(observed):
+        raise BundleError(f"Windows reparse points are forbidden in bundles: {path}")
+
+
+def _assert_windows_path_chain_is_not_reparse(path: Path) -> None:
+    """Reject every existing component in one absolute staging path chain."""
+
+    absolute = path.absolute()
+    anchor = Path(absolute.anchor)
+    current = anchor
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _assert_staging_components_are_not_reparse(
+    path: Path,
+    *,
+    staging: Path,
+) -> None:
+    """Reject root/ancestor/final reparse aliases for one staged path."""
+
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        relative = path.relative_to(staging)
+    except ValueError as error:
+        raise BundleError(f"staged path escaped staging directory: {path}") from error
+    current = staging
+    for part in relative.parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _walk_staging(staging: Path) -> list[Path]:
+    """Enumerate staging without descending through symlink/reparse directories."""
+
+    files: list[Path] = []
+    pending = [staging]
+    while pending:
+        directory = pending.pop()
+        _assert_windows_path_chain_is_not_reparse(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, observed)
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            if stat.S_ISDIR(observed.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            files.append(path)
+    return sorted(files, key=lambda item: item.as_posix())
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -116,7 +222,7 @@ def _looks_like_credential_vault(data: bytes) -> bool:
     """Detect the existing AutoTrade protected-vault shape by content.
 
     Filename/path gates are necessary but insufficient: a copied credential
-    vault can be renamed before staging.  Detection intentionally requires the
+    vault can be renamed before staging. Detection intentionally requires the
     characteristic owner/ciphertext record shape to avoid treating arbitrary
     JSON documents as secrets.
     """
@@ -164,6 +270,7 @@ def _assert_staged_file_identity(
         raise BundleError(f"staged file identity cannot be verified: {path}") from error
 
     for observed in (opened, current, resolved_current):
+        _reject_windows_reparse(path, observed)
         if not stat.S_ISREG(observed.st_mode):
             raise BundleError(f"staged entry must remain a regular file: {path}")
 
@@ -222,18 +329,23 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
 
 
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
-    if not staging.is_dir():
+    staging = staging.absolute()
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        staging_stat = os.stat(staging, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError("staging must be an existing directory") from error
+    _reject_windows_reparse(staging, staging_stat)
+    if not stat.S_ISDIR(staging_stat.st_mode):
         raise BundleError("staging must be an existing directory")
     staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
-    for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise BundleError(f"symlinks are forbidden in bundles: {path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise BundleError(f"unsupported filesystem entry: {path}")
+    for path in _walk_staging(staging):
+        _assert_staging_components_are_not_reparse(
+            path,
+            staging=staging,
+        )
         relative = _safe_relative(path, staging)
         windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
@@ -281,6 +393,86 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
         "sha256": "sha256:" + sha256(data).hexdigest(),
         "size": len(data),
     }
+
+
+def _require_release_runtime_snapshot_binding(
+    *,
+    files: list[tuple[str, Path, bytes]],
+    composition: dict[str, object],
+    staged_expected: tuple[dict[str, str], ...],
+) -> None:
+    """Bind post-stage collection to the exact-source release TCB snapshot."""
+
+    if type(staged_expected) is not tuple or len(staged_expected) != len(
+        _RELEASE_RUNTIME_REQUIRED
+    ):
+        raise BundleError(
+            "release runtime stager did not return the canonical 37-leaf snapshot"
+        )
+    required = {"component_id", "kind", "path", "version", "sha256"}
+    descriptor_by_path = {
+        descriptor.path: descriptor for descriptor in _RELEASE_RUNTIME_REQUIRED
+    }
+    validated_expected: list[dict[str, str]] = []
+    expected_paths: set[str] = set()
+    for index, expected in enumerate(staged_expected):
+        if type(expected) is not dict or set(expected) != required:
+            raise BundleError(
+                f"release runtime snapshot record {index} is not canonical"
+            )
+        if any(
+            type(expected[field]) is not str or not expected[field]
+            for field in ("component_id", "kind", "path", "version", "sha256")
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid identity"
+            )
+        descriptor = descriptor_by_path.get(expected["path"])
+        if (
+            descriptor is None
+            or expected["component_id"] != descriptor.component_id
+            or expected["kind"] != descriptor.kind
+            or expected["version"] != "source-controlled"
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} is not a canonical descriptor"
+            )
+        _windows_path_key(expected["path"])
+        if expected["path"] in expected_paths:
+            raise BundleError("release runtime snapshot contains duplicate paths")
+        expected_paths.add(expected["path"])
+        if CANONICAL_SHA256.fullmatch(expected["sha256"]) is None:
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid digest"
+            )
+        validated_expected.append(expected)
+    if expected_paths != set(descriptor_by_path):
+        raise BundleError(
+            "release runtime snapshot does not cover the canonical descriptor set"
+        )
+
+    collected = {
+        relative: "sha256:" + sha256(data).hexdigest()
+        for relative, _, data in files
+    }
+    raw_components = composition.get("components")
+    if not isinstance(raw_components, list):
+        raise BundleError("release composition components are unavailable")
+    by_path = {
+        item["path"]: item
+        for item in raw_components
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for expected in validated_expected:
+        path = expected["path"]
+        if collected.get(path) != expected["sha256"]:
+            raise BundleError(
+                f"release runtime changed after exact-source staging: {path}"
+            )
+        if by_path.get(path) != expected:
+            raise BundleError(
+                f"release composition changed after exact-source staging: {path}"
+            )
 
 
 def _canonical_digest(value: object, *, name: str) -> str:
@@ -368,9 +560,11 @@ def _load_composition(
         raise BundleError("unsupported Windows composition schema_version")
     if value["product"] != "AutoTrade":
         raise BundleError("Windows composition product must be AutoTrade")
-    composition_sha = _required_text(value["source_sha"], name="composition source_sha").lower()
+    composition_sha = _required_text(value["source_sha"], name="composition source_sha")
     if SOURCE_SHA.fullmatch(composition_sha) is None:
-        raise BundleError("composition source_sha must be an exact 40-character Git SHA")
+        raise BundleError(
+            "composition source_sha must be an exact 40-character lowercase Git SHA"
+        )
     if composition_sha != source_sha:
         raise BundleError("composition source_sha does not match bundle source_sha")
 
@@ -379,9 +573,31 @@ def _load_composition(
         raise BundleError(
             "composition schema_compatibility must contain exactly minimum and maximum"
         )
+    schema_minimum = _required_text(
+        schema_range["minimum"],
+        name="schema minimum",
+    )
+    schema_maximum = _required_text(
+        schema_range["maximum"],
+        name="schema maximum",
+    )
+    minimum_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", schema_minimum)
+    maximum_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+|x)", schema_maximum)
+    if minimum_match is None:
+        raise BundleError("schema minimum must use major.minor.patch")
+    if maximum_match is None:
+        raise BundleError("schema maximum must use major.minor.patch or major.minor.x")
+    minimum_key = tuple(int(part) for part in minimum_match.groups())
+    maximum_prefix = tuple(int(part) for part in maximum_match.groups()[:2])
+    maximum_patch = maximum_match.group(3)
+    if maximum_patch == "x":
+        if maximum_prefix < minimum_key[:2]:
+            raise BundleError("schema compatibility maximum precedes minimum")
+    elif (*maximum_prefix, int(maximum_patch)) < minimum_key:
+        raise BundleError("schema compatibility maximum precedes minimum")
     normalized_schema_range = {
-        "minimum": _required_text(schema_range["minimum"], name="schema minimum"),
-        "maximum": _required_text(schema_range["maximum"], name="schema maximum"),
+        "minimum": schema_minimum,
+        "maximum": schema_maximum,
     }
 
     runtime = value["runtime"]
@@ -394,14 +610,18 @@ def _load_composition(
             "composition runtime must contain architecture, runtime_identifier, "
             "minimum_windows_version"
         )
+    minimum_windows_version = _required_text(
+        runtime["minimum_windows_version"],
+        name="minimum Windows version",
+    )
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", minimum_windows_version) is None:
+        raise BundleError("minimum Windows version must use major.minor.build")
     normalized_runtime = {
         "architecture": _required_text(runtime["architecture"], name="runtime architecture"),
         "runtime_identifier": _required_text(
             runtime["runtime_identifier"], name="runtime identifier"
         ),
-        "minimum_windows_version": _required_text(
-            runtime["minimum_windows_version"], name="minimum Windows version"
-        ),
+        "minimum_windows_version": minimum_windows_version,
     }
     expected_rid = {
         "x64": "win-x64",
@@ -479,7 +699,7 @@ def _load_composition(
     # Exact Git objects remain the qualification trust authority for checkout/CI.
     # A source-controlled packaged-policy digest is only a composition inventory
     # constraint: it can require the exact policy bytes to be shipped, but cannot
-    # authenticate the installed source SHA.  Terminal non-Git verification stays
+    # authenticate the installed source SHA. Terminal non-Git verification stays
     # unavailable until a separate signed/delivered source-identity authority is
     # wired into qualification_attestation.
     try:
@@ -535,7 +755,6 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data)
 
 
-
 def _validate_output_destination(path: Path, *, name: str) -> None:
     try:
         validate_publication_destination(path)
@@ -565,10 +784,10 @@ def build_bundle(
     composition_path: Path | None = None,
 ) -> dict[str, object]:
     normalized_version = _required_text(version, name="version")
-    normalized_sha = _required_text(source_sha, name="source_sha").lower()
+    normalized_sha = _required_text(source_sha, name="source_sha")
     if SOURCE_SHA.fullmatch(normalized_sha) is None:
         raise BundleError("source_sha must be an exact 40-character lowercase Git SHA")
-    if mode not in {"diagnostics", "release"}:
+    if type(mode) is not str or mode not in {"diagnostics", "release"}:
         raise BundleError("mode must be diagnostics or release")
 
     try:
@@ -616,19 +835,35 @@ def build_bundle(
             + ", ".join(sorted(codes))
         )
 
+    release_runtime_expected: tuple[dict[str, str], ...] = ()
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
-            not isinstance(provenance_source_sha, str)
-            or SOURCE_SHA.fullmatch(provenance_source_sha.lower()) is None
+            type(provenance_source_sha) is not str
+            or SOURCE_SHA.fullmatch(provenance_source_sha) is None
         ):
             raise BundleError(
-                "release provenance must bind an exact 40-character source_sha"
+                "release provenance must bind an exact 40-character lowercase source_sha"
             )
-        if provenance_source_sha.lower() != normalized_sha:
+        if provenance_source_sha != normalized_sha:
             raise BundleError(
                 "release provenance source_sha does not match bundle source_sha"
             )
+        if composition_path is None:
+            raise BundleError(
+                "release bundle requires an exact Windows composition manifest"
+            )
+        try:
+            release_runtime_expected = stage_windows_release_runtime(
+                staging=staging,
+                composition_path=composition_path,
+                expected_source_sha=normalized_sha,
+                source_root=ROOT,
+            )
+        except FoundationStagingError as error:
+            raise BundleError(
+                f"release source-controlled runtime staging failed closed: {error}"
+            ) from error
 
     files = _collect(staging)
     composition = None
@@ -639,6 +874,12 @@ def build_bundle(
             source_sha=normalized_sha,
             files=files,
         )
+        if mode == "release":
+            _require_release_runtime_snapshot_binding(
+                files=files,
+                composition=composition,
+                staged_expected=release_runtime_expected,
+            )
     elif mode == "release":
         raise BundleError(
             "release bundle requires an exact Windows composition manifest"

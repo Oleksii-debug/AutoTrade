@@ -7,9 +7,11 @@ signed-attestation verifier against one exact ArtifactStore generation, then
 parses the authenticated provider campaign payload and derives a content identity
 from all accepted material.
 
-No provider-qualification protocol is source-enabled yet because the canonical
-qualification trust policy is not present on this lineage.  Public issuance is
-therefore intentionally unavailable rather than silently trusting test material.
+The provider-route v1 protocol descriptor is source-owned here, but canonical
+qualification trust policy roots remain separately controlled.  Configuring the
+protocol alone never makes a campaign authoritative: public issuance still must
+cross the canonical signed-attestation trust boundary and remains unavailable
+while that policy is absent.
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
-from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID
 
@@ -289,27 +290,29 @@ class ProviderQualificationProtocol:
             )
 
 
-# Runtime registration would reintroduce caller-selected trust semantics.  A real
-# provider protocol must be added here together with a reviewed canonical trust
-# policy.  The empty mapping keeps today's lineage fail-closed.
-_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType({})
-
-
+# Runtime registration would reintroduce caller-selected protocol semantics.
+# Keep the one supported route descriptor in executable source literals instead of
+# a retained Python object or module-level mapping. A frozen dataclass can still
+# be mutated with object.__setattr__, and module globals can be rebound; neither
+# mechanism may become provider-Q authority.
 def source_provider_qualification_protocol(
     key: str,
 ) -> ProviderQualificationProtocol:
     key = _token(key, name="protocol key")
-    try:
-        protocol = _SOURCE_PROTOCOLS[key]
-    except KeyError as error:
+    if key != "PROVIDER_ROUTE_V1":
         raise ProviderQualificationUnavailable(
             "no source-controlled provider qualification protocol is configured"
-        ) from error
-    if type(protocol) is not ProviderQualificationProtocol:
-        raise ProviderQualificationUnavailable(
-            "provider qualification protocol authority is invalid"
         )
-    return protocol
+    return ProviderQualificationProtocol(
+        key="PROVIDER_ROUTE_V1",
+        domain="PROVIDER",
+        gate="ROUTE_QUALIFICATION",
+        package_id="AUTOTRADE",
+        protocol_id="provider-route-v1",
+        protocol_version="1.0.0",
+        requirement_id="provider-route-required",
+        campaign_evidence_kind="PROVIDER_QUALIFICATION_CAMPAIGN",
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,10 +25,9 @@ from research.autotrade_research.artifacts.store import (
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
-    QualificationTrustPolicy,
     SignedQualificationAttestation,
     parse_signed_qualification_attestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -67,7 +66,6 @@ _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
 _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "release-candidate-subject-sha256:"
-_FROZEN_DECISION_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -383,9 +381,14 @@ class ReleaseCandidateDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
-    _freeze_token: InitVar[object | None] = None
+    verification_store: InitVar[ArtifactStore | None] = None
+    verification_root: InitVar[str | Path | None] = None
 
-    def __post_init__(self, _freeze_token: object | None) -> None:
+    def __post_init__(
+        self,
+        verification_store: ArtifactStore | None,
+        verification_root: str | Path | None,
+    ) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
         if not isinstance(self.reasons, tuple) or any(
@@ -602,9 +605,47 @@ class ReleaseCandidateDecision:
                     "frozen release candidate qualification receipt "
                     "does not cover exact artifact set"
                 )
-            if _freeze_token is not _FROZEN_DECISION_TOKEN:
+            if type(verification_store) is not ArtifactStore:
                 raise ReleaseCandidateError(
-                    "frozen release candidate requires verified factory authority"
+                    "frozen release candidate requires canonical evidence verification"
+                )
+            if verification_root is None:
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires canonical evidence verification"
+                )
+            windows_package = next(
+                item for item in parsed_artifacts
+                if item.role == "WINDOWS_PACKAGE"
+            )
+            try:
+                accepted = verify_canonical_qualification_attestation(
+                    receipt,
+                    evidence_store=verification_store,
+                    evidence_root=verification_root,
+                    expected_source_sha=manifest_source_sha,
+                    expected_domain=_QUALIFICATION_DOMAIN,
+                    expected_gate=_QUALIFICATION_GATE,
+                    expected_package_id=_QUALIFICATION_PACKAGE,
+                    expected_protocol_id=_QUALIFICATION_PROTOCOL,
+                    expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
+                    expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+                    expected_release_artifact_id=windows_package.artifact_id,
+                    expected_release_artifact_sha256=windows_package.artifact_sha256,
+                )
+            except QualificationTrustError as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonical qualification verification failed"
+                ) from error
+            if (
+                accepted.result != "PASS"
+                or accepted.attestation_id != self.qualification_attestation_id
+                or accepted.attestation_digest
+                != self.qualification_attestation_digest
+                or accepted.policy_id != self.qualification_policy_id
+                or accepted.trust_root_id != self.qualification_trust_root_id
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonical qualification identity mismatch"
                 )
         else:
             if not self.reasons:
@@ -750,16 +791,13 @@ def freeze_release_candidate(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> ReleaseCandidateDecision:
     """Freeze exact accepted evidence or fail closed without an RC manifest.
 
     PASS and VERIFIED fields are claims, not proof. ArtifactStore proves exact
     bytes/manifest bindings only. A FROZEN decision additionally requires the
-    canonical signed qualification authority, pinned policy identity, exact
-    WP-54 scope, exact delivered Windows package binding, and exact coverage of
+    canonical signed qualification authority, repository-selected trust policy,
+    exact WP-54 scope, exact delivered Windows package binding, and exact coverage of
     every candidate artifact.
     """
 
@@ -775,13 +813,6 @@ def freeze_release_candidate(
         raise TypeError(
             "qualification_receipt must be SignedQualificationAttestation"
         )
-    if qualification_policy is not None and not isinstance(
-        qualification_policy, QualificationTrustPolicy
-    ):
-        raise TypeError(
-            "qualification_policy must be QualificationTrustPolicy"
-        )
-
     reasons: list[str] = []
     accepted: AcceptedQualificationAttestation | None = None
     trusted_read = None
@@ -806,16 +837,10 @@ def freeze_release_candidate(
     for role in sorted(_REQUIRED_ROLES - set(by_role)):
         reasons.append(f"missing_required_artifact:{role}")
 
-    trust_inputs_present = all(
-        value is not None
-        for value in (
-            evidence_store,
-            evidence_root,
-            qualification_receipt,
-            qualification_policy,
-            expected_policy_id,
-            expected_policy_version,
-        )
+    trust_inputs_present = (
+        evidence_store is not None
+        and evidence_root is not None
+        and qualification_receipt is not None
     )
     if not trust_inputs_present:
         reasons.append("independent_evidence_trust_unavailable")
@@ -829,13 +854,10 @@ def freeze_release_candidate(
             reasons.append("qualification_evidence_set_mismatch")
         else:
             try:
-                accepted = verify_qualification_attestation(
+                accepted = verify_canonical_qualification_attestation(
                     qualification_receipt,
-                    policy=qualification_policy,
                     evidence_store=evidence_store,
                     evidence_root=evidence_root,
-                    expected_policy_id=expected_policy_id,
-                    expected_policy_version=expected_policy_version,
                     expected_source_sha=candidate.source_sha,
                     expected_domain=_QUALIFICATION_DOMAIN,
                     expected_gate=_QUALIFICATION_GATE,
@@ -911,5 +933,6 @@ def freeze_release_candidate(
         qualification_attestation_digest=accepted.attestation_digest,
         qualification_policy_id=accepted.policy_id,
         qualification_trust_root_id=accepted.trust_root_id,
-        _freeze_token=_FROZEN_DECISION_TOKEN,
+        verification_store=evidence_store,
+        verification_root=evidence_root,
     )

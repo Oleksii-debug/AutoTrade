@@ -79,6 +79,7 @@ class _History:
     accepted: dict[str, AcceptedProviderQualification]
     receipts: dict[str, tuple[str, SignedQualificationAttestation]]
     superseded: dict[str, str]
+    aggregate_versions: dict[str, int]
     journal_sequence_cut: int
 
 
@@ -91,11 +92,10 @@ def _qid(value: object, *, name: str) -> str:
 
 
 def _point(value: datetime, *, name: str) -> datetime:
-    if (
-        type(value) is not datetime
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    # Exact datetime alone is insufficient: its nested tzinfo can still be a
+    # caller-defined Python object. Reject executable timezone authority
+    # before utcoffset()/astimezone() can dispatch through caller code.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderQualificationError(
             f"{name} must be an exact timezone-aware datetime"
         )
@@ -414,6 +414,7 @@ class DurableProviderQualificationRegistry:
             accepted=accepted,
             receipts=receipts,
             superseded=superseded,
+            aggregate_versions=dict(versions),
             journal_sequence_cut=resolved_cut,
         )
 
@@ -506,10 +507,7 @@ class DurableProviderQualificationRegistry:
                 "provider qualification already has a different supersession target"
             )
         scope = _current_scope(old)
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            scope.content_digest,
-        )
+        version = history.aggregate_versions.get(scope.content_digest, 0) + 1
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "old_qualification_id": old_id,

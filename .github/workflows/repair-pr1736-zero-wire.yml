@@ -10,15 +10,16 @@ permissions:
 
 jobs:
   repair:
-    if: github.event.head_commit.message == 'chore: one-shot exact repair for PR 1736 source'
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - name: Apply exact bounded source repair
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
           path = Path('mvp/autotrade_mvp/simulation_session.py')
           text = path.read_text(encoding='utf-8')
@@ -36,6 +37,7 @@ jobs:
           text = text.replace(broken_unpack, fixed_unpack, 1)
 
           path.write_text(text, encoding='utf-8', newline='\n')
+          PY
       - name: Compile repaired module
         run: python -m py_compile mvp/autotrade_mvp/simulation_session.py
       - name: Run focused expired-Prepared recovery regression

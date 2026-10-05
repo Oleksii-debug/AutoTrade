@@ -11,6 +11,9 @@ from autotrade_research.evaluation.ablation_owned_operand_preflight import (
     resolve_ablation_owned_operand_preflight,
     reverify_ablation_owned_operand_preflight,
 )
+from autotrade_research.evaluation.utility_projection import (
+    build_utility_projection_rule,
+)
 from autotrade_research.memory.episodes import MemoryIntegrityError
 
 
@@ -36,6 +39,7 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
         *,
         components: list[str] | None = None,
         cost_unit: str = "USD",
+        source_owned_utility_rule: bool = True,
     ):
         descriptor = {
             "schema_version": 1,
@@ -53,15 +57,21 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
         ).encode("utf-8")
         digest = "sha256:" + sha256(raw).hexdigest()
         cost_ref = f"artifact:{COST_DESCRIPTOR_ID}@{digest}"
-        original_ref = utility_fixture.COST_DESCRIPTOR_REF
+        original_cost_ref = utility_fixture.COST_DESCRIPTOR_REF
+        original_utility_id = utility_fixture.UTILITY_DESCRIPTOR_ID
         utility_fixture.COST_DESCRIPTOR_REF = cost_ref
+        if source_owned_utility_rule:
+            utility_fixture.UTILITY_DESCRIPTOR_ID = build_utility_projection_rule(
+                "USD"
+            ).artifact_id
         try:
             helper = utility_fixture.AblationUtilityRuleProvenanceTests(
                 "test_registered_rule_binds_to_reverified_fact_without_numeric_score"
             )
             fixture = helper._build_fixture(root)
         finally:
-            utility_fixture.COST_DESCRIPTOR_REF = original_ref
+            utility_fixture.COST_DESCRIPTOR_REF = original_cost_ref
+            utility_fixture.UTILITY_DESCRIPTOR_ID = original_utility_id
         (
             _science,
             _memory,
@@ -116,6 +126,23 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
             self.assertFalse(hasattr(resolved, "cost"))
             self.assertFalse(hasattr(resolved, "verdict"))
             resolved.verify_integrity()
+
+    def test_caller_selected_utility_rule_identity_never_forms_preterminal_bundle(self):
+        with TemporaryDirectory() as directory:
+            _registration, pair, refs, authority = self._build_fixture(
+                Path(directory),
+                source_owned_utility_rule=False,
+            )
+
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "utility projection rule identity is not source-owned",
+            ):
+                resolve_ablation_owned_operand_preflight(
+                    authority,
+                    [pair],
+                    outcome_refs=list(refs),
+                )
 
     def test_reverification_reconstructs_identical_owned_preflight(self):
         with TemporaryDirectory() as directory:

@@ -1384,6 +1384,22 @@ def _install_authenticated_price_semantics_authority():
     settlement_convention_type = SettlementConvention
     settlement_payload = settlement_convention_type.payload
     settlement_payload_code = settlement_payload.__code__
+    registry_error_type = InstrumentRegistryError
+    canonical_decimal_text_function = canonical_decimal_text
+    canonical_decimal_text_code = getattr(canonical_decimal_text_function, "__code__", None)
+    exact_decimal_error_type = ExactDecimalError
+    timezone_type = timezone
+    mapping_type = Mapping
+    mapping_proxy_type = MappingProxyType
+    deliverable_leg_type = DeliverableLeg
+    canonical_dict = dict
+    canonical_str = str
+    canonical_type = type
+    canonical_int = int
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_any = any
+    canonical_isinstance = isinstance
 
     def require_executable_authority() -> None:
         if (
@@ -1441,8 +1457,25 @@ def _install_authenticated_price_semantics_authority():
             or SettlementConvention is not settlement_convention_type
             or SettlementConvention.payload is not settlement_payload
             or SettlementConvention.payload.__code__ is not settlement_payload_code
+            or InstrumentRegistryError is not registry_error_type
+            or canonical_decimal_text is not canonical_decimal_text_function
+            or getattr(canonical_decimal_text_function, "__code__", None)
+            is not canonical_decimal_text_code
+            or ExactDecimalError is not exact_decimal_error_type
+            or timezone is not timezone_type
+            or Mapping is not mapping_type
+            or MappingProxyType is not mapping_proxy_type
+            or DeliverableLeg is not deliverable_leg_type
+            or dict is not canonical_dict
+            or str is not canonical_str
+            or type is not canonical_type
+            or int is not canonical_int
+            or tuple is not canonical_tuple
+            or getattr is not canonical_getattr
+            or any is not canonical_any
+            or isinstance is not canonical_isinstance
         ):
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "instrument price-semantics executable authority changed"
             )
 

@@ -224,6 +224,14 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     public Uri BaseUri { get; }
 
+    /// <summary>
+    /// Returns the same paired, origin-bound short-lived session used by the
+    /// native emergency client. The embedded web adapter consumes this only to
+    /// attach credentials to requests admitted by WebExperienceSecurityPolicy;
+    /// credentials are never exposed to JavaScript or persisted by the browser.
+    /// </summary>
+    internal EmergencyHostSession GetBoundSessionForEmbeddedWeb() => GetBoundSession();
+
     private EmergencyHostSession GetBoundSession(
         EmergencyHostSession? knownSession = null)
     {

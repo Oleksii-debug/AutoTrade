@@ -157,10 +157,19 @@
                   AutomationProperties.Name="Web experience">
           <StackPanel Margin="12">
             <TextBlock TextWrapping="Wrap"
-                       Text="The embedded web experience is not connected in this foundation build. This native surface remains truthful and keyboard-operable if the web layer is unavailable." />
-            <TextBlock Margin="0,8,0,0"
+                       Text="The primary web workflow is loaded only from the paired AutoTrade host origin. Native status and emergency controls above remain independent if the web runtime or host UI is unavailable." />
+            <TextBlock x:Name="WebExperienceStatus"
+                       Margin="0,8,0,8"
                        TextWrapping="Wrap"
-                       Text="Use the host status above before relying on any command." />
+                       Focusable="False"
+                       Text="Embedded web experience has not been initialized."
+                       AutomationProperties.Name="Web experience status"
+                       AutomationProperties.LiveSetting="Polite" />
+            <Border x:Name="WebExperienceContainer"
+                    MinHeight="320"
+                    BorderThickness="1"
+                    Padding="1"
+                    AutomationProperties.Name="Primary AutoTrade web experience" />
           </StackPanel>
         </GroupBox>
       </StackPanel>

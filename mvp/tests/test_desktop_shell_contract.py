@@ -281,6 +281,45 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("WITHDRAW", client.upper())
         self.assertNotIn("TRANSFER", client.upper())
 
+    def test_webview2_live_composition_is_origin_fenced_and_native_fallback_independent(self):
+        text = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        client = CLIENT.read_text(encoding="utf-8")
+
+        self.assertIn('x:Name="WebExperienceContainer"', text)
+        self.assertIn('AutomationProperties.Name="Web experience status"', text)
+        self.assertNotIn("embedded web experience is not connected", text.lower())
+        self.assertIn("new WebView2", code)
+        self.assertIn("EnsureCoreWebView2Async", code)
+        self.assertIn("ConfigureWebView(webView.CoreWebView2, policy)", code)
+        self.assertIn("core.WebResourceRequested += WebView_WebResourceRequested", code)
+        self.assertIn("core.NavigationStarting += WebView_NavigationStarting", code)
+        self.assertIn("core.NewWindowRequested += WebView_NewWindowRequested", code)
+        self.assertIn("core.DownloadStarting += WebView_DownloadStarting", code)
+        self.assertIn("core.PermissionRequested += WebView_PermissionRequested", code)
+        self.assertIn("settings.AreHostObjectsAllowed = false", code)
+        self.assertIn("settings.IsBuiltInErrorPageEnabled = false", code)
+        self.assertIn('request.Headers.RemoveHeader("Authorization")', code)
+        self.assertIn('request.Headers.RemoveHeader("X-AutoTrade-Actor")', code)
+        self.assertIn("AllowsSessionHeaderForwarding(", code)
+        self.assertLess(
+            code.index('request.Headers.RemoveHeader("Authorization")'),
+            code.index("AllowsSessionHeaderForwarding("),
+        )
+        self.assertIn("GetBoundSessionForEmbeddedWeb()", code)
+        self.assertIn('"AutoTrade-Session " + session.Token', code)
+        self.assertIn('"X-AutoTrade-Actor"', code)
+        self.assertIn("args.Handled = true", code)
+        self.assertIn("args.Cancel = true", code)
+        self.assertIn("CoreWebView2PermissionState.Deny", code)
+        self.assertIn("webView.Dispose()", code)
+        self.assertIn("Native status and emergency controls remain available", code)
+        self.assertIn(
+            "internal EmergencyHostSession GetBoundSessionForEmbeddedWeb() => GetBoundSession();",
+            client,
+        )
+        self.assertLess(code.index("InitializeComponent();"), code.index("InitializeWebExperienceAsync"))
+
     def test_windows_ci_builds_the_actual_desktop_project(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn('src/**/*.xaml', workflow)

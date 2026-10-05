@@ -1,6 +1,8 @@
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 
 namespace AutoTrade.Desktop;
 
@@ -10,6 +12,10 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _lifetime = new();
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
+    private readonly AuthenticatedEmergencyHostClient? _authenticatedHostClient;
+    private WebView2? _webView;
+    private WebExperienceSecurityPolicy? _webSecurityPolicy;
+    private Uri? _trustedTopLevelDocument;
 
     public MainWindow()
         : this(DesktopHostClientFactory.Create())
@@ -19,6 +25,7 @@ public partial class MainWindow : Window
     internal MainWindow(IEmergencyHostClient hostClient)
     {
         _hostClient = hostClient ?? throw new ArgumentNullException(nameof(hostClient));
+        _authenticatedHostClient = hostClient as AuthenticatedEmergencyHostClient;
         InitializeComponent();
         ConnectionStatus.Text = "Host unavailable; new exposure cannot be confirmed blocked from this window.";
     }
@@ -40,11 +47,18 @@ public partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        await InitializeWebExperienceAsync();
     }
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _lifetime.Cancel();
+        _trustedTopLevelDocument = null;
+        if (_webView is { } webView)
+        {
+            _webView = null;
+            webView.Dispose();
+        }
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)
@@ -321,4 +335,194 @@ public partial class MainWindow : Window
             }
         }
     }
+
+    private void SetWebExperienceStatus(string text)
+    {
+        SetLiveRegionText(WebExperienceStatus, text);
+    }
+
+    private async Task InitializeWebExperienceAsync()
+    {
+        if (_authenticatedHostClient is null)
+        {
+            SetWebExperienceStatus(
+                "Embedded web experience is unavailable because no authenticated paired host session is configured. Native status and emergency controls remain available.");
+            return;
+        }
+
+        WebExperienceSecurityPolicy policy =
+            new(_authenticatedHostClient.BaseUri);
+        WebView2? webView = null;
+        try
+        {
+            webView = new WebView2
+            {
+                MinHeight = 320,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+            };
+            WebExperienceContainer.Child = webView;
+            _webView = webView;
+            _webSecurityPolicy = policy;
+
+            await webView.EnsureCoreWebView2Async();
+            if (_lifetime.IsCancellationRequested || !IsLoaded)
+            {
+                return;
+            }
+
+            ConfigureWebView(webView.CoreWebView2, policy);
+            Uri entryPoint = new(policy.HostOrigin, "/");
+            _trustedTopLevelDocument = entryPoint;
+            webView.Source = entryPoint;
+            SetWebExperienceStatus(
+                "Loading the primary web experience from the paired AutoTrade host.");
+        }
+        catch (Exception)
+        {
+            _trustedTopLevelDocument = null;
+            _webSecurityPolicy = null;
+            if (webView is not null)
+            {
+                if (ReferenceEquals(WebExperienceContainer.Child, webView))
+                {
+                    WebExperienceContainer.Child = null;
+                }
+                if (ReferenceEquals(_webView, webView))
+                {
+                    _webView = null;
+                }
+                webView.Dispose();
+            }
+
+            SetWebExperienceStatus(
+                "Embedded web experience is unavailable. Native status and emergency controls remain available and do not imply any browser-side command outcome.");
+        }
+    }
+
+    private void ConfigureWebView(
+        CoreWebView2 core,
+        WebExperienceSecurityPolicy policy)
+    {
+        CoreWebView2Settings settings = core.Settings;
+        settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;
+        settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;
+        settings.AreDefaultContextMenusEnabled = false;
+        settings.AreDefaultScriptDialogsEnabled = false;
+        settings.AreHostObjectsAllowed = false;
+        settings.IsBuiltInErrorPageEnabled = false;
+        settings.IsStatusBarEnabled = false;
+
+        core.AddWebResourceRequestedFilter(
+            "*",
+            CoreWebView2WebResourceContext.All);
+        core.WebResourceRequested += WebView_WebResourceRequested;
+        core.NavigationStarting += WebView_NavigationStarting;
+        core.NavigationCompleted += WebView_NavigationCompleted;
+        core.NewWindowRequested += WebView_NewWindowRequested;
+        core.DownloadStarting += WebView_DownloadStarting;
+        core.PermissionRequested += WebView_PermissionRequested;
+    }
+
+    private void WebView_NavigationStarting(
+        object? sender,
+        CoreWebView2NavigationStartingEventArgs args)
+    {
+        if (_webSecurityPolicy is null
+            || !Uri.TryCreate(args.Uri, UriKind.Absolute, out Uri? target)
+            || !_webSecurityPolicy.AllowsTopLevelNavigation(target))
+        {
+            args.Cancel = true;
+            _trustedTopLevelDocument = null;
+            SetWebExperienceStatus(
+                "Blocked an untrusted embedded navigation. Native status and emergency controls remain available.");
+            return;
+        }
+
+        _trustedTopLevelDocument = target;
+    }
+
+    private void WebView_NavigationCompleted(
+        object? sender,
+        CoreWebView2NavigationCompletedEventArgs args)
+    {
+        if (!args.IsSuccess)
+        {
+            _trustedTopLevelDocument = null;
+            SetWebExperienceStatus(
+                "Embedded web navigation failed. Native status and emergency controls remain available.");
+            return;
+        }
+
+        SetWebExperienceStatus(
+            "Primary web experience loaded from the paired AutoTrade host. Financial state and command outcomes remain authoritative in the host.");
+    }
+
+    private void WebView_WebResourceRequested(
+        object? sender,
+        CoreWebView2WebResourceRequestedEventArgs args)
+    {
+        CoreWebView2WebResourceRequest request = args.Request;
+
+        // Browser/JS supplied credential material is never trusted. Native code
+        // removes it first, then selectively attaches the current paired session
+        // only to exact Host API operations admitted by the canonical policy.
+        request.Headers.RemoveHeader("Authorization");
+        request.Headers.RemoveHeader("X-AutoTrade-Actor");
+
+        if (_authenticatedHostClient is null
+            || _webSecurityPolicy is null
+            || _trustedTopLevelDocument is null
+            || !Uri.TryCreate(request.Uri, UriKind.Absolute, out Uri? target)
+            || !_webSecurityPolicy.AllowsSessionHeaderForwarding(
+                request.Method,
+                target,
+                _trustedTopLevelDocument))
+        {
+            return;
+        }
+
+        try
+        {
+            EmergencyHostSession session =
+                _authenticatedHostClient.GetBoundSessionForEmbeddedWeb();
+            request.Headers.SetHeader(
+                "Authorization",
+                "AutoTrade-Session " + session.Token);
+            request.Headers.SetHeader(
+                "X-AutoTrade-Actor",
+                session.Actor);
+        }
+        catch (Exception)
+        {
+            // Missing/expired/mismatched credentials fail closed: the request is
+            // sent without credentials and the host remains the rejecting authority.
+        }
+    }
+
+    private void WebView_NewWindowRequested(
+        object? sender,
+        CoreWebView2NewWindowRequestedEventArgs args)
+    {
+        args.Handled = true;
+        SetWebExperienceStatus(
+            "Blocked an embedded new-window request. Native controls remain available.");
+    }
+
+    private void WebView_DownloadStarting(
+        object? sender,
+        CoreWebView2DownloadStartingEventArgs args)
+    {
+        args.Cancel = true;
+        SetWebExperienceStatus(
+            "Blocked an embedded download request. Downloads are not part of the trusted financial UI.");
+    }
+
+    private void WebView_PermissionRequested(
+        object? sender,
+        CoreWebView2PermissionRequestedEventArgs args)
+    {
+        args.State = CoreWebView2PermissionState.Deny;
+    }
+
 }

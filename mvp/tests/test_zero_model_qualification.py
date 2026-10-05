@@ -1,7 +1,9 @@
 from decimal import Decimal
 from pathlib import Path
+import socket
 import platform
 import unittest
+from unittest.mock import patch
 
 from qualification.zero_model.qualify import (
     _observed_source_sha,
@@ -58,6 +60,13 @@ class ZeroModelQualificationTests(unittest.TestCase):
             self.assertEqual(outage["reserved_cost"], "0")
             self.assertEqual(outage["reason"], "no_admissible_model")
         self.assertEqual(evidence["model_cost_total"], "0")
+        self.assertEqual(
+            evidence["network_guard"],
+            {
+                "python_socket_io_blocked": True,
+                "network_attempt_count": 0,
+            },
+        )
 
         financial = evidence["deterministic_financial_slice"]
         self.assertTrue(financial["resumed"])
@@ -105,6 +114,20 @@ class ZeroModelQualificationTests(unittest.TestCase):
         self.assertFalse(claims["live_trading_qualified"])
         self.assertFalse(claims["economic_edge_proven"])
         self.assertFalse(claims["all_wp62_workflows_qualified"])
+
+    def test_qualification_installs_network_deny_fence_around_financial_slice(self):
+        observed = _observed_source_sha()
+
+        def forbidden_network_slice(*args, **kwargs):
+            del args, kwargs
+            socket.create_connection(("127.0.0.1", 9), timeout=0.01)
+
+        with patch(
+            "qualification.zero_model.qualify.run_vertical_slice",
+            side_effect=forbidden_network_slice,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "attempted network access"):
+                qualify(observed)
 
     def test_expected_source_identity_must_match_actual_checkout(self):
         observed = _observed_source_sha()

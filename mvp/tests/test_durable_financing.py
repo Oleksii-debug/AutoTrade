@@ -1938,6 +1938,100 @@ class DurableFinancingTests(unittest.TestCase):
             0,
         )
 
+    def test_bybit_settlement_requires_complete_financing_only_economics(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        base_row = {
+            "id": "funding-complete-economics",
+            "symbol": "XRPUSDT",
+            "category": "linear",
+            "side": "Buy",
+            "transactionTime": str(transaction_time),
+            "type": "SETTLEMENT",
+            "funding": "-0.003676",
+            "currency": "USDT",
+            "fee": "0",
+            "cashFlow": "0",
+            "change": "-0.003676",
+        }
+        cases = (
+            ("missing_cash_flow", {"cashFlow": None}, "missing or noncanonical"),
+            ("missing_fee", {"fee": None}, "missing or noncanonical"),
+            ("missing_change", {"change": None}, "missing or noncanonical"),
+            ("nonzero_fee", {"fee": "0.10", "change": "-0.103676"}, "companion economics"),
+            ("nonzero_cash_flow", {"cashFlow": "1.25", "change": "1.246324"}, "companion economics"),
+            ("inconsistent_change", {"change": "-0.003675"}, "does not equal cashFlow + funding - fee"),
+        )
+        for suffix, changes, expected in cases:
+            with self.subTest(case=suffix):
+                row = dict(base_row)
+                for key, value in changes.items():
+                    if value is None:
+                        row.pop(key, None)
+                    else:
+                        row[key] = value
+                response = {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "nextPageCursor": "",
+                        "list": [row],
+                    },
+                    "time": transaction_time + 1000,
+                }
+                raw = json.dumps(
+                    response,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                observed_at = BASE + timedelta(seconds=2)
+                observation = bybit_activity_observation(
+                    raw,
+                    observed_at=observed_at,
+                )
+                artifact = f"00000000-0000-0000-0000-0000000001{suffix[-2:]}"
+                raw_store = ArtifactStore(
+                    Path(self.temp.name) / f"bybit-complete-{suffix}"
+                )
+                raw_store.publish_bytes(
+                    artifact_id=artifact,
+                    data=raw,
+                    media_type="application/json",
+                    rights={"storage": True, "export": False},
+                    source_refs=[observation.evidence_ref],
+                    metadata={"evidence_class": "provider_response"},
+                )
+                economic = DurableProviderEconomicBook(
+                    self.store,
+                    provider_id="BYBIT",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                )
+                financing = DurableFinancingBook(
+                    self.store,
+                    economic,
+                    provider_id="BYBIT",
+                    account_id="acct-1",
+                    environment="SIMULATION",
+                )
+                with self.assertRaisesRegex(FinancingError, expected):
+                    financing.record_bybit_funding_observation(
+                        observation,
+                        raw_store,
+                        artifact_id=artifact,
+                        row_id="funding-complete-economics",
+                        instrument_registry=bybit_instrument_registry()[0],
+                        instrument_versions={
+                            "XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+                        },
+                        committed_at=observed_at.isoformat(),
+                    )
+                self.assertEqual(
+                    economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+                    0,
+                )
+
     def test_bybit_funding_transaction_must_be_inside_authenticated_query_window(self):
         transaction_time = int(BASE.timestamp() * 1000)
         response = {

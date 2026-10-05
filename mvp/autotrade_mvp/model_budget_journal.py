@@ -488,11 +488,51 @@ class DurableModelBudget:
         restore_clock_authority = DurableModelBudget._restore_clock_authority
         clock_text = _clock_text
         module_globals = globals()
-        clock_dependencies = (
-            ("datetime", datetime),
-            ("timedelta", timedelta),
-            ("timezone", timezone),
+
+        # The injected clock is caller-owned code. Freeze the executable state
+        # and every module binding consulted by the two trusted helpers before
+        # yielding control. In-place function-code poisoning preserves function
+        # identity, so class/module alias checks alone cannot detect it.
+        object_getattribute = object.__getattribute__
+        object_setattr = object.__setattr__
+        dict_get = dict.get
+        dict_setitem = dict.__setitem__
+        dict_delitem = dict.__delitem__
+        caught_exception_type = Exception
+        value_error_type = ValueError
+        set_type = set
+        sorted_fn = sorted
+        missing_binding = object()
+
+        restore_function_state = (
+            ("__code__", object_getattribute(restore_clock_authority, "__code__")),
+            ("__defaults__", object_getattribute(restore_clock_authority, "__defaults__")),
+            ("__kwdefaults__", object_getattribute(restore_clock_authority, "__kwdefaults__")),
         )
+        clock_text_function_state = (
+            ("__code__", object_getattribute(clock_text, "__code__")),
+            ("__defaults__", object_getattribute(clock_text, "__defaults__")),
+            ("__kwdefaults__", object_getattribute(clock_text, "__kwdefaults__")),
+        )
+        runtime_names = tuple(
+            dict.fromkeys(
+                (
+                    "DurableModelBudget",
+                    "_clock_text",
+                    "Exception",
+                    "ValueError",
+                    "set",
+                    "sorted",
+                    *restore_function_state[0][1].co_names,
+                    *clock_text_function_state[0][1].co_names,
+                )
+            )
+        )
+        runtime_bindings = tuple(
+            (name, dict_get(module_globals, name, missing_binding))
+            for name in runtime_names
+        )
+
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -503,35 +543,66 @@ class DurableModelBudget:
         changes: list[str] = []
         try:
             clock_value = clock()
-        except Exception as error:
+        except caught_exception_type as error:
             clock_error = error
         finally:
             try:
+                for attribute, expected in restore_function_state:
+                    current = object_getattribute(restore_clock_authority, attribute)
+                    if current is expected:
+                        continue
+                    changes.append(
+                        "function.DurableModelBudget._restore_clock_authority."
+                        + attribute
+                    )
+                    object_setattr(restore_clock_authority, attribute, expected)
+
+                for name, expected in runtime_bindings:
+                    current = dict_get(module_globals, name, missing_binding)
+                    if expected is missing_binding:
+                        if current is missing_binding:
+                            continue
+                        changes.append("module." + name)
+                        dict_delitem(module_globals, name)
+                        continue
+                    if current is expected:
+                        continue
+                    changes.append("module." + name)
+                    dict_setitem(module_globals, name, expected)
+
                 changes.extend(
                     restore_clock_authority(
                         self,
                         snapshot,
+                        module_globals,
                     )
                 )
             finally:
-                for name, expected in (
-                    ("_clock_text", clock_text),
-                    *clock_dependencies,
-                ):
-                    current = dict.get(module_globals, name)
+                for attribute, expected in clock_text_function_state:
+                    current = object_getattribute(clock_text, attribute)
+                    if current is expected:
+                        continue
+                    changes.append("function._clock_text." + attribute)
+                    object_setattr(clock_text, attribute, expected)
+
+                # Reassert helper runtime bindings after class/state recovery too.
+                for name, expected in runtime_bindings:
+                    current = dict_get(module_globals, name, missing_binding)
+                    if expected is missing_binding:
+                        if current is missing_binding:
+                            continue
+                        changes.append("module." + name)
+                        dict_delitem(module_globals, name)
+                        continue
                     if current is expected:
                         continue
                     changes.append("module." + name)
-                    dict.__setitem__(
-                        module_globals,
-                        name,
-                        expected,
-                    )
+                    dict_setitem(module_globals, name, expected)
 
         if changes:
-            error = ValueError(
+            error = value_error_type(
                 "model budget clock mutated authority:"
-                + ",".join(sorted(set(changes)))
+                + ",".join(sorted_fn(set_type(changes)))
             )
             if clock_error is not None:
                 raise error from clock_error

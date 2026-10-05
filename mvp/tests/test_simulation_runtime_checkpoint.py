@@ -318,7 +318,7 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
             self.assertTrue(checkpoint_path(directory).is_file())
             self.assertEqual(store.whole_store_state_cut(), before)
 
-    def test_foreign_durable_journal_mutation_invalidates_checkpoint_before_restore(self):
+    def test_zero_owned_durable_journal_mutation_invalidates_checkpoint_before_restore(self):
         with TemporaryDirectory() as directory:
             run(directory, stop_after_episodes=3)
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -328,8 +328,8 @@ class AutonomousRuntimeCheckpointTests(unittest.TestCase):
                     "event_id": "wp12-post-checkpoint-probe",
                     "event_type": "Wp12DurableMutationProbe",
                     "schema_version": "1.0.0",
-                    "aggregate_type": "wp12_test_probe",
-                    "aggregate_id": "probe",
+                    "aggregate_type": "valuation_observation",
+                    "aggregate_id": "checkpoint-scope-probe",
                     "aggregate_version": "1",
                     "host_id": "test",
                     "owner_epoch": "1",

@@ -9,6 +9,7 @@ It deliberately does not keep a second plaintext credential store.
 
 from __future__ import annotations
 
+from collections import namedtuple
 from contextlib import contextmanager
 import math
 import re
@@ -187,6 +188,7 @@ def _build_execution_lease_authority(
     vault_for_boundary,
     credential_text,
     handle_type,
+    lease_handle,
     execution_roles,
 ):
     """Install the terminal credential-use path over retained executables.
@@ -203,6 +205,7 @@ def _build_execution_lease_authority(
     vault_lease_generator = getattr(vault_lease, "__wrapped__", None)
     vault_lease_generator_code = getattr(vault_lease_generator, "__code__", None)
     vault_for_boundary_code = getattr(vault_for_boundary, "__code__", None)
+    lease_handle_code = getattr(lease_handle, "__code__", None)
     if (
         validate_session_code is None
         or credential_text_code is None
@@ -210,6 +213,7 @@ def _build_execution_lease_authority(
         or not callable(vault_lease_generator)
         or vault_lease_generator_code is None
         or vault_for_boundary_code is None
+        or lease_handle_code is None
     ):
         raise TypeError("credential lease authority is not canonical")
     retained_roles = frozenset(execution_roles)
@@ -244,6 +248,8 @@ def _build_execution_lease_authority(
             raise PermissionError("Credential vault lease implementation code changed")
         if getattr(vault_for_boundary, "__code__", None) is not vault_for_boundary_code:
             raise PermissionError("Credential vault object authority code changed")
+        if getattr(lease_handle, "__code__", None) is not lease_handle_code:
+            raise PermissionError("Credential handle comparison authority code changed")
 
         validate_session(
             self,
@@ -253,10 +259,11 @@ def _build_execution_lease_authority(
         )
         if not isinstance(handle, handle_type):
             raise PermissionError("Credential handle is invalid")
+        terminal_handle = lease_handle(handle)
         vault = vault_for_boundary(self)
         with vault_lease(
             vault,
-            handle,
+            terminal_handle,
             execution_identity=credential_text(
                 execution_identity,
                 name="execution_identity",
@@ -745,7 +752,7 @@ class SecurityBoundary:
         if isinstance(value, tuple):
             return tuple(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, set):
-            return {SecurityBoundary.redact(item) for item in value}
+            return {SecurityBoundary.redact(item) for item in value]
         if isinstance(value, frozenset):
             return frozenset(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, str) and _REDACT_RE.search(value):
@@ -837,6 +844,18 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     )
     handle_type = PersistentCredentialHandle
     handle_post_init_code = getattr(retained_handle_post_init, "__code__", None)
+    terminal_handle_type = namedtuple(
+        "_TerminalCredentialHandle",
+        (
+            "handle_id",
+            "account_id",
+            "provider",
+            "environment",
+            "purpose",
+            "generation",
+            "provider_environment",
+        ),
+    )
 
     def retained_handle_factory(
         *,
@@ -850,16 +869,37 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     ):
         if getattr(retained_handle_post_init, "__code__", None) is not handle_post_init_code:
             raise PermissionError("Credential handle validation code changed")
-        handle = object.__new__(handle_type)
-        object.__setattr__(handle, "handle_id", handle_id)
-        object.__setattr__(handle, "account_id", account_id)
-        object.__setattr__(handle, "provider", provider)
-        object.__setattr__(handle, "environment", environment)
-        object.__setattr__(handle, "purpose", purpose)
-        object.__setattr__(handle, "generation", generation)
-        object.__setattr__(handle, "provider_environment", provider_environment)
-        retained_handle_post_init(handle)
-        return handle
+        validated = object.__new__(handle_type)
+        object.__setattr__(validated, "handle_id", handle_id)
+        object.__setattr__(validated, "account_id", account_id)
+        object.__setattr__(validated, "provider", provider)
+        object.__setattr__(validated, "environment", environment)
+        object.__setattr__(validated, "purpose", purpose)
+        object.__setattr__(validated, "generation", generation)
+        object.__setattr__(validated, "provider_environment", provider_environment)
+        retained_handle_post_init(validated)
+        return terminal_handle_type(
+            validated.handle_id,
+            validated.account_id,
+            validated.provider,
+            validated.environment,
+            validated.purpose,
+            validated.generation,
+            validated.provider_environment,
+        )
+
+    def terminal_handle_for_public(handle):
+        if type(handle) is not handle_type:
+            raise PermissionError("Credential handle must use the canonical exact type")
+        return retained_handle_factory(
+            handle_id=handle.handle_id,
+            account_id=handle.account_id,
+            provider=handle.provider,
+            environment=handle.environment,
+            purpose=handle.purpose,
+            generation=handle.generation,
+            provider_environment=handle.provider_environment,
+        )
 
     retained_vault_leaf = _retain_function_globals(
         _windows_secrets._require_vault_leaf
@@ -909,7 +949,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     retained_vault_lease_generator = _retain_function_globals(
         vault_lease_generator,
         globals_override={
-            "PersistentCredentialHandle": handle_type,
+            "PersistentCredentialHandle": terminal_handle_type,
             "_exclusive_file_lock": retained_file_lock,
             "_scope_entropy": retained_scope_entropy,
             "b64decode": retained_b64decode,
@@ -967,6 +1007,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
         vault_for_boundary=vault_for_boundary,
         credential_text=_credential_text,
         handle_type=handle_type,
+        lease_handle=terminal_handle_for_public,
         execution_roles=boundary_type._EXECUTION_ROLES,
     )
 

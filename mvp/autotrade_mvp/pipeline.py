@@ -553,6 +553,89 @@ def _persist_intent(path: Path, intent: OrderIntent) -> None:
     _atomic_json(path, payload)
 
 
+def _restore_simulated_fills(
+    state: dict,
+    root: Path,
+    *,
+    symbol: str,
+    fee_rate: Decimal,
+) -> dict[str, Fill]:
+    """Reconstruct simulated fills only from exact checkpoint + intent authority."""
+
+    restored: dict[str, Fill] = {}
+    raw_fills = state.get("fills", {})
+    if type(raw_fills) is not dict:
+        raise ValueError("Corrupt checkpoint fills")
+    fill_fields = {
+        "fill_id",
+        "client_order_id",
+        "symbol",
+        "side",
+        "quantity",
+        "price",
+        "fee",
+    }
+    for key, value in raw_fills.items():
+        if type(key) is not str or type(value) is not dict or set(value) != fill_fields:
+            raise ValueError("Corrupt checkpoint fill structure")
+        client_order_id = value["client_order_id"]
+        fill_id = value["fill_id"]
+        fill_symbol = value["symbol"]
+        side = value["side"]
+        if (
+            type(client_order_id) is not str
+            or len(client_order_id) != 27
+            or not client_order_id.startswith("intent-")
+            or any(char not in "0123456789abcdef" for char in client_order_id[7:])
+            or key != client_order_id
+        ):
+            raise ValueError("Corrupt checkpoint fill client order identity")
+        expected_fill_id = (
+            "fill-" + sha256(client_order_id.encode("utf-8")).hexdigest()[:20]
+        )
+        if type(fill_id) is not str or fill_id != expected_fill_id:
+            raise ValueError("Corrupt checkpoint fill identity")
+        if type(fill_symbol) is not str or fill_symbol != symbol:
+            raise ValueError("Corrupt checkpoint fill symbol")
+        if type(side) is not str or side not in {"BUY", "SELL"}:
+            raise ValueError("Corrupt checkpoint fill side")
+
+        quantity = _checkpoint_decimal(value["quantity"], name="fill quantity")
+        price = _checkpoint_decimal(value["price"], name="fill price")
+        fee = _checkpoint_decimal(value["fee"], name="fill fee")
+        if quantity <= 0 or price <= 0 or fee < 0:
+            raise ValueError("Corrupt checkpoint fill financial scalar")
+        expected_fee = _money(exact_multiply(quantity, price, fee_rate))
+        if fee != expected_fee:
+            raise ValueError("Corrupt checkpoint fill fee does not match bound fee rate")
+
+        intent_path = root / "order-intents" / f"{client_order_id}.json"
+        try:
+            intent_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("Durable order intent missing for checkpoint fill") from error
+        expected_intent_payload = {
+            "client_order_id": client_order_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": str(quantity),
+            "price": str(price),
+        }
+        if type(intent_payload) is not dict or intent_payload != expected_intent_payload:
+            raise ValueError("Checkpoint fill conflicts with durable order intent")
+
+        restored[client_order_id] = Fill(
+            fill_id=fill_id,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            fee=fee,
+        )
+    return restored
+
+
 def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
     postings = {row["fill_id"]: row for row in ledger.postings}
     if len(postings) != len(ledger.postings) or len(postings) != len(provider.fills):
@@ -786,16 +869,12 @@ def run_vertical_slice(
         _checkpoint_decimal(state["initial_cash"], name="initial_cash"),
         list(state.get("postings", [])),
     )
-    restored_fills = {
-        key: Fill(
-            fill_id=value["fill_id"], client_order_id=value["client_order_id"], symbol=value["symbol"],
-            side=value["side"],
-            quantity=_checkpoint_decimal(value["quantity"], name="fill quantity"),
-            price=_checkpoint_decimal(value["price"], name="fill price"),
-            fee=_checkpoint_decimal(value["fee"], name="fill fee"),
-        )
-        for key, value in state.get("fills", {}).items()
-    }
+    restored_fills = _restore_simulated_fills(
+        state,
+        root,
+        symbol=symbol,
+        fee_rate=rate,
+    )
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
     normalized = handle_market_data(prices)

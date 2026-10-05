@@ -669,6 +669,8 @@ def _install_bybit_prepared_submission_authority(
 
     prepared_type = BybitPreparedSubmission
     capability_type = CapabilitySnapshot
+    datetime_type = datetime
+    timezone_type = timezone
     prepared_ref = weakref_ref
     prepared_init = prepared_type.__init__
     prepared_init_code = prepared_init.__code__
@@ -746,8 +748,12 @@ def _install_bybit_prepared_submission_authority(
             raise ProviderCoreError(
                 "Bybit preparation requires exact CapabilitySnapshot authority"
             )
-        if type(at) is not datetime:
+        if type(at) is not datetime_type:
             raise ProviderCoreError("Bybit preparation time must be exact datetime")
+        if type(at.tzinfo) is not timezone_type:
+            raise ProviderCoreError(
+                "Bybit preparation time must use exact stdlib timezone"
+            )
         if BybitPreparedSubmission is not prepared_type:
             authority_changed()
         if (

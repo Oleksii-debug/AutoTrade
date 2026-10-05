@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -22,7 +23,30 @@ class HostileJournalStore(JournalStore):
         raise AssertionError("JournalStore subclass dispatch reached model budget")
 
 
+class HostileDurableModelBudget(DurableModelBudget):
+    pass
+
+
 class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
+    def test_constructor_rejects_model_budget_subclass_before_durable_read(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(
+                TypeError,
+                r"model budget must be exact DurableModelBudget",
+            ):
+                HostileDurableModelBudget(
+                    journal=journal,
+                    budget_id="exact-budget-type",
+                    ceiling="5",
+                    environment="PAPER",
+                    clock=lambda: NOW_TEXT,
+                )
+            self.assertEqual(
+                journal.load_events("model_budget", "exact-budget-type"),
+                [],
+            )
+
     def test_constructor_rejects_journal_store_subclass_before_dispatch(self):
         with TemporaryDirectory() as directory:
             journal = HostileJournalStore(Path(directory) / "journal.db")
@@ -95,6 +119,36 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 second.load_events("model_budget", "retarget-budget"),
                 [],
             )
+
+    def test_budget_rejects_scope_retarget_after_construction(self):
+        mutations = (
+            ("budget_id", "other-budget"),
+            ("environment", "LIVE"),
+            ("_ceiling", Decimal("500")),
+            ("_clock", lambda: "2026-09-25T11:00:00+00:00"),
+        )
+        for index, (name, value) in enumerate(mutations):
+            with self.subTest(name=name), TemporaryDirectory() as directory:
+                journal = JournalStore(Path(directory) / "journal.db")
+                budget_id = f"scope-budget-{index}"
+                budget = DurableModelBudget(
+                    journal=journal,
+                    budget_id=budget_id,
+                    ceiling="5",
+                    environment="PAPER",
+                    clock=lambda: NOW_TEXT,
+                )
+                object.__setattr__(budget, name, value)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"scope authority changed after construction",
+                ):
+                    budget.reserve(f"scope-request-{index}", "0.2")
+
+                events = journal.load_events("model_budget", budget_id)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["event_type"], "ModelBudgetInitialized")
 
     def test_prepoisoned_journal_base_is_restored_before_reserve_dispatch(self):
         canonical_base = JournalStore.__bases__[0]

@@ -1308,10 +1308,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 },
             )
             self.assertEqual(result.status, "UNKNOWN")
-            self.assertEqual(
-                result.reason,
-                "bybit_http_5xx_execution_unknown",
-            )
+            self.assertEqual(result.reason, "transport_result_ambiguous")
             self.assertEqual(events.count("wire"), 1)
 
             repeated = dispatcher.dispatch(

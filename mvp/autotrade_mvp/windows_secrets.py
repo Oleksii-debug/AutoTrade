@@ -414,7 +414,7 @@ class CredentialReattachmentRequirement:
     was_active: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.handle, PersistentCredentialHandle):
+        if type(self.handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be PersistentCredentialHandle")
         if type(self.was_active) is not bool:
             raise SecretVaultError("was_active must be boolean")
@@ -843,7 +843,7 @@ class ProtectedCredentialVault:
         purpose: str,
         provider_environment: str | None = None,
     ) -> str:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         (
             owner,
@@ -920,7 +920,7 @@ class ProtectedCredentialVault:
         and revoke() use the same inter-process lock, so neither can commit after
         the generation/scope check and before the caller exits the lease.
         """
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         (
             owner,
@@ -991,7 +991,7 @@ class ProtectedCredentialVault:
         execution_identity: str,
         new_secret_value: str,
     ) -> PersistentCredentialHandle:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         if type(new_secret_value) is not str or not new_secret_value:
             raise SecretVaultError("new_secret_value must be exact non-empty text")
@@ -1046,7 +1046,7 @@ class ProtectedCredentialVault:
         *,
         execution_identity: str,
     ) -> None:
-        if not isinstance(handle, PersistentCredentialHandle):
+        if type(handle) is not PersistentCredentialHandle:
             raise TypeError("handle must be a PersistentCredentialHandle")
         owner = _text(execution_identity, name="execution_identity")
         with _exclusive_file_lock(self.lock_path, vault_path=self.path):

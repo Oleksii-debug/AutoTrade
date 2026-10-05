@@ -61,7 +61,7 @@ _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION = guarded_order_projection
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code__
 _CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
 _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
-_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v2"
 _BINDING_PAYLOAD_BASE_FIELDS = frozenset(
     {
         "schema_version",
@@ -183,6 +183,9 @@ def _production_request_origin_receipt(
         "body_sha256": material.body_sha256,
         "query_sha256": material.query_sha256,
         "trigger_protection_digest": material.trigger_protection_digest,
+        "instrument_id": material.instrument_id,
+        "instrument_version": material.instrument_version,
+        "price_semantics_digest": material.price_semantics_digest,
     }
 
 
@@ -221,6 +224,26 @@ def _require_bybit_prepared_request_origin(
         raise DurableFinancialRequestBindingError(
             "Bybit prepared request lacks canonical issuance provenance"
         ) from error
+    price_authority = (
+        prepared_request.price_rule_instrument_id,
+        prepared_request.price_rule_instrument_version,
+        prepared_request.price_semantics_digest,
+    )
+    if any(value is None for value in price_authority):
+        raise DurableFinancialRequestBindingError(
+            "Bybit PAPER/LIVE prepared request lacks canonical InstrumentVersion price semantics authority"
+        )
+    if (
+        prepared_request.price_rule_instrument_id != material.instrument_id
+        or prepared_request.price_rule_instrument_version != material.instrument_version
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price-rule instrument differs from financial binding"
+        )
+    if prepared_request.price_semantics_digest != material.price_semantics_digest:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price semantics differ from financial binding"
+        )
     if (
         guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
         or getattr(

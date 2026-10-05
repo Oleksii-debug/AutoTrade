@@ -168,7 +168,7 @@
                     IsEnabled="False"
                     AutomationProperties.Name="Focus application web interface" />
             <Button x:Name="ReloadWebButton"
-                    Content="_Reload application web interface"
+                    Content="Reload application _web interface"
                     Click="ReloadWeb_Click"
                     Margin="0,0,0,8"
                     IsEnabled="False"

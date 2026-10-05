@@ -1420,16 +1420,17 @@ def _install_authenticated_price_semantics_authority():
             or _is_exact_multiple is not exact_multiple
             or _is_exact_multiple.__code__ is not exact_multiple_code
             or parse_bounded_exact_decimal is not bounded_decimal_parser
-            or getattr(bounded_decimal_parser, "__code__", None)
+            or canonical_getattr(bounded_decimal_parser, "__code__", None)
             is not bounded_decimal_parser_code
             or is_exact_decimal_multiple is not decimal_multiple
-            or getattr(decimal_multiple, "__code__", None) is not decimal_multiple_code
+            or canonical_getattr(decimal_multiple, "__code__", None)
+            is not decimal_multiple_code
             or version_type.metadata_evidence_binding is not metadata_binding
             or version_type.metadata_evidence_binding.__code__ is not metadata_binding_code
             or _registry_versions_for is not versions_for
-            or getattr(versions_for, "__code__", None) is not versions_for_code
+            or canonical_getattr(versions_for, "__code__", None) is not versions_for_code
             or trusted_authenticated_reader is not trusted_reader
-            or getattr(trusted_reader, "__code__", None) is not trusted_reader_code
+            or canonical_getattr(trusted_reader, "__code__", None) is not trusted_reader_code
             or _detached_instrument_version is not detach
             or _detached_instrument_version.__code__ is not detach_code
             or _instrument_version_ref is not canonical_ref
@@ -1440,7 +1441,7 @@ def _install_authenticated_price_semantics_authority():
             or _utc.__code__ is not utc_code
             or json is not json_module
             or json.dumps is not json_dumps
-            or getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or canonical_getattr(json_dumps, "__code__", None) is not json_dumps_code
             or sha256 is not sha256_function
             or version_type.to_contract_dict is not to_contract_dict
             or version_type.to_contract_dict.__code__ is not to_contract_dict_code
@@ -1459,7 +1460,7 @@ def _install_authenticated_price_semantics_authority():
             or SettlementConvention.payload.__code__ is not settlement_payload_code
             or InstrumentRegistryError is not registry_error_type
             or canonical_decimal_text is not canonical_decimal_text_function
-            or getattr(canonical_decimal_text_function, "__code__", None)
+            or canonical_getattr(canonical_decimal_text_function, "__code__", None)
             is not canonical_decimal_text_code
             or ExactDecimalError is not exact_decimal_error_type
             or timezone is not timezone_type

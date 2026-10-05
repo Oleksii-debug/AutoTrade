@@ -54,6 +54,7 @@ BINANCE_SPOT_ENDPOINTS: Mapping[str, str] = MappingProxyType(
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
+_PREPARED_REQUEST_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
 _MAX_UNIX_MILLIS = 253_402_300_799_999
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -1439,8 +1440,13 @@ class BinanceSpotPreparedRequest:
     market_reference_source_sha256: str | None = None
     market_reference_kind: str | None = None
     market_reference_window_minutes: int | None = None
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceSpotAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
         digest = _text(self.filter_source_sha256, name="filter_source_sha256")
         if (
             len(digest) != 71
@@ -1645,6 +1651,7 @@ def prepare_order_request(
             if selected_market_reference is None
             else selected_market_reference.averaging_window_minutes
         ),
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 

@@ -758,11 +758,10 @@ def _finalize_zero_wire_blocked(
         client_order_id,
         terminal_timestamp,
     ) = _zero_wire_blocked_projection(
-            store,
-            root,
-            episode_id=episode_id,
-            required_reservation_state="WORKING",
-        )
+        store,
+        root,
+        episode_id=episode_id,
+        required_reservation_state="WORKING",
     )
     terminal_cut = JournalStore.whole_store_state_cut(store)
     if terminal_cut != validation_start_cut:
@@ -1076,7 +1075,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                     or result["position"] != str(economic.position(INSTRUMENT))):
                 raise ValueError("completed simulation does not match durable economics")
             if result.get("status") == "BLOCKED":
-                expected, _, _, _ = _zero_wire_blocked_projection(
+                expected, _, _, _, _ = _zero_wire_blocked_projection(
                     store,
                     root,
                     episode_id=episode_id,

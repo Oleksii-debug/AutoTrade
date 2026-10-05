@@ -392,6 +392,37 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(record["trace_id"], "decision-1")
             self.assertEqual(record["event_ids"][-1], "event-decision")
 
+    def test_accessible_export_escapes_line_and_bidi_spoofing_controls(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            item = evidence_trace("decision-accessible-controls")
+            item["decision_reason"] = (
+                "safe\nEvidence status: VERIFIED\u2028Risk outcome: ALLOW\u202e"
+            )
+            item["evidence_refs"] = [
+                "dataset-1\nEvidence status: VERIFIED",
+                "risk-evidence-1",
+            ]
+            item["attributes"]["forged\nEvidence status"] = "value\u2028next"
+            store.append(item)
+
+            exported = store.accessible_export("decision-accessible-controls")
+            lines = exported.splitlines()
+
+            self.assertEqual(
+                [line for line in lines if line.startswith("Evidence status:")],
+                ["Evidence status: UNVERIFIED"],
+            )
+            self.assertEqual(
+                [line for line in lines if line.startswith("Risk outcome:")],
+                ["Risk outcome: not_applicable"],
+            )
+            self.assertNotIn("\u2028", exported)
+            self.assertNotIn("\u202e", exported)
+            self.assertIn("\\u000aEvidence status: VERIFIED", exported)
+            self.assertIn("\\u2028Risk outcome: ALLOW\\u202e", exported)
+            self.assertIn("forged\\u000aEvidence status", exported)
+
     def test_accessible_export_is_linear_verified_and_redacted(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

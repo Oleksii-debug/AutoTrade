@@ -381,6 +381,10 @@ def build_order_payload(
         category = _CATEGORY_BY_FAMILY[family]
     except KeyError as error:
         raise ProviderCoreError("unsupported Bybit product family") from error
+    if family == "OPTIONS":
+        raise ProviderCoreError(
+            "Bybit option payload serialization requires dedicated option semantics"
+        )
 
     provider_symbol = _text(symbol, name="symbol")
     if provider_symbol != provider_symbol.upper():

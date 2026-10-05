@@ -242,6 +242,22 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
 
+    def test_raw_option_payload_fails_closed_without_option_semantics(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option semantics",
+        ):
+            build_order_payload(
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-payload-unqualified",
+                time_in_force="GTC",
+            )
+
     def test_canonical_preparation_rejects_cross_provider_environment_capability(self):
         capability = submission_write_capability(
             environment="PAPER",

@@ -100,6 +100,12 @@ _CANONICAL_RECORD_CREDENTIAL_TRANSITION_ANCHOR = (
 _CANONICAL_REQUIRE_CREDENTIAL_TRANSITION_ANCHOR = (
     require_current_trade_credential_transition_anchor
 )
+_CANONICAL_VAULT_FILE_LOCK = _exclusive_file_lock
+_CANONICAL_VAULT_LOAD = ProtectedCredentialVault._load
+_CANONICAL_VAULT_HANDLE = ProtectedCredentialVault._handle
+_CANONICAL_TRANSITION_AUTHORITY_KEY = transition._CANONICAL_AUTHORITY_KEY
+_CANONICAL_TRANSITION_AUTHORITY_SECTION = transition._authority_section
+_CANONICAL_TRANSITION_PARSE_RECEIPT = transition._parse_receipt
 
 
 @dataclass(frozen=True)
@@ -242,9 +248,6 @@ def _started_owners(
             payload.get("target_owner_epoch"), name="target_owner_epoch"
         ),
     )
-    # owner_id may be stable across a process restart. Epoch is the durable
-    # sender-fence generation, so the successor identity remains distinct only
-    # when it advances exactly by one below.
     if target.epoch != source.epoch + 1:
         raise DurableTakeoverError(
             "takeover owner epoch transition is invalid"
@@ -362,6 +365,12 @@ def _vault_snapshot(
     *,
     handle_id: str,
     _verify_receipt=_CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT,
+    _file_lock=_CANONICAL_VAULT_FILE_LOCK,
+    _vault_load=_CANONICAL_VAULT_LOAD,
+    _vault_handle=_CANONICAL_VAULT_HANDLE,
+    _transition_authority_key=_CANONICAL_TRANSITION_AUTHORITY_KEY,
+    _transition_authority_section=_CANONICAL_TRANSITION_AUTHORITY_SECTION,
+    _transition_parse_receipt=_CANONICAL_TRANSITION_PARSE_RECEIPT,
 ) -> tuple[
     PersistentCredentialHandle,
     bool,
@@ -369,28 +378,28 @@ def _vault_snapshot(
 ]:
     """Read vault state. Never call pre-freeze while holding sender gate."""
 
-    with _exclusive_file_lock(vault.lock_path, vault_path=vault.path):
-        state = ProtectedCredentialVault._load(vault)
+    with _file_lock(vault.lock_path, vault_path=vault.path):
+        state = _vault_load(vault)
         record = state["records"].get(handle_id)
         if record is None:
             raise DurableTakeoverError(
                 "takeover credential record is missing"
             )
-        current = ProtectedCredentialVault._handle(record)
+        current = _vault_handle(record)
         active = record.get("active")
         if type(active) is not bool:
             raise DurableTakeoverError(
                 "takeover credential active state is invalid"
             )
-        section = state.get(transition._AUTHORITY_KEY)
+        section = state.get(_transition_authority_key)
         receipt = None
         if section is not None:
-            parsed = transition._authority_section(
+            parsed = _transition_authority_section(
                 state, create=False
             )
             item = parsed["latest_by_handle"].get(handle_id)
             if item is not None:
-                receipt = transition._parse_receipt(item["receipt"])
+                receipt = _transition_parse_receipt(item["receipt"])
     if receipt is not None:
         _verify_receipt(vault, receipt)
     return current, active, receipt
@@ -820,7 +829,6 @@ def _execute_durable_takeover_impl(
         provider_id=provider_id,
     )
 
-    # Phase 1: durable freeze. Do not touch the vault under this sender gate.
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
@@ -837,8 +845,6 @@ def _execute_durable_takeover_impl(
                 raise DurableTakeoverError(
                     "source owner is not current durable owner"
                 )
-            # A production host_id is stable configuration, not a process nonce.
-            # Same-id restart takeover is valid only through the mandatory next epoch.
             target = OwnerFence(
                 target_owner_id, source.epoch + 1
             )
@@ -938,8 +944,6 @@ def _execute_durable_takeover_impl(
                 "durable owner changed outside takeover sequence"
             )
 
-    # Phase 2: STARTED is durable and freezes ordinary sends, so now it is safe
-    # to wait for the vault lock without holding the sender gate.
     pending = _pending_for_scope(
         store, owner_scope=owner_scope
     )
@@ -1093,9 +1097,6 @@ def _execute_durable_takeover_impl(
                 "issued takeover evidence does not match durable credential anchor"
             )
 
-    # Phase 3: old credential is durably inactive; now reacquire the same sender
-    # gate, rescan ambiguity, and advance durable sender authority only if the
-    # complete validation interval still ends on the exact JournalStore cut.
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:

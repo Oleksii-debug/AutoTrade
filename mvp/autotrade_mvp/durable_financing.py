@@ -620,6 +620,41 @@ def _bybit_funding_event_from_exact_response(
         raise FinancingError(
             "Bybit funding authenticated query is not bound to the canonical instrument version"
         )
+    cash_flow_text = row.get("cashFlow")
+    fee_text = row.get("fee")
+    change_text = row.get("change")
+    if (
+        type(cash_flow_text) is not str
+        or cash_flow_text != cash_flow_text.strip()
+        or type(fee_text) is not str
+        or fee_text != fee_text.strip()
+        or type(change_text) is not str
+        or change_text != change_text.strip()
+    ):
+        raise FinancingError(
+            "Bybit settlement row contains missing or noncanonical companion economics"
+        )
+    try:
+        cash_flow = parse_bounded_exact_decimal(cash_flow_text, allow_exponent=False)
+        fee = parse_bounded_exact_decimal(fee_text, allow_exponent=False)
+        change = parse_bounded_exact_decimal(change_text, allow_exponent=False)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FinancingError(
+            "Bybit settlement row contains noncanonical companion economics"
+        ) from error
+    expected_change = exact_subtract(
+        exact_subtract(cash_flow, fee),
+        exact_subtract(Decimal("0"), funding),
+    )
+    if change != expected_change:
+        raise FinancingError(
+            "Bybit SETTLEMENT change does not equal cashFlow + funding - fee"
+        )
+    if cash_flow != 0 or fee != 0:
+        raise FinancingError(
+            "Bybit SETTLEMENT with companion economics requires settlement authority"
+        )
+
     available_at = _instant(observation.observed_at, name="observed_at")
     evidence_ref = (
         f"artifact:{artifact_id}:{artifact_digest}|{observation.evidence_ref}"

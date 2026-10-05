@@ -596,6 +596,18 @@ def _install_submission_response_binding_authority(loader):
     canonical_json_module = json
     canonical_re_module = re
     canonical_journal_type = JournalStore
+    canonical_vars = vars
+    canonical_len = len
+    canonical_dict = dict
+    canonical_journal_load_events = JournalStore.load_events
+    journal_load_events_code = canonical_journal_load_events.__code__
+    canonical_journal_decode_event_row = JournalStore._decode_event_row
+    journal_decode_event_row_code = canonical_journal_decode_event_row.__code__
+    canonical_journal_connect = JournalStore._connect
+    journal_connect_code = canonical_journal_connect.__code__
+    canonical_journal_require_text = JournalStore._require_text
+    journal_require_text_code = canonical_journal_require_text.__code__
+    canonical_journal_store_identity = JournalStore.store_identity
 
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     field_names = (
@@ -639,6 +651,19 @@ def _install_submission_response_binding_authority(loader):
             or MappingProxyType is not mapping_proxy_type
             or weakref_ref is not canonical_weakref_ref
             or JournalStore is not canonical_journal_type
+            or vars is not canonical_vars
+            or len is not canonical_len
+            or dict is not canonical_dict
+            or JournalStore.load_events is not canonical_journal_load_events
+            or canonical_journal_load_events.__code__ is not journal_load_events_code
+            or JournalStore._decode_event_row is not canonical_journal_decode_event_row
+            or canonical_journal_decode_event_row.__code__
+            is not journal_decode_event_row_code
+            or JournalStore._connect is not canonical_journal_connect
+            or canonical_journal_connect.__code__ is not journal_connect_code
+            or JournalStore._require_text is not canonical_journal_require_text
+            or canonical_journal_require_text.__code__ is not journal_require_text_code
+            or JournalStore.store_identity is not canonical_journal_store_identity
             or json is not canonical_json_module
             or re is not canonical_re_module
             or sha256 is not canonical_sha256

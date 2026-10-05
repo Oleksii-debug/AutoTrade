@@ -854,6 +854,9 @@ class DispatchTests(unittest.TestCase):
                 "weakref_ref",
                 "SubmissionResponseBinding",
                 "JournalStore",
+                "vars",
+                "len",
+                "dict",
                 "ValueError",
             ):
                 with self.subTest(name=name):
@@ -869,6 +872,73 @@ class DispatchTests(unittest.TestCase):
                         ):
                             require_canonical_submission_response_binding(binding)
                     self.assertEqual(callbacks, [])
+
+    def test_submission_response_loader_rejects_journal_method_shadowing_before_callback(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            dispatcher.dispatch(
+                attempt_id="binding-loader-shadow-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(b'{"ok":true}'),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return []
+
+            for name in (
+                "load_events",
+                "_decode_event_row",
+                "_connect",
+                "_require_text",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(JournalStore, name, forged):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "binding authority is unavailable",
+                        ):
+                            load_submission_response_binding(
+                                store,
+                                environment="SIMULATION",
+                                account_id="acct",
+                                attempt_id="binding-loader-shadow-a1",
+                            )
+                    self.assertEqual(callbacks, [])
+
+            with patch.object(JournalStore, "store_identity", property(forged)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-loader-shadow-a1",
+                    )
+            self.assertEqual(callbacks, [])
+
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

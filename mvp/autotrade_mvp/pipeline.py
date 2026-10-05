@@ -563,11 +563,9 @@ def verify_replay(state_dir: str | Path) -> bool:
             for line in evidence_path.read_text(encoding="utf-8").splitlines()
         ]
         observed = {row["evidence_id"]: row for row in rows}
-        if (
-            not isinstance(records, dict)
-            or not isinstance(ids, list)
-            or len(ids) != len(set(ids)) != 0
-        ):
+        if not isinstance(records, dict) or not isinstance(ids, list):
+            return False
+        if len(ids) != len(set(ids)):
             return False
         if not (len(ids) == len(records) == len(observed) == len(rows)):
             return False

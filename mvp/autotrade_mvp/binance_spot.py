@@ -51,6 +51,7 @@ _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
 _MAX_UNIX_MILLIS = 253_402_300_799_999
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 BINANCE_SPOT_DEPTH_POLICY_ID = "BINANCE_SPOT_DIFF_DEPTH_V1"
 
 
@@ -120,7 +121,7 @@ def _millis(value: object, *, name: str) -> str:
             f"{name} exceeds the supported UTC millisecond range"
         )
     seconds, remainder = divmod(raw, 1000)
-    instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
+    instant = _UNIX_EPOCH + timedelta(seconds=seconds, milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 

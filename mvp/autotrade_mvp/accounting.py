@@ -726,6 +726,7 @@ def _scoped_economic_owner_operations(
     _exact_type=type,
     _identity=id,
     _getattribute=object.__getattribute__,
+    _tuple_factory=tuple,
     _text_type=str,
     _type_error=TypeError,
     _conflict_type=AccountingConflict,
@@ -735,7 +736,7 @@ def _scoped_economic_owner_operations(
 
     def bind(value, environment, account_id, book):
         with lock:
-            for key, (reference, *_rest) in tuple(owners.items()):
+            for key, (reference, *_rest) in _tuple_factory(owners.items()):
                 if reference() is None:
                     owners.pop(key)
             current = owners.get(_identity(value))

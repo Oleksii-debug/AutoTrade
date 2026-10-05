@@ -1,0 +1,45 @@
+name: shared-store-zero-worker-correction
+
+on:
+  push:
+    branches:
+      - fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+    paths:
+      - .github/workflows/shared-store-zero-worker-correction.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shared-store-zero-implementation-v3
+  cancel-in-progress: true
+
+jobs:
+  correct-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+          fetch-depth: 0
+      - name: Correct nested event-payload ownership check
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('.github/workflows/shared-store-zero-implementation-v3.yml')
+          text = path.read_text(encoding='utf-8')
+          old = '''    return (\n        aggregate_type in _COMPONENT_AGGREGATE_TYPES\n        and payload.get("environment") == "SIMULATION"\n        and payload.get("host_id") == "local-simulation"\n    )\n'''
+          new = '''    event_payload = payload.get("payload")\n    if type(event_payload) is not dict:\n        return False\n    return (\n        aggregate_type in _COMPONENT_AGGREGATE_TYPES\n        and event_payload.get("environment") == "SIMULATION"\n        and event_payload.get("host_id") == "local-simulation"\n    )\n'''
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+      - name: Commit correction and retire one-shot worker
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/shared-store-zero-worker-correction.yml
+          git add .github/workflows/shared-store-zero-implementation-v3.yml
+          git commit -m 'CI: fix nested ZERO publication ownership selection'
+          git push origin HEAD:fix/shared-store-zero-checkpoint-outbox-20261005-sol56

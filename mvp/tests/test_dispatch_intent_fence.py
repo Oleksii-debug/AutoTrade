@@ -5,9 +5,24 @@ import unittest
 from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     stable_client_order_id,
+    submission_attempt_aggregate_id,
     submission_intent_aggregate_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+
+
+class ExplodingText(str):
+    def strip(self, *args, **kwargs):
+        raise AssertionError("polymorphic strip callback executed")
+
+    def lower(self):
+        raise AssertionError("polymorphic lower callback executed")
+
+    def upper(self):
+        raise AssertionError("polymorphic upper callback executed")
+
+    def replace(self, *args, **kwargs):
+        raise AssertionError("polymorphic replace callback executed")
 
 
 class SimulatedProcessDeath(BaseException):
@@ -130,6 +145,73 @@ class SubmissionIntentFenceTests(unittest.TestCase):
         elif terminal != "SubmissionSending":
             raise AssertionError("unsupported legacy terminal")
         return client_order_id
+
+    def test_financial_send_identity_rejects_polymorphic_text_before_callbacks(self):
+        evil = ExplodingText("sim")
+        with self.assertRaises(ValueError):
+            stable_client_order_id(
+                evil,
+                "economic-intent-1",
+                environment="SIMULATION",
+                account_id="acct",
+            )
+        with self.assertRaises(ValueError):
+            submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id=ExplodingText("attempt"),
+            )
+        with self.assertRaises(ValueError):
+            submission_intent_aggregate_id(
+                provider=evil,
+                environment="SIMULATION",
+                account_id="acct",
+                intent_id="economic-intent-1",
+            )
+
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            with self.assertRaises(ValueError):
+                GuardedDispatcher(
+                    store,
+                    environment=ExplodingText("SIMULATION"),
+                    account_id="acct",
+                    owner_token="owner",
+                )
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            with self.assertRaises(ValueError):
+                dispatcher.dispatch(
+                    attempt_id="attempt",
+                    intent_id="economic-intent-1",
+                    intent_hash="ih",
+                    provider=evil,
+                    request={"qty": "1"},
+                    now="2026-10-05T08:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=lambda *_args: self.fail(
+                        "polymorphic provider reached transport"
+                    ),
+                )
+            with self.assertRaises(ValueError):
+                dispatcher.dispatch(
+                    attempt_id="attempt",
+                    intent_id="economic-intent-1",
+                    intent_hash="ih",
+                    provider="sim",
+                    request={"qty": "1"},
+                    now=ExplodingText("2026-10-05T08:00:00Z"),
+                    authority_check=self.authority,
+                    transport_send=lambda *_args: self.fail(
+                        "polymorphic clock reached transport"
+                    ),
+                )
+
 
     def test_pre_fence_sent_attempt_replays_without_provider_send(self):
         with TemporaryDirectory() as directory:

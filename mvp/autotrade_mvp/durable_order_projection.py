@@ -254,7 +254,21 @@ def _order_projection_binding_operations():
             store = state["store"]
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+            evidence = state["evidence_artifact_store"]
+            key = id(value)
+            # Keep the owner weakref callback-free. Python exposes weakref
+            # callbacks through weakref.getweakrefs(), so a cleanup callback
+            # would become a caller-invokable trust-binding removal capability.
+            # The selected store/evidence entries are themselves weakrefs, so
+            # a stale dead-owner row cannot retain authority resources.
+            projection_ref = weakref.ref(value)
+            bindings[key] = (
+                projection_ref,
+                weakref.ref(store),
+                identity,
+                scope,
+                None if evidence is None else weakref.ref(evidence),
+            )
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:
@@ -263,7 +277,11 @@ def _order_projection_binding_operations():
             entry = bindings.get(id(value))
             if entry is None or entry[0]() is not value:
                 raise OrderProjectionConflict("durable OMS selection authority is unavailable")
-            _, store, identity, scope, evidence = entry
+            _, store_ref, identity, scope, evidence_ref = entry
+            store = store_ref()
+            evidence = None if evidence_ref is None else evidence_ref()
+            if store is None or (evidence_ref is not None and evidence is None):
+                raise OrderProjectionConflict("durable OMS selected store authority was lost")
             state = object.__getattribute__(value, "__dict__")
             if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
                 raise OrderProjectionConflict("durable OMS instance state is shadowed")

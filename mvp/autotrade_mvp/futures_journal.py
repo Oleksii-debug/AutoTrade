@@ -418,6 +418,8 @@ def _detached_durable_contract(contract: FuturesContract) -> FuturesContract:
     version = contract.canonical_instrument
     if version is None:
         raise FuturesError("durable settlement requires canonical InstrumentVersion")
+    if contract.payoff == "INVERSE":
+        inverse_settlement_convention(contract)
     try:
         detached_version = _detached_instrument_version(version)
         detached = FuturesContract.from_instrument_version(detached_version)

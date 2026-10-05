@@ -67,6 +67,7 @@ def bound_risk_decision(
     *,
     admitted=True,
     intent_hash="sha256:" + "a" * 64,
+    evaluated_risk_intent=None,
     state_version=7,
     policy_version=1,
     reservation_version=0,
@@ -92,6 +93,11 @@ def bound_risk_decision(
             ),
         ),
         arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
+        evaluated_intent_hash=risk_module.risk_intent_hash(
+            public_risk_intent()
+            if evaluated_risk_intent is None
+            else evaluated_risk_intent
+        ),
     )
     return bind_risk_decision(
         raw,
@@ -2739,6 +2745,10 @@ class AuthorityTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
+                risk_event["payload"]["evaluated_intent_hash"],
+                risk_module.risk_intent_hash(public_risk_intent()),
+            )
+            self.assertEqual(
                 risk_event["payload"]["financial_idempotency_key"],
                 authority_module._authority_event_id(
                     "FinancialAdmissionIdempotency",
@@ -2811,6 +2821,73 @@ class AuthorityTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_historical_financial_retry_rejects_missing_evaluated_intent_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            first = authority.admit(
+                command_id="cmd-historical-evaluated-intent",
+                idempotency_key="idem-historical-evaluated-intent",
+                admission_id="admission-historical-evaluated-intent",
+                policy_id=item.policy_id,
+                intent_id="intent-historical-evaluated-intent",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-historical-evaluated-intent",
+                **public_financial_kwargs(store),
+            )
+            restarted = authority_service(store)
+            original_store_call = authority_module._authority_store_call
+
+            def without_evaluated_intent(service, method_name, *args, **kwargs):
+                result = original_store_call(
+                    service, method_name, *args, **kwargs
+                )
+                if (
+                    method_name == "load_events"
+                    and len(args) >= 2
+                    and args[0] == "risk_decision"
+                    and args[1] == first.risk_decision_id
+                ):
+                    result = [
+                        {
+                            **event,
+                            "payload": {
+                                key: value
+                                for key, value in event["payload"].items()
+                                if key != "evaluated_intent_hash"
+                            },
+                        }
+                        for event in result
+                    ]
+                return result
+
+            with patch.object(
+                authority_module,
+                "_authority_store_call",
+                without_evaluated_intent,
+            ), self.assertRaisesRegex(
+                AuthorityConflict,
+                "historical risk evaluated intent identity is missing or inconsistent",
+            ):
+                restarted._validate_historical_financial_retry_evidence(
+                    first,
+                    item,
+                )
+
 
     def test_public_financial_retry_rejects_changed_risk_intent_before_evaluation(self):
         with TemporaryDirectory() as directory:
@@ -3039,6 +3116,66 @@ class AuthorityTests(unittest.TestCase):
                 Decimal("100"),
             )
             self.assertEqual(len(store.pending_outbox()), 1)
+
+
+    def test_internal_bound_risk_commit_rejects_decision_for_different_risk_intent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="SIMULATION", account_id="paper-1"
+            )
+            evaluated = public_risk_intent()
+            substituted = RiskIntent.create(
+                symbol=evaluated.symbol,
+                side="SELL",
+                quantity=evaluated.quantity,
+                price=evaluated.price,
+                expected_state_version=evaluated.expected_state_version,
+                reduce_only=evaluated.reduce_only,
+                action=evaluated.action,
+                instrument_type=evaluated.instrument_type,
+            )
+            decision = bound_risk_decision(
+                policy_version=item.version,
+                reservation_version=reservations.version,
+                evaluated_risk_intent=evaluated,
+            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "risk decision evaluated intent does not match risk_intent",
+            ):
+                authority._admit_bound_risk(
+                    command_id="mismatch-command",
+                    idempotency_key="mismatch-command",
+                    admission_id="mismatch-admission",
+                    policy_id=item.policy_id,
+                    intent_id="intent-mismatch",
+                    intent_hash=decision.intent_hash,
+                    risk_intent=substituted,
+                    account_id="paper-1",
+                    environment="SIMULATION",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    notional="100",
+                    current_state_version=7,
+                    capability_snapshot_id=decision.capability_snapshot_id,
+                    risk_decision=decision,
+                    reservation_book=reservations,
+                    reservation_id="mismatch-reservation",
+                    reservation_requirements={"CASH:USD": "100"},
+                    reservation_available={"CASH:USD": "1000"},
+                    journal_sequence_cut=store.current_journal_sequence(),
+                    now="2026-09-24T18:01:00Z",
+                )
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+            self.assertEqual(
+                store.load_events("risk_decision", decision.decision_id), []
+            )
 
 
     def test_internal_bound_risk_commit_rejects_stale_reservation_cut(self):

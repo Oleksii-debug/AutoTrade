@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import book_equity_fill, book_external_cash_flow
+from .accounting import book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import (
     GuardedDispatcher,
@@ -42,7 +42,6 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
-    commit_order_fill_with_reservation_consumption,
     commit_provider_fill_with_reservation_consumption,
 )
 from .reconciliation import (
@@ -1782,23 +1781,11 @@ def _simulation_settlement_completion(
 
 
 
-def _autonomous_fill_financials(artifacts, fill, key):
-    """Use identical economics and settlement identities during execution/recovery."""
-    fill_id = fill["provider_execution_id"]
-    fill_transaction = book_equity_fill(
-        transaction_id=_uuid("loop-fill-transaction", key),
-        cause_event_id=fill_id,
-        instrument=INSTRUMENT,
-        settlement_currency="USD",
-        side=fill["side"],
-        quantity=fill["last_quantity"]["value"],
-        price=fill["last_price"],
-        fee=fill["fees"][0]["amount"],
-        fee_currency="USD",
-        economic_effective_at=fill["trade_time"],
-        economic_order_key=f"provider:{PROVIDER}:execution:{fill_id}",
-        observed_at=fill["receipt_time"],
-    )
+def _autonomous_fill_settlement_obligation(
+    artifacts, fill, key, fill_transaction
+):
+    """Bind settlement to the canonical provider-derived fill transaction."""
+
     trade_point = datetime.fromisoformat(
         fill["trade_time"].replace("Z", "+00:00")
     ).astimezone(timezone.utc)
@@ -1808,7 +1795,7 @@ def _autonomous_fill_financials(artifacts, fill, key):
         trade_date=trade_point.date(),
         settlement_date=settlement_date,
     )
-    settlement_obligation = equity_cash_obligation_from_transaction(
+    return equity_cash_obligation_from_transaction(
         fill_transaction,
         obligation_id=_uuid("loop-settlement-obligation", key),
         instrument=INSTRUMENT,
@@ -1816,7 +1803,6 @@ def _autonomous_fill_financials(artifacts, fill, key):
         settlement_date=settlement_date,
         rule_binding=settlement_rule,
     )
-    return fill_transaction, settlement_obligation
 
 
 def _retained_autonomous_fills(observed, protocol):
@@ -1836,20 +1822,67 @@ def _commit_autonomous_fill_batch(orders, economic, reservations, settlements, a
     """The canonical atomic writer owns each partial execution and its exact usage."""
     for index, fill in enumerate(fills, 1):
         fill_key = key if len(fills) == 1 else f"{key}:part:{index}"
-        transaction, obligation = _autonomous_fill_financials(artifacts, fill, fill_key)
-        amount = exact_multiply(parse_bounded_exact_decimal(fill["last_quantity"]["value"]),
-                                parse_bounded_exact_decimal(fill["last_price"]))
-        fee = exact_multiply(amount, FEE_RATE)
-        usage = exact_add(amount, fee) if fill["side"] == "BUY" else fee
-        commit_order_fill_with_reservation_consumption(
-            orders, economic, reservations,
-            order_event_key=f"{fill_key}:fill", client_order_id=order_id,
-            fill_id=fill["provider_execution_id"], provider_execution_id=fill["provider_execution_id"],
-            quantity=fill["last_quantity"]["value"], price=fill["last_price"],
-            order_evidence_refs=fill["evidence"], command_id=_uuid("loop-fill-command", fill_key),
-            idempotency_key=_uuid("loop-fill-command", fill_key), reservation_id=reservation_id,
-            usage={"CASH:USD": usage}, transactions=(transaction,), committed_at=timestamp,
-            settlement_book=settlements, settlement_obligations=(obligation,),
+        reservation = reservations.get(reservation_id)
+        fee = fill["fees"][0]
+        provider_fill = ProviderFillEvidence.create(
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_execution_id=fill["provider_execution_id"],
+            client_order_id=order_id,
+            instrument=fill["instrument_version"],
+            quantity=fill["last_quantity"]["value"],
+            price=fill["last_price"],
+            fee_amount=fee["amount"],
+            fee_currency=fee["currency"],
+            trade_time=fill["trade_time"],
+            side=fill["side"],
+            evidence_refs=(
+                f"simulated:provider-execution:{fill['provider_execution_id']}",
+            ),
+        )
+        projected_fill = ProjectedFillEvidence.create(
+            fill_id=fill["fill_id"],
+            provider_execution_id=fill["provider_execution_id"],
+            intent_id=reservation.intent_id,
+            client_order_id=order_id,
+            side=fill["side"],
+            quantity=fill["last_quantity"]["value"],
+            price=fill["last_price"],
+        )
+        financial_plan = build_provider_fill_financial_plan(
+            book=economic,
+            provider_id=PROVIDER,
+            projected_fill=projected_fill,
+            provider_fill=provider_fill,
+            expected_instrument=INSTRUMENT,
+            settlement_currency="USD",
+            reservation_snapshot=reservation,
+            observed_at=fill["receipt_time"],
+        )
+        obligation = _autonomous_fill_settlement_obligation(
+            artifacts,
+            fill,
+            fill_key,
+            financial_plan.transaction,
+        )
+        commit_provider_fill_with_reservation_consumption(
+            economic,
+            reservations,
+            command_id=_uuid("loop-fill-command", fill_key),
+            idempotency_key=_uuid("loop-fill-command", fill_key),
+            reservation_id=reservation_id,
+            projected_fill=projected_fill,
+            provider_fill=provider_fill,
+            expected_instrument=INSTRUMENT,
+            settlement_currency="USD",
+            observed_at=fill["receipt_time"],
+            committed_at=timestamp,
+            settlement_book=settlements,
+            settlement_obligations=(obligation,),
+            order_book=orders,
+            order_event_key=f"{fill_key}:fill",
+            order_evidence_refs=fill["evidence"],
             expected_journal_sequence=expected_journal_sequence,
         )
         if expected_journal_sequence is not None:

@@ -439,6 +439,21 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     submission_scope={**scope, "extra": cyclic_list},
                 )
 
+            shared = {"value": "one"}
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "request digest differs",
+            ):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "shared_left": shared,
+                        "shared_right": shared,
+                    },
+                    submission_scope=scope,
+                )
+
     def test_deep_acyclic_json_fails_as_authority_error_not_recursion_error(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

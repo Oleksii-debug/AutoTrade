@@ -183,10 +183,14 @@ def handle_learning_evidence(evidence: dict, evidence_path: Path, evidence_ids: 
 
 
 def _utc_z(value: str) -> str:
-    if value.endswith("Z"):
-        return value
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
+    if type(value) is not str or not value:
+        raise ValueError("Timestamp must be exact ISO-8601 text")
+    candidate = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as error:
+        raise ValueError("Timestamp must be valid ISO-8601 text") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("Timestamp must include a timezone")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -201,6 +205,7 @@ def handle_journal_event(
     evidence: dict,
     financial_configuration_hash: str,
 ) -> None:
+    timestamp = _utc_z(evidence["recorded_at"])
     store = JournalStore(root / "journal.sqlite3")
     event_id = _event_uuid("simulation-episode", evidence["evidence_id"])
     existing = store.get_event(event_id)
@@ -209,7 +214,6 @@ def handle_journal_event(
         if existing is not None
         else store.next_aggregate_version("simulation_portfolio", symbol)
     )
-    timestamp = _utc_z(evidence["recorded_at"])
     payload = {
         "evidence_id": evidence["evidence_id"],
         "input_hash": evidence["input_hash"],

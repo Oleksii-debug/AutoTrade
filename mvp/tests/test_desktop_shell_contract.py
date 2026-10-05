@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -8,18 +9,146 @@ XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
+AUTH_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
+COMMON_SCHEMA = ROOT / "contracts" / "jsonschema" / "common.schema.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
 class DesktopSafetyShellContractTests(unittest.TestCase):
-    def test_wpf_project_targets_windows_without_unreviewed_packages(self):
+    def test_wpf_project_targets_windows_with_only_exact_admitted_webview2_package(self):
         project = ET.parse(PROJECT).getroot()
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        package_refs = project.findall(".//PackageReference")
+        self.assertEqual(len(package_refs), 1)
+        self.assertEqual(package_refs[0].attrib.get("Include"), "Microsoft.Web.WebView2")
+        self.assertEqual(package_refs[0].attrib.get("Version"), "1.0.4258.31")
         self.assertEqual(project.tag, "Project")
+
+    def test_primary_webview2_surface_is_real_and_native_safety_remains_independent(self):
+        xaml = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn(
+            'xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"',
+            xaml,
+        )
+        self.assertIn('<wv2:WebView2 x:Name="ProductWebView"', xaml)
+        self.assertIn('AutomationProperties.Name="AutoTrade application web interface"', xaml)
+        self.assertIn('Content="_Focus application web interface"', xaml)
+        self.assertIn('AutomationProperties.Name="Block new exposure"', xaml)
+        self.assertIn('AutomationProperties.Name="Host connection status"', xaml)
+        self.assertIn("await ConnectWebExperienceAsync();", code)
+        self.assertIn("ProductWebView.Visibility = Visibility.Visible;", code)
+        self.assertIn("FocusWebButton.IsEnabled = true;", code)
+
+    def test_default_window_construction_keeps_native_and_web_on_one_connection(self):
+        code = CODE.read_text(encoding="utf-8")
+        constructor = code.split("public MainWindow()", 1)[1].split(
+            "internal MainWindow(", 1
+        )[0]
+        self.assertIn("DesktopHostClientFactory.CreateConnection()", constructor)
+        self.assertIn("private MainWindow(DesktopHostConnection connection)", constructor)
+        self.assertIn("connection.Client", constructor)
+        self.assertIn("connection.SessionProvider", constructor)
+        self.assertNotIn("DesktopHostClientFactory.Create()", constructor)
+
+    def test_native_status_refresh_precedes_optional_webview_startup(self):
+        code = CODE.read_text(encoding="utf-8")
+        loaded = code.split(
+            "private async void MainWindow_Loaded", 1
+        )[1].split("private async Task ConnectWebExperienceAsync", 1)[0]
+        self.assertLess(
+            loaded.index("RefreshHostStatusAsync"),
+            loaded.index("ConnectWebExperienceAsync"),
+        )
+        self.assertIn("if (!_lifetime.IsCancellationRequested)", loaded)
+
+    def test_webview2_security_events_delegate_to_shared_policy_and_fail_closed(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("WebExperienceSecurityPolicy policy = new(origin);", code)
+        self.assertIn("core.Settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;", code)
+        self.assertIn(
+            "core.Settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;",
+            code,
+        )
+        self.assertIn("core.FrameNavigationStarting += (_, e) => e.Cancel = true;", code)
+        self.assertIn("core.NewWindowRequested += (_, e) => e.Handled = true;", code)
+        self.assertIn("core.DownloadStarting += (_, e) => e.Cancel = true;", code)
+        self.assertIn("CoreWebView2PermissionState.Deny", code)
+        self.assertIn("CoreWebView2ServerCertificateErrorAction.Cancel", code)
+        self.assertIn("policy.AllowsTopLevelNavigation(target)", code)
+        self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
+        self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+
+    def test_webview2_session_never_becomes_a_cookie_and_stale_browser_authority_is_purged(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertNotIn('CreateCookie("AutoTradeSession"', code)
+        self.assertNotIn("Cookie = ", code)
+        self.assertIn("core.CookieManager.DeleteAllCookies();", code)
+        self.assertIn("CoreWebView2BrowsingDataKinds.ServiceWorkers", code)
+        self.assertIn('e.Request.Headers.RemoveHeader("Authorization")', code)
+        self.assertIn('e.Request.Headers.RemoveHeader("X-AutoTrade-Actor")', code)
+
+    def test_webview2_reuses_the_same_paired_session_authority_as_native_host_client(self):
+        auth = AUTH_CLIENT.read_text(encoding="utf-8")
+        app = APP.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("internal sealed record DesktopHostConnection(", auth)
+        self.assertIn("WindowsCredentialManagerSessionProvider sessionProvider = new(", auth)
+        self.assertIn("new AuthenticatedEmergencyHostClient(", auth)
+        self.assertIn("return new DesktopHostConnection(client, sessionProvider);", auth)
+        self.assertIn("DesktopHostClientFactory.CreateConnection()", app)
+        self.assertIn("connection.Client, connection.SessionProvider", app)
+        self.assertIn("_sessionProvider.GetSession().Validated()", code)
+        self.assertIn('"AutoTrade-Session " + currentSession.Token', code)
+        self.assertIn('"X-AutoTrade-Actor",\n                        currentSession.Actor', code)
+        self.assertNotIn('"X-AutoTrade-Actor", "local-owner"', code)
+
+    def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
+        text = WEB_POLICY.read_text(encoding="utf-8")
+        self.assertIn("AuthenticatedEmergencyHostClient.ValidateBaseUri", text)
+        self.assertIn("using AutoTrade.Contracts;", text)
+        self.assertIn('StatePath = "/" + HostApiRoutes.GetState', text)
+        self.assertIn('CommandPath = "/" + HostApiRoutes.SubmitCommand', text)
+        self.assertIn('EventPath = "/" + HostApiRoutes.StreamEvents', text)
+        self.assertIn("IsSameHostOrigin(target)", text)
+        self.assertIn("Guid.TryParseExact(operationId, \"D\"", text)
+        self.assertIn('parsedOperationId.ToString("D")', text)
+        self.assertIn("HostApiRoutes.GetOperation(RouteProbeOperationId)", text)
+        self.assertIn("BuildCanonicalOperationPrefix()", text)
+        self.assertNotIn('"/api/v1/operations/"', text)
+        self.assertIn("HasCanonicalEventQuery(target.Query)", text)
+        self.assertIn('const string prefix = "?after=";', text)
+        self.assertIn("value.Contains('&')", text)
+        self.assertIn('string.Equals(method, "GET", StringComparison.Ordinal)', text)
+        self.assertIn('string.Equals(method, "POST", StringComparison.Ordinal)', text)
+        self.assertNotIn("CanonicalApiRoot", text)
+        self.assertIn("AllowsWebMessageCommandAuthority => false", text)
+        self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsServiceWorkers => false", text)
+        self.assertIn("AllowsDownloads => false", text)
+        self.assertIn("AllowsNewWindow(Uri target) => false", text)
+        self.assertNotIn("Authorization", text)
+        self.assertNotIn("AutoTrade-Session", text)
+
+    def test_event_credential_query_grammar_matches_canonical_sequence_contract(self):
+        policy = WEB_POLICY.read_text(encoding="utf-8")
+        common = json.loads(COMMON_SCHEMA.read_text(encoding="utf-8"))
+        sequence = common["$defs"]["Sequence"]
+
+        self.assertEqual(sequence["type"], "string")
+        self.assertEqual(
+            sequence["pattern"],
+            r"^(0|[1-9][0-9]*)$(?![\s\S])",
+        )
+        self.assertIn('const string prefix = "?after=";', policy)
+        self.assertIn('if (value == "0")', policy)
+        self.assertIn("value[0] is < '1' or > '9'", policy)
+        self.assertIn("character is < '0' or > '9'", policy)
+        self.assertIn("value.Contains('&')", policy)
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")

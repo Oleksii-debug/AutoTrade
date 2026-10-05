@@ -16,7 +16,7 @@ from hashlib import sha256
 import json
 from typing import Literal
 
-from .exact_decimal import as_fraction, exact_multiply, round_fraction_to_quantum
+from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, round_fraction_to_quantum
 
 
 class ExecutionRealismError(ValueError):
@@ -903,23 +903,29 @@ def simulate_execution(
         )
         # Keep all MARKET price arithmetic exact until the explicit instrument
         # price-grid projection. The ambient Decimal context must not affect it.
-        participation = as_fraction(capacity) / as_fraction(observation.available_volume)
-        max_participation = as_fraction(model.max_participation)
-        impact_fraction = min(
-            participation / max_participation,
-            Fraction(1, 1),
+        participation = bounded_fraction(
+            as_fraction(capacity) / as_fraction(observation.available_volume)
         )
-        impact_bps = (
+        max_participation = as_fraction(model.max_participation)
+        impact_fraction = bounded_fraction(
+            min(
+                bounded_fraction(participation / max_participation),
+                Fraction(1, 1),
+            )
+        )
+        impact_bps = bounded_fraction(
             as_fraction(model.impact_bps_at_max_participation) * impact_fraction
         )
-        total_bps = (
-            as_fraction(additional_spread_bps)
-            + as_fraction(model.slippage_bps)
-            + impact_bps
-        ) * as_fraction(model.scenario_cost_multiplier)
+        total_bps = bounded_fraction(
+            (
+                as_fraction(additional_spread_bps)
+                + as_fraction(model.slippage_bps)
+                + impact_bps
+            ) * as_fraction(model.scenario_cost_multiplier)
+        )
         reference = as_fraction(base_price)
-        price_delta = reference * total_bps / 10000
-        target = (
+        price_delta = bounded_fraction(reference * total_bps / 10000)
+        target = bounded_fraction(
             reference + price_delta
             if order.side == "BUY"
             else reference - price_delta

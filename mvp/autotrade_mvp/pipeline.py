@@ -33,8 +33,8 @@ CHECKPOINT_SCHEMA_VERSION = 2
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(f"{name} must use an exact Decimal, string or integer")
     return parse_bounded_exact_decimal(value)
 
 
@@ -561,6 +561,8 @@ def run_vertical_slice(
 ) -> RunResult:
     """Run or resume one safe simulated end-to-end trading episode."""
 
+    if type(symbol) is not str:
+        raise TypeError("symbol must be exact text")
     if not symbol or not symbol.strip():
         raise ValueError("A simulated symbol is required")
     starting_cash = _money(initial_cash)

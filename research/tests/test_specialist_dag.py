@@ -819,6 +819,40 @@ class SpecialistDagTests(unittest.TestCase):
                 decision_deadline=NOW,
             )
 
+    def test_dag_plan_class_equality_rebinding_cannot_self_authenticate(self):
+        specs = [spec("a", "g1")]
+        canonical = full_plan(specs)
+        forged = DagPlan(
+            canonical.input_snapshot_id,
+            (),
+            (("a", "budget_exceeded"),),
+            Decimal("0"),
+            canonical.available_inputs,
+            canonical.total_budget,
+        )
+        calls = []
+        original = type.__getattribute__(DagPlan, "__eq__")
+
+        def hostile_eq(left, right):
+            calls.append((left, right))
+            return True
+
+        type.__setattr__(DagPlan, "__eq__", hostile_eq)
+        try:
+            with self.assertRaisesRegex(
+                SpecialistDagError,
+                "canonical planner output",
+            ):
+                aggregate(
+                    specs,
+                    [run("a", "0.5")],
+                    plan=forged,
+                    decision_deadline=NOW,
+                )
+        finally:
+            type.__setattr__(DagPlan, "__eq__", original)
+        self.assertEqual(calls, [])
+
     def test_mutated_spec_is_readmitted_before_planning(self):
         value = spec("a", "g1", cost="1")
         object.__setattr__(value, "max_cost", "9" * 10_000)

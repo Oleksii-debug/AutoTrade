@@ -229,7 +229,7 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
             )
         with os.fdopen(descriptor, "a+b", closefd=False) as stream:
             if stream.tell() == 0:
-                stream.write(b"\\0")
+                stream.write(b"\0")
                 stream.flush()
                 os.fsync(stream.fileno())
             stream.seek(0)
@@ -256,6 +256,7 @@ class DpapiCurrentUserProtector:
     def __init__(self) -> None:
         if os.name != "nt":
             raise OSError("Windows DPAPI is available only on Windows")
+        self._crypt_authority = self._crypt
 
     @staticmethod
     def _crypt(*, data: bytes, entropy: bytes, decrypt: bool) -> bytes:
@@ -341,14 +342,14 @@ class DpapiCurrentUserProtector:
             raise SecretVaultError("plaintext must be non-empty bytes")
         if not isinstance(entropy, bytes) or not entropy:
             raise SecretVaultError("entropy must be non-empty bytes")
-        return self._crypt(data=plaintext, entropy=entropy, decrypt=False)
+        return self._crypt_authority(data=plaintext, entropy=entropy, decrypt=False)
 
     def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
         if not isinstance(ciphertext, bytes) or not ciphertext:
             raise SecretVaultError("ciphertext must be non-empty bytes")
         if not isinstance(entropy, bytes) or not entropy:
             raise SecretVaultError("entropy must be non-empty bytes")
-        return self._crypt(data=ciphertext, entropy=entropy, decrypt=True)
+        return self._crypt_authority(data=ciphertext, entropy=entropy, decrypt=True)
 
 
 @dataclass(frozen=True)

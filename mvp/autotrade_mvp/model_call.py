@@ -830,6 +830,7 @@ class DurableModelCallOrchestrator:
             dict[str, object] | None,
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
+        module_globals=globals(),
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
         (
@@ -847,6 +848,17 @@ class DurableModelCallOrchestrator:
             class_authority,
         ) = snapshot
         changes: list[str] = []
+        current_module_alias = dict.get(
+            module_globals,
+            "DurableModelCallOrchestrator",
+        )
+        if current_module_alias is not orchestrator_class:
+            changes.append("module.DurableModelCallOrchestrator")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelCallOrchestrator",
+                orchestrator_class,
+            )
 
         # Restore the trusted JournalStore class topology before any generic
         # class-dictionary or instance recovery.  In particular, inherited

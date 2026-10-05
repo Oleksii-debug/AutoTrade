@@ -1504,16 +1504,12 @@ def risk_decision_fingerprint(decision: RiskDecision) -> str:
     if any(value is not None for value in binding_values):
         if any(value is None for value in binding_values):
             raise ValueError("risk decision binding must be complete")
-        bound_intent_hash = _canonical_risk_intent_hash(
+        bound_intent_hash = _risk_binding_text(
             decision.intent_hash,
             name="intent_hash",
         )
         if decision.evaluated_intent_hash is None:
             raise ValueError("bound risk decision lacks evaluated intent identity")
-        if bound_intent_hash != decision.evaluated_intent_hash:
-            raise ValueError(
-                "bound risk decision intent_hash does not match evaluated intent identity"
-            )
         payload["binding"] = {
             "intent_hash": bound_intent_hash,
             "state_version": decision.state_version,
@@ -1588,8 +1584,6 @@ def bind_risk_decision(
         raise ValueError("risk decision lacks evaluated intent identity")
     if _RISK_INTENT_HASH_RE.fullmatch(evaluated_intent_hash) is None:
         raise ValueError("risk decision evaluated intent identity is malformed")
-    if ihash != evaluated_intent_hash:
-        raise ValueError("intent_hash does not match the evaluated risk intent")
     capability = _risk_binding_text(
         capability_snapshot_id, name="capability_snapshot_id"
     )

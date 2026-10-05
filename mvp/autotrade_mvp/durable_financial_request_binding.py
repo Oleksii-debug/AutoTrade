@@ -859,6 +859,12 @@ def _validate_material_against_admission(
     return record
 
 
+_CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION = _validate_material_against_admission
+_CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE = (
+    _validate_material_against_admission.__code__
+)
+
+
 class DurableFinancialRequestBindingRegistry:
     """One immutable prepared-request content identity per ADMITTED admission."""
 
@@ -962,7 +968,20 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding id does not match material"
             )
-        _validate_material_against_admission(
+        current_validator = _validate_material_against_admission
+        if (
+            current_validator is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION
+            or getattr(
+                _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE
+        ):
+            raise DurableFinancialRequestBindingError(
+                "admitted financial validator executable changed"
+            )
+        _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION(
             self._require_store(),
             self._authority(),
             admission_id=aid,
@@ -1009,7 +1028,20 @@ class DurableFinancialRequestBindingRegistry:
             prepared_request,
         )
         store = self._require_store()
-        record = _validate_material_against_admission(
+        current_validator = _validate_material_against_admission
+        if (
+            current_validator is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION
+            or getattr(
+                _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE
+        ):
+            raise DurableFinancialRequestBindingError(
+                "admitted financial validator executable changed"
+            )
+        record = _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION(
             store,
             self._authority(),
             admission_id=aid,

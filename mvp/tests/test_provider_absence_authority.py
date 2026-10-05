@@ -1,4 +1,5 @@
 from datetime import timedelta
+import inspect
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,8 +11,9 @@ from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_absence_authority import (
     ProviderAbsenceAuthorityError,
-    issue_qualified_absence_coverage,
+    QualifiedProviderAbsenceSemantics,
     qualified_absence_route_semantic_claim,
+    require_qualified_absence_semantics,
 )
 from mvp.autotrade_mvp.provider_core import Surface
 from mvp.autotrade_mvp.provider_qualification_authority import (
@@ -196,34 +198,49 @@ class ProviderAbsenceAuthorityTests(unittest.TestCase):
             observed_at=NOW + timedelta(seconds=1),
         )
 
-    def issue(self, observation, qualifications, **overrides):
-        values = dict(
-            provider_id="BYBIT",
-            account_id="paper-account",
-            environment="PAPER",
-            surface=SURFACE,
-            coverage_start="2026-10-04T05:01:00Z",
-            coverage_end="2026-10-04T05:05:01Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-        )
-        values.update(overrides)
-        return issue_qualified_absence_coverage(
+    def semantics(self, observation, qualifications, *, surface=SURFACE):
+        return require_qualified_absence_semantics(
             observation,
             qualifications,
-            **values,
+            reconciliation_surface=surface,
         )
 
-    def test_exact_q_claim_and_qualified_response_issue_positive_semantics(self):
+    def test_exact_q_claim_and_qualified_response_issue_semantic_capability_only(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, route = self.authorities(directory)
-            observation = self.observed_execution_read(route, capabilities, qualifications)
-            evidence = self.issue(observation, qualifications)
-            self.assertTrue(evidence.provider_semantics_exclude_execution)
-            self.assertEqual(evidence.provider_id, "BYBIT")
-            self.assertEqual(evidence.account_id, "paper-account")
-            self.assertEqual(evidence.environment, "PAPER")
-            self.assertEqual(evidence.surface, SURFACE)
+            observation = self.observed_execution_read(
+                route,
+                capabilities,
+                qualifications,
+            )
+            authority = self.semantics(observation, qualifications)
+            self.assertIsInstance(authority, QualifiedProviderAbsenceSemantics)
+            self.assertEqual(authority.provider_id, "BYBIT")
+            self.assertEqual(authority.account_id, "paper-account")
+            self.assertEqual(authority.environment, "PAPER")
+            self.assertEqual(authority.endpoint, ENDPOINT)
+            self.assertEqual(authority.reconciliation_surface, SURFACE)
+            self.assertTrue(
+                authority.evidence_ref.startswith(
+                    "qualified-provider-absence-semantics:sha256:"
+                )
+            )
+
+    def test_semantic_issuer_has_no_caller_coverage_or_horizon_inputs(self):
+        parameters = inspect.signature(
+            require_qualified_absence_semantics
+        ).parameters
+        for forbidden in (
+            "provider_id",
+            "account_id",
+            "environment",
+            "coverage_start",
+            "coverage_end",
+            "pagination_complete",
+            "consistency_horizon_satisfied",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, parameters)
 
     def test_read_rule_without_exact_absence_claim_stays_fail_closed(self):
         with TemporaryDirectory() as directory:
@@ -231,38 +248,34 @@ class ProviderAbsenceAuthorityTests(unittest.TestCase):
                 directory,
                 include_absence_claim=False,
             )
-            observation = self.observed_execution_read(route, capabilities, qualifications)
+            observation = self.observed_execution_read(
+                route,
+                capabilities,
+                qualifications,
+            )
             with self.assertRaisesRegex(
                 ProviderAbsenceAuthorityError,
                 "does not cover exact absence-semantics rule",
             ):
-                self.issue(observation, qualifications)
-
-    def test_reconciliation_scope_mismatch_cannot_relabel_response(self):
-        with TemporaryDirectory() as directory:
-            capabilities, qualifications, route = self.authorities(directory)
-            observation = self.observed_execution_read(route, capabilities, qualifications)
-            for field, value in (
-                ("provider_id", "BINANCE"),
-                ("account_id", "other-account"),
-                ("environment", "LIVE"),
-            ):
-                with self.subTest(field=field):
-                    with self.assertRaisesRegex(
-                        ProviderAbsenceAuthorityError,
-                        "scope does not match",
-                    ):
-                        self.issue(observation, qualifications, **{field: value})
+                self.semantics(observation, qualifications)
 
     def test_endpoint_cannot_be_relabelled_as_another_absence_surface(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, route = self.authorities(directory)
-            observation = self.observed_execution_read(route, capabilities, qualifications)
+            observation = self.observed_execution_read(
+                route,
+                capabilities,
+                qualifications,
+            )
             with self.assertRaisesRegex(
                 ProviderAbsenceAuthorityError,
                 "endpoint does not match",
             ):
-                self.issue(observation, qualifications, surface="ORDER_HISTORY")
+                self.semantics(
+                    observation,
+                    qualifications,
+                    surface="ORDER_HISTORY",
+                )
 
     def test_object_new_forged_qualified_response_has_no_absence_authority(self):
         with TemporaryDirectory() as directory:
@@ -272,12 +285,16 @@ class ProviderAbsenceAuthorityTests(unittest.TestCase):
                 ProviderAbsenceAuthorityError,
                 "construction authority is unavailable",
             ):
-                self.issue(forged, qualifications)
+                self.semantics(forged, qualifications)
 
     def test_qualified_response_mutation_invalidates_absence_issuance(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, route = self.authorities(directory)
-            observation = self.observed_execution_read(route, capabilities, qualifications)
+            observation = self.observed_execution_read(
+                route,
+                capabilities,
+                qualifications,
+            )
             object.__setattr__(
                 observation.query_binding,
                 "qualification_id",
@@ -287,17 +304,34 @@ class ProviderAbsenceAuthorityTests(unittest.TestCase):
                 ProviderAbsenceAuthorityError,
                 "construction authority is unavailable",
             ):
-                self.issue(observation, qualifications)
+                self.semantics(observation, qualifications)
 
-    def test_non_boolean_coverage_predicates_are_rejected(self):
+    def test_semantics_constructor_is_sealed(self):
+        with self.assertRaisesRegex(
+            ProviderAbsenceAuthorityError,
+            "must come from canonical provider-Q authority",
+        ):
+            QualifiedProviderAbsenceSemantics()
+
+    def test_mutating_issued_semantics_invalidates_its_evidence_ref(self):
         with TemporaryDirectory() as directory:
             capabilities, qualifications, route = self.authorities(directory)
-            observation = self.observed_execution_read(route, capabilities, qualifications)
+            observation = self.observed_execution_read(
+                route,
+                capabilities,
+                qualifications,
+            )
+            authority = self.semantics(observation, qualifications)
+            object.__setattr__(
+                authority,
+                "reconciliation_surface",
+                "ORDER_HISTORY",
+            )
             with self.assertRaisesRegex(
                 ProviderAbsenceAuthorityError,
-                "pagination_complete must be an exact boolean",
+                "changed after issuance",
             ):
-                self.issue(observation, qualifications, pagination_complete=1)
+                _ = authority.evidence_ref
 
 
 if __name__ == "__main__":

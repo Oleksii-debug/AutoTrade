@@ -7,15 +7,18 @@ double-entry transaction to the existing JournalStore atomically.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -219,19 +222,50 @@ def provider_settlement_evidence_metadata(
     }
 
 
+
+def _trusted_settlement_evidence_reader(
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None,
+):
+    """Issue one lifetime-pinned reader from an independently selected root."""
+
+    if (
+        evidence_artifact_store is not None
+        and type(evidence_artifact_store) is not ArtifactStore
+    ):
+        raise TypeError(
+            "evidence_artifact_store must be the canonical ArtifactStore or None"
+        )
+    try:
+        return trusted_authenticated_reader(
+            evidence_artifact_root,
+            publication_store=evidence_artifact_store,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise FuturesError(
+            "trusted settlement evidence authority is unavailable"
+        ) from error
+
+
 def _verify_provider_settlement_evidence(
     evidence: FuturesSettlementEvidence,
-    artifact_store: ArtifactStore,
+    authenticated_reader,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise FuturesError(
-            "durable provider settlement requires trusted ArtifactStore"
-        )
     artifact_id, digest, canonical_ref = _immutable_settlement_evidence_ref(
         evidence.evidence_ref
     )
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = authenticated_reader(artifact_id)
+        if type(manifest) is not dict or type(raw) is not bytes:
+            raise ArtifactIntegrityError(
+                "settlement evidence authenticated snapshot is malformed"
+            )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -254,15 +288,15 @@ def _verify_provider_settlement_evidence(
                 "settlement evidence manifest metadata does not match financial scope"
             )
         rights = manifest.get("rights")
-        if not isinstance(rights, dict) or rights.get("storage") is not True:
+        if type(rights) is not dict or rights.get("storage") is not True:
             raise ArtifactIntegrityError(
                 "settlement evidence manifest lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         receipt = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -276,6 +310,50 @@ def _verify_provider_settlement_evidence(
     if raw != canonical_json(expected).encode("utf-8"):
         raise FuturesError("settlement provider evidence must use canonical JSON bytes")
     return canonical_ref
+
+
+@dataclass(frozen=True)
+class _JournalReplayCut:
+    events: tuple[dict[str, Any], ...]
+    journal_sequence: int
+
+
+def _capture_journal_replay_cut(
+    store: JournalStore,
+    aggregate_id: str,
+    *,
+    max_attempts: int = 3,
+) -> _JournalReplayCut:
+    """Capture aggregate events proven to belong to one global journal cut."""
+
+    if type(store) is not JournalStore:
+        raise TypeError("store must be the canonical JournalStore")
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("max_attempts must be a positive integer")
+
+    try:
+        for _attempt in range(max_attempts):
+            before = JournalStore.current_journal_sequence(store)
+            events = tuple(
+                JournalStore.load_events(store, _AGGREGATE_TYPE, aggregate_id)
+            )
+            after = JournalStore.current_journal_sequence(store)
+            if before != after:
+                continue
+            for event in events:
+                sequence = event.get("journal_sequence")
+                if type(sequence) is not int or sequence < 1 or sequence > after:
+                    raise FuturesError(
+                        "durable futures event is outside the accepted journal cut"
+                    )
+            return _JournalReplayCut(events=events, journal_sequence=after)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise FuturesError(
+            "durable futures journal cut verification failed"
+        ) from error
+    raise FuturesError(
+        "durable futures journal changed while capturing a verified replay cut"
+    )
 
 
 def _durable_scope(
@@ -338,32 +416,34 @@ def _transaction_from_payload(value: object) -> JournalTransaction | None:
     return transaction
 
 
+
 def rebuild_variation_margin_book(
     store: JournalStore,
     opening_state: VariationMarginState | InverseVariationMarginState,
     *,
-    evidence_artifact_store: ArtifactStore,
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> EconomicBook:
-    """Rebuild the canonical double-entry projection from durable settlement events."""
+    """Rebuild economics from the exact event tuple whose evidence was verified."""
 
-    if isinstance(opening_state, VariationMarginState):
-        restore_linear_variation_margin(
-            store,
-            opening_state,
-            evidence_artifact_store=evidence_artifact_store,
-        )
-    elif isinstance(opening_state, InverseVariationMarginState):
-        restore_inverse_variation_margin(
-            store,
-            opening_state,
-            evidence_artifact_store=evidence_artifact_store,
-        )
-    else:
+    if not isinstance(
+        opening_state,
+        (VariationMarginState, InverseVariationMarginState),
+    ):
         raise TypeError("opening_state must be a variation-margin state")
-
     aggregate_id, _ = _durable_scope(opening_state)
+    reader = _trusted_settlement_evidence_reader(
+        evidence_artifact_root,
+        evidence_artifact_store,
+    )
+    cut = _capture_journal_replay_cut(store, aggregate_id)
+    if isinstance(opening_state, VariationMarginState):
+        _replay_linear_events(opening_state, cut.events, reader)
+    else:
+        _replay_inverse_events(opening_state, cut.events, reader)
+
     book = EconomicBook()
-    for event in store.load_events(_AGGREGATE_TYPE, aggregate_id):
+    for event in cut.events:
         payload = event["payload"]
         if not isinstance(payload, Mapping):
             raise FuturesError("durable futures settlement payload must be an object")
@@ -452,25 +532,19 @@ def _envelope(
     }
 
 
-def restore_linear_variation_margin(
-    store: JournalStore,
-    opening_state: VariationMarginState,
-    *,
-    evidence_artifact_store: ArtifactStore,
-) -> VariationMarginState:
-    """Rebuild and independently verify durable linear VM economics."""
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+def _replay_linear_events(
+    opening_state: VariationMarginState,
+    events: tuple[dict[str, Any], ...],
+    authenticated_reader,
+) -> VariationMarginState:
     if not isinstance(opening_state, VariationMarginState):
         raise TypeError("opening_state must be VariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
-    aggregate_id, _ = _durable_scope(opening_state)
+
     state = opening_state
-    for expected_version, event in enumerate(
-        store.load_events(_AGGREGATE_TYPE, aggregate_id), start=1
-    ):
+    for expected_version, event in enumerate(events, start=1):
         if (
             event["event_type"] != _EVENT_TYPE
             or event["aggregate_version"] != expected_version
@@ -480,10 +554,7 @@ def restore_linear_variation_margin(
         if not isinstance(payload, Mapping) or payload.get("kind") != "LINEAR":
             raise FuturesError("durable futures settlement kind mismatch")
         settlement = _evidence_from_payload(payload.get("settlement"))
-        _verify_provider_settlement_evidence(
-            settlement,
-            evidence_artifact_store,
-        )
+        _verify_provider_settlement_evidence(settlement, authenticated_reader)
         prior_price = state.last_settlement_price
         next_state, delta = apply_variation_margin(state, settlement)
         if next_state is state:
@@ -506,26 +577,47 @@ def restore_linear_variation_margin(
     return state
 
 
+def restore_linear_variation_margin(
+    store: JournalStore,
+    opening_state: VariationMarginState,
+    *,
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None = None,
+) -> VariationMarginState:
+    """Rebuild and verify linear VM from one accepted journal/evidence cut."""
+
+    aggregate_id, _ = _durable_scope(opening_state)
+    reader = _trusted_settlement_evidence_reader(
+        evidence_artifact_root,
+        evidence_artifact_store,
+    )
+    cut = _capture_journal_replay_cut(store, aggregate_id)
+    return _replay_linear_events(opening_state, cut.events, reader)
+
+
+
 def commit_linear_variation_margin(
     store: JournalStore,
     opening_state: VariationMarginState,
     settlement: FuturesSettlementEvidence,
     *,
-    evidence_artifact_store: ArtifactStore,
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> tuple[VariationMarginState, Decimal, JournalTransaction | None, bool]:
-    """Atomically accept one linear settlement and its double-entry economics."""
+    """Atomically accept linear VM against one evidence and global-journal cut."""
 
-    current = restore_linear_variation_margin(
-        store,
-        opening_state,
-        evidence_artifact_store=evidence_artifact_store,
+    aggregate_id, environment = _durable_scope(opening_state)
+    reader = _trusted_settlement_evidence_reader(
+        evidence_artifact_root,
+        evidence_artifact_store,
     )
-    _verify_provider_settlement_evidence(settlement, evidence_artifact_store)
+    cut = _capture_journal_replay_cut(store, aggregate_id)
+    current = _replay_linear_events(opening_state, cut.events, reader)
+    _verify_provider_settlement_evidence(settlement, reader)
     next_state, delta = apply_variation_margin(current, settlement)
     if next_state is current:
         return current, Decimal("0"), None, False
 
-    aggregate_id, environment = _durable_scope(opening_state)
     prior_price = current.last_settlement_price
     transaction = (
         book_variation_margin(settlement=settlement, amount=delta)
@@ -541,7 +633,7 @@ def commit_linear_variation_margin(
     )
     digest = settlement_identity_digest(settlement)
     suffix = digest.removeprefix("sha256:")
-    version = len(store.load_events(_AGGREGATE_TYPE, aggregate_id)) + 1
+    version = len(cut.events) + 1
     envelope = _envelope(
         aggregate_id=aggregate_id,
         version=version,
@@ -556,47 +648,47 @@ def commit_linear_variation_margin(
         "aggregate_id": aggregate_id,
         "settlement": _evidence_payload(settlement),
     }
-    _, inserted, _ = store.commit_command(
-        command_id=f"futures-vm-command:{suffix}",
-        actor=_ACTOR,
-        environment=environment,
-        idempotency_key=f"futures-settlement:{suffix}",
-        request=request,
-        result={"accepted": True, "payload_hash": payload_digest(payload)},
-        state_version=version,
-        events=[(envelope, None)],
-    )
-    rebuilt = restore_linear_variation_margin(
-        store,
-        opening_state,
-        evidence_artifact_store=evidence_artifact_store,
-    )
-    if not inserted:
-        return rebuilt, Decimal("0"), None, False
-    if rebuilt != next_state:
-        raise FuturesError("durable linear settlement replay diverged after commit")
-    return rebuilt, delta, transaction, True
+    try:
+        _, inserted, _ = JournalStore.commit_command(
+            store,
+            command_id=f"futures-vm-command:{suffix}",
+            actor=_ACTOR,
+            environment=environment,
+            idempotency_key=f"futures-settlement:{suffix}",
+            request=request,
+            result={"accepted": True, "payload_hash": payload_digest(payload)},
+            state_version=version,
+            events=[(envelope, None)],
+            expected_journal_sequence=cut.journal_sequence,
+        )
+    except ValueError as error:
+        if "journal sequence changed after financial evidence validation" in str(error):
+            raise FuturesError(
+                "futures settlement journal cut changed before commit"
+            ) from error
+        raise
+
+    if inserted:
+        return next_state, delta, transaction, True
+
+    retry_cut = _capture_journal_replay_cut(store, aggregate_id)
+    rebuilt = _replay_linear_events(opening_state, retry_cut.events, reader)
+    return rebuilt, Decimal("0"), None, False
 
 
-def restore_inverse_variation_margin(
-    store: JournalStore,
+
+def _replay_inverse_events(
     opening_state: InverseVariationMarginState,
-    *,
-    evidence_artifact_store: ArtifactStore,
+    events: tuple[dict[str, Any], ...],
+    authenticated_reader,
 ) -> InverseVariationMarginState:
-    """Rebuild and independently verify durable inverse VM economics."""
-
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
     if not isinstance(opening_state, InverseVariationMarginState):
         raise TypeError("opening_state must be InverseVariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
-    aggregate_id, _ = _durable_scope(opening_state)
+
     state = opening_state
-    for expected_version, event in enumerate(
-        store.load_events(_AGGREGATE_TYPE, aggregate_id), start=1
-    ):
+    for expected_version, event in enumerate(events, start=1):
         if (
             event["event_type"] != _EVENT_TYPE
             or event["aggregate_version"] != expected_version
@@ -606,10 +698,7 @@ def restore_inverse_variation_margin(
         if not isinstance(payload, Mapping) or payload.get("kind") != "INVERSE":
             raise FuturesError("durable futures settlement kind mismatch")
         settlement = _evidence_from_payload(payload.get("settlement"))
-        _verify_provider_settlement_evidence(
-            settlement,
-            evidence_artifact_store,
-        )
+        _verify_provider_settlement_evidence(settlement, authenticated_reader)
         quantum = Decimal(str(payload.get("settlement_quantum")))
         rounding = payload.get("rounding")
         prior_price = state.last_settlement_price
@@ -639,12 +728,32 @@ def restore_inverse_variation_margin(
     return state
 
 
+def restore_inverse_variation_margin(
+    store: JournalStore,
+    opening_state: InverseVariationMarginState,
+    *,
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None = None,
+) -> InverseVariationMarginState:
+    """Rebuild and verify inverse VM from one accepted journal/evidence cut."""
+
+    aggregate_id, _ = _durable_scope(opening_state)
+    reader = _trusted_settlement_evidence_reader(
+        evidence_artifact_root,
+        evidence_artifact_store,
+    )
+    cut = _capture_journal_replay_cut(store, aggregate_id)
+    return _replay_inverse_events(opening_state, cut.events, reader)
+
+
+
 def commit_inverse_variation_margin(
     store: JournalStore,
     opening_state: InverseVariationMarginState,
     settlement: FuturesSettlementEvidence,
     *,
-    evidence_artifact_store: ArtifactStore,
+    evidence_artifact_root: str | Path,
+    evidence_artifact_store: ArtifactStore | None = None,
     settlement_quantum: Decimal | str,
     rounding: str = "HALF_EVEN",
 ) -> tuple[
@@ -654,7 +763,7 @@ def commit_inverse_variation_margin(
     JournalTransaction | None,
     bool,
 ]:
-    """Atomically accept one inverse settlement and its rounded cash economics."""
+    """Atomically accept inverse VM against one evidence and global-journal cut."""
 
     quantum = (
         settlement_quantum
@@ -666,17 +775,18 @@ def commit_inverse_variation_margin(
     if rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
-    current = restore_inverse_variation_margin(
-        store,
-        opening_state,
-        evidence_artifact_store=evidence_artifact_store,
+    aggregate_id, environment = _durable_scope(opening_state)
+    reader = _trusted_settlement_evidence_reader(
+        evidence_artifact_root,
+        evidence_artifact_store,
     )
-    _verify_provider_settlement_evidence(settlement, evidence_artifact_store)
+    cut = _capture_journal_replay_cut(store, aggregate_id)
+    current = _replay_inverse_events(opening_state, cut.events, reader)
+    _verify_provider_settlement_evidence(settlement, reader)
     next_state, exact_delta = apply_inverse_variation_margin(current, settlement)
     if next_state is current:
         return current, Fraction(0, 1), Decimal("0"), None, False
 
-    aggregate_id, environment = _durable_scope(opening_state)
     prior_price = current.last_settlement_price
     settled_cash, transaction = settle_and_book_inverse_variation_margin(
         settlement=settlement,
@@ -697,7 +807,7 @@ def commit_inverse_variation_margin(
     )
     digest = settlement_identity_digest(settlement)
     suffix = digest.removeprefix("sha256:")
-    version = len(store.load_events(_AGGREGATE_TYPE, aggregate_id)) + 1
+    version = len(cut.events) + 1
     envelope = _envelope(
         aggregate_id=aggregate_id,
         version=version,
@@ -714,23 +824,31 @@ def commit_inverse_variation_margin(
         "settlement_quantum": _decimal_text(quantum),
         "rounding": rounding,
     }
-    _, inserted, _ = store.commit_command(
-        command_id=f"futures-vm-command:{suffix}",
-        actor=_ACTOR,
-        environment=environment,
-        idempotency_key=f"futures-settlement:{suffix}",
-        request=request,
-        result={"accepted": True, "payload_hash": payload_digest(payload)},
-        state_version=version,
-        events=[(envelope, None)],
-    )
-    rebuilt = restore_inverse_variation_margin(
-        store,
-        opening_state,
-        evidence_artifact_store=evidence_artifact_store,
-    )
-    if not inserted:
-        return rebuilt, Fraction(0, 1), Decimal("0"), None, False
-    if rebuilt != next_state:
-        raise FuturesError("durable inverse settlement replay diverged after commit")
-    return rebuilt, exact_delta, settled_cash, transaction, True
+    try:
+        _, inserted, _ = JournalStore.commit_command(
+            store,
+            command_id=f"futures-vm-command:{suffix}",
+            actor=_ACTOR,
+            environment=environment,
+            idempotency_key=f"futures-settlement:{suffix}",
+            request=request,
+            result={"accepted": True, "payload_hash": payload_digest(payload)},
+            state_version=version,
+            events=[(envelope, None)],
+            expected_journal_sequence=cut.journal_sequence,
+        )
+    except ValueError as error:
+        if "journal sequence changed after financial evidence validation" in str(error):
+            raise FuturesError(
+                "futures settlement journal cut changed before commit"
+            ) from error
+        raise
+
+    if inserted:
+        return next_state, exact_delta, settled_cash, transaction, True
+
+    retry_cut = _capture_journal_replay_cut(store, aggregate_id)
+    rebuilt = _replay_inverse_events(opening_state, retry_cut.events, reader)
+    return rebuilt, Fraction(0, 1), Decimal("0"), None, False
+
+

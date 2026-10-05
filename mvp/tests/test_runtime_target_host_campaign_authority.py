@@ -113,6 +113,30 @@ class RuntimeTargetHostCampaignAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(loaded, authority)
 
+    def test_authority_id_may_equal_financial_plan_id_without_aggregate_collision(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            plan = self._plan(store, plan_id="same-id")
+
+            authority = declare_runtime_target_host_campaign_authority(
+                store,
+                _spec(),
+                authority_id=plan.plan_id,
+                financial_plan_id=plan.plan_id,
+                release_artifact_id=ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+            )
+
+            plan_event = store.get_event(plan.event_id)
+            authority_event = store.get_event(authority.event_id)
+            self.assertIsNotNone(plan_event)
+            self.assertIsNotNone(authority_event)
+            self.assertNotEqual(plan_event["aggregate_id"], authority_event["aggregate_id"])
+            self.assertGreater(
+                authority.declared_journal_sequence,
+                plan.declared_journal_sequence,
+            )
+
     def test_exact_redeclaration_is_idempotent_and_does_not_append(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

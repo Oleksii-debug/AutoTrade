@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import copy
 import inspect
 import pickle
@@ -14,6 +15,85 @@ from mvp.autotrade_mvp.admitted_financial_request_authority import (
 from mvp.autotrade_mvp.financial_binding_dispatch import financial_submission_scope
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.tests.test_financial_binding_dispatch import FinancialBindingDispatchTests
+
+
+class _ExplosiveMapping(Mapping):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller mapping callback executed")
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+    def __iter__(self):
+        return self._explode()
+
+    def __len__(self):
+        return self._explode()
+
+
+class _ExplosiveDict(dict):
+    def __init__(self, value) -> None:
+        dict.__init__(self, value)
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller dict callback executed")
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+    def __iter__(self):
+        return self._explode()
+
+    def items(self):
+        return self._explode()
+
+    def keys(self):
+        return self._explode()
+
+    def values(self):
+        return self._explode()
+
+
+class _ExplosiveList(list):
+    def __init__(self, value) -> None:
+        list.__init__(self, value)
+        self.calls = 0
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller list callback executed")
+
+    def __iter__(self):
+        return self._explode()
+
+    def __getitem__(self, _key):
+        return self._explode()
+
+
+class _ExplosiveText(str):
+    def __new__(cls, value):
+        instance = str.__new__(cls, value)
+        instance.calls = 0
+        return instance
+
+    def _explode(self):
+        self.calls += 1
+        raise AssertionError("caller text callback executed")
+
+    def __str__(self):
+        return self._explode()
+
+    def strip(self, *_args, **_kwargs):
+        return self._explode()
+
+    def encode(self, *_args, **_kwargs):
+        return self._explode()
 
 
 class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
@@ -162,6 +242,118 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                 pickle.dumps(authority)
             with self.assertRaises(AttributeError):
                 authority.binding_id = "financial-request:sha256:" + "0" * 64
+
+    def test_polymorphic_request_and_scope_are_rejected_without_callbacks(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            hostile_request = _ExplosiveMapping()
+            with self.assertRaisesRegex(TypeError, "request must be an exact dict"):
+                issuer.require_exact_request(
+                    authority,
+                    request=hostile_request,
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_request.calls, 0)
+
+            hostile_scope = _ExplosiveMapping()
+            with self.assertRaisesRegex(TypeError, "submission_scope must be an exact dict"):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope=hostile_scope,
+                )
+            self.assertEqual(hostile_scope.calls, 0)
+
+    def test_nested_polymorphic_json_values_are_rejected_without_callbacks(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            hostile_dict = _ExplosiveDict(request["body"])
+            with self.assertRaisesRegex(TypeError, "request.body"):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "body": hostile_dict},
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_dict.calls, 0)
+
+            hostile_list = _ExplosiveList(["one"])
+            with self.assertRaisesRegex(TypeError, "request.tags"):
+                issuer.require_exact_request(
+                    authority,
+                    request={**request, "tags": hostile_list},
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_list.calls, 0)
+
+            hostile_text = _ExplosiveText("1")
+            with self.assertRaisesRegex(TypeError, "request.body.quantity"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": hostile_text},
+                    },
+                    submission_scope=scope,
+                )
+            self.assertEqual(hostile_text.calls, 0)
+
+            hostile_scope_dict = _ExplosiveDict(
+                {"request_sha256": material.request_sha256}
+            )
+            with self.assertRaisesRegex(TypeError, "submission_scope.extra"):
+                issuer.require_exact_request(
+                    authority,
+                    request=request,
+                    submission_scope={**scope, "extra": hostile_scope_dict},
+                )
+            self.assertEqual(hostile_scope_dict.calls, 0)
+
+    def test_noncanonical_json_scalars_and_keys_fail_closed(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            admitted, material, request = self._bound_case(store)
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+            authority = issuer.issue(admitted.admission_id)
+            scope = financial_submission_scope(
+                admission_id=admitted.admission_id,
+                material=material,
+            )
+
+            with self.assertRaisesRegex(TypeError, "request.body.quantity"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], "quantity": 1.0},
+                    },
+                    submission_scope=scope,
+                )
+
+            with self.assertRaisesRegex(TypeError, "request.body keys"):
+                issuer.require_exact_request(
+                    authority,
+                    request={
+                        **request,
+                        "body": {**request["body"], 1: "forbidden"},
+                    },
+                    submission_scope=scope,
+                )
 
     def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
         parameters = inspect.signature(

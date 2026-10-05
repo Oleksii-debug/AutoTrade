@@ -797,6 +797,22 @@ class BybitV5AdapterTests(unittest.TestCase):
             observation.response_sha256,
         )
 
+    def test_non_2xx_status_gates_body_semantics(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {},
+            http_status=502,
+            intent_id="bybit-http-gates-body",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["reason_code"], "BYBIT_HTTP_NON_2XX")
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(result["evidence"][0]["http_status"], 502)
+
     def test_non_2xx_rejection_body_is_also_unknown(self):
         attempt, prepared, observation = self._durable_write_observation(
             {

@@ -858,6 +858,16 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 [],
             )
 
+    def test_whitebit_raw_response_without_http_status_requires_reconciliation(self):
+        raw = b'{"orderId":"provider-raw"}'
+        exact = _whitebit_exact_trading_response(raw)
+        self.assertIsNone(exact.http_status)
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "whitebit_http_status_unavailable_execution_unknown",
+        )
+
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)

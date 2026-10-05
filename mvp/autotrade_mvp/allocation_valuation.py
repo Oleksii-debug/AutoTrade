@@ -336,14 +336,18 @@ def normalize_allocation_valuation(
 
     if _text(valuation.get("symbol"), name=f"{symbol_text} valuation symbol") != symbol_text:
         raise AllocationValuationError(f"{symbol_text} valuation symbol mismatch")
-    asset_class = _text(
-        valuation["asset_class"],
-        name=f"{symbol_text} valuation asset_class",
-    ).upper()
-    payoff = _text(
-        valuation["payoff"],
-        name=f"{symbol_text} valuation payoff",
-    ).upper()
+    asset_class = str.upper(
+        _text(
+            valuation["asset_class"],
+            name=f"{symbol_text} valuation asset_class",
+        )
+    )
+    payoff = str.upper(
+        _text(
+            valuation["payoff"],
+            name=f"{symbol_text} valuation payoff",
+        )
+    )
     quantity_unit = _text(
         valuation["quantity_unit"],
         name=f"{symbol_text} valuation quantity_unit",
@@ -429,10 +433,15 @@ def normalize_allocation_valuation(
     liability_rate_denominator: int
 
     if quote_currency == base_currency:
-        if fx_quote_payload not in (None, {}):
-            raise AllocationValuationError(
-                f"{symbol_text} identity FX conversion must not carry a quote"
+        if fx_quote_payload is not None:
+            identity_quote_payload = _mapping(
+                fx_quote_payload,
+                name=f"{symbol_text} valuation fx_quote",
             )
+            if identity_quote_payload:
+                raise AllocationValuationError(
+                    f"{symbol_text} identity FX conversion must not carry a quote"
+                )
         if expected_fx_rate != Decimal("1") or fx_source_id != "IDENTITY":
             raise AllocationValuationError(
                 f"{symbol_text} identity FX conversion must use rate 1 and IDENTITY source"

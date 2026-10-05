@@ -380,11 +380,25 @@ class PersistentCredentialHandle:
         if purpose not in _ALLOWED_PURPOSES:
             raise SecretVaultError("credential purpose is not allowed")
         object.__setattr__(self, "purpose", purpose)
-        if (
-            type(self.generation) is not int
-            or self.generation < 1
-        ):
+        if type(self.generation) is not int or self.generation < 1:
             raise SecretVaultError("credential generation is invalid")
+
+
+def _sealed_persistent_credential_handle(
+    value: object,
+) -> PersistentCredentialHandle:
+    """Revalidate one caller-owned handle before any vault lock or lookup."""
+    if type(value) is not PersistentCredentialHandle:
+        raise TypeError("handle must be a PersistentCredentialHandle")
+    return PersistentCredentialHandle(
+        handle_id=value.handle_id,
+        account_id=value.account_id,
+        provider=value.provider,
+        environment=value.environment,
+        provider_environment=value.provider_environment,
+        purpose=value.purpose,
+        generation=value.generation,
+    )
 
 
 @dataclass(frozen=True)
@@ -395,8 +409,11 @@ class CredentialReattachmentRequirement:
     was_active: bool
 
     def __post_init__(self) -> None:
-        if type(self.handle) is not PersistentCredentialHandle:
-            raise TypeError("handle must be PersistentCredentialHandle")
+        object.__setattr__(
+            self,
+            "handle",
+            _sealed_persistent_credential_handle(self.handle),
+        )
         if type(self.was_active) is not bool:
             raise SecretVaultError("was_active must be boolean")
 
@@ -813,8 +830,7 @@ class ProtectedCredentialVault:
         purpose: str,
         provider_environment: str | None = None,
     ) -> str:
-        if type(handle) is not PersistentCredentialHandle:
-            raise TypeError("handle must be a PersistentCredentialHandle")
+        handle = _sealed_persistent_credential_handle(handle)
         (
             owner,
             account,
@@ -890,8 +906,7 @@ class ProtectedCredentialVault:
         and revoke() use the same inter-process lock, so neither can commit after
         the generation/scope check and before the caller exits the lease.
         """
-        if type(handle) is not PersistentCredentialHandle:
-            raise TypeError("handle must be a PersistentCredentialHandle")
+        handle = _sealed_persistent_credential_handle(handle)
         (
             owner,
             account,
@@ -961,8 +976,7 @@ class ProtectedCredentialVault:
         execution_identity: str,
         new_secret_value: str,
     ) -> PersistentCredentialHandle:
-        if type(handle) is not PersistentCredentialHandle:
-            raise TypeError("handle must be a PersistentCredentialHandle")
+        handle = _sealed_persistent_credential_handle(handle)
         if type(new_secret_value) is not str or not new_secret_value:
             raise SecretVaultError("new_secret_value must be exact non-empty text")
         owner = _text(execution_identity, name="execution_identity")
@@ -1016,8 +1030,7 @@ class ProtectedCredentialVault:
         *,
         execution_identity: str,
     ) -> None:
-        if type(handle) is not PersistentCredentialHandle:
-            raise TypeError("handle must be a PersistentCredentialHandle")
+        handle = _sealed_persistent_credential_handle(handle)
         owner = _text(execution_identity, name="execution_identity")
         with _exclusive_file_lock(self.lock_path, vault_path=self.path):
             state = self._load()

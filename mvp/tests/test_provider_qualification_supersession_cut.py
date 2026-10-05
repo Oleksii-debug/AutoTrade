@@ -10,7 +10,7 @@ from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.durable_provider_qualification import (
     ProviderQualificationError,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.tests.test_provider_qualification_authority import (
     _ProjectionOnlyRegistry,
     _issued,
@@ -105,6 +105,63 @@ class ProviderQualificationSupersessionCutTests(unittest.TestCase):
             self.assertEqual(
                 supersession_events[0]["payload"]["new_qualification_id"],
                 q3.qualification_id,
+            )
+
+    def test_unrelated_journal_advance_does_not_block_valid_supersession(self):
+        q1, r1, p1 = _issued(ordinal=63, campaign_version=1)
+        q2, r2, p2 = _issued(
+            ordinal=64,
+            campaign_version=2,
+            supersedes=q1.qualification_id,
+            route_parser="BYBIT_ORDER_V5_JSON_V2",
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "journal.db"
+            evidence_root = root / "evidence"
+            registry = _AfterHistoryRegistry(
+                JournalStore(database),
+                evidence_store=ArtifactStore(evidence_root),
+                evidence_root=evidence_root,
+            )
+            for record, receipt, protocol in (
+                (q1, r1, p1),
+                (q2, r2, p2),
+            ):
+                registry._append_accepted(
+                    protocol_key=protocol.key,
+                    record=record,
+                    receipt=receipt,
+                )
+
+            unrelated_payload = {"marker": "independent-authority"}
+
+            def append_unrelated() -> None:
+                registry.store.append_event(
+                    {
+                        "event_id": "provider-q-unrelated-race-event",
+                        "event_type": "IndependentAuthorityAdvanced.v1",
+                        "aggregate_type": "independent_authority",
+                        "aggregate_id": "independent-authority",
+                        "aggregate_version": "1",
+                        "payload": unrelated_payload,
+                        "payload_hash": payload_digest(unrelated_payload),
+                        "committed_at": "2026-10-04T05:02:00Z",
+                    }
+                )
+
+            registry.after_history = append_unrelated
+            self.assertTrue(
+                registry._append_supersession(
+                    old_id=q1.qualification_id,
+                    new_id=q2.qualification_id,
+                )
+            )
+            history = registry._history()
+            self.assertEqual(
+                history.superseded,
+                {q1.qualification_id: q2.qualification_id},
             )
 
 

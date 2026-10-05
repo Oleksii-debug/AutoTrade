@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.execution_oracle import (
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
+    MARKET_PRICE_PROJECTION_POLICY_V1,
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
@@ -17,6 +18,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+PRICE_GRID_EVIDENCE = "b" * 64
 
 
 def model(**overrides):
@@ -32,6 +34,10 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_tick="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256=PRICE_GRID_EVIDENCE,
+        price_projection_policy=MARKET_PRICE_PROJECTION_POLICY_V1,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -65,6 +71,56 @@ def observation(**overrides):
 
 
 class ExecutionOracleTests(unittest.TestCase):
+    def test_oracle_reconstructs_context_independent_market_grid_projection(self):
+        o = order(quantity="1", side="BUY")
+        q = observation(
+            available_volume="3",
+            bid="100",
+            ask="100",
+        )
+        m = model(
+            max_participation="1",
+            slippage_bps="0",
+            impact_bps_at_max_participation="10",
+            fee_rate="0",
+            minimum_fee="0",
+            price_tick="0.01",
+        )
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+        self.assertEqual(result.fill_price, Decimal("100.04"))
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_FLOOR),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+        forged = replace(result, fill_price=Decimal("100.03"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independent adverse price-grid projection",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
     def test_oracle_rejects_domain_subclasses_before_economic_checks(self):
         class DerivedOrder(SimulatedOrder):
             pass

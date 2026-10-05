@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 import unittest
@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.market_data import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -43,6 +44,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.reservations import ReservationSnapshot
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -2536,6 +2538,214 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             ),
             "BOOTSTRAPPING",
         )
+
+
+class BinanceSpotTemporalIngressTests(unittest.TestCase):
+    def _intent(self):
+        return BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.100",
+            price="100.00",
+            time_in_force="GTC",
+        )
+
+    def test_order_admission_rejects_datetime_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                callbacks.append("utcoffset")
+                raise AssertionError("hostile datetime callback executed")
+
+            def astimezone(self, *args, **kwargs):
+                callbacks.append("astimezone")
+                raise AssertionError("hostile datetime callback executed")
+
+        hostile = HostileDateTime(2026, 9, 24, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError, "exact timezone-aware datetime"
+        ):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-datetime",
+                capability=capability(),
+                symbol_rules=symbol_rules(),
+                at=hostile,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_custom_tzinfo_before_callbacks(self):
+        callbacks = []
+
+        class HostileTzInfo(tzinfo):
+            def utcoffset(self, dt):
+                callbacks.append("utcoffset")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def dst(self, dt):
+                callbacks.append("dst")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def tzname(self, dt):
+                callbacks.append("tzname")
+                raise AssertionError("hostile tzinfo callback executed")
+
+        hostile = datetime(2026, 9, 24, 20, tzinfo=HostileTzInfo())
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError, "exact timezone-aware datetime"
+        ):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-tzinfo",
+                capability=capability(),
+                symbol_rules=symbol_rules(),
+                at=hostile,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                callbacks.append("is_finite")
+                raise AssertionError("hostile Decimal callback executed")
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "bounded exact decimal"):
+            BinanceSpotOrderIntent.create(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                price="100.00",
+                time_in_force="GTC",
+
+                quantity=HostileDecimal("0.100"),
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_text_ingress_rejects_str_subclass_before_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "symbol is required"):
+            BinanceSpotOrderIntent.create(
+                instrument_version="BTCUSDT:v1",
+                symbol=HostileText("BTCUSDT"),
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.100",
+                price="100.00",
+                time_in_force="GTC",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_capability_subclass_before_admits(self):
+        callbacks = []
+        trusted = capability()
+
+        class HostileCapability(CapabilitySnapshot):
+            def admits(self, *args, **kwargs):
+                callbacks.append("admits")
+                return True
+
+        hostile = object.__new__(HostileCapability)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-capability",
+                capability=hostile,
+                symbol_rules=symbol_rules(),
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_symbol_rules_subclass_before_validate(self):
+        callbacks = []
+        trusted = symbol_rules()
+
+        class HostileRules(BinanceSpotSymbolRules):
+            def validate(self, *args, **kwargs):
+                callbacks.append("validate")
+                return None
+
+        hostile = object.__new__(HostileRules)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact BinanceSpotSymbolRules"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-hostile-rules",
+                capability=capability(),
+                symbol_rules=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_timestamp_rejects_coercible_object_before_callbacks(self):
+        callbacks = []
+
+        class HostileMillis:
+            def __int__(self):
+                callbacks.append("__int__")
+                raise AssertionError("hostile integer callback executed")
+
+            def __str__(self):
+                callbacks.append("__str__")
+                raise AssertionError("hostile string callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError, "integer millisecond timestamp"
+        ):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-hostile-millis",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 42,
+                    "clientOrderId": "at-hostile-millis",
+                    "transactTime": HostileMillis(),
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_trade_parser_rejects_observation_subclass_before_scope_callback(self):
+        callbacks = []
+        trusted = execution_observation([])
+
+        class HostileObservation(ProviderResponseObservation):
+            def require_scope(self, *args, **kwargs):
+                callbacks.append("require_scope")
+
+        hostile = object.__new__(HostileObservation)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderResponseObservation"):
+            parse_account_trades(hostile, instrument_versions={})
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_keeps_builtin_fixed_offset_supported(self):
+        fixed = timezone(timedelta(hours=2))
+        request = prepare_order_request(
+            self._intent(),
+            client_order_id="at-fixed-offset",
+            capability=capability(),
+            symbol_rules=symbol_rules(),
+            at=datetime(2026, 9, 24, 22, tzinfo=fixed),
+        )
+        self.assertEqual(request.body["newClientOrderId"], "at-fixed-offset")
 
 if __name__ == "__main__":
     unittest.main()

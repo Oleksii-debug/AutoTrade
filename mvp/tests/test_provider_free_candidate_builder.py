@@ -157,6 +157,7 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(bound['artifact']['bytes'], len(b'MZ-bound-host'))
             self.assertRegex(bound['publish_payload_sha256'], r'^sha256:[0-9a-f]{64}$')
+            self.assertFalse(any(path.name.endswith('.lock') for path in publish.iterdir()))
             held = candidate._capture_publish(publish)
             self.assertEqual(
                 bound['publish_payload_sha256'],

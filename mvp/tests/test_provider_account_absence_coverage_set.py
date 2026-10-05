@@ -94,6 +94,7 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
         directory: str,
         *,
         suffix: str = "a",
+        acquisition_suffix: str | None = None,
     ):
         journal = JournalStore(Path(directory) / "journal.sqlite3")
         capabilities = DurableCapabilityRegistry(journal)
@@ -180,10 +181,11 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
             ),
         )
         acquisition_authority = DurableProviderAccountAcquisitionAuthority(journal)
+        acquisition_key = suffix if acquisition_suffix is None else acquisition_suffix
         acquisition = acquisition_authority.issue_serialized(
             provider_scope=record.scope.provider_scope,
             account_id=account_id,
-            acquisition_request_id=f"coverage-set-acquisition-{suffix}",
+            acquisition_request_id=f"coverage-set-acquisition-{acquisition_key}",
             committed_at=NOW,
         )
         reconciliation = resolve_current_provider_account_reconciliation_semantics(
@@ -238,6 +240,7 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
         }
 
         coverages = []
+        page_chains = []
         for surface in (
             "OPEN_ORDERS",
             "ORDER_HISTORY",
@@ -282,6 +285,7 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
                 surface=surface,
                 at=NOW,
             )
+            page_chains.append(page_chain)
             coverages.append(
                 issue_provider_account_surface_coverage(
                     absence_semantics=absence,
@@ -291,13 +295,14 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
                     at=NOW,
                 )
             )
-        return tuple(coverages)
+        return tuple(coverages), tuple(page_chains)
 
     def test_exact_four_surface_graph_issues_sealed_set(self):
         with TemporaryDirectory() as directory:
-            coverages = self._coverage_graph(directory)
+            coverages, page_chains = self._coverage_graph(directory)
             value = issue_provider_account_absence_coverage_set(
                 coverages=coverages,
+                page_chains=page_chains,
             )
             self.assertIsInstance(value, ProviderAccountAbsenceCoverageSet)
             self.assertEqual(
@@ -318,30 +323,34 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
 
     def test_input_order_does_not_change_content_identity(self):
         with TemporaryDirectory() as directory:
-            coverages = self._coverage_graph(directory)
+            coverages, page_chains = self._coverage_graph(directory)
             forward = issue_provider_account_absence_coverage_set(
                 coverages=coverages,
+                page_chains=page_chains,
             )
             reverse = issue_provider_account_absence_coverage_set(
                 coverages=tuple(reversed(coverages)),
+                page_chains=tuple(reversed(page_chains)),
             )
             self.assertEqual(forward.content_digest, reverse.content_digest)
 
     def test_missing_surface_cannot_issue_complete_graph(self):
         with TemporaryDirectory() as directory:
-            coverages = self._coverage_graph(directory)
+            coverages, page_chains = self._coverage_graph(directory)
             with self.assertRaisesRegex(
                 ProviderAccountAbsenceCoverageSetError,
                 "exactly four",
             ):
                 issue_provider_account_absence_coverage_set(
                     coverages=coverages[:-1],
+                    page_chains=page_chains[:-1],
                 )
 
     def test_duplicate_surface_cannot_replace_required_surface(self):
         with TemporaryDirectory() as directory:
-            coverages = self._coverage_graph(directory)
+            coverages, page_chains = self._coverage_graph(directory)
             by_surface = {item.surface: item for item in coverages}
+            chains_by_surface = {item.surface: item for item in page_chains}
             with self.assertRaisesRegex(
                 ProviderAccountAbsenceCoverageSetError,
                 "duplicate provider surface",
@@ -353,14 +362,26 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
                         by_surface["EXECUTIONS"],
                         by_surface["EXECUTIONS"],
                     ),
+                    page_chains=(
+                        chains_by_surface["OPEN_ORDERS"],
+                        chains_by_surface["ORDER_HISTORY"],
+                        chains_by_surface["EXECUTIONS"],
+                        chains_by_surface["EXECUTIONS"],
+                    ),
                 )
 
     def test_mixed_historical_submission_graphs_fail_closed(self):
         with TemporaryDirectory() as directory:
-            first = self._coverage_graph(str(Path(directory) / "first"), suffix="a")
-            second = self._coverage_graph(str(Path(directory) / "second"), suffix="b")
+            first, first_chains = self._coverage_graph(
+                str(Path(directory) / "first"), suffix="a"
+            )
+            second, second_chains = self._coverage_graph(
+                str(Path(directory) / "second"), suffix="b"
+            )
             first_by_surface = {item.surface: item for item in first}
             second_by_surface = {item.surface: item for item in second}
+            first_chain_by_surface = {item.surface: item for item in first_chains}
+            second_chain_by_surface = {item.surface: item for item in second_chains}
             with self.assertRaisesRegex(
                 ProviderAccountAbsenceCoverageSetError,
                 "historical_submission_digest differs",
@@ -371,6 +392,47 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
                         first_by_surface["ORDER_HISTORY"],
                         first_by_surface["EXECUTIONS"],
                         second_by_surface["ACTIVITIES"],
+                    ),
+                    page_chains=(
+                        first_chain_by_surface["OPEN_ORDERS"],
+                        first_chain_by_surface["ORDER_HISTORY"],
+                        first_chain_by_surface["EXECUTIONS"],
+                        second_chain_by_surface["ACTIVITIES"],
+                    ),
+                )
+
+    def test_mixed_acquisition_generations_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            first, first_chains = self._coverage_graph(
+                str(Path(directory) / "first"),
+                suffix="same",
+                acquisition_suffix="a",
+            )
+            second, second_chains = self._coverage_graph(
+                str(Path(directory) / "second"),
+                suffix="same",
+                acquisition_suffix="b",
+            )
+            first_by_surface = {item.surface: item for item in first}
+            second_by_surface = {item.surface: item for item in second}
+            first_chain_by_surface = {item.surface: item for item in first_chains}
+            second_chain_by_surface = {item.surface: item for item in second_chains}
+            with self.assertRaisesRegex(
+                ProviderAccountAbsenceCoverageSetError,
+                "acquisition generation differs",
+            ):
+                issue_provider_account_absence_coverage_set(
+                    coverages=(
+                        first_by_surface["OPEN_ORDERS"],
+                        first_by_surface["ORDER_HISTORY"],
+                        first_by_surface["EXECUTIONS"],
+                        second_by_surface["ACTIVITIES"],
+                    ),
+                    page_chains=(
+                        first_chain_by_surface["OPEN_ORDERS"],
+                        first_chain_by_surface["ORDER_HISTORY"],
+                        first_chain_by_surface["EXECUTIONS"],
+                        second_chain_by_surface["ACTIVITIES"],
                     ),
                 )
 
@@ -389,16 +451,17 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
             require_provider_account_absence_coverage_set_authority(forged)
 
         with TemporaryDirectory() as directory:
-            coverages = self._coverage_graph(directory)
+            coverages, page_chains = self._coverage_graph(directory)
             value = issue_provider_account_absence_coverage_set(
                 coverages=coverages,
+                page_chains=page_chains,
             )
             source = coverages[0]
             original = source.page_count
             object.__setattr__(source, "page_count", original + 1)
             with self.assertRaisesRegex(
                 ProviderAccountAbsenceCoverageSetError,
-                "source authority changed",
+                "source coverage authority changed",
             ):
                 require_provider_account_absence_coverage_set_authority(value)
 
@@ -406,7 +469,7 @@ class ProviderAccountAbsenceCoverageSetTests(unittest.TestCase):
         parameters = inspect.signature(
             issue_provider_account_absence_coverage_set
         ).parameters
-        self.assertEqual(tuple(parameters), ("coverages",))
+        self.assertEqual(tuple(parameters), ("coverages", "page_chains"))
         for forbidden in (
             "consistency_horizon_satisfied",
             "provider_semantics_exclude_execution",

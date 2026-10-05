@@ -9,6 +9,7 @@ import unittest
 
 from control.tools.reconvergence_integrity import (
     Change,
+    PROTECTED_MUTATION_ROOTS,
     PROTECTED_SENTINELS,
     assess_git_revisions,
     assess_reconvergence,
@@ -317,7 +318,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertFalse(blocked.allowed)
         self.assertEqual(
             blocked.protected_violations,
-            (f"{sentinel} (modified without exact-path authorization)",),
+            (f"{sentinel} (content change without exact-path authorization)",),
         )
 
         directory_scope = assess_reconvergence(
@@ -326,7 +327,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             allowed_scopes=("control/tools",),
         )
         self.assertFalse(directory_scope.allowed)
-        self.assertIn("modified without exact-path authorization", directory_scope.reasons[0])
+        self.assertIn("content change without exact-path authorization", directory_scope.reasons[0])
 
         exact_scope = assess_reconvergence(
             base_paths=base,
@@ -346,11 +347,15 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual(result.protected_deletions, (sentinel,))
 
-    def test_change_rejects_unmerged_unknown_and_noncanonical_paths(self):
+    def test_assessment_rejects_unmerged_unknown_and_noncanonical_paths(self):
         for status in ("U", "X", "B", "MM", "R", "R101", "C999"):
             with self.subTest(status=status):
                 with self.assertRaises(ValueError):
-                    Change(status=status, path="owned/file.py")
+                    assess_reconvergence(
+                        base_paths=["owned/file.py"],
+                        changes=[Change(status=status, path="owned/file.py")],
+                        protected_sentinels=frozenset(),
+                    )
 
         for path in (
             "",
@@ -366,7 +371,11 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 with self.assertRaises(ValueError):
-                    Change(status="M", path=path)
+                    assess_reconvergence(
+                        base_paths=["owned/file.py"],
+                        changes=[Change(status="M", path=path)],
+                        protected_sentinels=frozenset(),
+                    )
 
     def test_assessment_rejects_change_subclass_bypass(self):
         class ForgedChange(Change):
@@ -479,7 +488,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             self.assertEqual(blocked.returncode, 2, blocked.stderr + blocked.stdout)
-            self.assertIn("modified without exact-path authorization", blocked.stdout)
+            self.assertIn("content change without exact-path authorization", blocked.stdout)
 
             directory_scope = subprocess.run(
                 [
@@ -714,30 +723,39 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertTrue(copied.allowed)
         self.assertEqual(copied.destructive_change_count, 0)
 
-    def test_workflow_authority_is_dynamic_and_exact_scope_is_required(self):
-        new_workflow = ".github/workflows/new-authority.yml"
-        blocked = assess_reconvergence(
-            base_paths=["README.md"],
-            changes=[Change(status="A", path=new_workflow)],
+    def test_exact_content_authority_is_bounded_to_two_executable_roots(self):
+        self.assertEqual(
+            PROTECTED_MUTATION_ROOTS,
+            frozenset(
+                {
+                    ".github/workflows/reconvergence-integrity.yml",
+                    "control/tools/reconvergence_integrity.py",
+                }
+            ),
         )
-        self.assertFalse(blocked.allowed)
-        self.assertIn(
-            "authority destination without exact authorization",
-            blocked.reasons[0],
+        metadata = "control/INDEX.json"
+        self.assertIn(metadata, PROTECTED_SENTINELS)
+        self.assertNotIn(metadata, PROTECTED_MUTATION_ROOTS)
+        result = assess_reconvergence(
+            base_paths=[metadata, "README.md"],
+            changes=[Change(status="M", path=metadata)],
         )
-        authorized = assess_reconvergence(
-            base_paths=["README.md"],
-            changes=[Change(status="A", path=new_workflow)],
-            allowed_scopes=(new_workflow,),
-        )
-        self.assertTrue(authorized.allowed)
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
 
-        next_run_blocked = assess_reconvergence(
-            base_paths=["README.md", new_workflow],
-            changes=[Change(status="M", path=new_workflow)],
+    def test_wrong_case_scope_does_not_authorize_executable_trust_root(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="M", path=sentinel)],
+            allowed_scopes=("CONTROL/TOOLS/RECONVERGENCE_INTEGRITY.PY",),
         )
-        self.assertFalse(next_run_blocked.allowed)
-        self.assertIn("content change without exact authorization", next_run_blocked.reasons[0])
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.scope_violations, ())
+        self.assertIn(
+            "content change without exact-path authorization",
+            result.reasons[0],
+        )
 
     def test_protected_destination_replacement_requires_exact_scope(self):
         sentinel = "control/tools/reconvergence_integrity.py"
@@ -755,7 +773,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 )
                 self.assertFalse(blocked.allowed)
                 self.assertIn(
-                    "authority destination without exact authorization",
+                    "trust-root destination without exact-path authorization",
                     blocked.reasons[0],
                 )
 

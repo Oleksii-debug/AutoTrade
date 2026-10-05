@@ -28,7 +28,7 @@ from .provider_core import (
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
-BINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
+_MAX_UNIX_MILLIS = 253_402_300_799_999\n\n\nBINANCE_USDM_ENDPOINTS: Mapping[str, str] = MappingProxyType(
     {
         "PLACE_ORDER": "/fapi/v1/order",
         "QUERY_ORDER": "/fapi/v1/order",
@@ -92,13 +92,21 @@ def _millis(value: object, *, name: str) -> str:
     if type(value) is int:
         raw = value
     elif type(value) is str and value.isdigit():
+        # Reject oversized provider text before Python integer materialization.
+        # The financial ingress contract owns a finite UTC time domain.
+        if len(value) > len(str(_MAX_UNIX_MILLIS)):
+            raise BinanceUsdmAdapterError(
+                f"{name} exceeds the supported UTC millisecond range"
+            )
         raw = int(value)
     else:
         raise BinanceUsdmAdapterError(
             f"{name} must be an integer millisecond timestamp"
         )
-    if raw < 0:
-        raise BinanceUsdmAdapterError(f"{name} must be non-negative")
+    if raw < 0 or raw > _MAX_UNIX_MILLIS:
+        raise BinanceUsdmAdapterError(
+            f"{name} exceeds the supported UTC millisecond range"
+        )
     seconds, remainder = divmod(raw, 1000)
     instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)
     return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")

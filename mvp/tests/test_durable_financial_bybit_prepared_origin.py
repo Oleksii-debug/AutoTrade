@@ -1,6 +1,7 @@
 from dataclasses import replace
 import inspect
 import unittest
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import bybit_v5 as bybit_module
@@ -21,7 +22,7 @@ from mvp.autotrade_mvp.durable_financial_request_binding import (
     _require_admitted_price_semantics,
     _require_bybit_prepared_request_origin,
 )
-from mvp.autotrade_mvp.persistence import payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 from mvp.tests.test_financial_send_authority import (
@@ -133,6 +134,31 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 "admitted financial validator executable changed",
             ):
                 registry.resolve("admission-1")
+
+    def test_bind_pins_durable_admission_validator_before_execution(self):
+        material, prepared = canonical_case()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableFinancialRequestBindingRegistry(store)
+
+            def forged_validator(*_args, **_kwargs):
+                raise AssertionError("forged validator executed")
+
+            with patch.object(
+                binding_module,
+                "_validate_material_against_admission",
+                forged_validator,
+            ):
+                with self.assertRaisesRegex(
+                    DurableFinancialRequestBindingError,
+                    "admitted financial validator executable changed",
+                ):
+                    registry.bind(
+                        admission_id="admission-1",
+                        material=material,
+                        bound_at=BOUND_AT,
+                        prepared_request=prepared,
+                    )
 
     def test_paper_live_bind_cannot_bypass_prepared_origin(self):
         registry = object.__new__(DurableFinancialRequestBindingRegistry)

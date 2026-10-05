@@ -79,6 +79,8 @@ def _financial_configuration(
         "max_abs_position": str(max_abs_position),
         "max_notional": str(max_notional),
         "fee_rate": str(fee_rate),
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "money_quantum": str(MONEY_QUANTUM),
         "strategy": {
             "kind": "MOVING_AVERAGE",
             "fast": 2,

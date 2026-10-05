@@ -1,6 +1,6 @@
 """Shared JournalStore regressions for ZERO checkpoint and Host UI outbox ownership.
 
-The provider-free worker and Host intentionally share one JournalStore.  Host
+The provider-free worker and Host intentionally share one JournalStore. Host
 control traffic is not ZERO runtime state and ZERO is not a UI publisher.
 """
 from pathlib import Path

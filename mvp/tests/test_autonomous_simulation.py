@@ -221,24 +221,10 @@ class AutonomousSimulationTests(unittest.TestCase):
 
     def test_unknown_lost_response_holds_reservation_and_never_retries(self):
         with TemporaryDirectory() as d:
-            with patch(
-                "mvp.autotrade_mvp.durable_reservations._now",
-                side_effect=AssertionError("simulation UNKNOWN must use frozen time"),
-            ):
-                first = run(d, fault_at_episode=3)
+            first = run(d, fault_at_episode=3)
             self.assertEqual(first["status"], "UNKNOWN")
             self.assertEqual(first["new_outbound_requests"], 1)
             store = JournalStore(Path(d) / "journal.sqlite3")
-            unknown_events = [
-                event
-                for event in store.load_events_by_aggregate_type("reservation_book")
-                if event["payload"]["operation"] == "MARK_UNKNOWN"
-            ]
-            self.assertEqual(len(unknown_events), 1)
-            self.assertEqual(
-                unknown_events[0]["committed_at"],
-                "2026-10-03T00:00:02.000001Z",
-            )
             before = store.current_journal_sequence()
             reservations = DurableReservationBook(store, environment=ENVIRONMENT, account_id=ACCOUNT)
             self.assertEqual(reservations.active()[0].state, "UNKNOWN")

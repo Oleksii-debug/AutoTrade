@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 import unittest
@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.binance_usdm import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -608,6 +609,207 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
             )
 
+
+
+class BinanceUsdmTemporalIngressTests(unittest.TestCase):
+    def _intent(self):
+        return BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.010",
+            position_side="BOTH",
+        )
+
+    def test_order_admission_rejects_datetime_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileDateTime(datetime):
+            def utcoffset(self):
+                callbacks.append("utcoffset")
+                raise AssertionError("hostile datetime callback executed")
+
+            def astimezone(self, *args, **kwargs):
+                callbacks.append("astimezone")
+                raise AssertionError("hostile datetime callback executed")
+
+        hostile = HostileDateTime(2026, 9, 25, 0, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError, "exact timezone-aware datetime"
+        ):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-usdm-hostile-datetime",
+                capability=capability(),
+                at=hostile,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_custom_tzinfo_before_callbacks(self):
+        callbacks = []
+
+        class HostileTzInfo(tzinfo):
+            def utcoffset(self, dt):
+                callbacks.append("utcoffset")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def dst(self, dt):
+                callbacks.append("dst")
+                raise AssertionError("hostile tzinfo callback executed")
+
+            def tzname(self, dt):
+                callbacks.append("tzname")
+                raise AssertionError("hostile tzinfo callback executed")
+
+        hostile = datetime(2026, 9, 25, 0, tzinfo=HostileTzInfo())
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError, "exact timezone-aware datetime"
+        ):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-usdm-hostile-tzinfo",
+                capability=capability(),
+                at=hostile,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                callbacks.append("is_finite")
+                raise AssertionError("hostile Decimal callback executed")
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "bounded exact decimal"):
+            BinanceUsdmOrderIntent.create(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="MARKET",
+                position_side="BOTH",
+
+                quantity=HostileDecimal("0.100"),
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_text_ingress_rejects_str_subclass_before_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile text callback executed")
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "symbol is required"):
+            BinanceUsdmOrderIntent.create(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol=HostileText("BTCUSDT"),
+                side="BUY",
+                order_type="MARKET",
+                quantity="0.010",
+                position_side="BOTH",
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_rejects_capability_subclass_before_admits(self):
+        callbacks = []
+        trusted = capability()
+
+        class HostileCapability(CapabilitySnapshot):
+            def admits(self, *args, **kwargs):
+                callbacks.append("admits")
+                return True
+
+        hostile = object.__new__(HostileCapability)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_order_request(
+                self._intent(),
+                client_order_id="at-usdm-hostile-capability",
+                capability=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_timestamp_rejects_str_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileMillis(str):
+            def isdigit(self):
+                callbacks.append("isdigit")
+                raise AssertionError("hostile timestamp callback executed")
+
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError, "integer millisecond timestamp"
+        ):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-usdm-hostile-millis",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 42,
+                    "clientOrderId": "at-usdm-hostile-millis",
+                    "updateTime": HostileMillis("1790272800123"),
+                },
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_trade_parser_rejects_observation_subclass_before_scope_callback(self):
+        callbacks = []
+        trusted = execution_observation([])
+
+        class HostileObservation(ProviderResponseObservation):
+            def require_scope(self, *args, **kwargs):
+                callbacks.append("require_scope")
+
+        hostile = object.__new__(HostileObservation)
+        object.__getattribute__(hostile, "__dict__").update(
+            object.__getattribute__(trusted, "__dict__")
+        )
+        with self.assertRaisesRegex(TypeError, "exact ProviderResponseObservation"):
+            parse_account_trades(hostile, instrument_versions={})
+        self.assertEqual(callbacks, [])
+
+    def test_order_admission_keeps_builtin_fixed_offset_supported(self):
+        fixed = timezone(timedelta(hours=2))
+        request = prepare_order_request(
+            self._intent(),
+            client_order_id="at-usdm-fixed-offset",
+            capability=capability(),
+            at=datetime(2026, 9, 25, 2, tzinfo=fixed),
+        )
+        self.assertEqual(
+            request.body["newClientOrderId"], "at-usdm-fixed-offset"
+        )
+
+class BinanceUsdmWriteAdmissionRevalidationTests(unittest.TestCase):
+    def test_direct_intent_constructor_cannot_bypass_market_price_invariant(self):
+        forged = BinanceUsdmOrderIntent(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            price=Decimal("40000"),
+            time_in_force=None,
+            position_side="BOTH",
+            reduce_only=False,
+        )
+
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "MARKET order must not carry limit price",
+        ):
+            prepare_order_request(
+                forged,
+                client_order_id="usdm-direct-constructor",
+                capability=capability(),
+                at=NOW,
+            )
 
 if __name__ == "__main__":
     unittest.main()

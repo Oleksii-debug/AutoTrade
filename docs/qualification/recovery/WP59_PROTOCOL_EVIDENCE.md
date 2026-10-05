@@ -24,3 +24,7 @@ This increment strengthens evidence semantics only. It is not delivered-artifact
 ## Trust boundary
 
 `ArtifactStore` is a content-integrity mechanism, not an independent verifier identity. A caller can create a store and publish receipts whose metadata repeats its own PASS assertions. Therefore a complete store-backed scenario set remains `INCONCLUSIVE` with `independent_evidence_trust_unavailable` until WP-59's release dependencies provide a qualified authenticated or cryptographically signed attestation boundary whose producer/verifier identity is not controlled by the evidence submitter. Hard recovery-invariant violations still produce `FAIL`.
+
+Terminal recovery qualification cannot accept a trust policy, policy ID or policy version from the evidence caller. Signed receipts are verified only through the repository-selected canonical qualification-policy loader bound to the exact candidate source SHA. If that canonical trust authority is unavailable, qualification remains fail-closed rather than accepting a caller-provided substitute.
+
+The integrated product stack reads qualification evidence through the canonical `autotrade_runtime.artifacts` authority. The dedicated exact-head gate therefore reruns both recovery/qualification authority-ingress suites whenever that runtime artifact authority, its retained research compatibility facade, or either trust-boundary test surface changes.

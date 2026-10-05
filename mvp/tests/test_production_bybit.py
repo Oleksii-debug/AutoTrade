@@ -1,20 +1,34 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp import production_host
+from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection, prepare_order_submission
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.dispatch import stable_client_order_id
+from mvp.autotrade_mvp.durable_financial_bybit_sender import (
+    DurableFinanciallyBoundBybitOrderSender,
+)
+from mvp.autotrade_mvp.durable_financial_request_binding import (
+    DurableFinancialRequestBindingRegistry,
+)
 from mvp.autotrade_mvp.host_network import AuthenticatedHostApplication
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.financial_send_authority import (
+    FinancialSendAuthorityError,
+    FinanciallyBoundBybitOrderSender,
+    build_financial_send_authority_issuer,
+)
 from mvp.autotrade_mvp.production_bybit import (
     ProductionBybitOrderSender,
+    _build_production_bybit_order_sender,
     build_production_bybit_order_sender,
 )
 from mvp.autotrade_mvp.production_financial_host import compose_financial_authority
@@ -24,6 +38,8 @@ from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
+from mvp.tests.test_security import DeterministicProtector
 from mvp.tests.test_bybit_v5 import READ_AT, write_capability
 from mvp.tests.test_reconciliation_journal import reconciliation
 
@@ -54,6 +70,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         environment: str = "PAPER",
         host_id: str = "host-a",
         journal: JournalStore | None = None,
+        security_boundary: SecurityBoundary | None = None,
     ):
         journal = journal or JournalStore(Path(root) / "financial-host.sqlite")
         config = ProductionHostConfig(
@@ -65,7 +82,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             bind_port=18765,
             public_origin="http://127.0.0.1:18765",
         )
-        boundary = object.__new__(SecurityBoundary)
+        boundary = security_boundary or object.__new__(SecurityBoundary)
         application = object.__new__(AuthenticatedHostApplication)
         application.security_boundary = boundary
         host = ProductionHostRuntime(
@@ -75,6 +92,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             server=object(),
             instance_fence=_FenceStub(),
             admission_gate=object(),
+            issuance_token=production_host._RUNTIME_ISSUANCE_TOKEN,
         )
         return compose_financial_authority(host), host, boundary
 
@@ -104,14 +122,15 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
         capability_registry: CapabilityRegistry | None = None,
         capability_snapshot_id: str = "capability-1",
         wire_client=None,
+        session_token: str = "session-1",
     ) -> ProductionBybitOrderSender:
-        return build_production_bybit_order_sender(
+        return _build_production_bybit_order_sender(
             runtime,
             provider_environment=provider_environment,
             capability_snapshot_id=capability_snapshot_id,
             capability_registry=capability_registry or CapabilityRegistry(),
             credential_handle=credential_handle or self._handle(),
-            session_token="session-1",
+            session_token=session_token,
             clock_millis=lambda: 1_700_000_000_000,
             clock_utc=lambda: _NOW,
             wire_client=wire_client,
@@ -147,6 +166,99 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             environment=runtime.config.environment,
         )
         self.assertIs(recovery.state, HostState.READY)
+
+    def test_raw_sender_direct_construction_is_not_a_product_surface(self) -> None:
+        with self.assertRaisesRegex(
+            PermissionError,
+            "requires internal financial composition",
+        ):
+            ProductionBybitOrderSender(runtime=object(), transport=object())
+
+    def test_public_builder_rejects_financial_issuer_without_selected_route(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            service = AuthorityService(runtime.journal)
+            issuer = build_financial_send_authority_issuer(service, runtime)
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "requires selected provider route authority",
+            ):
+                build_production_bybit_order_sender(
+                    runtime,
+                    financial_issuer=issuer,
+                    financial_binding_registry=DurableFinancialRequestBindingRegistry(runtime.journal),
+                    provider_environment="TESTNET",
+                    capability_snapshot_id="capability-1",
+                    capability_registry=CapabilityRegistry(),
+                    credential_handle=self._handle(),
+                    session_token="session-1",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: _NOW,
+                )
+
+    def test_public_builder_rejects_noncanonical_financial_issuer_before_raw_build(self) -> None:
+        with TemporaryDirectory() as root:
+            runtime, _host, _boundary = self._runtime(root)
+            with self.assertRaisesRegex(
+                TypeError,
+                "financial_issuer must be exact",
+            ):
+                build_production_bybit_order_sender(
+                    runtime,
+                    financial_issuer=object(),
+                    financial_binding_registry=DurableFinancialRequestBindingRegistry(runtime.journal),
+                    provider_environment="TESTNET",
+                    capability_snapshot_id="capability-1",
+                    capability_registry=CapabilityRegistry(),
+                    credential_handle=self._handle(),
+                    session_token="session-1",
+                    clock_millis=lambda: 1_700_000_000_000,
+                    clock_utc=lambda: _NOW,
+                )
+
+    def test_product_modules_do_not_reach_raw_callback_sender_surface(self) -> None:
+        product_root = Path(__file__).resolve().parents[1] / "autotrade_mvp"
+        allowed = {"production_bybit.py", "financial_send_authority.py"}
+        forbidden = {
+            "ProductionBybitOrderSender",
+            "_build_production_bybit_order_sender",
+        }
+        violations = []
+        for source_path in sorted(product_root.glob("*.py")):
+            if source_path.name in allowed:
+                continue
+            source = source_path.read_text(encoding="utf-8")
+            for token in sorted(forbidden):
+                if token in source:
+                    violations.append(f"{source_path.name}:{token}")
+
+        self.assertEqual(violations, [])
+        public_arguments = build_production_bybit_order_sender.__code__.co_varnames[
+            : (
+                build_production_bybit_order_sender.__code__.co_argcount
+                + build_production_bybit_order_sender.__code__.co_kwonlyargcount
+            )
+        ]
+        self.assertIn("financial_issuer", public_arguments)
+        self.assertIn("financial_binding_registry", public_arguments)
+        self.assertNotIn("authority", public_arguments)
+        self.assertNotIn("binding", public_arguments)
+        self.assertNotIn("authority_check", public_arguments)
+
+        bound_arguments = (
+            DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_varnames[
+                : (
+                    DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_argcount
+                    + DurableFinanciallyBoundBybitOrderSender.dispatch.__code__.co_kwonlyargcount
+                )
+            ]
+        )
+        self.assertIn("admission_id", bound_arguments)
+        self.assertIn("action", bound_arguments)
+        self.assertNotIn("authority", bound_arguments)
+        self.assertNotIn("binding", bound_arguments)
+        self.assertNotIn("authority_check", bound_arguments)
+        self.assertNotIn("final_barrier_clock", bound_arguments)
 
     def test_builder_uses_exact_host_security_boundary_and_financial_scope(self) -> None:
         with TemporaryDirectory() as root:
@@ -232,7 +344,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     PermissionError,
-                    "does not match production host authority",
+                    "production credential lease authority changed",
                 ):
                     with resolver.lease_for_execution(
                         "session-1",
@@ -309,7 +421,24 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1"}}'
         )
         with TemporaryDirectory() as root:
-            runtime, _host, _boundary = self._runtime(root)
+            boundary = SecurityBoundary(
+                allowed_origins={"http://127.0.0.1:18765"},
+                credential_vault=ProtectedCredentialVault(
+                    Path(root) / "credentials.json", protector=DeterministicProtector(),
+                ),
+                session_authorizer=lambda _subject, _role, _origin: True,
+                now=lambda: 1000.0,
+            )
+            runtime, _host, _boundary = self._runtime(root, security_boundary=boundary)
+            session = boundary.create_session(
+                subject="test-owner", role="OWNER", origin=runtime.config.public_origin,
+            )
+            credential_handle = boundary.register_secret(
+                session.token, origin=runtime.config.public_origin,
+                owner_identity=runtime.financial_dispatcher.owner.owner_id,
+                account_id="account-1", provider="BYBIT", environment="PAPER",
+                provider_environment="TESTNET", purpose="TRADE", secret_value=credential,
+            )
             capability = write_capability(
                 family="LINEAR_DERIVATIVES",
                 position_mode="HEDGE",
@@ -318,6 +447,8 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 instrument_version="BTCUSDT@1",
                 permission_scope="BYBIT.LINEAR.ORDER.WRITE",
                 additional_permission_scopes=("ORDER_WRITE",),
+                provider_environment="TESTNET",
+                expires_at=_NOW + timedelta(minutes=5),
             )
             registry = CapabilityRegistry()
             registry.add(capability)
@@ -332,7 +463,7 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
             )
             prepared = prepare_order_submission(
                 capability=capability,
-                at=READ_AT,
+                at=_NOW,
                 provider_environment="TESTNET",
                 product_family="LINEAR_DERIVATIVES",
                 symbol="BTCUSDT",
@@ -352,44 +483,30 @@ class ProductionBybitCurrentHostTests(unittest.TestCase):
                 capability_registry=registry,
                 capability_snapshot_id=capability.snapshot_id,
                 wire_client=wire,
+                credential_handle=credential_handle,
+                session_token=session.token,
             )
-            recovery = runtime.recovery_controller
             self._mark_ready(runtime)
-            lease_calls = []
+            authority_calls = []
 
-            @contextmanager
-            def fake_lease(_self, token, **kwargs):
-                lease_calls.append((token, kwargs))
-                yield credential
+            def authority_check(intent_hash: str, at: str):
+                authority_calls.append((intent_hash, at))
+                return True, "authorized"
 
-            original = SecurityBoundary.lease_for_execution
-            SecurityBoundary.lease_for_execution = fake_lease
-            try:
-                authority_calls = []
-
-                def authority_check(intent_hash: str, at: str):
-                    authority_calls.append((intent_hash, at))
-                    return True, "authorized"
-
-                dispatch_now = READ_AT.isoformat().replace("+00:00", "Z")
-                outcome = sender.dispatch(
-                    attempt_id="attempt-e2e",
-                    intent_id=intent_id,
-                    intent_hash="sha256:" + "2" * 64,
-                    request=guarded_order_projection(prepared),
-                    now=dispatch_now,
-                    authority_check=authority_check,
-                    final_barrier_clock=lambda: dispatch_now,
-                )
-            finally:
-                SecurityBoundary.lease_for_execution = original
+            dispatch_now = _NOW.isoformat().replace("+00:00", "Z")
+            outcome = sender.dispatch(
+                attempt_id="attempt-e2e", intent_id=intent_id,
+                intent_hash="sha256:" + "2" * 64,
+                request=guarded_order_projection(prepared), now=dispatch_now,
+                authority_check=authority_check,
+                final_barrier_clock=lambda: dispatch_now,
+            )
 
             self.assertEqual(outcome.status, "SENT")
             self.assertEqual(outcome.reason, "sent_confirmed")
             self.assertEqual(outcome.response["retCode"], 0)
             self.assertEqual(outcome.response["result"]["orderId"], "provider-1")
             self.assertEqual(len(wire.requests), 1)
-            self.assertEqual(len(lease_calls), 1)
             self.assertEqual(len(authority_calls), 2)
             events = runtime.journal.load_events_by_aggregate_type("submission_attempt")
             self.assertEqual(

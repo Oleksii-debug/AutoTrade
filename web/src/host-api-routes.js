@@ -4,7 +4,6 @@
   // AUTO-GENERATED from contracts/openapi/host-api.yaml. DO NOT EDIT.
   // Run python tools/generate_host_api_routes.py to regenerate.
   const ROUTES = Object.freeze({
-    pairLocalSession: '/api/v1/session',
     getState: '/api/v1/state',
     submitCommand: '/api/v1/commands',
     getOperation: '/api/v1/operations/{operation_id}',

@@ -11,23 +11,6 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-if __package__:
-    from .dotnet_lock import (
-        dotnet_locked_dependency_graph,
-        dotnet_project_package_references,
-        dotnet_restore_command_tokens,
-        dotnet_restore_targets_project,
-        dotnet_restore_tokens_are_locked,
-    )
-else:
-    from dotnet_lock import (
-        dotnet_imported_package_reference_blockers,
-        dotnet_locked_dependency_graph,
-        dotnet_project_package_references,
-        dotnet_restore_command_tokens,
-        dotnet_restore_tokens_are_locked,
-    )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
@@ -322,7 +305,13 @@ def python_dev_dependencies() -> list[dict[str, object]]:
 def dotnet_package_dependencies() -> list[dict[str, str]]:
     packages: set[tuple[str, str]] = set()
     for project in sorted((ROOT / "src").rglob("*.csproj")):
-        for name, version in dotnet_project_package_references(project):
+        tree = ET.parse(project)
+        for node in tree.findall(".//PackageReference"):
+            name = node.attrib.get("Include") or node.attrib.get("Update")
+            version = node.attrib.get("Version")
+            if version is None:
+                child = node.find("Version")
+                version = child.text.strip() if child is not None and child.text else None
             if not name or not version:
                 raise ValueError(
                     f"PackageReference must have exact Include/Version in {project.relative_to(ROOT)}"
@@ -341,7 +330,8 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
 def dotnet_package_projects() -> list[Path]:
     projects: list[Path] = []
     for project in sorted((ROOT / "src").rglob("*.csproj")):
-        if dotnet_project_package_references(project):
+        tree = ET.parse(project)
+        if tree.findall(".//PackageReference"):
             projects.append(project)
     return projects
 
@@ -429,17 +419,7 @@ def build_manifest() -> dict[str, object]:
         )
 
     python_dependencies = python_dev_dependencies()
-    dotnet_projects = dotnet_package_projects()
-    try:
-        dotnet_packages = dotnet_locked_dependency_graph(ROOT, dotnet_projects)
-    except ValueError as error:
-        blockers.append(
-            {
-                "code": "DOTNET_LOCK_CONTENT_INVALID",
-                "detail": str(error),
-            }
-        )
-        dotnet_packages = []
+    dotnet_packages = dotnet_package_dependencies()
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
@@ -468,6 +448,7 @@ def build_manifest() -> dict[str, object]:
             }
         )
 
+    dotnet_projects = dotnet_package_projects()
     missing_dotnet_locks = [
         project.relative_to(ROOT).as_posix()
         for project in dotnet_projects
@@ -523,62 +504,20 @@ def build_manifest() -> dict[str, object]:
                         ),
                     }
                 )
-            else:
-                restore_tokens: list[tuple[str, ...]] = []
-                invalid_restore = False
-                for command in restore_commands:
-                    try:
-                        tokens = dotnet_restore_command_tokens(command)
-                    except ValueError:
-                        invalid_restore = True
-                        continue
-                    restore_tokens.append(tokens)
-                if invalid_restore:
-                    blockers.append(
-                        {
-                            "code": "DOTNET_RESTORE_COMMAND_INVALID",
-                            "detail": (
-                                "Canonical dotnet restore commands must be "
-                                "unambiguously tokenizable."
-                            ),
-                        }
-                    )
-                if any(
-                    not dotnet_restore_tokens_are_locked(tokens)
-                    for tokens in restore_tokens
-                ):
-                    blockers.append(
-                        {
-                            "code": "DOTNET_RESTORE_NOT_LOCKED",
-                            "detail": (
-                                "Every canonical dotnet restore must enforce the "
-                                "committed NuGet dependency graph."
-                            ),
-                        }
-                    )
-                missing_restore_projects = [
-                    project.relative_to(ROOT).as_posix()
-                    for project in dotnet_projects
-                    if not any(
-                        dotnet_restore_targets_project(
-                            tokens,
-                            project.relative_to(ROOT).as_posix(),
-                        )
-                        for tokens in restore_tokens
-                    )
-                ]
-                if missing_restore_projects:
-                    blockers.append(
-                        {
-                            "code": "DOTNET_LOCKED_RESTORE_PROJECT_MISSING",
-                            "projects": missing_restore_projects,
-                            "detail": (
-                                "Every release project with PackageReference "
-                                "dependencies must be an exact project token in "
-                                "a canonical dotnet restore command."
-                            ),
-                        }
-                    )
+            elif any(
+                "--locked-mode" not in command
+                and "RestoreLockedMode=true" not in command
+                for command in restore_commands
+            ):
+                blockers.append(
+                    {
+                        "code": "DOTNET_RESTORE_NOT_LOCKED",
+                        "detail": (
+                            "Every canonical dotnet restore must enforce the "
+                            "committed NuGet dependency graph."
+                        ),
+                    }
+                )
 
     return {
         "schema_version": "1.0.0",

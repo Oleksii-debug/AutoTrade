@@ -119,6 +119,41 @@ def _checkpoint_owner(
     )
 
 
+def _require_negative_resolution_authority(
+    payload: Mapping[str, Any],
+) -> None:
+    """Reject durable real-provider absence verdicts without accepted Q authority.
+
+    Reconciliation coverage objects remain useful diagnostic state, but their
+    caller-authored booleans are not financial authority. Until WP-20 has an
+    immutable provider-Q coverage proof bound to exact source semantics, a real
+    PAPER/LIVE provider cannot durably publish or re-consume PROVEN_ABSENT.
+
+    The exact SIMULATED provider is retained only for the existing PAPER
+    vertical-slice/test path. LIVE never receives that exception.
+    """
+
+    provider = _text(payload.get("provider_id"), name="provider_id").upper()
+    environment = _text(payload.get("environment"), name="environment").upper()
+    if environment not in {"PAPER", "LIVE"}:
+        return
+    if environment == "PAPER" and provider == "SIMULATED":
+        return
+
+    resolutions = payload.get("submission_resolutions")
+    if not isinstance(resolutions, list):
+        raise ValueError("checkpoint submission_resolutions must be a list")
+    for item in resolutions:
+        if not isinstance(item, Mapping):
+            raise ValueError("submission resolution must be an object")
+        outcome = _text(item.get("outcome"), name="outcome").upper()
+        if outcome == "PROVEN_ABSENT":
+            raise ValueError(
+                "PAPER/LIVE real-provider PROVEN_ABSENT requires accepted "
+                "provider coverage authority"
+            )
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -297,6 +332,8 @@ def record_reconciliation_checkpoint(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    if type(result) is not ReconciliationResult:
+        raise TypeError("result must be exact ReconciliationResult")
     _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
@@ -306,6 +343,7 @@ def record_reconciliation_checkpoint(
         "host_id": host,
         "owner_epoch": epoch,
     }
+    _require_negative_resolution_authority(payload)
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
         provider_id=result.provider_id,
@@ -378,12 +416,13 @@ def load_latest_reconciliation_checkpoint(
     if not events:
         return None
     event = events[-1]
-    _require_checkpoint_scope(
+    payload = _require_checkpoint_scope(
         event,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     return event
 
 
@@ -426,6 +465,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
             or payload.get("environment") != scope
         ):
             continue
+        _require_negative_resolution_authority(payload)
         aggregate_version = event.get("aggregate_version")
         if type(aggregate_version) is not int or aggregate_version <= 0:
             raise ValueError(
@@ -570,6 +610,7 @@ def load_submission_resolution_evidence(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -668,7 +709,6 @@ def load_account_resource_availability_evidence(
     evidence_artifact_store: ArtifactStore | None = None,
     require_latest_scope: bool = False,
     journal_sequence_cut: int | None = None,
-    _historical_risk_event_id: str | None = None,
 ) -> dict[str, Any]:
     """Return exact reservable availability from a fresh provider snapshot.
 
@@ -682,49 +722,13 @@ def load_account_resource_availability_evidence(
         raise TypeError("store must be JournalStore")
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
-    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
-    historical_cut = journal_sequence_cut
-    if _historical_risk_event_id is not None:
-        if require_latest_scope:
-            raise ValueError("historical verification cannot authorize current availability")
-        risk_event = store.get_event(_historical_risk_event_id)
-        if (
-            risk_event is None
-            or risk_event.get("event_type") != "RiskDecisionRecorded"
-            or risk_event.get("aggregate_type") != "risk_decision"
-            or type(risk_event.get("journal_sequence")) is not int
-            or not isinstance(risk_event.get("payload"), Mapping)
-        ):
-            raise ValueError("historical availability requires a durable risk event")
-        risk_payload = risk_event["payload"]
-        historical_evidence = risk_payload.get("reservation_availability_evidence")
-        risk_cut = risk_payload.get("journal_sequence_cut")
-        if (
-            type(historical_evidence) is not dict
-            or historical_evidence.get("checkpoint_event_id") != event_id
-            or historical_evidence.get("provider_id") != provider_id
-            or historical_evidence.get("account_id") != account_id
-            or historical_evidence.get("environment") != environment
-        ):
-            raise ValueError("historical risk availability scope differs")
-        if (
-            type(risk_cut) is not int
-            or risk_cut < 0
-            or risk_event["journal_sequence"] <= risk_cut
-        ):
-            raise ValueError("historical durable risk event journal cut is invalid")
-        if historical_cut is not None and historical_cut != risk_cut:
-            raise ValueError("historical risk event journal cut differs")
-        historical_cut = risk_cut
-    if historical_cut is not None:
-        if (
-            type(historical_cut) is not int
-            or historical_cut < 0
-            or historical_cut > store.current_journal_sequence()
-        ):
+    if journal_sequence_cut is not None:
+        if (type(journal_sequence_cut) is not int or journal_sequence_cut < 0
+                or journal_sequence_cut > store.current_journal_sequence()):
             raise ValueError("historical availability journal cut is invalid")
         if require_latest_scope:
             raise ValueError("current availability cannot use a historical journal cut")
+    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     current_scope_head = None
     if require_latest_scope:
         current_scope_head = require_current_reconciliation_checkpoint(
@@ -737,10 +741,9 @@ def load_account_resource_availability_evidence(
     checkpoint = store.get_event(event_id)
     if checkpoint is None:
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
-    if (
-        historical_cut is not None
-        and checkpoint.get("journal_sequence", historical_cut + 1) > historical_cut
-    ):
+    if (journal_sequence_cut is not None
+            and checkpoint.get("journal_sequence", journal_sequence_cut + 1)
+            > journal_sequence_cut):
         raise ValueError("availability checkpoint is after the historical journal cut")
     if (
         checkpoint.get("event_type") != "AccountReconciled"
@@ -754,6 +757,7 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     if (
         payload.get("complete") is not True
         or payload.get("snapshot_consistent") is not True
@@ -910,11 +914,8 @@ def load_account_resource_availability_evidence(
             "settlement_book"
         ):
             settlement_sequence = settlement_event.get("journal_sequence")
-            if (
-                historical_cut is not None
-                and type(settlement_sequence) is int
-                and settlement_sequence > historical_cut
-            ):
+            if (journal_sequence_cut is not None and type(settlement_sequence) is int
+                    and settlement_sequence > journal_sequence_cut):
                 continue
             settlement_payload = settlement_event.get("payload")
             if (
@@ -955,11 +956,8 @@ def load_account_resource_availability_evidence(
             "option_lifecycle"
         ):
             lifecycle_sequence = lifecycle_event.get("journal_sequence")
-            if (
-                historical_cut is not None
-                and type(lifecycle_sequence) is int
-                and lifecycle_sequence > historical_cut
-            ):
+            if (journal_sequence_cut is not None and type(lifecycle_sequence) is int
+                    and lifecycle_sequence > journal_sequence_cut):
                 continue
             lifecycle_payload = lifecycle_event.get("payload")
             if (
@@ -1142,6 +1140,7 @@ def load_account_resource_availability_evidence(
         )
     return evidence
 
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,
@@ -1157,6 +1156,7 @@ def unresolved_attempt_ids_from_checkpoint(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
         raise ValueError("checkpoint submission_resolutions must be a list")
@@ -1186,6 +1186,7 @@ def unresolved_provider_activity_ids_from_checkpoint(
         account_id=account_id,
         environment=environment,
     )
+    _require_negative_resolution_authority(payload)
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
     for values, name in (

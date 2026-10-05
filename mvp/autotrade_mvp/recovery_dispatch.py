@@ -30,28 +30,104 @@ from .dispatch import (
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_latest_reconciliation_checkpoint_for_scope
 from .recovery import HostState, OwnerFence, RecoveryController
+from .recovery_takeover import _latest_effectful_submission_sequence
 
 
 _ISSUANCE_TOKEN = object()
 _CANONICAL_VALIDATE_SENDER = RecoveryController.validate_sender
+_CANONICAL_VALIDATE_SENDER_CODE = RecoveryController.validate_sender.__code__
 _CANONICAL_RECOVER_DURABLE_UNCERTAINTY = (
     RecoveryController.recover_durable_submission_uncertainty
 )
+_CANONICAL_RECOVER_DURABLE_UNCERTAINTY_CODE = (
+    RecoveryController.recover_durable_submission_uncertainty.__code__
+)
+_CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT = _canonical_journal_authority_snapshot
+_CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE = (
+    _canonical_journal_authority_snapshot.__code__
+)
 _CANONICAL_LOAD_LATEST_RECONCILIATION = load_latest_reconciliation_checkpoint_for_scope
+_CANONICAL_LOAD_LATEST_RECONCILIATION_CODE = (
+    load_latest_reconciliation_checkpoint_for_scope.__code__
+)
+_CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE = _latest_effectful_submission_sequence
+_CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE = (
+    _latest_effectful_submission_sequence.__code__
+)
+_CANONICAL_PAYLOAD_DIGEST = payload_digest
+_CANONICAL_PAYLOAD_DIGEST_CODE = payload_digest.__code__
 _CANONICAL_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_TAKEOVER_SOURCE_ATTR = "_autotrade_takeover_source_owner"
+
+
+def _require_executable_authority() -> None:
+    if RecoveryController.validate_sender is not _CANONICAL_VALIDATE_SENDER:
+        raise PermissionError("recovery sender validator authority changed")
+    if _CANONICAL_VALIDATE_SENDER.__code__ is not _CANONICAL_VALIDATE_SENDER_CODE:
+        raise PermissionError("recovery sender validator code changed")
+    if (
+        RecoveryController.recover_durable_submission_uncertainty
+        is not _CANONICAL_RECOVER_DURABLE_UNCERTAINTY
+    ):
+        raise PermissionError("recovery uncertainty authority changed")
+    if (
+        _CANONICAL_RECOVER_DURABLE_UNCERTAINTY.__code__
+        is not _CANONICAL_RECOVER_DURABLE_UNCERTAINTY_CODE
+    ):
+        raise PermissionError("recovery uncertainty authority code changed")
+    if _canonical_journal_authority_snapshot is not _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT:
+        raise PermissionError("journal snapshot authority changed")
+    if (
+        _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT.__code__
+        is not _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE
+    ):
+        raise PermissionError("journal snapshot authority code changed")
+    if (
+        load_latest_reconciliation_checkpoint_for_scope
+        is not _CANONICAL_LOAD_LATEST_RECONCILIATION
+    ):
+        raise PermissionError("reconciliation reader authority changed")
+    if (
+        _CANONICAL_LOAD_LATEST_RECONCILIATION.__code__
+        is not _CANONICAL_LOAD_LATEST_RECONCILIATION_CODE
+    ):
+        raise PermissionError("reconciliation reader authority code changed")
+    if (
+        _latest_effectful_submission_sequence
+        is not _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE
+    ):
+        raise PermissionError("effectful submission reader authority changed")
+    if (
+        _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE.__code__
+        is not _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE
+    ):
+        raise PermissionError("effectful submission reader authority code changed")
+    if payload_digest is not _CANONICAL_PAYLOAD_DIGEST:
+        raise PermissionError("payload digest authority changed")
+    if _CANONICAL_PAYLOAD_DIGEST.__code__ is not _CANONICAL_PAYLOAD_DIGEST_CODE:
+        raise PermissionError("payload digest authority code changed")
+
+
+def _trusted_journal_authority_snapshot(store: JournalStore):
+    _require_executable_authority()
+    return _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT(store)
 
 
 def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
-    normalized_environment = (
-        environment.strip().upper() if isinstance(environment, str) else ""
-    )
+    # Reject executable subclasses before invoking string normalization, but
+    # preserve the existing built-in string normalization contract.
+    if type(environment) is not str:
+        raise TypeError("environment must be exact text")
+    normalized_environment = environment.strip().upper()
     if normalized_environment not in _CANONICAL_ENVIRONMENTS:
         raise ValueError(
             "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
         )
-    if not isinstance(account_id, str) or not account_id.strip():
-        raise ValueError("account_id is required")
+    if type(account_id) is not str:
+        raise TypeError("account_id must be exact text")
     normalized_account = account_id.strip()
+    if not normalized_account:
+        raise ValueError("account_id is required")
     return (
         normalized_environment,
         normalized_account,
@@ -59,13 +135,104 @@ def _scope(environment: str, account_id: str) -> tuple[str, str, str]:
     )
 
 
-class RecoveryIssuedDispatcher:
-    """Opaque owner-bound facade over the canonical GuardedDispatcher.
+def _takeover_source_owner(recovery: RecoveryController) -> OwnerFence | None:
+    """Diagnostic reader for the takeover-only source marker.
 
-    This is trusted-process composition provenance, not a Python sandbox. The
-    authority-bearing callback is captured from the canonical RecoveryController
-    class at module initialization and is never selected by the dispatch caller.
+    Financial issuance paths intentionally do not dispatch through this mutable
+    module helper after composition. They read and validate the exact marker
+    state directly so rebinding this convenience reader cannot relax authority.
     """
+
+    state = vars(recovery)
+    source = state.get(_TAKEOVER_SOURCE_ATTR)
+    if source is None:
+        return None
+    if type(source) is not OwnerFence:
+        raise PermissionError("takeover source owner authority changed")
+    if type(source.owner_id) is not str or not source.owner_id:
+        raise PermissionError("takeover source owner identity is invalid")
+    if type(source.epoch) is not int or source.epoch < 1:
+        raise PermissionError("takeover source owner epoch is invalid")
+    return source
+
+
+def mark_recovery_takeover_source(
+    recovery: RecoveryController,
+    source: OwnerFence,
+) -> OwnerFence:
+    """Mark an attached durable restart owner as takeover-only authority."""
+
+    if type(recovery) is not RecoveryController:
+        raise TypeError("recovery must be exact RecoveryController")
+    if type(source) is not OwnerFence:
+        raise TypeError("source must be exact OwnerFence")
+    if recovery.owner is not source and recovery.owner != source:
+        raise PermissionError("takeover source is not the attached recovery owner")
+    chain = recovery.durable_owner_chain()
+    if not chain or chain[-1] != source:
+        raise PermissionError("takeover source is not the current durable owner")
+    state = vars(recovery)
+    existing = state.get(_TAKEOVER_SOURCE_ATTR)
+    if existing is not None:
+        if type(existing) is not OwnerFence:
+            raise PermissionError("takeover source owner authority changed")
+        if type(existing.owner_id) is not str or not existing.owner_id:
+            raise PermissionError("takeover source owner identity is invalid")
+        if type(existing.epoch) is not int or existing.epoch < 1:
+            raise PermissionError("takeover source owner epoch is invalid")
+        if existing != source:
+            raise PermissionError(
+                "takeover source owner marker already belongs elsewhere"
+            )
+    state[_TAKEOVER_SOURCE_ATTR] = source
+    recovery.provider_reconciled = False
+    recovery.reason_codes.add("takeover_source_only")
+    recovery.reason_codes.add("startup_reconciliation_required")
+    recovery.state = HostState.RECOVERING
+    return source
+
+
+def activate_recovery_takeover_target(
+    recovery: RecoveryController,
+    *,
+    source: OwnerFence,
+    target: OwnerFence,
+) -> OwnerFence:
+    """Release takeover-only fencing only after exact durable N -> N+1 advance."""
+
+    if type(recovery) is not RecoveryController:
+        raise TypeError("recovery must be exact RecoveryController")
+    if type(source) is not OwnerFence or type(target) is not OwnerFence:
+        raise TypeError("source and target must be exact OwnerFence values")
+    state = vars(recovery)
+    marked_source = state.get(_TAKEOVER_SOURCE_ATTR)
+    if marked_source is None:
+        raise PermissionError("recovery controller is not attached takeover-only")
+    if type(marked_source) is not OwnerFence:
+        raise PermissionError("takeover source owner authority changed")
+    if type(marked_source.owner_id) is not str or not marked_source.owner_id:
+        raise PermissionError("takeover source owner identity is invalid")
+    if type(marked_source.epoch) is not int or marked_source.epoch < 1:
+        raise PermissionError("takeover source owner epoch is invalid")
+    if marked_source != source:
+        raise PermissionError("durable takeover source does not match attached source")
+    if target.epoch != source.epoch + 1:
+        raise PermissionError("durable takeover target is not the next owner generation")
+    if recovery.owner != target:
+        raise PermissionError("recovery controller is not bound to takeover target")
+    chain = recovery.durable_owner_chain()
+    if not chain or chain[-1] != target:
+        raise PermissionError("takeover target is not the current durable owner")
+    state.pop(_TAKEOVER_SOURCE_ATTR, None)
+    recovery.provider_reconciled = False
+    recovery.reason_codes.discard("takeover_source_only")
+    recovery.reason_codes.add("startup_reconciliation_required")
+    recovery.state = HostState.RECOVERING
+    return target
+
+
+class RecoveryIssuedDispatcher:
+    """Opaque owner-bound facade over the canonical GuardedDispatcher."""
 
     __slots__ = (
         "__dispatcher",
@@ -73,6 +240,17 @@ class RecoveryIssuedDispatcher:
         "__store",
         "__store_snapshot",
         "__sender_check",
+        "__sender_check_code",
+        "__recover_uncertainty",
+        "__recover_uncertainty_code",
+        "__journal_snapshot_reader",
+        "__journal_snapshot_reader_code",
+        "__reconciliation_reader",
+        "__reconciliation_reader_code",
+        "__latest_effectful_submission_sequence",
+        "__latest_effectful_submission_sequence_code",
+        "__payload_digest",
+        "__payload_digest_code",
         "__owner",
         "__environment",
         "__account_id",
@@ -102,15 +280,53 @@ class RecoveryIssuedDispatcher:
             raise TypeError("store must be exact JournalStore")
         if type(owner) is not OwnerFence:
             raise TypeError("owner must be exact OwnerFence")
+        if type(owner.owner_id) is not str or not owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(owner.epoch) is not int or owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
+        _require_executable_authority()
         normalized_environment, normalized_account, _ = _scope(
             environment, account_id
         )
+        source = vars(recovery).get(_TAKEOVER_SOURCE_ATTR)
+        if source is not None:
+            if type(source) is not OwnerFence:
+                raise PermissionError("takeover source owner authority changed")
+            if type(source.owner_id) is not str or not source.owner_id:
+                raise PermissionError("takeover source owner identity is invalid")
+            if type(source.epoch) is not int or source.epoch < 1:
+                raise PermissionError("takeover source owner epoch is invalid")
+            if owner == source:
+                raise PermissionError(
+                    "takeover source owner cannot receive recovery-issued sender authority"
+                )
+
+        sender_function = _CANONICAL_VALIDATE_SENDER
+        recover_function = _CANONICAL_RECOVER_DURABLE_UNCERTAINTY
+        snapshot_reader = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT
+        reconciliation_reader = _CANONICAL_LOAD_LATEST_RECONCILIATION
+        effectful_reader = _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE
+        digest_function = _CANONICAL_PAYLOAD_DIGEST
+
         self.__recovery = recovery
         self.__store = store
-        self.__store_snapshot = _canonical_journal_authority_snapshot(store)
-        self.__sender_check = _CANONICAL_VALIDATE_SENDER.__get__(
+        self.__store_snapshot = snapshot_reader(store)
+        self.__sender_check = sender_function.__get__(recovery, RecoveryController)
+        self.__sender_check_code = _CANONICAL_VALIDATE_SENDER_CODE
+        self.__recover_uncertainty = recover_function.__get__(
             recovery, RecoveryController
         )
+        self.__recover_uncertainty_code = _CANONICAL_RECOVER_DURABLE_UNCERTAINTY_CODE
+        self.__journal_snapshot_reader = snapshot_reader
+        self.__journal_snapshot_reader_code = _CANONICAL_JOURNAL_AUTHORITY_SNAPSHOT_CODE
+        self.__reconciliation_reader = reconciliation_reader
+        self.__reconciliation_reader_code = _CANONICAL_LOAD_LATEST_RECONCILIATION_CODE
+        self.__latest_effectful_submission_sequence = effectful_reader
+        self.__latest_effectful_submission_sequence_code = (
+            _CANONICAL_LATEST_EFFECTFUL_SUBMISSION_SEQUENCE_CODE
+        )
+        self.__payload_digest = digest_function
+        self.__payload_digest_code = _CANONICAL_PAYLOAD_DIGEST_CODE
         self.__owner = owner
         self.__environment = normalized_environment
         self.__account_id = normalized_account
@@ -142,8 +358,87 @@ class RecoveryIssuedDispatcher:
             raise PermissionError("recovery controller authority changed")
         if type(self.__store) is not JournalStore:
             raise PermissionError("submission journal authority changed")
-        if _canonical_journal_authority_snapshot(self.__store) != self.__store_snapshot:
+        if type(self.__owner) is not OwnerFence:
+            raise PermissionError("recovery owner authority changed")
+        if type(self.__owner.owner_id) is not str or not self.__owner.owner_id:
+            raise PermissionError("recovery owner identity is not canonical exact text")
+        if type(self.__owner.epoch) is not int or self.__owner.epoch < 1:
+            raise PermissionError("recovery owner epoch is not a positive exact integer")
+        if (
+            type(self.__environment) is not str
+            or self.__environment not in _CANONICAL_ENVIRONMENTS
+        ):
+            raise PermissionError("issued dispatcher environment authority changed")
+        if (
+            type(self.__account_id) is not str
+            or not self.__account_id
+            or self.__account_id != self.__account_id.strip()
+        ):
+            raise PermissionError("issued dispatcher account authority changed")
+        source = vars(self.__recovery).get(_TAKEOVER_SOURCE_ATTR)
+        if source is not None:
+            if type(source) is not OwnerFence:
+                raise PermissionError("takeover source owner authority changed")
+            if type(source.owner_id) is not str or not source.owner_id:
+                raise PermissionError("takeover source owner identity is invalid")
+            if type(source.epoch) is not int or source.epoch < 1:
+                raise PermissionError("takeover source owner epoch is invalid")
+            if self.__owner == source:
+                raise PermissionError(
+                    "takeover source owner cannot retain recovery-issued sender authority"
+                )
+
+        sender_function = self.__sender_check.__func__
+        if self.__sender_check.__self__ is not self.__recovery:
+            raise PermissionError("bound recovery sender authority changed")
+        if RecoveryController.validate_sender is not sender_function:
+            raise PermissionError("recovery sender validator authority changed")
+        if sender_function.__code__ is not self.__sender_check_code:
+            raise PermissionError("recovery sender validator code changed")
+
+        recover_function = self.__recover_uncertainty.__func__
+        if self.__recover_uncertainty.__self__ is not self.__recovery:
+            raise PermissionError("bound recovery uncertainty authority changed")
+        if (
+            RecoveryController.recover_durable_submission_uncertainty
+            is not recover_function
+        ):
+            raise PermissionError("recovery uncertainty authority changed")
+        if recover_function.__code__ is not self.__recover_uncertainty_code:
+            raise PermissionError("recovery uncertainty authority code changed")
+
+        snapshot_reader = self.__journal_snapshot_reader
+        if _canonical_journal_authority_snapshot is not snapshot_reader:
+            raise PermissionError("journal snapshot authority changed")
+        if snapshot_reader.__code__ is not self.__journal_snapshot_reader_code:
+            raise PermissionError("journal snapshot authority code changed")
+        if snapshot_reader(self.__store) != self.__store_snapshot:
             raise PermissionError("submission journal generation changed")
+
+        reconciliation_reader = self.__reconciliation_reader
+        if (
+            load_latest_reconciliation_checkpoint_for_scope
+            is not reconciliation_reader
+        ):
+            raise PermissionError("reconciliation reader authority changed")
+        if reconciliation_reader.__code__ is not self.__reconciliation_reader_code:
+            raise PermissionError("reconciliation reader authority code changed")
+
+        effectful_reader = self.__latest_effectful_submission_sequence
+        if _latest_effectful_submission_sequence is not effectful_reader:
+            raise PermissionError("effectful submission reader authority changed")
+        if (
+            effectful_reader.__code__
+            is not self.__latest_effectful_submission_sequence_code
+        ):
+            raise PermissionError("effectful submission reader authority code changed")
+
+        digest_function = self.__payload_digest
+        if payload_digest is not digest_function:
+            raise PermissionError("payload digest authority changed")
+        if digest_function.__code__ is not self.__payload_digest_code:
+            raise PermissionError("payload digest authority code changed")
+
         if self.__dispatcher.store is not self.__store:
             raise PermissionError("guarded dispatcher journal authority changed")
         if (
@@ -168,7 +463,7 @@ class RecoveryIssuedDispatcher:
                 "production sender requires accepted durable reconciliation"
             )
 
-        checkpoint = _CANONICAL_LOAD_LATEST_RECONCILIATION(
+        checkpoint = self.__reconciliation_reader(
             self.__store,
             provider_id=provider.strip().upper(),
             account_id=self.__account_id,
@@ -178,17 +473,31 @@ class RecoveryIssuedDispatcher:
             raise PermissionError(
                 "production sender requires a current durable reconciliation checkpoint"
             )
+        if type(checkpoint) is not dict:
+            raise PermissionError("durable reconciliation checkpoint is invalid")
         payload = checkpoint.get("payload")
         if (
             checkpoint.get("event_type") != "AccountReconciled"
             or checkpoint.get("aggregate_type") != "account_reconciliation"
-            or not isinstance(payload, dict)
-            or payload_digest(payload) != checkpoint.get("payload_hash")
+            or type(payload) is not dict
+            or self.__payload_digest(payload) != checkpoint.get("payload_hash")
         ):
             raise PermissionError("durable reconciliation payload is invalid")
+        checkpoint_sequence = checkpoint.get("journal_sequence")
+        if type(checkpoint_sequence) is not int or checkpoint_sequence < 1:
+            raise PermissionError("durable reconciliation journal sequence is invalid")
+        latest_effectful_sequence = self.__latest_effectful_submission_sequence(
+            self.__store,
+            environment=self.__environment,
+            account_id=self.__account_id,
+        )
+        if checkpoint_sequence <= latest_effectful_sequence:
+            raise PermissionError(
+                "durable reconciliation predates latest durable send state"
+            )
         checkpoint_owner = payload.get("checkpoint_owner")
         if (
-            not isinstance(checkpoint_owner, dict)
+            type(checkpoint_owner) is not dict
             or checkpoint_owner.get("host_id") != self.__owner.owner_id
             or checkpoint_owner.get("owner_epoch") != str(self.__owner.epoch)
         ):
@@ -204,12 +513,12 @@ class RecoveryIssuedDispatcher:
 
         blocking = payload.get("blocking_resources")
         resolutions = payload.get("submission_resolutions")
-        if not isinstance(blocking, list) or not isinstance(resolutions, list):
+        if type(blocking) is not list or type(resolutions) is not list:
             raise PermissionError("durable reconciliation readiness fields are invalid")
         if blocking:
             raise PermissionError("durable reconciliation has blocking resources")
         for resolution in resolutions:
-            if not isinstance(resolution, dict):
+            if type(resolution) is not dict:
                 raise PermissionError("durable reconciliation resolution is invalid")
             outcome = resolution.get("outcome")
             if type(outcome) is not str or outcome.strip().upper() == "UNKNOWN":
@@ -234,23 +543,17 @@ class RecoveryIssuedDispatcher:
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
     ) -> DispatchOutcome:
-        """Dispatch with recovery-owned sender validation at the final guard.
-
-        ``sender_check`` is intentionally ignored. It remains in the signature
-        only so legacy callers cannot regain authority by routing around this
-        facade while call sites are migrated.
-        """
+        """Dispatch with recovery-owned sender validation at the final guard."""
 
         del sender_check
         self._require_issued_authority()
 
         def canonical_sender_check(owner_id: str, owner_epoch: int) -> None:
-            # Rehydrate same-process and restart-visible ambiguity from the
-            # canonical submission journal while the shared sender gate is held.
-            # A previous SubmissionSending/SubmissionUnknown must invalidate
-            # READY before another attempt can cross the irreversible barrier.
-            _CANONICAL_RECOVER_DURABLE_UNCERTAINTY(
-                self.__recovery,
+            # Revalidate executable provenance at the actual irreversible cut.
+            # This closes callback-time retargeting after the outer dispatch
+            # preflight but before SubmissionSending/provider I/O.
+            self._require_issued_authority()
+            self.__recover_uncertainty(
                 environment=self.__environment,
                 account_id=self.__account_id,
             )
@@ -273,15 +576,21 @@ class RecoveryIssuedDispatcher:
             submission_scope=submission_scope,
         )
         if outcome.status == "UNKNOWN":
-            # The GuardedDispatcher has already persisted the ambiguous durable
-            # chronology. Reflect that fact into recovery immediately so
-            # readiness/admission cannot remain optimistically READY until a
-            # later send happens to re-enter the final barrier.
-            _CANONICAL_RECOVER_DURABLE_UNCERTAINTY(
-                self.__recovery,
-                environment=self.__environment,
-                account_id=self.__account_id,
-            )
+            # Durable UNKNOWN must remain the public outcome even if executable
+            # authority is concurrently damaged after the possible provider send.
+            # Reflect the blocker into process-local readiness whenever the
+            # retained canonical recovery reader is still trustworthy.
+            try:
+                self._require_issued_authority()
+            except PermissionError:
+                self.__recovery.provider_reconciled = False
+                self.__recovery.reason_codes.add("provider_uncertainty")
+                self.__recovery.state = HostState.DEGRADED
+            else:
+                self.__recover_uncertainty(
+                    environment=self.__environment,
+                    account_id=self.__account_id,
+                )
         return outcome
 
 
@@ -296,24 +605,19 @@ def build_recovery_issued_dispatcher(
     """Mint one dispatcher from the exact current durable recovery owner.
 
     Issuance is allowed while the host is RECOVERING so product bootstrap can
-    finish before reconciliation. That does not grant send authority: the bound
-    ``validate_sender`` is re-executed inside the GuardedDispatcher final sender
-    gate and requires the same durable owner to be current and the controller to
-    be READY before ``SubmissionSending`` can be persisted or provider bytes can
-    be emitted.
+    finish before reconciliation. A controller attached to a pre-existing
+    durable source owner is an exception: it is takeover-only and may not mint
+    a sender until exact durable N -> N+1 takeover activation clears that fence.
     """
 
     if type(recovery) is not RecoveryController:
         raise TypeError("recovery must be exact RecoveryController")
     if type(store) is not JournalStore:
         raise TypeError("store must be exact JournalStore")
-    if (
-        not isinstance(prepared_lease_seconds, int)
-        or isinstance(prepared_lease_seconds, bool)
-        or prepared_lease_seconds < 1
-    ):
-        raise ValueError("prepared_lease_seconds must be a positive integer")
+    if type(prepared_lease_seconds) is not int or prepared_lease_seconds < 1:
+        raise ValueError("prepared_lease_seconds must be a positive exact integer")
 
+    _require_executable_authority()
     normalized_environment, normalized_account, expected_scope = _scope(
         environment, account_id
     )
@@ -322,19 +626,34 @@ def build_recovery_issued_dispatcher(
         raise PermissionError(
             "dispatcher JournalStore must be the exact recovery owner store"
         )
-    if recovery.owner_scope != expected_scope:
+    owner_scope = state.get("_owner_scope")
+    if type(owner_scope) is not str or owner_scope != expected_scope:
         raise PermissionError("dispatcher scope does not match recovery owner scope")
 
     owner = recovery.owner
     if type(owner) is not OwnerFence:
         raise PermissionError("recovery has no active durable owner")
+    if type(owner.owner_id) is not str or not owner.owner_id:
+        raise PermissionError("recovery owner identity is not canonical exact text")
+    if type(owner.epoch) is not int or owner.epoch < 1:
+        raise PermissionError("recovery owner epoch is not a positive exact integer")
+    source = state.get(_TAKEOVER_SOURCE_ATTR)
+    if source is not None:
+        if type(source) is not OwnerFence:
+            raise PermissionError("takeover source owner authority changed")
+        if type(source.owner_id) is not str or not source.owner_id:
+            raise PermissionError("takeover source owner identity is invalid")
+        if type(source.epoch) is not int or source.epoch < 1:
+            raise PermissionError("takeover source owner epoch is invalid")
+        if owner == source:
+            raise PermissionError(
+                "takeover source owner cannot receive recovery-issued sender authority"
+            )
     durable_chain = recovery.durable_owner_chain()
     if not durable_chain or durable_chain[-1] != owner:
         raise PermissionError("recovery owner is not the current durable owner")
 
-    # Snapshot the exact backing generation before creating the inner dispatcher;
-    # GuardedDispatcher snapshots and rechecks the same generation independently.
-    _canonical_journal_authority_snapshot(store)
+    _trusted_journal_authority_snapshot(store)
     return RecoveryIssuedDispatcher(
         recovery=recovery,
         store=store,

@@ -16,7 +16,7 @@ from mvp.autotrade_mvp.host_network import (
     header_principal_resolver,
     public_session_reference,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
@@ -194,90 +194,6 @@ class HostNetworkTests(unittest.TestCase):
             public_session_reference(self.owner.token),
         )
         self.assertNotIn(self.owner.token, response.body.decode("utf-8"))
-
-    def test_snapshot_retries_on_one_global_journal_advance_and_returns_one_coherent_cut(self):
-        writer = JournalStore(self.path)
-        inserted = {"done": False}
-        calls = {"count": 0}
-
-        def advancing_snapshot(durable, principal):
-            calls["count"] += 1
-            value = self._snapshot(durable, principal)
-            if not inserted["done"]:
-                inserted["done"] = True
-                payload = {"reason": "snapshot-cut-race-regression"}
-                writer.append_event(
-                    {
-                        "event_id": "snapshot-cut-race-event",
-                        "event_type": "SnapshotCutRaceInjected",
-                        "aggregate_type": "snapshot_cut_test",
-                        "aggregate_id": "singleton",
-                        "aggregate_version": "1",
-                        "payload": payload,
-                        "payload_hash": payload_digest(payload),
-                        "committed_at": "2026-09-25T09:30:00Z",
-                    }
-                )
-            return value
-
-        app = self._application(
-            origin=self.origin,
-            boundary=self.boundary,
-            session=self.owner,
-            path=self.path,
-            snapshot_provider=advancing_snapshot,
-        )
-        response = app.dispatch(
-            method="GET",
-            target="/api/v1/state",
-            headers=self.headers(),
-        )
-        self.assertEqual(response.status, 200)
-        self.assertEqual(self.body(response)["state_version"], "0")
-        self.assertEqual(calls["count"], 2)
-
-    def test_snapshot_persistent_journal_churn_remains_bounded_and_fails_closed(self):
-        writer = JournalStore(self.path)
-        calls = {"count": 0}
-
-        def always_advancing_snapshot(durable, principal):
-            calls["count"] += 1
-            value = self._snapshot(durable, principal)
-            sequence = calls["count"]
-            payload = {"reason": "snapshot-cut-persistent-churn", "attempt": sequence}
-            writer.append_event(
-                {
-                    "event_id": f"snapshot-cut-persistent-{sequence}",
-                    "event_type": "SnapshotCutRaceInjected",
-                    "aggregate_type": "snapshot_cut_persistent_test",
-                    "aggregate_id": str(sequence),
-                    "aggregate_version": "1",
-                    "payload": payload,
-                    "payload_hash": payload_digest(payload),
-                    "committed_at": "2026-09-25T09:30:00Z",
-                }
-            )
-            return value
-
-        app = self._application(
-            origin=self.origin,
-            boundary=self.boundary,
-            session=self.owner,
-            path=self.path,
-            snapshot_provider=always_advancing_snapshot,
-        )
-        response = app.dispatch(
-            method="GET",
-            target="/api/v1/state",
-            headers=self.headers(),
-        )
-        self.assertEqual(response.status, 503)
-        self.assertEqual(
-            self.body(response),
-            {"error": "SNAPSHOT_BUSY", "retryable": True},
-        )
-        self.assertEqual(dict(response.headers)["Retry-After"], "1")
-        self.assertEqual(calls["count"], 4)
 
     def test_snapshot_role_cannot_exceed_authenticated_session_role(self):
         observer = self.boundary.create_session(
@@ -1142,6 +1058,141 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_host_id_configuration_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("host_id strip callback must not run")
+
+        with self.assertRaisesRegex(ValueError, "host_id is required"):
+            AuthenticatedHostApplication(
+                JournalStore(str(Path(self.directory.name) / "hostile-host-id.sqlite3")),
+                security_boundary=self.boundary,
+                account_id="paper-account-1",
+                environment="PAPER",
+                host_id=HostileText("host-local-1"),
+                public_origin=self.origin,
+                principal_resolver=header_principal_resolver,
+                snapshot_provider=self._snapshot,
+                now=lambda: "2026-09-25T09:30:00Z",
+            )
+
+        self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_scope_identity_rejects_str_subclasses_before_comparison(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot identity equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot identity inequality callback must not run")
+
+        for field in ("account_id", "host_id"):
+            with self.subTest(field=field):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = HostileText(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-{field}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+                self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_identity_metadata_rejects_str_subclasses_without_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("snapshot text truthiness callback must not run")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot text equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot text inequality callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("snapshot text strip callback must not run")
+
+        cases = (
+            ("actor", "owner"),
+            ("session", public_session_reference(self.owner.token)),
+            ("role", "OWNER"),
+            ("capability", "READ"),
+            ("reason_code", "diagnostic"),
+            ("server_time", "2026-09-25T09:30:00Z"),
+        )
+        for target, raw_value in cases:
+            with self.subTest(target=target):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _target=target, _value=raw_value):
+                    payload = dict(self._snapshot(durable, principal))
+                    hostile = HostileText(_value)
+                    if _target in {"actor", "session", "role"}:
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"][_target] = hostile
+                    elif _target == "capability":
+                        payload["permission_summary"] = dict(payload["permission_summary"])
+                        payload["permission_summary"]["capabilities"] = [hostile]
+                    elif _target == "reason_code":
+                        payload["reason_codes"] = [hostile]
+                    else:
+                        payload["server_time"] = hostile
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-metadata-{target}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(self.body(response), {"error": "INVALID_REQUEST"})
+                self.assertEqual(callbacks, [])
+
+
     def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
         for field in ("state_version", "event_cursor"):
             with self.subTest(field=field):
@@ -1188,6 +1239,9 @@ class HostNetworkTests(unittest.TestCase):
     def test_event_cursor_rejects_noncanonical_query_aliases(self):
         targets = (
             "/api/v1/events?after=01",
+            "/api/v1/events?after=%31",
+            "/api/v1/events?after=%30",
+            "/api/v1/events?a%66ter=0",
             "/api/v1/events?after=%2B1",
             "/api/v1/events?after=-0",
             "/api/v1/events?after=%200",

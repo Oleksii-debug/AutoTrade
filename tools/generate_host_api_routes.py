@@ -110,11 +110,6 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
                     raise ValueError(
                         "nested OpenAPI parameter content appeared outside schema"
                     )
-                if line == "            $ref: https://schemas.autotrade.local/5.0.0/common.schema.json#/$defs/Sequence":
-                    if kind_match.group(1) != "query" or direct.get("name") != "after" or schema:
-                        raise ValueError("Sequence reference is supported only for the event cursor query")
-                    schema["$ref"] = "canonical-sequence"
-                    continue
                 schema_match = re.fullmatch(
                     r"            ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
                     line,

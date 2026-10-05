@@ -195,20 +195,6 @@ public sealed class EmergencyCommandUncertainException : Exception
 }
 
 /// <summary>
-/// The authenticated host is reachable but cannot currently expose one
-/// coherent journal-cut snapshot. No durable state is carried by this exception.
-/// </summary>
-public sealed class EmergencySnapshotBusyException : Exception
-{
-    public EmergencySnapshotBusyException()
-        : base(
-            "The authenticated host is reachable, but one coherent state snapshot "
-            + "is temporarily unavailable. Retry without treating prior state as current.")
-    {
-    }
-}
-
-/// <summary>
 /// Authenticated client for the one canonical versioned host API. It contains no
 /// provider credentials, financial logic, or alternate command authority.
 /// </summary>
@@ -282,22 +268,15 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 if (!string.Equals(
                         existing.Actor,
                         currentSession.Actor,
-                        StringComparison.Ordinal))
-                {
-                    throw new EmergencyCommandUncertainException(
-                        existing.CommandId,
-                        "The unresolved emergency command is bound to a different actor. "
-                        + "Its identity is preserved and will not be retargeted.");
-                }
-
-                if (!FixedTimeEquals(
+                        StringComparison.Ordinal)
+                    || !FixedTimeEquals(
                         existing.SessionReference,
                         currentSessionReference))
                 {
-                    return await RecoverAcceptedOperationAfterSessionRotationAsync(
-                        existing,
-                        currentSession,
-                        cancellationToken);
+                    throw new EmergencyCommandUncertainException(
+                        existing.CommandId,
+                        "The unresolved emergency command is bound to a different or expired host session. "
+                        + "Its identity is preserved and will not be retargeted.");
                 }
 
                 pending = existing;
@@ -314,7 +293,6 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     SessionReference: currentSessionReference,
                     AccountId: snapshot.Status.AccountId,
                     Environment: snapshot.Status.Environment,
-                    HostId: snapshot.Status.HostId,
                     ExpectedStateVersion: snapshot.Status.StateVersion);
                 PersistPendingCommand(pending);
             }
@@ -431,8 +409,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(
                             operationId,
-                            cancellationToken,
-                            currentSession);
+                            cancellationToken);
                         bool terminal = operation.State is
                             EmergencyOperationState.Succeeded
                             or EmergencyOperationState.Failed
@@ -506,110 +483,6 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
     }
 
-    private async Task<EmergencyCommandResult> RecoverAcceptedOperationAfterSessionRotationAsync(
-        PendingCommand pending,
-        EmergencyHostSession currentSession,
-        CancellationToken cancellationToken)
-    {
-        if (pending.HostId is null)
-        {
-            throw new EmergencyCommandUncertainException(
-                pending.CommandId,
-                "The unresolved emergency command predates durable host-identity binding. "
-                + "A replacement session cannot prove that it is attached to the same host, so "
-                + "the command remains unresolved and will not be resent or retargeted.");
-        }
-
-        Snapshot snapshot;
-        try
-        {
-            snapshot = await GetSnapshotAsync(
-                cancellationToken,
-                currentSession);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            throw new EmergencyCommandUncertainException(
-                pending.CommandId,
-                "The unresolved emergency command is bound to an earlier session, and the current session "
-                + "could not prove the same authenticated host scope. The command remains unresolved and "
-                + "will not be resent or retargeted.",
-                error);
-        }
-
-        if (!string.Equals(
-                snapshot.Status.HostId,
-                pending.HostId,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                snapshot.Status.AccountId,
-                pending.AccountId,
-                StringComparison.Ordinal)
-            || !string.Equals(
-                snapshot.Status.Environment,
-                pending.Environment,
-                StringComparison.Ordinal))
-        {
-            throw new EmergencyCommandUncertainException(
-                pending.CommandId,
-                "The current authenticated host scope does not match the unresolved emergency command. "
-                + "The command remains unresolved and will not be resent or retargeted.");
-        }
-
-        string operationId = HostOperationIdentity.Derive(
-            pending.AccountId,
-            pending.Environment,
-            pending.CommandId);
-        EmergencyOperationStatus operation;
-        try
-        {
-            // The read-only operation lookup is the journal-continuity proof.
-            // A replacement session never replays or rewrites the persisted
-            // command. If this exact operation is absent, malformed, foreign,
-            // unauthenticated or unreachable, recovery remains unresolved.
-            operation = await GetOperationAsync(
-                operationId,
-                cancellationToken,
-                currentSession);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception error)
-        {
-            throw new EmergencyCommandUncertainException(
-                pending.CommandId,
-                "The current authenticated host did not prove the exact durable operation derived from "
-                + "the unresolved command. The command remains unresolved and will not be resent or retargeted.",
-                error);
-        }
-
-        bool terminal = operation.State is
-            EmergencyOperationState.Succeeded
-            or EmergencyOperationState.Failed
-            or EmergencyOperationState.Cancelled;
-        bool recoveryRecordCleared =
-            terminal && TryClearPendingCommand();
-        return new EmergencyCommandResult(
-            accepted: true,
-            durableBlockConfirmed: operation.DurableBlockConfirmed,
-            inFlightActions: operation.InFlightActions,
-            operationId: operationId,
-            message: "A replacement authenticated session recovered the exact durable operation "
-                + operationId
-                + " by read-only identity lookup; the original command was not resent or retargeted"
-                + (terminal
-                    ? (recoveryRecordCleared
-                        ? "."
-                        : ". The terminal operation was observed, but the secure local recovery record could not be cleared.")
-                    : ". The operation is not terminal; the secure local recovery record is retained."));
-    }
-
     private void PersistPendingCommand(PendingCommand pending)
     {
         _pendingCommandStore.Save(SerializePendingCommand(pending));
@@ -618,23 +491,18 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     private static string SerializePendingCommand(PendingCommand pending)
     {
-        Dictionary<string, string> payload = new(StringComparer.Ordinal)
-        {
-            ["schema_version"] = pending.HostId is null ? "2" : "3",
-            ["command_id"] = pending.CommandId,
-            ["idempotency_key"] = pending.IdempotencyKey,
-            ["actor"] = pending.Actor,
-            ["session"] = pending.SessionReference,
-            ["account_id"] = pending.AccountId,
-            ["environment"] = pending.Environment,
-            ["expected_state_version"] = pending.ExpectedStateVersion,
-        };
-        if (pending.HostId is not null)
-        {
-            payload["host_id"] = pending.HostId;
-        }
-
-        return JsonSerializer.Serialize(payload);
+        return JsonSerializer.Serialize(
+            new
+            {
+                schema_version = "2",
+                command_id = pending.CommandId,
+                idempotency_key = pending.IdempotencyKey,
+                actor = pending.Actor,
+                session = pending.SessionReference,
+                account_id = pending.AccountId,
+                environment = pending.Environment,
+                expected_state_version = pending.ExpectedStateVersion,
+            });
     }
 
     private PendingCommand? LoadPendingCommand()
@@ -664,37 +532,17 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 error);
         }
 
-        string schemaVersion = RequiredString(value, "schema_version");
-        if (schemaVersion is not ("1" or "2" or "3"))
-        {
-            throw new InvalidOperationException(
-                "Persisted emergency command schema version is unsupported.");
-        }
-
-        string[] expectedFields = schemaVersion == "3"
-            ?
-            [
-                "schema_version",
-                "command_id",
-                "idempotency_key",
-                "actor",
-                "session",
-                "account_id",
-                "environment",
-                "host_id",
-                "expected_state_version",
-            ]
-            :
-            [
-                "schema_version",
-                "command_id",
-                "idempotency_key",
-                "actor",
-                "session",
-                "account_id",
-                "environment",
-                "expected_state_version",
-            ];
+        string[] expectedFields =
+        [
+            "schema_version",
+            "command_id",
+            "idempotency_key",
+            "actor",
+            "session",
+            "account_id",
+            "environment",
+            "expected_state_version",
+        ];
         string[] actualFields = value.EnumerateObject()
             .Select(property => property.Name)
             .OrderBy(name => name, StringComparer.Ordinal)
@@ -706,6 +554,13 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         {
             throw new InvalidOperationException(
                 "Persisted emergency command has an unexpected schema.");
+        }
+
+        string schemaVersion = RequiredString(value, "schema_version");
+        if (schemaVersion is not ("1" or "2"))
+        {
+            throw new InvalidOperationException(
+                "Persisted emergency command schema version is unsupported.");
         }
 
         string storedSession = RequiredString(value, "session");
@@ -724,9 +579,6 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             SessionReference: sessionReference,
             AccountId: RequiredString(value, "account_id"),
             Environment: RequiredString(value, "environment"),
-            HostId: schemaVersion == "3"
-                ? RequiredString(value, "host_id")
-                : null,
             ExpectedStateVersion: CanonicalSequence(
                 RequiredString(value, "expected_state_version"),
                 "expected_state_version"));
@@ -734,8 +586,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         if (schemaVersion == "1")
         {
             // V1 persisted the reusable bearer. Rewrite the same unresolved
-            // command identity immediately to the bearer-free v2 record. Host
-            // identity is intentionally not invented for legacy unresolved work.
+            // command identity immediately to the v2 public-reference record.
             _pendingCommandStore.Save(SerializePendingCommand(pending));
         }
 
@@ -762,18 +613,12 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         _pendingCommand = null;
     }
 
-    public Task<EmergencyOperationStatus> GetOperationAsync(
+    public async Task<EmergencyOperationStatus> GetOperationAsync(
         string operationId,
-        CancellationToken cancellationToken) =>
-        GetOperationAsync(operationId, cancellationToken, knownSession: null);
-
-    private async Task<EmergencyOperationStatus> GetOperationAsync(
-        string operationId,
-        CancellationToken cancellationToken,
-        EmergencyHostSession? knownSession)
+        CancellationToken cancellationToken)
     {
         string canonicalId = CanonicalGuid(operationId, nameof(operationId));
-        EmergencyHostSession session = GetBoundSession(knownSession);
+        EmergencyHostSession session = GetBoundSession();
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             HostApiRoutes.GetOperation(canonicalId),
@@ -842,34 +687,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
-        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-        {
-            JsonElement unavailable = await ReadObjectAsync(
-                response,
-                cancellationToken);
-            bool exactSnapshotBusy =
-                unavailable.EnumerateObject().Count() == 2
-                && unavailable.TryGetProperty("error", out JsonElement error)
-                && error.ValueKind == JsonValueKind.String
-                && string.Equals(
-                    error.GetString(),
-                    "SNAPSHOT_BUSY",
-                    StringComparison.Ordinal)
-                && unavailable.TryGetProperty(
-                    "retryable",
-                    out JsonElement retryable)
-                && retryable.ValueKind == JsonValueKind.True;
-            if (exactSnapshotBusy)
-            {
-                throw new EmergencySnapshotBusyException();
-            }
-
-            response.EnsureSuccessStatusCode();
-        }
-        else
-        {
-            response.EnsureSuccessStatusCode();
-        }
+        response.EnsureSuccessStatusCode();
 
         JsonElement value = await ReadObjectAsync(response, cancellationToken);
         string hostId = RequiredString(value, "host_id");
@@ -1233,7 +1051,6 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string SessionReference,
         string AccountId,
         string Environment,
-        string? HostId,
         string ExpectedStateVersion);
 }
 
@@ -1242,23 +1059,16 @@ internal static class DesktopHostClientFactory
     public static IEmergencyHostClient Create()
     {
         string? uriText = Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI");
-        Uri? uri;
-        if (string.IsNullOrWhiteSpace(uriText))
-        {
-            // The runnable ZERO launcher binds this exact loopback origin by
-            // default. No authority follows from the default: the client still
-            // requires the current user's paired Credential Manager token.
-            uri = new Uri("http://127.0.0.1:8765/", UriKind.Absolute);
-        }
-        else if (!Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out uri) || uri is null)
-        {
-            return new DisconnectedEmergencyHostClient(
-                "Authenticated host URI configuration is invalid. "
-                + "No durable emergency command can be issued until it is repaired.");
-        }
-
         string? credentialTarget =
             Environment.GetEnvironmentVariable("AUTOTRADE_HOST_CREDENTIAL_TARGET");
+        if (string.IsNullOrWhiteSpace(uriText)
+            || string.IsNullOrWhiteSpace(credentialTarget)
+            || !Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out Uri? uri))
+        {
+            return new DisconnectedEmergencyHostClient(
+                "Authenticated host connection is not configured. "
+                + "Set the non-secret host URI and Windows Credential Manager target after pairing.");
+        }
 
         try
         {
@@ -1271,10 +1081,7 @@ internal static class DesktopHostClientFactory
             {
                 Timeout = TimeSpan.FromSeconds(10),
             };
-            string canonicalCredentialTarget =
-                string.IsNullOrWhiteSpace(credentialTarget)
-                    ? WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(uri)
-                    : credentialTarget.Trim();
+            string canonicalCredentialTarget = credentialTarget.Trim();
             return new AuthenticatedEmergencyHostClient(
                 httpClient,
                 uri,

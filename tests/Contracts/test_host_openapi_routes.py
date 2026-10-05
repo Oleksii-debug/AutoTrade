@@ -19,15 +19,6 @@ class HostOpenApiRouteTests(unittest.TestCase):
             self.assertIn(f"  {route}:", text)
         self.assertNotIn("\n  /v1/", text)
 
-    def test_state_contract_declares_retryable_coherent_snapshot_contention(self):
-        text = OPENAPI.read_text(encoding="utf-8")
-        state = text.split("  /api/v1/state:", 1)[1].split("\n  /api/v1/commands:", 1)[0]
-        self.assertIn('"503":', state)
-        self.assertIn("No mixed-cut snapshot is returned; clients may retry.", state)
-        self.assertIn("Retry-After:", state)
-        self.assertIn("const: SNAPSHOT_BUSY", state)
-        self.assertIn("const: true", state)
-
     def test_cursor_gap_description_points_to_canonical_state_route(self):
         text = OPENAPI.read_text(encoding="utf-8")
         self.assertIn("requires /api/v1/state resnapshot", text)

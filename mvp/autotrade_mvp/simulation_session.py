@@ -152,8 +152,6 @@ def _module_source_root(component) -> Path:
 def _simulation_build_identity() -> str:
     """Bind restart to the exact executable source packages, not only inputs."""
 
-    from research.autotrade_research.strategies.deterministic import ReturnThresholdBaseline
-    from research.autotrade_research.agents.dag import aggregate_specialists
     document = {
         "mvp_source_tree": _python_source_tree_digest(Path(__file__).resolve().parent),
         "shared_numeric_source_tree": _python_source_tree_digest(
@@ -161,12 +159,6 @@ def _simulation_build_identity() -> str:
         ),
         "research_artifact_source_tree": _python_source_tree_digest(
             _module_source_root(ArtifactStore)
-        ),
-        "research_strategy_source_tree": _python_source_tree_digest(
-            _module_source_root(ReturnThresholdBaseline)
-        ),
-        "research_agent_source_tree": _python_source_tree_digest(
-            _module_source_root(aggregate_specialists)
         ),
     }
     return payload_digest(document)
@@ -459,7 +451,7 @@ def _require_zero_wire_blocked_submission(
     store: JournalStore,
     *,
     episode_id: str,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     attempt_id = _uuid("attempt", episode_id)
     aggregate_id = submission_attempt_aggregate_id(
         environment=ENVIRONMENT,
@@ -505,7 +497,15 @@ def _require_zero_wire_blocked_submission(
         or not reason.strip()
     ):
         raise ValueError("durable blocked submission scope is invalid")
-    return attempt_id, expected_client_order_id, reason.strip()
+    blocked_at = blocked.get("committed_at")
+    if (
+        type(blocked_at) is not str
+        or _now(blocked_at) != blocked_at
+        or blocked.get("occurred_at") != blocked_at
+        or blocked.get("observed_at") != blocked_at
+    ):
+        raise ValueError("durable blocked submission timestamp is invalid")
+    return attempt_id, expected_client_order_id, reason.strip(), blocked_at
 
 
 def _require_initial_reconciliation_checkpoint(store: JournalStore) -> dict:
@@ -681,8 +681,13 @@ def _zero_wire_blocked_projection(
     *,
     episode_id: str,
     required_reservation_state: str,
-) -> tuple[dict[str, object], DurableReservationBook, str, str]:
-    attempt_id, client_order_id, reason = _require_zero_wire_blocked_submission(
+) -> tuple[dict[str, object], DurableReservationBook, str, str, str]:
+    (
+        attempt_id,
+        client_order_id,
+        reason,
+        blocked_at,
+    ) = _require_zero_wire_blocked_submission(
         store,
         episode_id=episode_id,
     )
@@ -731,7 +736,7 @@ def _zero_wire_blocked_projection(
         "new_outbound_requests": 0,
     }
     result.update(_started_identity(store, episode_id=episode_id))
-    return result, reservations, attempt_id, client_order_id
+    return result, reservations, attempt_id, client_order_id, blocked_at
 
 
 def _finalize_zero_wire_blocked(
@@ -742,9 +747,17 @@ def _finalize_zero_wire_blocked(
     timestamp: str,
     resumed: bool,
 ) -> dict[str, object]:
+    # The caller timestamp is compatibility-only here. The durable
+    # SubmissionBlocked event owns the terminal chronology on every restart.
+    _now(timestamp)
     validation_start_cut = JournalStore.whole_store_state_cut(store)
-    result, reservations, attempt_id, client_order_id = (
-        _zero_wire_blocked_projection(
+    (
+        result,
+        reservations,
+        attempt_id,
+        client_order_id,
+        terminal_timestamp,
+    ) = _zero_wire_blocked_projection(
             store,
             root,
             episode_id=episode_id,
@@ -763,7 +776,7 @@ def _finalize_zero_wire_blocked(
         provider=PROVIDER,
         attempt_id=attempt_id,
         client_order_id=client_order_id,
-        committed_at=timestamp,
+        committed_at=terminal_timestamp,
     )
     if terminal_plan.already_committed or terminal_plan.envelope is None:
         raise ValueError(
@@ -783,7 +796,7 @@ def _finalize_zero_wire_blocked(
         "SimulationSessionCompleted",
         episode_id,
         result,
-        timestamp,
+        terminal_timestamp,
         aggregate_version=2,
     )
     command_id = _uuid("blocked-terminal-command", episode_id)
@@ -1182,6 +1195,14 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         prepared_request_time=timestamp,
                         recovery_now=timestamp if now is None else _now(now),
                     )
+                    if recovery.status == "BLOCKED":
+                        return _finalize_zero_wire_blocked(
+                            store,
+                            root,
+                            episode_id=episode_id,
+                            timestamp=timestamp,
+                            resumed=True,
+                        )
                     if recovery.status == "IN_PROGRESS":
                         # Dispatcher lease activity is an internal recovery
                         # phase, not a new product-level simulation status.
@@ -1797,7 +1818,7 @@ def _autonomous_fill_financials(artifacts, fill, key):
 
 
 def _retained_autonomous_fills(observed, protocol):
-    partials = protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}
+    partials = protocol["execution_profile"] == "TWO_EQUAL_PARTIALS"
     field = "fills" if partials else "fill"
     if set(observed) != {"episode", "protocol_digest", "provider_state", field}:
         raise ValueError("retained fill observation identity differs")
@@ -1890,8 +1911,6 @@ def run_autonomous_simulation(
     fault_at_episode: int | None = None, emergency_at_episode: int | None = None,
     execution_profile: str = "IMMEDIATE",
     target_quantity: str = "1",
-    partial_fills: bool = False,
-    should_pause=None,
 ) -> dict[str, object]:
     """Run/resume a frozen price stream using the canonical SIMULATION authorities.
 
@@ -1913,23 +1932,15 @@ def run_autonomous_simulation(
         raise ValueError("price stream must contain 1 to 10000 observations")
     values = _prices(prices)
     timestamp = _now(now)
-    if type(partial_fills) is not bool:
-        raise TypeError("partial_fills must be boolean")
-    if should_pause is not None and not callable(should_pause):
-        raise TypeError("should_pause must be callable or None")
-    if type(execution_profile) is not str or execution_profile not in {
-        "IMMEDIATE", "TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"
-    }:
+    if type(execution_profile) is not str or execution_profile not in {"IMMEDIATE", "TWO_EQUAL_PARTIALS"}:
         raise ValueError("unsupported frozen simulation execution profile")
-    if partial_fills:
-        execution_profile = "PARTIAL_THEN_FULL_V1"
     instrument_registry = _loop_instrument(datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
     instrument = instrument_registry.require_tradable(INSTRUMENT_ID, datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
     if type(target_quantity) is not str:
         raise TypeError("frozen target quantity must be exact decimal text")
     target = parse_bounded_exact_decimal(target_quantity)
     instrument.validate_quantity(target)
-    if execution_profile in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
+    if execution_profile == "TWO_EQUAL_PARTIALS":
         instrument.validate_quantity(exact_multiply(target, Decimal("0.5")))
     for price in values:
         instrument.validate_price(price)
@@ -1968,9 +1979,7 @@ def run_autonomous_simulation(
         raise ValueError("legacy state requires a separate autonomous simulation directory")
     root.mkdir(parents=True, exist_ok=True)
     with deny_python_network(), ResourceLock(root / ".canonical-simulation.lock"):
-        return _run_autonomous_locked(
-            root, values, protocol, stop_after_episodes, selected_policy, should_pause
-        )
+        return _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy)
 
 
 def _autonomous_reconciliation(
@@ -2631,9 +2640,7 @@ def _recover_autonomous_observed_fill(
         )
 
 
-def _run_autonomous_locked(
-    root, values, protocol, stop_after_episodes, selected_policy, should_pause=None
-):
+def _run_autonomous_locked(root, values, protocol, stop_after_episodes, selected_policy):
     from .allocation import AllocationCandidate, AllocationPolicy, StressScenarioEvidence, allocate_targets
     from .durable_order_projection import DurableOrderBookProjection
     from .exact_decimal import exact_abs, exact_subtract, exact_sum, as_fraction, round_fraction_to_quantum
@@ -2743,7 +2750,6 @@ def _run_autonomous_locked(
                 protocol,
                 stop_after_episodes,
                 selected_policy,
-                should_pause,
             )
         if active.get("decision") in {"HOLD", "NO_TRADE"}:
             _recover_autonomous_zero_wire_completion(
@@ -2768,7 +2774,6 @@ def _run_autonomous_locked(
                 protocol,
                 stop_after_episodes,
                 selected_policy,
-                should_pause,
             )
         return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO",
                 "run_id": run_id, "completed_episodes": len(completed),
@@ -2854,8 +2859,6 @@ def _run_autonomous_locked(
 
     authority = None
     for index in range(len(completed), end):
-        if should_pause is not None and should_pause():
-            break
         episode = index + 1
         key = f"{run_id}:{episode}"
         point = started_at + timedelta(seconds=index)
@@ -2900,19 +2903,8 @@ def _run_autonomous_locked(
                                              Decimal("0.000000000000000001"), mode="CEILING")
         frozen_target = parse_bounded_exact_decimal(protocol["target_quantity"])
         proposal = MovingAverageStrategy(**protocol["strategy_parameters"]).decide(values[:episode], frozen_target)
-        proposal_side = proposal.side
-        if protocol["execution_profile"] == "PARTIAL_THEN_FULL_V1":
-            from .product_agent import decide
-            proposal_side = decide(
-                store,
-                protocol,
-                episode=episode,
-                strategy_side=proposal.side,
-                position=position,
-                timestamp=timestamp,
-            )
-        target_quantity = frozen_target if proposal_side == "BUY" else Decimal("0") if proposal_side == "SELL" else position
-        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal_side == "HOLD" else "NO_TRADE"
+        target_quantity = frozen_target if proposal.side == "BUY" else Decimal("0") if proposal.side == "SELL" else position
+        decision = "BUY" if target_quantity > position else "REDUCE" if target_quantity < position else "HOLD" if proposal.side == "HOLD" else "NO_TRADE"
         emergency = protocol["emergency_at_episode"] is not None and episode >= protocol["emergency_at_episode"]
         if emergency:
             decision = "NO_TRADE"
@@ -2990,8 +2982,7 @@ def _run_autonomous_locked(
             policy_id = _uuid("loop-authority-policy", key)
             authority.register_policy(AuthorityPolicy.create(policy_id=policy_id, account_id=ACCOUNT,
                 environments={ENVIRONMENT}, instruments={(INSTRUMENT_ID, 1)}, actions={"ORDER.SUBMIT"},
-                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1),
-                simulation_time=timestamp)
+                max_notional="1000", expires_at=future, autonomous=True, protection_only=False, version=1))
             intent_id = _uuid("loop-intent", key)
             intent_hash = payload_digest({"protocol_digest": protocol_digest, "episode": episode,
                 "side": side, "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price),
@@ -3022,7 +3013,7 @@ def _run_autonomous_locked(
                     expected_cut=JournalStore.whole_store_state_cut(store))
                 request = {"attempt_id": attempt_id, "instrument_version": INSTRUMENT, "side": side,
                     "quantity": canonical_decimal_text(exact_abs(quantity)), "price": canonical_decimal_text(price), "now": timestamp}
-                if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
+                if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS":
                     request["fill_immediately"] = False
                 frozen_request = dict(request)
 
@@ -3042,12 +3033,12 @@ def _run_autonomous_locked(
                 orders.sync_submission_attempt(attempt_id=attempt_id)
                 if dispatched.status != "SENT":
                     reservations.mark_unknown(command_id=_uuid("loop-unknown", key), idempotency_key=_uuid("loop-unknown", key),
-                                              reservation_id=reservation_id, simulation_time=timestamp)
+                                              reservation_id=reservation_id)
                     return {"status": "UNKNOWN", "environment": ENVIRONMENT, "mode": "ZERO", "run_id": run_id,
                             "completed_episodes": len(completed), "unresolved_episode": episode,
                             "new_outbound_requests": provider.outbound_request_count - count_before, "resumed": bool(completed)}
                 # Acknowledgement has only changed OMS acceptance. Fill history owns quantity.
-                if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"}:
+                if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS":
                     part_quantity = exact_multiply(exact_abs(quantity), Decimal("0.5"))
                     instrument.validate_quantity(part_quantity)
                     for part in (1, 2):
@@ -3055,7 +3046,7 @@ def _run_autonomous_locked(
                             provider_execution_id=_uuid("loop-partial-execution", f"{key}:part:{part}"),
                             quantity=part_quantity, now=timestamp, price=price)
                 fresh_fills = [f for f in provider.activity_fills() if f["order_ref"] == dispatched.response["provider_order_id"]]
-                if len(fresh_fills) != (2 if protocol["execution_profile"] in {"TWO_EQUAL_PARTIALS", "PARTIAL_THEN_FULL_V1"} else 1):
+                if len(fresh_fills) != (2 if protocol["execution_profile"] == "TWO_EQUAL_PARTIALS" else 1):
                     raise ValueError("ACK is not fill evidence")
                 fill = fresh_fills[-1]
                 fill_id = fill["provider_execution_id"]

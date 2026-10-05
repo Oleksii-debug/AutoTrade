@@ -101,6 +101,17 @@ class DurableOrderProjectionTests(unittest.TestCase):
             oms_ref = weakref.ref(oms)
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
+            # Binding weakrefs must remain callback-free: a caller can
+            # enumerate weakrefs and invoke exposed callbacks manually.
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(oms))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(store))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(artifacts))
+            )
 
             del oms
             gc.collect()
@@ -111,6 +122,48 @@ class DurableOrderProjectionTests(unittest.TestCase):
             gc.collect()
             self.assertIsNone(store_ref())
             self.assertIsNone(artifacts_ref())
+
+    def test_failed_initial_replay_releases_provisional_binding_and_reader(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            captured = {}
+            original_reload = DurableOrderBookProjection._reload
+
+            def fail_initial_reload(value):
+                state = object.__getattribute__(value, "__dict__")
+                captured["oms"] = weakref.ref(value)
+                captured["reader"] = weakref.ref(
+                    state["_provider_evidence_reader"]
+                )
+                raise RuntimeError("forced initial replay failure")
+
+            DurableOrderBookProjection._reload = fail_initial_reload
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced initial replay failure",
+                ):
+                    durable(
+                        store,
+                        environment="PAPER",
+                        evidence_artifact_store=artifacts,
+                    )
+            finally:
+                DurableOrderBookProjection._reload = original_reload
+
+            gc.collect()
+            self.assertIsNone(captured["oms"]())
+            self.assertIsNone(captured["reader"]())
+
+            # A failed initial replay must remove its provisional registry row,
+            # otherwise the next exact composition would fail as already bound.
+            recovered = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(recovered.snapshots, ())
 
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:

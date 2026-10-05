@@ -431,6 +431,7 @@ class ProductionHostRuntime:
         self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
+        self._terminal_finalizer: Callable[[], None] | None = None
 
     @property
     def config(self) -> ProductionHostConfig:
@@ -454,6 +455,20 @@ class ProductionHostRuntime:
     def serving(self) -> bool:
         with self._lifecycle_condition:
             return self._serve_state == "SERVING"
+
+    def bind_terminal_finalizer(self, finalizer: Callable[[], None]) -> None:
+        """Bind one authority finalizer that must succeed before fence release."""
+
+        if not callable(finalizer):
+            raise TypeError("terminal finalizer must be callable")
+        with self._lifecycle_condition:
+            if self._serve_state != "IDLE":
+                raise RuntimeError(
+                    "terminal finalizer must be bound before serving or shutdown"
+                )
+            if self._terminal_finalizer is not None:
+                raise RuntimeError("terminal finalizer is already bound")
+            self._terminal_finalizer = finalizer
 
     def _raise_terminal_failure(self) -> None:
         assert self._terminal_error is not None
@@ -531,6 +546,10 @@ class ProductionHostRuntime:
                 worker.join()
             with self._lifecycle_condition:
                 terminal_cause = self._serve_error
+            stage = "terminal authority finalizer"
+            finalizer = self._terminal_finalizer
+            if finalizer is not None:
+                finalizer()
             stage = "listener close"
             self.server.server_close()
             stage = "instance fence release"
@@ -625,7 +644,6 @@ def build_production_host(
     security_boundary: SecurityBoundary,
     principal_resolver: PrincipalResolver,
     snapshot_provider: SnapshotProvider,
-    application_factory: Callable[..., AuthenticatedHostApplication] | None = None,
     tls_context: ssl.SSLContext | None = None,
     now: Callable[[], str] | None = None,
 ) -> ProductionHostRuntime:
@@ -638,8 +656,6 @@ def build_production_host(
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):
         raise TypeError("snapshot_provider must be callable")
-    if application_factory is not None and not callable(application_factory):
-        raise TypeError("application_factory must be callable")
 
     scheme = urlsplit(config.public_origin).scheme
     if tls_context is None and scheme != "http":
@@ -651,7 +667,7 @@ def build_production_host(
     server: AuthenticatedHostServer | None = None
     try:
         journal = JournalStore(config.journal_path)
-        application = (application_factory or AuthenticatedHostApplication)(
+        application = AuthenticatedHostApplication(
             journal,
             security_boundary=security_boundary,
             account_id=config.account_id,
@@ -662,20 +678,6 @@ def build_production_host(
             snapshot_provider=snapshot_provider,
             now=now,
         )
-        if application_factory is not None:
-            from .host_network import AuthenticatedHostApplication as HostApplicationBase
-            if (
-                not isinstance(application, HostApplicationBase)
-                or application._journal is not journal
-                or application.security_boundary is not security_boundary
-                or application.host_id != config.host_id
-                or application.public_origin != config.public_origin
-                or application._principal_resolver is not principal_resolver
-                or application._snapshot_provider is not snapshot_provider
-                or application.store.account_id != config.account_id
-                or application.store.environment != config.environment
-            ):
-                raise TypeError("application_factory changed canonical host authorities")
         identity_gate = _StoreIdentityGate(application, journal)
         admission_gate = _CommandAdmissionGate(identity_gate)
         application.dispatch = admission_gate.dispatch  # type: ignore[method-assign]

@@ -2,24 +2,6 @@
 
 Universal autonomous multi-agent financial trading platform.
 
-## Run the integrated provider-free application
-
-```console
-python -B -m mvp.autotrade_mvp.product_runtime --data-dir "AutoTrade ZERO state"
-```
-
-Python 3.12 starts the existing production host and opens its authenticated web interface. The one-use pairing code is removed from the browser address before authentication. In **Risk and authority**, choose **Start provider-free simulation**, **Recover provider-free simulation**, **Create verified simulation backup**, or **Block new exposure**, then submit with the keyboard. Portfolio, orders, executions, strategy/agent decisions, research and diagnostics are textual host projections. Ctrl+C drains accepted host work. Real exchange submission is unavailable.
-
-The frozen synthetic eight-observation run produces three orders, six partial/full execution slices, cash `895.696 USD` and one owned share. It uses the existing causal research baseline, deterministic agent DAG, allocation, hard risk, reservations, OMS, journal and explicitly synthetic T+0 settlement. These values demonstrate accounting consistency; economic edge remains unproven.
-
-To restore a verified backup into a **new** directory:
-
-```console
-python -B -m mvp.autotrade_mvp.product_runtime --data-dir "AutoTrade restored state" --restore-backup "AutoTrade ZERO state/backups/BACKUP_COMMAND_UUID"
-```
-
-The original restore reconciliation marker remains in place. A restored ZERO session can be inspected and recovered; restoration grants no real trading authority. [The candidate runbook](packaging/windows/PROVIDER_FREE_CANDIDATE.md) explains the Windows package, exact-source evidence and outstanding Windows 11/NVDA qualification.
-
 ## Run the network-free simulation
 
 From the repository root, Python 3.12 can run one journal-backed BUY/HOLD episode without provider accounts or model calls:

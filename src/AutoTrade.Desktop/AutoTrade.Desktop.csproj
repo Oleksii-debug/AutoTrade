@@ -7,8 +7,6 @@
     <AssemblyName>AutoTrade.Desktop</AssemblyName>
     <RootNamespace>AutoTrade.Desktop</RootNamespace>
     <IsPackable>false</IsPackable>
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <StartupObject>AutoTrade.Desktop.App</StartupObject>
   </PropertyGroup>
   <ItemGroup>
@@ -17,6 +15,5 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../AutoTrade.Contracts/AutoTrade.Contracts.csproj" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
   </ItemGroup>
 </Project>

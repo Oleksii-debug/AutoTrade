@@ -243,24 +243,83 @@ def _aggregate_events(
     ]
 
 
-def _autonomous_publication_owned(
-    item: Mapping[str, object],
+def _runtime_scope_snapshot(
+    store: JournalStore,
+    *,
+    run_id: str,
+    completion_event_id: str | None = None,
+) -> tuple[
+    dict[str, object],
+    list[dict[str, object]],
+    dict[str, list[dict[str, object]]],
+]:
+    """Capture only ZERO-owned durable runtime authority.
+
+    Host control/UI events share the physical journal but are not simulation,
+    portfolio, risk, OMS, reconciliation, settlement, or provider authority.
+    They must therefore not invalidate a ZERO replay checkpoint after they have
+    been independently delivered. Relevant ZERO authority is read twice by the
+    caller so a concurrent financial/runtime mutation still fails closed.
+    """
+
+    loop_events = [
+        _event_identity(event)
+        for event in JournalStore.load_events(
+            store,
+            "canonical_autonomous_simulation",
+            run_id,
+        )
+    ]
+    if completion_event_id is not None:
+        if (
+            type(completion_event_id) is not str
+            or not completion_event_id
+            or not loop_events
+            or loop_events[-1].get("event_id") != completion_event_id
+        ):
+            raise AutonomousRuntimeCheckpointError(
+                "completion checkpoint is not the terminal ZERO loop event"
+            )
+        loop_events = loop_events[:-1]
+
+    authority_events = {
+        aggregate_type: _aggregate_events(store, aggregate_type)
+        for aggregate_type in _COMPONENT_AGGREGATE_TYPES
+    }
+    cut = {
+        "schema": "autonomous-runtime-scope-cut.v1",
+        "run_id": run_id,
+        "loop_event_count": len(loop_events),
+        "authority_event_counts": {
+            aggregate_type: len(events)
+            for aggregate_type, events in authority_events.items()
+        },
+        "state_digest": "sha256:" + _digest(
+            {
+                "loop_events": loop_events,
+                "authority_events": authority_events,
+            }
+        ),
+    }
+    return cut, loop_events, authority_events
+
+
+def _autonomous_event_owned(
+    event: Mapping[str, object],
     *,
     run_id: str,
 ) -> bool:
-    envelope = item.get("payload")
-    if type(envelope) is not dict:
-        raise AutonomousRuntimeCheckpointError(
-            "pending outbox payload is not a canonical event envelope"
-        )
-    aggregate_type = envelope.get("aggregate_type")
-    aggregate_id = envelope.get("aggregate_id")
+    """Return whether one durable event belongs to ZERO runtime authority."""
+
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
     if aggregate_type == "canonical_autonomous_simulation":
         return aggregate_id == run_id
-    event_payload = envelope.get("payload")
+
+    event_payload = event.get("payload")
     event_payload = event_payload if type(event_payload) is dict else {}
-    environment = envelope.get("environment", event_payload.get("environment"))
-    host_id = envelope.get("host_id", event_payload.get("host_id"))
+    environment = event.get("environment", event_payload.get("environment"))
+    host_id = event.get("host_id", event_payload.get("host_id"))
     return (
         aggregate_type in _COMPONENT_AGGREGATE_TYPES
         and environment == "SIMULATION"
@@ -268,24 +327,79 @@ def _autonomous_publication_owned(
     )
 
 
+def _autonomous_publication_owned(
+    item: Mapping[str, object],
+    *,
+    run_id: str,
+) -> bool:
+    """Return whether one publication belongs to ZERO runtime authority."""
+
+    envelope = item.get("payload")
+    if type(envelope) is not dict:
+        raise AutonomousRuntimeCheckpointError(
+            "outbox payload is not a canonical event envelope"
+        )
+    return _autonomous_event_owned(envelope, run_id=run_id)
+
+
+def _autonomous_owned_event_ids(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> tuple[str, ...]:
+    """Resolve exact ZERO event identities without scanning foreign outbox rows."""
+
+    events = list(
+        JournalStore.load_events(
+            store,
+            "canonical_autonomous_simulation",
+            run_id,
+        )
+    )
+    for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
+        events.extend(
+            event
+            for event in JournalStore.load_events_by_aggregate_type(
+                store,
+                aggregate_type,
+            )
+            if _autonomous_event_owned(event, run_id=run_id)
+        )
+    event_ids = tuple(event["event_id"] for event in events)
+    if len(set(event_ids)) != len(event_ids):
+        raise AutonomousRuntimeCheckpointError(
+            "ZERO runtime event identities are not unique"
+        )
+    return event_ids
+
+
 def _autonomous_owned_pending_publications(
     store: JournalStore,
     *,
     run_id: str,
 ) -> tuple[dict[str, object], ...]:
-    pending = JournalStore.pending_outbox(store, limit=1000)
-    if (
-        len(pending) == 1000
-        and JournalStore.pending_outbox_count(store) > len(pending)
-    ):
-        raise AutonomousRuntimeCheckpointError(
-            "runtime checkpoint publication ownership scan exceeded bounded outbox window"
-        )
-    return tuple(
-        item
-        for item in pending
-        if _autonomous_publication_owned(item, run_id=run_id)
-    )
+    pending: list[dict[str, object]] = []
+    for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
+        state = JournalStore.outbox_delivery_state(store, event_id)
+        if state is None:
+            continue
+        if not _autonomous_publication_owned(state, run_id=run_id):
+            raise AutonomousRuntimeCheckpointError(
+                "exact ZERO outbox state escaped runtime ownership"
+            )
+        envelope = state.get("payload")
+        if (
+            type(envelope) is dict
+            and envelope.get("aggregate_type") == "canonical_autonomous_simulation"
+            and state.get("topic") != "autotrade.simulation.events"
+        ):
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO loop publication routing topic is not canonical"
+            )
+        if state["delivered"]:
+            continue
+        pending.append(state)
+    return tuple(pending)
 
 
 def deliver_autonomous_owned_publications(
@@ -294,6 +408,7 @@ def deliver_autonomous_owned_publications(
     run_id: str,
 ) -> None:
     """Acknowledge only publications owned by the closed ZERO authority scope."""
+
     for item in _autonomous_owned_pending_publications(store, run_id=run_id):
         JournalStore.mark_outbox_delivered(
             store,
@@ -302,12 +417,35 @@ def deliver_autonomous_owned_publications(
         )
 
 
+def _require_checkpoint_outbox_state(
+    store: JournalStore,
+    *,
+    run_id: str,
+    completion_event_id: str | None,
+) -> None:
+    """Require ZERO-owned publication completion; ignore foreign Host/UI backlog."""
+
+    pending = _autonomous_owned_pending_publications(store, run_id=run_id)
+    if not pending:
+        return
+    if (
+        completion_event_id is not None
+        and len(pending) == 1
+        and pending[0].get("event_id") == completion_event_id
+        and pending[0].get("topic") == "autotrade.simulation.events"
+    ):
+        return
+    raise AutonomousRuntimeCheckpointError(
+        "runtime checkpoint requires all ZERO-owned publications delivered"
+    )
+
+
 def _stable_runtime_components(
     store: JournalStore,
     *,
     protocol: Mapping[str, object],
     completed: Sequence[Mapping[str, object]],
-    completion_preimage: tuple[str, dict[str, object]] | None = None,
+    completion_preimage: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     if type(store) is not JournalStore:
         raise TypeError("runtime checkpoint requires the canonical JournalStore")
@@ -325,40 +463,16 @@ def _stable_runtime_components(
         "windows_file_index_high": identity.windows_file_index_high,
         "windows_file_index_low": identity.windows_file_index_low,
     }
-    before = JournalStore.whole_store_state_cut(store)
-
-    owned_pending = _autonomous_owned_pending_publications(store, run_id=run_id)
-    if owned_pending:
-        if completion_preimage is None:
-            raise AutonomousRuntimeCheckpointError(
-                "runtime checkpoint requires all ZERO-owned publications delivered"
-            )
-        terminal_id, _receipt_prior_cut = completion_preimage
-        if (
-            len(owned_pending) != 1
-            or owned_pending[0].get("event_id") != terminal_id
-        ):
-            raise AutonomousRuntimeCheckpointError(
-                "runtime checkpoint completion preimage has a foreign ZERO publication"
-            )
-
-    loop_events = [
-        _event_identity(event)
-        for event in JournalStore.load_events(
-            store,
-            "canonical_autonomous_simulation",
-            run_id,
-        )
-    ]
-    if completion_preimage is not None:
-        terminal_id, _receipt_prior_cut = completion_preimage
-        if not loop_events or loop_events[-1]["event_id"] != terminal_id:
-            raise AutonomousRuntimeCheckpointError("completion checkpoint is not the terminal loop event")
-        loop_events = loop_events[:-1]
-    authority_events = {
-        aggregate_type: _aggregate_events(store, aggregate_type)
-        for aggregate_type in _COMPONENT_AGGREGATE_TYPES
-    }
+    _require_checkpoint_outbox_state(
+        store,
+        run_id=run_id,
+        completion_event_id=completion_preimage,
+    )
+    captured_cut, loop_events, authority_events = _runtime_scope_snapshot(
+        store,
+        run_id=run_id,
+        completion_event_id=completion_preimage,
+    )
 
     completed_values: list[dict[str, object]] = []
     for index, item in enumerate(completed):
@@ -399,24 +513,8 @@ def _stable_runtime_components(
         }
     )
 
-    scoped_cut = {
-        "loop_events": _digest(loop_events),
-        "authority_events": {
-            aggregate_type: _digest(events)
-            for aggregate_type, events in sorted(authority_events.items())
-        },
-        "owned_pending_publications": [
-            {
-                "event_id": item["event_id"],
-                "topic": item["topic"],
-                "envelope_hash": item["envelope_hash"],
-            }
-            for item in owned_pending
-            if completion_preimage is None
-        ],
-    }
     common = {
-        "cut": scoped_cut,
+        "cut": captured_cut,
         "journal_store_identity": store_identity,
         "run_id": run_id,
         "protocol_digest": protocol_digest,
@@ -519,15 +617,24 @@ def _stable_runtime_components(
         ),
     }
 
-    after = JournalStore.whole_store_state_cut(store)
-    if after != before:
+    after_cut, _after_loop, _after_authority = _runtime_scope_snapshot(
+        store,
+        run_id=run_id,
+        completion_event_id=completion_preimage,
+    )
+    _require_checkpoint_outbox_state(
+        store,
+        run_id=run_id,
+        completion_event_id=completion_preimage,
+    )
+    if after_cut != captured_cut:
         raise AutonomousRuntimeCheckpointError(
-            "durable runtime state changed while checkpoint cut was captured"
+            "ZERO-owned runtime state changed while checkpoint cut was captured"
         )
     cut_id = "sha256:" + _digest(
         {
-            "kind": "autonomous-runtime-owned-cut-v2",
-            "cut": scoped_cut,
+            "kind": "autonomous-runtime-scope-cut-v1",
+            "cut": captured_cut,
             "components": components,
         }
     )
@@ -1093,38 +1200,66 @@ def repair_autonomous_completion_checkpoint(root, store, *, protocol, completed)
             or result != completed[-1]):
         raise AutonomousRuntimeCheckpointError("completion checkpoint receipt identity differs")
     prior_cut = receipt["prior_cut"]
-    expected_terminal_sequence = prior_cut["journal_sequence"] + 1
-    if terminal["journal_sequence"] != expected_terminal_sequence:
+    if (
+        type(prior_cut) is not dict
+        or type(prior_cut.get("journal_sequence")) is not int
+        or prior_cut["journal_sequence"] < 0
+        or type(prior_cut.get("counts")) is not dict
+    ):
         raise AutonomousRuntimeCheckpointError(
-            "completion checkpoint terminal event is not the authorized next journal event"
+            "completion checkpoint prior journal cut is malformed"
         )
-    terminal_publication = JournalStore.outbox_delivery_state(
+    expected_terminal_sequence = prior_cut["journal_sequence"] + 1
+    if terminal.get("journal_sequence") != expected_terminal_sequence:
+        raise AutonomousRuntimeCheckpointError(
+            "completion checkpoint terminal chronology differs"
+        )
+    batch = JournalStore.load_command_event_batch(
+        store,
+        command_id=terminal["event_id"],
+        actor="canonical-autonomous-simulation",
+        environment="SIMULATION",
+        idempotency_key=terminal["event_id"],
+        request=payload,
+    )
+    if (
+        type(batch) is not dict
+        or len(batch.get("events", ())) != 1
+        or batch["events"][0].get("event_id") != terminal["event_id"]
+        or batch["events"][0].get("journal_sequence") != expected_terminal_sequence
+    ):
+        raise AutonomousRuntimeCheckpointError(
+            "completion checkpoint terminal command authority differs"
+        )
+    cut_id, components = _stable_runtime_components(
+        store,
+        protocol=protocol,
+        completed=completed[:-1],
+        completion_preimage=terminal["event_id"],
+    )
+    if cut_id != receipt["prior_runtime_cut_id"] or components != receipt["prior_components"]:
+        raise AutonomousRuntimeCheckpointError("completion checkpoint preimage does not match current authorities")
+    state = JournalStore.outbox_delivery_state(
         store,
         terminal["event_id"],
         topic="autotrade.simulation.events",
     )
-    if terminal_publication is None:
+    if state is None:
         raise AutonomousRuntimeCheckpointError(
             "completion checkpoint terminal publication is missing"
         )
-    cut_id, components = _stable_runtime_components(
-        store, protocol=protocol, completed=completed[:-1],
-        completion_preimage=(terminal["event_id"], prior_cut),
-    )
-    if cut_id != receipt["prior_runtime_cut_id"] or components != receipt["prior_components"]:
-        raise AutonomousRuntimeCheckpointError("completion checkpoint preimage does not match current authorities")
-    if not terminal_publication["delivered"]:
+    if not state["delivered"]:
         JournalStore.mark_outbox_delivered(
             store,
-            terminal_publication["outbox_id"],
-            expected_envelope_hash=terminal_publication["envelope_hash"],
+            state["outbox_id"],
+            expected_envelope_hash=state["envelope_hash"],
         )
-        terminal_publication = JournalStore.outbox_delivery_state(
+        state = JournalStore.outbox_delivery_state(
             store,
             terminal["event_id"],
             topic="autotrade.simulation.events",
         )
-    if terminal_publication is None or not terminal_publication["delivered"]:
+    if state is None or not state["delivered"]:
         raise AutonomousRuntimeCheckpointError(
             "completion checkpoint terminal publication remains undelivered"
         )

@@ -15,6 +15,7 @@ from enum import StrEnum
 from hashlib import sha256
 import json
 from types import MappingProxyType
+import weakref
 from typing import Iterable, Literal, Mapping
 import re
 
@@ -89,8 +90,6 @@ class Surface(StrEnum):
     STREAM = "STREAM"
 
 
-_PREPARED_READ_TOKEN = object()
-_OBSERVED_RESPONSE_TOKEN = object()
 _SUBMISSION_OBSERVED_RESPONSE_TOKEN = object()
 
 
@@ -215,9 +214,9 @@ def _decode_exact_json(raw: bytes) -> object:
     return _freeze_json(decoded)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class AuthenticatedReadQueryBinding:
-    """Immutable credential/capability scope fixed before provider read I/O."""
+    """Credential/capability scope minted only by verified preparation."""
 
     provider_id: str
     account_id: str
@@ -231,70 +230,11 @@ class AuthenticatedReadQueryBinding:
     prepared_at: str
     permission_scope: str
     query_digest: str
-    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self, _preparation_token: object | None) -> None:
-        if _preparation_token is not _PREPARED_READ_TOKEN:
-            raise ProviderCoreError(
-                "authenticated-read bindings must come from verified capability preparation"
-            )
-        provider = _text(self.provider_id, "provider_id").upper()
-        if provider not in PROVIDERS:
-            raise ProviderCoreError("unknown provider")
-        object.__setattr__(self, "provider_id", provider)
-        object.__setattr__(self, "account_id", _text(self.account_id, "account_id"))
-        object.__setattr__(self, "entity_id", _text(self.entity_id, "entity_id"))
-        object.__setattr__(
-            self,
-            "environment",
-            _text(self.environment, "environment").upper(),
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderCoreError(
+            "authenticated-read bindings must come from verified capability preparation"
         )
-        object.__setattr__(
-            self,
-            "capability_snapshot_id",
-            _text(self.capability_snapshot_id, "capability_snapshot_id"),
-        )
-        object.__setattr__(
-            self,
-            "instrument_version",
-            _text(self.instrument_version, "instrument_version"),
-        )
-        if not isinstance(self.surface, Surface):
-            raise ProviderCoreError("surface must be a provider Surface")
-        if self.surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
-            raise ProviderCoreError(
-                "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
-            )
-        endpoint = _text(self.endpoint, "endpoint")
-        if not endpoint.startswith("/") or "://" in endpoint:
-            raise ProviderCoreError(
-                "authenticated-read endpoint must be a canonical provider-relative path"
-            )
-        object.__setattr__(self, "endpoint", endpoint)
-        object.__setattr__(self, "query", _canonical_query_values(self.query))
-        object.__setattr__(
-            self,
-            "prepared_at",
-            _text(self.prepared_at, "prepared_at"),
-        )
-        try:
-            parsed = datetime.fromisoformat(self.prepared_at.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise ProviderCoreError("prepared_at must be an ISO timestamp") from error
-        if parsed.tzinfo is None or not self.prepared_at.endswith("Z"):
-            raise ProviderCoreError("prepared_at must be canonical UTC text")
-        canonical_time = parsed.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        )
-        if canonical_time != self.prepared_at:
-            raise ProviderCoreError("prepared_at must be canonical UTC text")
-        object.__setattr__(
-            self,
-            "permission_scope",
-            _text(self.permission_scope, "permission_scope"),
-        )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.query_digest) is None:
-            raise ProviderCoreError("query_digest must be a canonical SHA-256 digest")
 
     def require_scope(
         self,
@@ -305,6 +245,7 @@ class AuthenticatedReadQueryBinding:
         account_id: str | None = None,
         environment: str | None = None,
     ) -> None:
+        _require_authenticated_read_query_binding_authority(self)
         if _text(provider_id, "provider_id").upper() != self.provider_id:
             raise ProviderCoreError("provider-read provenance provider mismatch")
         if surface != self.surface:
@@ -320,7 +261,7 @@ class AuthenticatedReadQueryBinding:
             raise ProviderCoreError("provider-read provenance environment mismatch")
 
 
-def prepare_authenticated_read_query(
+def _prepare_authenticated_read_query_impl(
     *,
     capability: CapabilitySnapshot,
     surface: Surface,
@@ -328,6 +269,7 @@ def prepare_authenticated_read_query(
     query: Mapping[str, str] | None,
     at: datetime,
     permission_scope: str = "ORDER.READ",
+    _register_authority,
 ) -> AuthenticatedReadQueryBinding:
     """Prepare one authenticated query from canonical capability identity.
 
@@ -335,8 +277,14 @@ def prepare_authenticated_read_query(
     from the VERIFIED capability snapshot before any provider response exists.
     """
 
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
+    if type(surface) is not Surface:
+        raise TypeError("surface must be exact Surface")
+    if surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
+        raise ProviderCoreError(
+            "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
+        )
     point = _utc(at, "at")
     scope = _text(permission_scope, "permission_scope")
     if (
@@ -377,26 +325,30 @@ def prepare_authenticated_read_query(
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
-    return AuthenticatedReadQueryBinding(
-        provider_id=provider,
-        account_id=capability.account_id,
-        entity_id=capability.entity_id,
-        environment=capability.environment,
-        capability_snapshot_id=capability.snapshot_id,
-        instrument_version=capability.instrument_version,
-        surface=surface,
-        endpoint=normalized_endpoint,
-        query=normalized_query,
-        prepared_at=prepared_at,
-        permission_scope=scope,
-        query_digest="sha256:" + sha256(encoded).hexdigest(),
-        _preparation_token=_PREPARED_READ_TOKEN,
+    binding = object.__new__(AuthenticatedReadQueryBinding)
+    object.__setattr__(binding, "provider_id", provider)
+    object.__setattr__(binding, "account_id", capability.account_id)
+    object.__setattr__(binding, "entity_id", capability.entity_id)
+    object.__setattr__(binding, "environment", capability.environment)
+    object.__setattr__(binding, "capability_snapshot_id", capability.snapshot_id)
+    object.__setattr__(binding, "instrument_version", capability.instrument_version)
+    object.__setattr__(binding, "surface", surface)
+    object.__setattr__(binding, "endpoint", normalized_endpoint)
+    object.__setattr__(binding, "query", normalized_query)
+    object.__setattr__(binding, "prepared_at", prepared_at)
+    object.__setattr__(binding, "permission_scope", scope)
+    object.__setattr__(
+        binding,
+        "query_digest",
+        "sha256:" + sha256(encoded).hexdigest(),
     )
+    _register_authority(binding)
+    return binding
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class ProviderResponseObservation:
-    """Exact response bytes bound to one immutable authenticated query."""
+    """Exact response bytes minted only by the canonical observation path."""
 
     query_binding: AuthenticatedReadQueryBinding
     observed_at: str
@@ -404,70 +356,25 @@ class ProviderResponseObservation:
     response_sha256: str
     evidence_ref: str
     payload: object
-    _observation_token: InitVar[object | None] = None
 
-    def __post_init__(self, _observation_token: object | None) -> None:
-        if _observation_token is not _OBSERVED_RESPONSE_TOKEN:
-            raise ProviderCoreError(
-                "provider response observations must come from exact response bytes"
-            )
-        if not isinstance(self.query_binding, AuthenticatedReadQueryBinding):
-            raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
-            )
-        if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
-            or self.http_status < 200
-            or self.http_status > 299
-        ):
-            raise ProviderCoreError(
-                "successful provider response observation requires HTTP 2xx status"
-            )
-        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
-            raise ProviderCoreError(
-                "response_sha256 must be a canonical SHA-256 digest"
-            )
-        if re.fullmatch(
-            r"provider-read:sha256:[0-9a-f]{64}",
-            self.evidence_ref,
-        ) is None:
-            raise ProviderCoreError("evidence_ref must be canonical")
-        observed = _text(self.observed_at, "observed_at")
-        try:
-            point = datetime.fromisoformat(observed.replace("Z", "+00:00"))
-            prepared = datetime.fromisoformat(
-                self.query_binding.prepared_at.replace("Z", "+00:00")
-            )
-        except ValueError as error:
-            raise ProviderCoreError(
-                "provider response timestamps must be ISO timestamps"
-            ) from error
-        if (
-            point.tzinfo is None
-            or not observed.endswith("Z")
-            or point < prepared
-        ):
-            raise ProviderCoreError(
-                "provider response observation must be canonical UTC at/after query preparation"
-            )
-        canonical_time = point.astimezone(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise ProviderCoreError(
+            "provider response observations must come from exact response bytes"
         )
-        if canonical_time != observed:
-            raise ProviderCoreError("observed_at must be canonical UTC text")
-        object.__setattr__(self, "observed_at", observed)
 
     @property
     def provider_id(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.provider_id
 
     @property
     def account_id(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.account_id
 
     @property
     def environment(self) -> str:
+        _require_provider_response_observation_authority(self)
         return self.query_binding.environment
 
     def require_scope(
@@ -479,6 +386,7 @@ class ProviderResponseObservation:
         account_id: str | None = None,
         environment: str | None = None,
     ) -> None:
+        _require_provider_response_observation_authority(self)
         self.query_binding.require_scope(
             provider_id=provider_id,
             surface=surface,
@@ -488,15 +396,142 @@ class ProviderResponseObservation:
         )
 
 
-def observe_authenticated_json_response(
+def _install_authenticated_provider_read_authority():
+    """Retain provider-read construction authority outside frozen dataclass state."""
+
+    query_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    response_states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+
+    def prune(states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]]) -> None:
+        for object_id, (value_ref, _snapshot) in tuple(states.items()):
+            if value_ref() is None:
+                states.pop(object_id, None)
+
+    def register_query(value: object) -> None:
+        if type(value) is not AuthenticatedReadQueryBinding:
+            raise ProviderCoreError(
+                "authenticated-read construction authority requires exact binding"
+            )
+        prune(query_states)
+        object_id = id(value)
+        current = query_states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderCoreError(
+                "authenticated-read construction authority identity collision"
+            )
+        query_states[object_id] = (
+            weakref.ref(value),
+            (
+                value.provider_id, value.account_id, value.entity_id, value.environment,
+                value.capability_snapshot_id, value.instrument_version, value.surface,
+                value.endpoint, value.query, value.prepared_at, value.permission_scope,
+                value.query_digest,
+            ),
+        )
+
+    def require_query(value: object) -> None:
+        if type(value) is not AuthenticatedReadQueryBinding:
+            raise ProviderCoreError(
+                "authenticated-read construction authority requires exact binding"
+            )
+        prune(query_states)
+        state = query_states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "authenticated-read construction authority is unavailable"
+            )
+        (
+            provider_id, account_id, entity_id, environment, capability_snapshot_id,
+            instrument_version, surface, endpoint, query, prepared_at,
+            permission_scope, query_digest,
+        ) = state[1]
+        scalar_pairs = (
+            (value.provider_id, provider_id),
+            (value.account_id, account_id),
+            (value.entity_id, entity_id),
+            (value.environment, environment),
+            (value.capability_snapshot_id, capability_snapshot_id),
+            (value.instrument_version, instrument_version),
+            (value.endpoint, endpoint),
+            (value.prepared_at, prepared_at),
+            (value.permission_scope, permission_scope),
+            (value.query_digest, query_digest),
+        )
+        if any(type(current) is not str or current != expected for current, expected in scalar_pairs):
+            raise ProviderCoreError("authenticated-read binding changed after preparation")
+        if type(value.surface) is not Surface or value.surface is not surface:
+            raise ProviderCoreError("authenticated-read binding changed after preparation")
+        if value.query is not query:
+            raise ProviderCoreError("authenticated-read binding changed after preparation")
+
+    def register_response(value: object) -> None:
+        if type(value) is not ProviderResponseObservation:
+            raise ProviderCoreError(
+                "provider-response construction authority requires exact observation"
+            )
+        require_query(value.query_binding)
+        prune(response_states)
+        object_id = id(value)
+        current = response_states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise ProviderCoreError(
+                "provider-response construction authority identity collision"
+            )
+        response_states[object_id] = (
+            weakref.ref(value),
+            (
+                value.query_binding, value.observed_at, value.http_status,
+                value.response_sha256, value.evidence_ref, value.payload,
+            ),
+        )
+
+    def require_response(value: object) -> None:
+        if type(value) is not ProviderResponseObservation:
+            raise ProviderCoreError(
+                "provider-response construction authority requires exact observation"
+            )
+        prune(response_states)
+        state = response_states.get(id(value))
+        if state is None or state[0]() is not value:
+            raise ProviderCoreError(
+                "provider-response construction authority is unavailable"
+            )
+        query_binding, observed_at, http_status, response_sha256, evidence_ref, payload = state[1]
+        if value.query_binding is not query_binding:
+            raise ProviderCoreError("provider response changed after exact-byte observation")
+        require_query(value.query_binding)
+        if (
+            type(value.observed_at) is not str or value.observed_at != observed_at
+            or type(value.http_status) is not int or value.http_status != http_status
+            or type(value.response_sha256) is not str or value.response_sha256 != response_sha256
+            or type(value.evidence_ref) is not str or value.evidence_ref != evidence_ref
+            or value.payload is not payload
+        ):
+            raise ProviderCoreError("provider response changed after exact-byte observation")
+
+    return register_query, require_query, register_response, require_response
+
+
+(
+    _register_authenticated_read_query_binding_authority,
+    _require_authenticated_read_query_binding_authority,
+    _register_provider_response_observation_authority,
+    _require_provider_response_observation_authority,
+) = _install_authenticated_provider_read_authority()
+del _install_authenticated_provider_read_authority
+
+
+def _observe_authenticated_json_response_impl(
     *,
     query_binding: AuthenticatedReadQueryBinding,
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    _register_authority,
 ) -> ProviderResponseObservation:
-    if not isinstance(query_binding, AuthenticatedReadQueryBinding):
-        raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
+    _require_authenticated_read_query_binding_authority(query_binding)
     if (
         isinstance(http_status, bool)
         or not isinstance(http_status, int)
@@ -508,6 +543,14 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    prepared = datetime.fromisoformat(
+        query_binding.prepared_at.replace("Z", "+00:00")
+    )
+    observed_point = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    if observed_point < prepared:
+        raise ProviderCoreError(
+            "provider response observation must be canonical UTC at/after query preparation"
+        )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
@@ -519,17 +562,76 @@ def observe_authenticated_json_response(
         + observed
     ).encode("utf-8")
     evidence_ref = "provider-read:sha256:" + sha256(identity_material).hexdigest()
-    return ProviderResponseObservation(
-        query_binding=query_binding,
-        observed_at=observed,
-        http_status=http_status,
-        response_sha256=response_digest,
-        evidence_ref=evidence_ref,
-        payload=payload,
-        _observation_token=_OBSERVED_RESPONSE_TOKEN,
-    )
+    observation = object.__new__(ProviderResponseObservation)
+    object.__setattr__(observation, "query_binding", query_binding)
+    object.__setattr__(observation, "observed_at", observed)
+    object.__setattr__(observation, "http_status", http_status)
+    object.__setattr__(observation, "response_sha256", response_digest)
+    object.__setattr__(observation, "evidence_ref", evidence_ref)
+    object.__setattr__(observation, "payload", payload)
+    _register_authority(observation)
+    return observation
 
 
+
+
+def _bind_authenticated_provider_read_minting(
+    prepare_impl,
+    observe_impl,
+    register_query,
+    register_response,
+):
+    def prepare_authenticated_read_query(
+        *,
+        capability: CapabilitySnapshot,
+        surface: Surface,
+        endpoint: str,
+        query: Mapping[str, str] | None,
+        at: datetime,
+        permission_scope: str = "ORDER.READ",
+    ) -> AuthenticatedReadQueryBinding:
+        return prepare_impl(
+            capability=capability,
+            surface=surface,
+            endpoint=endpoint,
+            query=query,
+            at=at,
+            permission_scope=permission_scope,
+            _register_authority=register_query,
+        )
+
+    def observe_authenticated_json_response(
+        *,
+        query_binding: AuthenticatedReadQueryBinding,
+        http_status: int,
+        response_bytes: bytes,
+        observed_at: datetime,
+    ) -> ProviderResponseObservation:
+        return observe_impl(
+            query_binding=query_binding,
+            http_status=http_status,
+            response_bytes=response_bytes,
+            observed_at=observed_at,
+            _register_authority=register_response,
+        )
+
+    return prepare_authenticated_read_query, observe_authenticated_json_response
+
+
+(
+    prepare_authenticated_read_query,
+    observe_authenticated_json_response,
+) = _bind_authenticated_provider_read_minting(
+    _prepare_authenticated_read_query_impl,
+    _observe_authenticated_json_response_impl,
+    _register_authenticated_read_query_binding_authority,
+    _register_provider_response_observation_authority,
+)
+del _bind_authenticated_provider_read_minting
+del _prepare_authenticated_read_query_impl
+del _observe_authenticated_json_response_impl
+del _register_authenticated_read_query_binding_authority
+del _register_provider_response_observation_authority
 
 
 def _thaw_json(value: object) -> object:

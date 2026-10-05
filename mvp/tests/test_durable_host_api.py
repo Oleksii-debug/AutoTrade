@@ -187,6 +187,63 @@ class JournalBackedHostApiTests(unittest.TestCase):
             padded_durable.submit(command),
         )
 
+    def test_permission_ingress_requires_exact_origin_and_literal_true(self):
+        callbacks = []
+
+        class HostileOrigin(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("request origin strip callback must not run")
+
+        hostile_origin_store = JournalBackedHostCommandStore(
+            JournalStore(f"{self.directory.name}/hostile-origin.sqlite3"),
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: True,
+            request_origin_provider=lambda: HostileOrigin(
+                "https://local.autotrade.invalid"
+            ),
+        )
+        with self.assertRaisesRegex(PermissionError, "origin is unavailable"):
+            hostile_origin_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(hostile_origin_store.state_version, 0)
+
+        class TruthyDecision:
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("session decision truthiness must not run")
+
+        non_boolean_store = JournalBackedHostCommandStore(
+            JournalStore(f"{self.directory.name}/truthy-decision.sqlite3"),
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: TruthyDecision(),
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+        )
+        with self.assertRaisesRegex(PermissionError, "Session is not authorized"):
+            non_boolean_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(non_boolean_store.state_version, 0)
+
+
+    def test_account_scope_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("account_id strip callback must not run")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "account_id must be a non-empty string",
+        ):
+            self.store(account_id=HostileText("paper-account-1"))
+
+        self.assertEqual(callbacks, [])
+
+
     def test_whitespace_only_account_scope_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "account_id must be a non-empty string"):
             self.store(account_id="   ")
@@ -2220,6 +2277,57 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 store.submit(self.command(version=version))
             self.assertEqual(store.state_version, 0)
             self.assertEqual(store.events_after(0), ())
+
+
+    def test_command_identity_text_rejects_str_subclasses_without_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("command identity truthiness callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("command identity strip callback must not run")
+
+        store = self.store()
+        cases = (
+            ("command_id", "command_id", "11111111-1111-1111-1111-111111111111"),
+            ("idempotency_key", "key", "key-1"),
+            ("actor", "actor", "alice"),
+            ("session", "session", "session-a"),
+            ("account_id", "account_id", "paper-account-1"),
+            ("environment", "environment", "PAPER"),
+        )
+        for field, parameter, raw_value in cases:
+            with self.subTest(field=field):
+                callbacks.clear()
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    store.submit(
+                        self.command(
+                            **{parameter: HostileText(raw_value)}
+                        )
+                    )
+                self.assertEqual(callbacks, [])
+                self.assertEqual(store.state_version, 0)
+                self.assertEqual(store.events_after(0), ())
+
+
+    def test_expected_state_version_rejects_str_subclass_before_truthiness(self):
+        callbacks = []
+
+        class HostileSequence(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("expected_state_version truthiness must not run")
+
+        store = self.store()
+        with self.assertRaisesRegex(ValueError, "canonical Sequence"):
+            store.submit(self.command(version=HostileSequence("0")))
+        self.assertEqual(callbacks, [])
+        self.assertEqual(store.state_version, 0)
+        self.assertEqual(store.events_after(0), ())
 
     def test_event_cursor_rejects_noncanonical_sequence_text(self):
         store = self.store()

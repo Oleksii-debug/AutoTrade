@@ -6,6 +6,16 @@ from mvp.autotrade_mvp import provider_activity_accounting as provider_accountin
 
 
 class ProviderFillPublicEntrypointFenceTests(unittest.TestCase):
+    def test_public_generic_barrier_is_not_replaced_by_internal_provenance_wrapper(self):
+        self.assertIsNot(
+            provider_accounting.commit_economic_batch_with_reservation_consumption,
+            _impl.commit_economic_batch_with_reservation_consumption,
+        )
+        self.assertEqual(
+            provider_accounting.commit_economic_batch_with_reservation_consumption.__module__,
+            provider_accounting.__name__,
+        )
+
     def test_public_generic_barrier_rejects_provider_fill_binding_before_dispatch(self):
         binding = _impl.PreparedProviderFillBinding(
             aggregate_id="provider-fill-binding-test",

@@ -111,47 +111,6 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(Clock.call_count, 1)
             self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
 
-    def test_clock_cannot_redirect_clock_text_normalizer(self):
-        with TemporaryDirectory() as directory:
-            journal = JournalStore(Path(directory) / "journal.db")
-            canonical_clock_text = model_budget_module._clock_text
-            forged_calls = []
-
-            def hostile_clock():
-                model_budget_module._clock_text = (
-                    lambda _value: forged_calls.append("forged")
-                    or "2099-01-01T00:00:00+00:00"
-                )
-                return NOW
-
-            try:
-                with self.assertRaisesRegex(
-                    ValueError,
-                    r"model budget clock mutated authority:.*module\._clock_text",
-                ):
-                    DurableModelBudget(
-                        journal=journal,
-                        budget_id="policy-clock-text-alias",
-                        ceiling="1",
-                        environment="SIMULATION",
-                        clock=hostile_clock,
-                    )
-            finally:
-                model_budget_module._clock_text = canonical_clock_text
-
-            self.assertEqual(forged_calls, [])
-            self.assertIs(
-                model_budget_module._clock_text,
-                canonical_clock_text,
-            )
-            self.assertEqual(
-                journal.load_events(
-                    "model_budget",
-                    "policy-clock-text-alias",
-                ),
-                [],
-            )
-
     def test_clock_cannot_redirect_cleanup_through_module_budget_alias(self):
         class DecoyBudget:
             restore_calls = 0

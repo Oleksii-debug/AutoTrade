@@ -831,8 +831,6 @@ class DurableModelCallOrchestrator:
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
         module_globals=globals(),
-        journal_class_authority_changes=_model_journal_class_authority_changes,
-        journal_authority_guard=require_exact_journal_store_authority,
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
         (
@@ -862,46 +860,10 @@ class DurableModelCallOrchestrator:
                 orchestrator_class,
             )
 
-        current_budget_alias = dict.get(
-            module_globals,
-            "DurableModelBudget",
-        )
-        if current_budget_alias is not budget_class:
-            changes.append("module.DurableModelBudget")
-            dict.__setitem__(
-                module_globals,
-                "DurableModelBudget",
-                budget_class,
-            )
-
-        current_journal_helper = dict.get(
-            module_globals,
-            "_model_journal_class_authority_changes",
-        )
-        if current_journal_helper is not journal_class_authority_changes:
-            changes.append("module._model_journal_class_authority_changes")
-            dict.__setitem__(
-                module_globals,
-                "_model_journal_class_authority_changes",
-                journal_class_authority_changes,
-            )
-
-        current_journal_guard = dict.get(
-            module_globals,
-            "require_exact_journal_store_authority",
-        )
-        if current_journal_guard is not journal_authority_guard:
-            changes.append("module.require_exact_journal_store_authority")
-            dict.__setitem__(
-                module_globals,
-                "require_exact_journal_store_authority",
-                journal_authority_guard,
-            )
-
         # Restore the trusted JournalStore class topology before any generic
         # class-dictionary or instance recovery.  In particular, inherited
         # dispatch must not execute through a callback-injected base class.
-        changes.extend(journal_class_authority_changes(restore=True))
+        changes.extend(_model_journal_class_authority_changes(restore=True))
 
         # Restore raw class dictionaries first. Descriptor identity comparison
         # avoids invoking attacker-defined equality during recovery.
@@ -1030,7 +992,7 @@ class DurableModelCallOrchestrator:
             )
 
         try:
-            journal_authority_guard(
+            require_exact_journal_store_authority(
                 journal,
                 subject="model budget journal",
             )

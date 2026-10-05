@@ -1,15 +1,15 @@
 """Durably bind one admitted financial decision to one exact provider request.
 
 ``FinancialRequestBindingMaterial`` already defines the immutable provider/wire
-content identity required by financial composition.  This module adds only the
+content identity required by financial composition. This module adds only the
 missing restart-safe ownership link from that content identity to the canonical
-ADMITTED ``AdmissionRecord``.  It does not prepare a request, select a provider,
+ADMITTED ``AdmissionRecord``. It does not prepare a request, select a provider,
 open a transport, call ``GuardedDispatcher``, or grant send authority.
 
-The binding is one immutable journal event keyed by ``admission_id``.  Binding
+The binding is one immutable journal event keyed by ``admission_id``. Binding
 reconstructs ``AuthorityService`` from the same exact JournalStore, revalidates
 the historical financial writer evidence, and requires every authority axis
-shared by the admission and prepared request to agree.  Provider-only execution
+shared by the admission and prepared request to agree. Provider-only execution
 semantics (order type, TIF, wire hashes, price semantics, endpoint, and similar)
 remain sealed content identity rather than values guessed from ``RiskIntent``.
 """
@@ -24,9 +24,7 @@ from .financial_request_binding import (
     FinancialRequestBindingMaterial,
 )
 from .persistence import JournalStore, payload_digest
-from .risk_policy_authority import (
-    journal_store_identity_digest,
-)
+from .risk_policy_authority import journal_store_identity_digest
 
 
 class DurableFinancialRequestBindingError(RuntimeError):
@@ -39,6 +37,7 @@ _SCHEMA_VERSION = "1.0.0"
 
 _CANONICAL_APPEND_EVENT = JournalStore.append_event
 _CANONICAL_LOAD_EVENTS = JournalStore.load_events
+_CANONICAL_CURRENT_SEQUENCE = JournalStore.current_journal_sequence
 _CANONICAL_STORE_IDENTITY = JournalStore.store_identity
 _CANONICAL_PAYLOAD_DIGEST = payload_digest
 _AUTHORITY_TYPE = AuthorityService
@@ -124,10 +123,15 @@ def _validate_material_against_admission(
     *,
     admission_id: str,
     material: FinancialRequestBindingMaterial,
+    current_journal_sequence: int,
 ) -> AdmissionRecord:
     if type(authority) is not _AUTHORITY_TYPE:
         raise DurableFinancialRequestBindingError(
             "financial request binding requires exact AuthorityService reconstruction"
+        )
+    if type(current_journal_sequence) is not int or current_journal_sequence < 0:
+        raise DurableFinancialRequestBindingError(
+            "current financial request binding journal cut is invalid"
         )
     record = authority._admissions.get(admission_id)
     if type(record) is not _ADMISSION_TYPE:
@@ -229,7 +233,11 @@ def _validate_material_against_admission(
         mismatches.append("provider_environment")
     if entity_policy_id is not None and material.entity_policy_id != entity_policy_id:
         mismatches.append("entity_policy_id")
-    if material.admitted_journal_sequence_cut < risk_event_cut:
+    if not (
+        risk_event_cut
+        <= material.admitted_journal_sequence_cut
+        <= current_journal_sequence
+    ):
         mismatches.append("admitted_journal_sequence_cut")
     if mismatches:
         raise DurableFinancialRequestBindingError(
@@ -258,6 +266,19 @@ class DurableFinancialRequestBindingRegistry:
                 "financial request binding JournalStore generation changed"
             )
         return self._store
+
+    def _current_sequence(self) -> int:
+        try:
+            value = _CANONICAL_CURRENT_SEQUENCE(self._require_store())
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise DurableFinancialRequestBindingError(
+                "financial request binding current journal cut is unavailable"
+            ) from error
+        if type(value) is not int or value < 0:
+            raise DurableFinancialRequestBindingError(
+                "financial request binding current journal cut is invalid"
+            )
+        return value
 
     def _authority(self) -> AuthorityService:
         try:
@@ -329,6 +350,7 @@ class DurableFinancialRequestBindingRegistry:
             self._authority(),
             admission_id=aid,
             material=material,
+            current_journal_sequence=self._current_sequence(),
         )
         if _binding_payload(
             admission_id=aid,
@@ -353,6 +375,7 @@ class DurableFinancialRequestBindingRegistry:
             self._authority(),
             admission_id=aid,
             material=material,
+            current_journal_sequence=self._current_sequence(),
         )
         payload = _binding_payload(
             admission_id=aid,

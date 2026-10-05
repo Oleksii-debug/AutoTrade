@@ -608,6 +608,38 @@ def _require_consumable_option_position(
         )
 
 
+def _project_delivery_asset_position_after_reversal(
+    *,
+    economic_cut: EconomicBookCut,
+    instrument: str,
+    old_active_transactions: tuple[JournalTransaction, ...],
+) -> Decimal:
+    """Project deliverable inventory after reversing prior lifecycle economics.
+
+    A prior EXPIRY legitimately has no underlying posting, while an
+    EXERCISE/ASSIGNMENT can have one or more deliverable postings.  Borrow safety
+    therefore cannot reuse the option-retirement projection, which intentionally
+    requires exactly one option-position posting per prior transaction.
+    """
+
+    projected = economic_cut.position(instrument)
+    for transaction in old_active_transactions:
+        matching = tuple(
+            item
+            for item in transaction.postings
+            if item.ledger_account == f"POSITION:{instrument}"
+            and item.asset_or_currency == instrument
+        )
+        for item in matching:
+            try:
+                projected = exact_subtract(projected, item.signed_amount)
+            except ExactDecimalError as error:
+                raise OptionLifecycleConflict(
+                    "physical delivery correction exceeds exact-decimal resource authority"
+                ) from error
+    return projected
+
+
 def _require_physical_delivery_borrow_safety(
     *,
     economic_cut: EconomicBookCut,
@@ -633,7 +665,7 @@ def _require_physical_delivery_borrow_safety(
     for asset_id, delivery_delta in obligation.asset_quantities:
         if delivery_delta >= 0:
             continue
-        current = _project_position_after_reversal(
+        current = _project_delivery_asset_position_after_reversal(
             economic_cut=economic_cut,
             instrument=asset_id,
             old_active_transactions=old_active_transactions,

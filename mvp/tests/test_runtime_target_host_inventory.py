@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
@@ -33,6 +34,53 @@ ARTIFACT_ID = "00000000-0000-4000-8000-000000000065"
 
 
 class RuntimeTargetHostInventoryTests(unittest.TestCase):
+    def test_host_identity_rejects_polymorphic_mappings_before_callbacks(self) -> None:
+        callbacks = []
+
+        class HostileMapping(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("host mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("host mapping callback executed")
+
+        hostile = HostileMapping(IDENTITY)
+        for value in (hostile, MappingProxyType(hostile)):
+            with self.subTest(type=type(value).__name__), self.assertRaisesRegex(
+                RuntimeTargetHostInventoryError,
+                "exact detached dict",
+            ):
+                host_identity_fingerprint(value)
+
+        self.assertEqual(callbacks, [])
+
+    def test_inventory_rejects_polymorphic_authority_strings_before_callbacks(self) -> None:
+        callbacks = []
+
+        class HostileStr(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("authority string callback executed")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("authority string equality callback executed")
+
+        expected = host_identity_fingerprint(IDENTITY)
+        with self.assertRaisesRegex(
+            RuntimeTargetHostInventoryError,
+            "canonical non-empty text",
+        ):
+            RuntimeTargetHostInventory(
+                host_identity=IDENTITY,
+                host_fingerprint=expected,
+                schema_version=HostileStr("1.0.0"),
+            )
+
+        self.assertEqual(callbacks, [])
+
     def test_fingerprint_matches_existing_wp65_campaign_identity_semantics(self) -> None:
         self.assertEqual(
             host_identity_fingerprint(IDENTITY),

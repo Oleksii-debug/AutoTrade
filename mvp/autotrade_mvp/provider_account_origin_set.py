@@ -316,6 +316,21 @@ def _install_origin_set_authority():
                 "origin-set provider qualification registry authority changed"
             )
 
+        def journal_sequence_cut() -> int:
+            cut = JournalStore.whole_store_state_cut(store)
+            if type(cut) is not dict:
+                raise ProviderAccountOriginSetError(
+                    "origin-set currentness journal cut is non-canonical"
+                )
+            sequence = cut.get("journal_sequence")
+            if type(sequence) is not int or sequence < 0:
+                raise ProviderAccountOriginSetError(
+                    "origin-set currentness journal cut is invalid"
+                )
+            return sequence
+
+        validation_cut = journal_sequence_cut()
+
         try:
             current_acquisition = account_acquisition_authority.require_current(
                 account_acquisition
@@ -340,7 +355,8 @@ def _install_origin_set_authority():
 
         try:
             accepted_q = qualification_registry.qualification(
-                accepted.qualification_id
+                accepted.qualification_id,
+                journal_sequence_cut=validation_cut,
             )
         except ProviderQualificationError as error:
             raise ProviderAccountOriginSetError(
@@ -364,15 +380,24 @@ def _install_origin_set_authority():
             protocol_version=accepted_q.scope.protocol_version,
         )
         try:
-            qualification_registry.require_exact_current(
+            current_q = qualification_registry.require_exact_current(
                 scope=current_scope,
                 at=point,
                 expected_qualification_id=accepted.qualification_id,
+                journal_sequence_cut=validation_cut,
             )
+            if current_q.journal_sequence_cut != validation_cut:
+                raise ProviderQualificationError(
+                    "provider qualification did not honor exact currentness cut"
+                )
         except ProviderQualificationError as error:
             raise ProviderAccountOriginSetError(
                 "origin set provider qualification is no longer exact current Q"
             ) from error
+        if journal_sequence_cut() != validation_cut:
+            raise ProviderAccountOriginSetError(
+                "origin-set journal changed during currentness validation"
+            )
         return accepted
 
     return register, require, require_current

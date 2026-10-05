@@ -76,7 +76,7 @@ jobs:
       - name: Bind Desktop PASS evidence to exact publish payload
         run: >-
           python -c "from pathlib import Path; from tools.build_provider_free_candidate import bind_publish_evidence; bind_publish_evidence(Path('artifacts/desktop'), executable='AutoTrade.Desktop.exe', evidence_name='desktop-build-evidence.json')"
-      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj
+      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj -r win-x64
       - run: dotnet publish src/AutoTrade.Host/AutoTrade.Host.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/host
       - run: python tools/write_ci_evidence.py --suite provider-free-host-publish --command "self-contained win-x64 Host publish; default authority fail-closed" --output artifacts/host/host-build-evidence.json
       - name: Bind Host PASS evidence to exact publish payload

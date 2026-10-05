@@ -128,6 +128,26 @@ class SimulationExpiredPreparedRecoveryTests(unittest.TestCase):
                 "REJECTED",
             )
 
+            replayed = run_canonical_simulation(
+                BUY,
+                directory,
+                episode_id=episode_id,
+                now=LATER_RESTART,
+            )
+            self.assertEqual(replayed["status"], "BLOCKED")
+            self.assertTrue(replayed["resumed"])
+            self.assertEqual(replayed["new_outbound_requests"], 0)
+            replay_events = store.load_events(
+                "canonical_simulation_session",
+                "single-episode",
+            )
+            self.assertEqual(len(replay_events), 2)
+            self.assertEqual(
+                replay_events[-1]["committed_at"],
+                AFTER_LEASE,
+                "completed replay must preserve the original durable terminal instant",
+            )
+
     def test_restart_after_blocked_before_terminal_uses_durable_blocked_time(self):
         class ProcessDeathAfterBlocked(BaseException):
             pass

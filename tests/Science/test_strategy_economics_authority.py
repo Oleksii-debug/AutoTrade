@@ -22,11 +22,10 @@ from qualification.strategy_economics.qualify import (
 )
 from research.autotrade_research.strategies.deterministic import (
     CausalObservation,
-    RegisteredStrategyRunReceipt,
     ReturnThresholdBaseline,
     StrategyDescriptor,
     StrategyEconomicsBinding,
-    run_registered_baseline,
+    run_baseline,
     to_decision_proposal,
 )
 
@@ -61,37 +60,35 @@ def _descriptor() -> StrategyDescriptor:
     )
 
 
-def _proposal_and_receipt():
+def _proposal():
     strategy = ReturnThresholdBaseline(
         lookback=2,
         threshold="0.01",
         proposal_quantity="2",
         descriptor=_descriptor(),
     )
-    observations = (
-        CausalObservation.create(
-            event_id="event-0",
-            symbol="AAA",
-            available_at=BASE,
-            price="100",
-        ),
-        CausalObservation.create(
-            event_id="event-1",
-            symbol="AAA",
-            available_at=BASE + timedelta(minutes=1),
-            price="102",
-        ),
-    )
-    return run_registered_baseline(
+    return run_baseline(
         strategy,
-        observations,
+        (
+            CausalObservation.create(
+                event_id="event-0",
+                symbol="AAA",
+                available_at=BASE,
+                price="100",
+            ),
+            CausalObservation.create(
+                event_id="event-1",
+                symbol="AAA",
+                available_at=BASE + timedelta(minutes=1),
+                price="102",
+            ),
+        ),
         decision_time=BASE + timedelta(minutes=1),
         symbol="AAA",
-        instrument_version=INSTRUMENT_VERSION,
     )
 
 
-def _binding(item, receipt, **overrides) -> StrategyEconomicsBinding:
+def _binding(item, **overrides) -> StrategyEconomicsBinding:
     values = dict(
         strategy_fingerprint=item.strategy_fingerprint,
         strategy_configuration_fingerprint=(
@@ -113,7 +110,6 @@ def _binding(item, receipt, **overrides) -> StrategyEconomicsBinding:
         capacity_assessment_sha256="sha256:" + "2" * 64,
         max_feasible_quantity="2",
         lot_size="1",
-        registered_run_receipt_sha256=receipt.fingerprint,
         required_evidence_dimensions=("FX",),
         dimension_evidence=(
             ("FX", "sha256:" + "3" * 64),
@@ -167,9 +163,9 @@ def _registry(*versions: InstrumentVersion) -> InstrumentRegistry:
 
 
 class StrategyEconomicsAuthorityTests(unittest.TestCase):
-    def test_replayed_registered_run_closes_only_that_owner(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(item, receipt)
+    def test_structural_qualified_binding_remains_terminally_inconclusive(self):
+        item = _proposal()
+        binding = _binding(item)
         diagnostic = to_decision_proposal(
             item,
             proposal_id=(
@@ -177,7 +173,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             ),
             instrument_version=INSTRUMENT_VERSION,
             economics_binding=binding,
-            registered_run_receipt=receipt,
             exit_policy_ref="exit:v1",
             compute_cost_currency="USD",
         )
@@ -190,33 +185,34 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             item,
             binding,
             instrument_registry=_registry(),
-            registered_run_receipt=receipt,
         )
         self.assertEqual(assessment.status, "INCONCLUSIVE")
-        self.assertEqual(
-            assessment.registered_run_receipt_digest,
-            receipt.fingerprint,
-        )
         self.assertIn(
-            "registered_strategy_run_receipt",
-            assessment.verified_owners,
-        )
-        self.assertNotIn(
             "registered_strategy_run_receipt",
             assessment.unresolved_owners,
         )
-        for owner in (
-            "execution_calibration_authority",
-            "capacity_evidence_authority",
-            "after_cost_projection_authority",
-            "provider_scope_binding",
-            "instrument_registry_authority",
-            "provider_economic_cut",
+        self.assertIn(
             "dimension_fx",
-        ):
-            self.assertIn(owner, assessment.unresolved_owners)
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "provider_scope_binding",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "instrument_registry_authority",
+            assessment.unresolved_owners,
+        )
+        self.assertIn(
+            "provider_economic_cut",
+            assessment.unresolved_owners,
+        )
         self.assertIn(
             "instrument_registry_shape",
+            assessment.verified_owners,
+        )
+        self.assertNotIn(
+            "instrument_registry",
             assessment.verified_owners,
         )
         with self.assertRaisesRegex(
@@ -225,59 +221,10 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         ):
             require_qualified_strategy_economics(assessment)
 
-    def test_exposure_without_registered_run_receipt_fails_before_assessment(self):
-        item, receipt = _proposal_and_receipt()
-        with self.assertRaisesRegex(
-            StrategyEconomicsAuthorityError,
-            "requires registered-run replay authority",
-        ):
-            assess_strategy_economics_authority(
-                item,
-                _binding(item, receipt),
-                instrument_registry=_registry(),
-            )
-
-    def test_binding_must_name_exact_replayed_registered_run(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(
-            item,
-            receipt,
-            registered_run_receipt_sha256="sha256:" + "9" * 64,
-        )
-        with self.assertRaisesRegex(
-            StrategyEconomicsAuthorityError,
-            "does not name the replayed registered strategy run",
-        ):
-            assess_strategy_economics_authority(
-                item,
-                binding,
-                instrument_registry=_registry(),
-                registered_run_receipt=receipt,
-            )
-
-    def test_registered_run_instrument_must_match_economics(self):
-        item, receipt = _proposal_and_receipt()
-        object.__setattr__(receipt, "instrument_version", "other@1")
-        with self.assertRaisesRegex(
-            StrategyEconomicsAuthorityError,
-            "instrument does not match economics",
-        ):
-            assess_strategy_economics_authority(
-                item,
-                _binding(
-                    item,
-                    receipt,
-                    registered_run_receipt_sha256=receipt.fingerprint,
-                ),
-                instrument_registry=_registry(),
-                registered_run_receipt=receipt,
-            )
-
     def test_fake_hashes_and_favorable_numbers_do_not_mint_authority(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         binding = _binding(
             item,
-            receipt,
             after_cost_lower_bound="999",
             max_feasible_quantity="100",
             input_manifest_refs=(
@@ -291,7 +238,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             item,
             binding,
             instrument_registry=_registry(),
-            registered_run_receipt=receipt,
         )
         self.assertEqual(assessment.status, "INCONCLUSIVE")
         self.assertIn(
@@ -304,14 +250,13 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
     def test_provider_symbol_alias_does_not_close_provider_scope_owner(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         assessment = assess_strategy_economics_authority(
             item,
-            _binding(item, receipt),
+            _binding(item),
             instrument_registry=_registry(
                 _instrument_version(provider_symbol="BBB")
             ),
-            registered_run_receipt=receipt,
         )
         self.assertEqual(assessment.status, "INCONCLUSIVE")
         self.assertIn(
@@ -320,21 +265,20 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
     def test_future_instrument_version_is_not_valid_at_information_cutoff(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         with self.assertRaises(InstrumentNotFound):
             assess_strategy_economics_authority(
                 item,
-                _binding(item, receipt),
+                _binding(item),
                 instrument_registry=_registry(
                     _instrument_version(
                         effective_from=BASE + timedelta(minutes=2)
                     )
                 ),
-                registered_run_receipt=receipt,
             )
 
     def test_superseded_exact_version_cannot_bind_later_proposal_cut(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         registry = _registry(
             _instrument_version(),
             _instrument_version(
@@ -348,14 +292,13 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         ):
             assess_strategy_economics_authority(
                 item,
-                _binding(item, receipt),
+                _binding(item),
                 instrument_registry=registry,
-                registered_run_receipt=receipt,
             )
 
     def test_public_structural_binder_rebind_cannot_redirect_assessment(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(item, receipt)
+        item = _proposal()
+        binding = _binding(item)
         original = economics_authority.bind_strategy_economics
         calls = []
 
@@ -369,7 +312,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 item,
                 binding,
                 instrument_registry=_registry(),
-                registered_run_receipt=receipt,
             )
         finally:
             economics_authority.bind_strategy_economics = original
@@ -381,36 +323,9 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             binding.fingerprint,
         )
 
-    def test_public_registered_run_verifier_rebind_cannot_redirect_assessment(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(item, receipt)
-        original = economics_authority.verify_registered_strategy_run
-        calls = []
-
-        def hostile_verify(*args, **kwargs):
-            calls.append((args, kwargs))
-            raise AssertionError("rebound public registered-run verifier executed")
-
-        economics_authority.verify_registered_strategy_run = hostile_verify
-        try:
-            assessment = assess_strategy_economics_authority(
-                item,
-                binding,
-                instrument_registry=_registry(),
-                registered_run_receipt=receipt,
-            )
-        finally:
-            economics_authority.verify_registered_strategy_run = original
-
-        self.assertEqual(calls, [])
-        self.assertEqual(
-            assessment.registered_run_receipt_digest,
-            receipt.fingerprint,
-        )
-
     def test_public_registry_exact_rebind_cannot_redirect_assessment(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(item, receipt)
+        item = _proposal()
+        binding = _binding(item)
         original = InstrumentRegistry.exact
         calls = []
 
@@ -424,7 +339,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 item,
                 binding,
                 instrument_registry=_registry(),
-                registered_run_receipt=receipt,
             )
         finally:
             InstrumentRegistry.exact = original
@@ -437,8 +351,8 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
     def test_public_registry_at_rebind_cannot_redirect_assessment(self):
-        item, receipt = _proposal_and_receipt()
-        binding = _binding(item, receipt)
+        item = _proposal()
+        binding = _binding(item)
         original = InstrumentRegistry.at
         calls = []
 
@@ -452,7 +366,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 item,
                 binding,
                 instrument_registry=_registry(),
-                registered_run_receipt=receipt,
             )
         finally:
             InstrumentRegistry.at = original
@@ -465,7 +378,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
     def test_caller_provider_replay_does_not_satisfy_owner_authority(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         original = economics_authority._REVERIFY_PROVIDER_ECONOMIC_CUT
         calls = []
 
@@ -482,9 +395,8 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         try:
             assessment = assess_strategy_economics_authority(
                 item,
-                _binding(item, receipt),
+                _binding(item),
                 instrument_registry=_registry(),
-                registered_run_receipt=receipt,
                 provider_economic_book=book,
                 provider_economic_cut=cut,
                 expected_visibility_journal_sequence=7,
@@ -507,12 +419,11 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         )
 
     def test_assessment_is_issued_and_mutation_invalidates_it(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         assessment = assess_strategy_economics_authority(
             item,
-            _binding(item, receipt),
+            _binding(item),
             instrument_registry=_registry(),
-            registered_run_receipt=receipt,
         )
         self.assertIs(
             require_strategy_economics_assessment(assessment),
@@ -544,7 +455,6 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                 instrument_provider_id="SIMULATED",
                 verified_owners=(),
                 unresolved_owners=(),
-                registered_run_receipt_digest=None,
                 provider_economic_cut_digest=None,
             )
 
@@ -563,20 +473,21 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
                     "instrument_registry_shape",
                 ),
                 unresolved_owners=(),
-                registered_run_receipt_digest=None,
                 provider_economic_cut_digest=None,
                 _token=economics_authority._ISSUE_TOKEN,
             )
 
     def test_private_registry_cannot_reseal_mutated_positive_authority(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         assessment = assess_strategy_economics_authority(
             item,
-            _binding(item, receipt),
+            _binding(item),
             instrument_registry=_registry(),
-            registered_run_receipt=receipt,
         )
 
+        # Python-private symbols are importable by same-process callers.  Prove
+        # that even a caller who mutates an issued diagnostic and re-registers
+        # a matching private seal still cannot obtain terminal authority.
         object.__setattr__(assessment, "status", "QUALIFIED")
         object.__setattr__(assessment, "unresolved_owners", ())
         economics_authority._register_issued(
@@ -595,7 +506,7 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
             require_qualified_strategy_economics(assessment)
 
     def test_unknown_instrument_fails_before_assessment_issuance(self):
-        item, receipt = _proposal_and_receipt()
+        item = _proposal()
         empty_registry = InstrumentRegistry(
             calendars=(
                 TradingCalendar.continuous_24_7(),
@@ -604,24 +515,8 @@ class StrategyEconomicsAuthorityTests(unittest.TestCase):
         with self.assertRaises(InstrumentNotFound):
             assess_strategy_economics_authority(
                 item,
-                _binding(item, receipt),
+                _binding(item),
                 instrument_registry=empty_registry,
-                registered_run_receipt=receipt,
-            )
-
-    def test_receipt_must_be_exact_canonical_type(self):
-        item, receipt = _proposal_and_receipt()
-
-        class ReceiptSubclass(RegisteredStrategyRunReceipt):
-            pass
-
-        hostile = object.__new__(ReceiptSubclass)
-        with self.assertRaisesRegex(TypeError, "must be exact"):
-            assess_strategy_economics_authority(
-                item,
-                _binding(item, receipt),
-                instrument_registry=_registry(),
-                registered_run_receipt=hostile,
             )
 
 

@@ -176,7 +176,7 @@ class HostCommandStore:
     @staticmethod
     def _required_text(command: Mapping[str, object], field: str) -> str:
         value = command.get(field)
-        if not isinstance(value, str) or not value:
+        if type(value) is not str or not value:
             raise ValueError(f"{field} must be a non-empty string")
         return value
 

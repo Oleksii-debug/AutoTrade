@@ -40,15 +40,23 @@ REQUIRED_ABLATION_COST_COMPONENTS = (
     "tax_estimate",
 )
 
-# Only ledger accounts with one unambiguous terminal cost meaning are projected.
-# FINANCING_EXPENSE is intentionally excluded: DurableFinancingBook can carry
-# funding, borrow or other financing charges through that generic account, so a
-# journal-only reader cannot truthfully split it among WP-63 component classes.
-_JOURNAL_ACCOUNT_COMPONENTS = {
-    "FEE_EXPENSE": "commission",
-    "FUNDING_PNL": "funding",
-}
-_AMBIGUOUS_COST_ACCOUNT_PREFIXES = ("FINANCING_EXPENSE:",)
+# Generic journal account names are not, by themselves, registered WP-63 cost
+# classification/projection authority.  In particular:
+# - FEE_EXPENSE can include provider/exchange fees and rebates; it is not proof
+#   that the registered "commission" component owns that amount.
+# - FUNDING_PNL is a signed economic cashflow; a credit must not be silently
+#   turned into a non-negative "funding cost".
+# - FINANCING_EXPENSE can represent funding, borrow, or other financing scopes.
+#
+# Dedicated owner-evidence modules preserve those facts and their durable lineage.
+# This legacy journal projection therefore keeps them explicit and unresolved
+# until a separately registered component classifier/projector composes them.
+_JOURNAL_ACCOUNT_COMPONENTS: dict[str, str] = {}
+_AMBIGUOUS_COST_ACCOUNT_PREFIXES = (
+    "FEE_EXPENSE:",
+    "FUNDING_PNL:",
+    "FINANCING_EXPENSE:",
+)
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -226,9 +234,12 @@ def _recompute_cut_digest(cut: EconomicBookCut) -> str:
 def project_economic_cut_costs(cut: EconomicBookCut) -> CanonicalJournalCostCut:
     """Project only journal-native cost semantics from an already obtained cut.
 
-    This descriptive function does not prove who issued ``cut``.  Authority-bearing
-    callers should use :func:`project_provider_journal_costs`, which obtains the cut
-    directly from an exact DurableProviderEconomicBook.
+    Generic fee/funding/financing account families remain unresolved here because
+    journal account identity alone cannot establish the registered WP-63 component
+    taxonomy or a signed-cashflow-to-cost projection.  This descriptive function
+    does not prove who issued ``cut``.  Authority-bearing callers should use
+    :func:`project_provider_journal_costs`, which obtains the cut directly from an
+    exact DurableProviderEconomicBook.
     """
 
     if type(cut) is not EconomicBookCut:

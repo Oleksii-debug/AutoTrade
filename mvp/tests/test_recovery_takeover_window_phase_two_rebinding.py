@@ -154,6 +154,26 @@ class RecoveryTakeoverWindowPhaseTwoRebindingTests(unittest.TestCase):
             "_CANONICAL_JOURNAL_CURRENT_SEQUENCE"
         )
 
+    def test_private_append_event_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_JOURNAL_APPEND_EVENT"
+        )
+
+    def test_private_load_events_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_JOURNAL_LOAD_EVENTS"
+        )
+
+    def test_private_load_by_type_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE"
+        )
+
+    def test_private_get_event_rebind_before_call_is_never_executed(self) -> None:
+        self._assert_private_authority_rebind_is_ignored(
+            "_CANONICAL_JOURNAL_GET_EVENT"
+        )
+
     def test_phase_two_callback_cannot_retarget_phase_three_takeover_window(self) -> None:
         calls = []
 

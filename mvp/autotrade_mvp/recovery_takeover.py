@@ -181,6 +181,8 @@ def _append_takeover_event(
     version: int,
     event_type: str,
     payload: dict[str, object],
+    _append_event=_CANONICAL_JOURNAL_APPEND_EVENT,
+    _load_events=_CANONICAL_JOURNAL_LOAD_EVENTS,
 ) -> dict[str, object]:
     event = {
         "event_id": _event_id(
@@ -197,8 +199,8 @@ def _append_takeover_event(
         "payload_hash": payload_digest(payload),
         "committed_at": _now(),
     }
-    _CANONICAL_JOURNAL_APPEND_EVENT(store, event)
-    loaded = _CANONICAL_JOURNAL_LOAD_EVENTS(
+    _append_event(store, event)
+    loaded = _load_events(
         store, _TAKEOVER_AGGREGATE_TYPE, takeover_id
     )
     if (
@@ -302,9 +304,11 @@ def _validate_takeover_events(
 
 def _takeover_groups(
     store: JournalStore,
+    *,
+    _load_events_by_type=_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE,
 ) -> dict[str, tuple[dict[str, object], ...]]:
     grouped: dict[str, list[dict[str, object]]] = {}
-    for event in _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
+    for event in _load_events_by_type(
         store, _TAKEOVER_AGGREGATE_TYPE
     ):
         if type(event) is not dict:
@@ -482,8 +486,9 @@ def _owner_event(
     *,
     owner_scope: str,
     owner: OwnerFence,
+    _load_events=_CANONICAL_JOURNAL_LOAD_EVENTS,
 ) -> dict[str, object]:
-    events = _CANONICAL_JOURNAL_LOAD_EVENTS(
+    events = _load_events(
         store, "recovery_owner", owner_scope
     )
     if len(events) < owner.epoch:
@@ -555,9 +560,10 @@ def _latest_effectful_submission_sequence(
     *,
     environment: str,
     account_id: str,
+    _load_events_by_type=_CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE,
 ) -> int:
     grouped: dict[str, list[dict[str, object]]] = {}
-    for event in _CANONICAL_JOURNAL_LOAD_EVENTS_BY_AGGREGATE_TYPE(
+    for event in _load_events_by_type(
         store, "submission_attempt"
     ):
         aggregate_id = event.get("aggregate_id")
@@ -625,13 +631,15 @@ def _latest_effectful_submission_sequence(
 def _require_checkpoint_event(
     store: JournalStore,
     started: dict[str, object],
+    *,
+    _get_event=_CANONICAL_JOURNAL_GET_EVENT,
 ) -> dict[str, object]:
     event_id = started.get("reconciliation_event_id")
     if type(event_id) is not str or not event_id:
         raise DurableTakeoverError(
             "takeover reconciliation event identity is invalid"
         )
-    event = _CANONICAL_JOURNAL_GET_EVENT(store, event_id)
+    event = _get_event(store, event_id)
     if event is None:
         raise DurableTakeoverError(
             "takeover reconciliation event disappeared"

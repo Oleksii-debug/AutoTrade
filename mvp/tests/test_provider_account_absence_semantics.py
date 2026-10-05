@@ -326,6 +326,31 @@ class ProviderAccountAbsenceSemanticsTests(unittest.TestCase):
                         semantics_version=1,
                     )
 
+    def test_claim_helper_rejects_endpoint_path_aliases(self):
+        for endpoint in (
+            "/v5//execution/list",
+            "/v5/./execution/list",
+            "/v5/execution/../order/history",
+            "/v5/execution/list/",
+            "/v5/execution/%2e%2e/order/history",
+            "/v5/%2Fexecution/list",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(
+                    ProviderAccountAbsenceSemanticsError,
+                    "provider-relative path",
+                ):
+                    account_reconciliation_absence_route_semantic(
+                        surface="EXECUTIONS",
+                        endpoint=endpoint,
+                        data_entitlement="EXECUTIONS",
+                        query_scope_rule_id="BYBIT_SPOT_ACCOUNT_QUERY_V1",
+                        pagination_rule_id="BYBIT_V5_CURSOR_V1",
+                        retention_rule_id="BYBIT_EXECUTION_RETENTION_V1",
+                        consistency_horizon_rule_id="BYBIT_ACCOUNT_CONSISTENCY_HORIZON_V1",
+                        semantics_version=1,
+                    )
+
     def test_claim_helper_rejects_caller_free_form_rule_identity_and_bool_version(self):
         with self.assertRaisesRegex(
             ProviderAccountAbsenceSemanticsError,

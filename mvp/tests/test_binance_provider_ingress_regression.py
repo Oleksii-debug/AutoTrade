@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.binance_spot import (
 )
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
+    parse_account_trades as parse_usdm_account_trades,
     parse_order_ack as parse_usdm_order_ack,
 )
 from mvp.autotrade_mvp.capabilities import (
@@ -106,6 +107,43 @@ def _spot_trade_observation():
     )
 
 
+def _usdm_trade_observation():
+    query = prepare_authenticated_read_query(
+        capability=_spot_capability(),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/fapi/v1/userTrades",
+        query={"symbol": "BTCUSDT"},
+        at=NOW,
+        permission_scope="TRADE.READ",
+    )
+    rows = [
+        {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "side": "BUY",
+            "positionSide": "BOTH",
+            "qty": "0.100",
+            "price": "40000.00",
+            "commission": "0.01",
+            "commissionAsset": "USDT",
+            "time": 1791187200123,
+        }
+    ]
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=json.dumps(
+            rows,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8"),
+        observed_at=NOW,
+    )
+
+
 def _spot_notional_rules():
     return BinanceSpotSymbolRules.from_exchange_info(
         instrument_version="BTCUSDT:v1",
@@ -175,6 +213,54 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].client_order_id, "spot-client-42")
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
+
+    def test_spot_identity_maps_reject_mapping_subclass_before_items_callback(self):
+        observation = _spot_trade_observation()
+        callbacks = []
+
+        class HostileMapping(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("hostile identity-map callback executed")
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument_versions must be an exact dict"):
+            parse_spot_account_trades(
+                observation,
+                instrument_versions=HostileMapping({"BTCUSDT": "BTCUSDT:v1"}),
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "client_ids_by_order_id must be an exact dict"):
+            parse_spot_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id=HostileMapping({42: "spot-client-42"}),
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_usdm_identity_maps_reject_mapping_subclass_before_items_callback(self):
+        observation = _usdm_trade_observation()
+        callbacks = []
+
+        class HostileMapping(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("hostile identity-map callback executed")
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "instrument_versions must be an exact dict"):
+            parse_usdm_account_trades(
+                observation,
+                instrument_versions=HostileMapping({"BTCUSDT": "BTCUSDT-PERP:v1"}),
+            )
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "client_ids_by_order_id must be an exact dict"):
+            parse_usdm_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id=HostileMapping({43: "usdm-client-43"}),
+            )
+        self.assertEqual(callbacks, [])
 
     def test_spot_market_notional_rejects_forged_reference_subclass_before_callback(self):
         callbacks = []

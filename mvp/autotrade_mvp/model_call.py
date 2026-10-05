@@ -35,7 +35,11 @@ from .model_gateway import (
     _route_now,
     route_model,
 )
-from .persistence import canonical_json, payload_digest
+from .persistence import (
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .exact_decimal import exact_add, parse_bounded_exact_decimal
 
 
@@ -499,6 +503,10 @@ class DurableModelCallOrchestrator:
             raise ValueError(
                 "started_lease_seconds must be an integer from 1 through 3600"
             )
+        # Validate the nested durable store before retaining any model-call
+        # authority. A caller-supplied JournalStore subtype or preinstalled
+        # instance method shadow must never become the model lifecycle journal.
+        DurableModelCallOrchestrator._capture_nested_budget_authority(budget)
         self.budget = budget
         self.journal = budget.journal
         self.clock = clock
@@ -518,13 +526,17 @@ class DurableModelCallOrchestrator:
     @staticmethod
     def _capture_nested_budget_authority(
         budget: DurableModelBudget,
-    ) -> tuple[DurableModelBudget, dict[str, object]]:
-        """Capture the exact canonical DurableModelBudget instance state.
+    ) -> tuple[
+        DurableModelBudget,
+        dict[str, object],
+        object,
+        dict[object, object],
+    ]:
+        """Capture budget state plus its exact durable JournalStore authority.
 
-        DurableModelBudget has no slots, so caller-owned callbacks can otherwise
-        install instance attributes that shadow class-owned methods such as
-        release(), settle(), or reconcile_unbilled() without replacing the
-        top-level budget reference or any of its five data fields.
+        DurableModelBudget and JournalStore both have instance dictionaries.
+        Callback code retaining either object can otherwise install method
+        shadows without replacing the object reference itself.
         """
         state = object.__getattribute__(budget, "__dict__")
         if type(state) is not dict:
@@ -538,19 +550,70 @@ class DurableModelCallOrchestrator:
         }
         if set(state) != expected_fields:
             raise ModelCallError("durable model budget authority state is invalid")
-        return budget, dict.copy(state)
+
+        journal = state["journal"]
+        try:
+            require_exact_journal_store_authority(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority is invalid"
+            ) from error
+        journal_state = object.__getattribute__(journal, "__dict__")
+        if type(journal_state) is not dict:
+            raise ModelCallError(
+                "durable model budget journal authority state is invalid"
+            )
+        return budget, dict.copy(state), journal, dict.copy(journal_state)
 
     @staticmethod
     def _restore_nested_budget_authority(
-        snapshot: tuple[DurableModelBudget, dict[str, object]],
+        snapshot: tuple[
+            DurableModelBudget,
+            dict[str, object],
+            object,
+            dict[object, object],
+        ],
     ) -> list[str]:
-        """Restore budget fields and remove any callback-installed shadows."""
-        budget, expected_state = snapshot
+        """Restore budget/store state and remove callback-installed shadows."""
+        budget, expected_state, journal, expected_journal_state = snapshot
+        current_journal_state = object.__getattribute__(journal, "__dict__")
+        if type(current_journal_state) is not dict:
+            raise ModelCallError(
+                "durable model budget journal authority state is invalid"
+            )
+
+        changes: list[str] = []
+        for name in sorted(
+            set(current_journal_state) | set(expected_journal_state),
+            key=str,
+        ):
+            if name not in expected_journal_state or name not in current_journal_state:
+                changes.append("budget.journal." + str(name))
+                continue
+            current = current_journal_state[name]
+            expected = expected_journal_state[name]
+            if type(current) is not type(expected) or current != expected:
+                changes.append("budget.journal." + str(name))
+
+        dict.clear(current_journal_state)
+        dict.update(current_journal_state, expected_journal_state)
+        try:
+            require_exact_journal_store_authority(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority changed"
+            ) from error
+
         current_state = object.__getattribute__(budget, "__dict__")
         if type(current_state) is not dict:
             raise ModelCallError("durable model budget authority state is invalid")
 
-        changes: list[str] = []
         expected_refs = {"journal", "_clock"}
         for name in sorted(set(current_state) | set(expected_state)):
             if name not in expected_state or name not in current_state:

@@ -841,6 +841,42 @@ def _build_durable_financing_authority_accessors():
 class DurableFinancingBook:
     """Journal-backed provider/account financing revision authority."""
 
+    _AUTHORITY_STATE_NAMES = frozenset(
+        {"store", "economic_book", "provider_id", "account_id", "environment"}
+    )
+
+    def __getattribute__(self, name: str):
+        is_registered = globals().get(
+            "_durable_financing_authority_is_registered"
+        )
+        if (
+            type(name) is str
+            and name != "__dict__"
+            and is_registered is not None
+            and is_registered(self)
+        ):
+            class_owned = any(
+                name in base.__dict__ for base in DurableFinancingBook.__mro__
+            )
+            if name in DurableFinancingBook._AUTHORITY_STATE_NAMES or class_owned:
+                _require_durable_financing_authority(self)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        is_registered = globals().get(
+            "_durable_financing_authority_is_registered"
+        )
+        if is_registered is not None and is_registered(self):
+            class_owned = (
+                type(name) is str
+                and any(name in base.__dict__ for base in DurableFinancingBook.__mro__)
+            )
+            if name in DurableFinancingBook._AUTHORITY_STATE_NAMES or class_owned:
+                raise FinancingConflict(
+                    "durable financing authority state is immutable"
+                )
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         store: JournalStore,

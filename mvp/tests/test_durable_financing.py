@@ -300,6 +300,23 @@ class DurableFinancingTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_authority_state_rejects_normal_retarget_after_construction(self):
+        other_store = JournalStore(Path(self.temp.name) / "normal-retarget.sqlite3")
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state is immutable",
+        ):
+            self.financing.store = other_store
+        self.assertIs(self.financing.store, self.store)
+
+    def test_authority_rejects_instance_method_shadow_after_construction(self):
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state is immutable",
+        ):
+            self.financing.latest = lambda _charge_id: None
+
     def test_store_retarget_fails_closed_before_financing_read(self):
         other_store = JournalStore(Path(self.temp.name) / "other.sqlite3")
         object.__setattr__(self.financing, "store", other_store)

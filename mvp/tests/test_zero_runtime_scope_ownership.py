@@ -26,6 +26,7 @@ def _event(
     aggregate_type: str,
     aggregate_id: str,
     event_type: str,
+    aggregate_version: int = 1,
     payload: dict | None = None,
     environment: str | None = None,
     host_id: str | None = None,
@@ -36,7 +37,7 @@ def _event(
         "event_type": event_type,
         "aggregate_type": aggregate_type,
         "aggregate_id": aggregate_id,
-        "aggregate_version": "1",
+        "aggregate_version": str(aggregate_version),
         "payload": body,
         "payload_hash": payload_digest(body),
         "committed_at": _TIME,
@@ -51,6 +52,7 @@ def _event(
 def _component_event(
     *,
     aggregate_id: str,
+    aggregate_version: int = 1,
     environment: str | None = None,
     host_id: str | None = None,
     payload: dict | None = None,
@@ -59,6 +61,7 @@ def _component_event(
         aggregate_type="submission_attempt",
         aggregate_id=aggregate_id,
         event_type="SubmissionPrepared",
+        aggregate_version=aggregate_version,
         payload=payload,
         environment=environment,
         host_id=host_id,
@@ -231,6 +234,49 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
                 [policy["event_id"]],
             )
 
+    def test_other_account_simulation_state_is_excluded_when_run_scope_is_known(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "checkpoint-account-owner"
+            store.append_event(_start_event(run_id=run_id))
+            owned = _event(
+                aggregate_type="economic_book",
+                aggregate_id="owned-economic",
+                event_type="EconomicTransactionBooked",
+                payload={
+                    "provider_id": "SIMULATED",
+                    "account_id": "zero-account",
+                    "environment": "SIMULATION",
+                },
+            )
+            foreign = _event(
+                aggregate_type="economic_book",
+                aggregate_id="foreign-economic",
+                event_type="EconomicTransactionBooked",
+                payload={
+                    "provider_id": "SIMULATED",
+                    "account_id": "other-account",
+                    "environment": "SIMULATION",
+                },
+            )
+            store.append_event(owned)
+            before_cut, _before_loop, before_authority = _runtime_scope_snapshot(
+                store,
+                run_id=run_id,
+            )
+            store.append_event(foreign)
+            after_cut, _after_loop, after_authority = _runtime_scope_snapshot(
+                store,
+                run_id=run_id,
+            )
+
+            self.assertEqual(after_cut, before_cut)
+            self.assertEqual(after_authority, before_authority)
+            self.assertEqual(
+                [item["event_id"] for item in after_authority["economic_book"]],
+                [owned["event_id"]],
+            )
+
     def test_other_account_simulation_publication_is_never_acknowledged(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -276,6 +322,93 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
             state = store.outbox_delivery_state(owned["event_id"])
             self.assertIsNotNone(state)
             self.assertTrue(state["delivered"])
+
+    def test_submission_aggregate_inherits_prepared_scope_for_sparse_later_events(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "submission-aggregate-owner"
+            store.append_event(_start_event(run_id=run_id))
+            aggregate_id = "submission-attempt:owned-test"
+            prepared = _event(
+                aggregate_type="submission_attempt",
+                aggregate_id=aggregate_id,
+                event_type="SubmissionPrepared",
+                aggregate_version=1,
+                environment="SIMULATION",
+                host_id="local-mvp",
+                payload={
+                    "attempt_id": "attempt-1",
+                    "provider": "SIMULATED",
+                    "account_id": "zero-account",
+                    "environment": "SIMULATION",
+                },
+            )
+            sending = _event(
+                aggregate_type="submission_attempt",
+                aggregate_id=aggregate_id,
+                event_type="SubmissionSending",
+                aggregate_version=2,
+                environment="SIMULATION",
+                host_id="local-mvp",
+                payload={"client_order_id": "client-1"},
+            )
+            terminal = _event(
+                aggregate_type="submission_attempt",
+                aggregate_id=aggregate_id,
+                event_type="SubmissionSent",
+                aggregate_version=3,
+                environment="SIMULATION",
+                host_id="local-mvp",
+                payload={"client_order_id": "client-1", "response": {"ok": True}},
+            )
+            for event in (prepared, sending, terminal):
+                store.append_event(event, outbox_topic="autotrade.submission.events")
+
+            deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            for event in (prepared, sending, terminal):
+                state = store.outbox_delivery_state(event["event_id"])
+                self.assertIsNotNone(state)
+                self.assertTrue(state["delivered"])
+
+    def test_foreign_submission_aggregate_does_not_inherit_zero_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "foreign-submission-owner"
+            store.append_event(_start_event(run_id=run_id))
+            aggregate_id = "submission-attempt:foreign-test"
+            prepared = _event(
+                aggregate_type="submission_attempt",
+                aggregate_id=aggregate_id,
+                event_type="SubmissionPrepared",
+                aggregate_version=1,
+                environment="SIMULATION",
+                host_id="local-mvp",
+                payload={
+                    "attempt_id": "attempt-foreign",
+                    "provider": "SIMULATED",
+                    "account_id": "other-account",
+                    "environment": "SIMULATION",
+                },
+            )
+            sending = _event(
+                aggregate_type="submission_attempt",
+                aggregate_id=aggregate_id,
+                event_type="SubmissionSending",
+                aggregate_version=2,
+                environment="SIMULATION",
+                host_id="local-mvp",
+                payload={"client_order_id": "client-foreign"},
+            )
+            for event in (prepared, sending):
+                store.append_event(event, outbox_topic="autotrade.submission.events")
+
+            deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            for event in (prepared, sending):
+                state = store.outbox_delivery_state(event["event_id"])
+                self.assertIsNotNone(state)
+                self.assertFalse(state["delivered"])
 
     def test_owned_economic_publication_with_wrong_topic_is_rejected(self):
         with TemporaryDirectory() as directory:

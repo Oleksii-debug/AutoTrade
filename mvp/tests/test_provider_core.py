@@ -515,6 +515,22 @@ class ProviderCoreTests(unittest.TestCase):
                 "ProviderSubmissionObservation",
                 "ProviderCoreError",
                 "submission_response_binding_projection",
+                "require_provider_json_depth",
+                "parse_bounded_json_number_token",
+                "parse_bounded_json_integer_token",
+                "_freeze_json",
+                "ExactDecimalError",
+                "ValueError",
+                "UnicodeDecodeError",
+                "RecursionError",
+                "bytes",
+                "isinstance",
+                "dict",
+                "list",
+                "Decimal",
+                "float",
+                "bool",
+                "int",
             ):
                 with self.subTest(name=name):
                     with patch.object(
@@ -531,6 +547,31 @@ class ProviderCoreTests(unittest.TestCase):
                                 observation
                             )
                     self.assertEqual(callbacks, [])
+
+    def test_submission_observation_decoder_rejects_json_loads_shadow_before_callback(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(directory)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return {"forged": True}
+
+            with patch.object(provider_core_module.json, "loads", forged):
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "observation authority is unavailable",
+                ):
+                    observe_submission_json_response(
+                        response_binding=binding,
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                    )
+            self.assertEqual(callbacks, [])
+
 
     def test_all_six_architectural_provider_targets_exist(self):
         self.assertEqual(

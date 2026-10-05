@@ -612,6 +612,14 @@ def prepare_order_submission(
             "Bybit MARGIN canonical preparation requires dedicated "
             "spot-margin borrow/collateral authority"
         )
+    if normalized_family == "OPTIONS":
+        # Option orders carry distinct payoff, exercise/lifecycle and protection
+        # semantics. Generic ORDER_WRITE does not prove the option-specific
+        # capability/economic authorities required for an executable request.
+        raise ProviderCoreError(
+            "Bybit OPTIONS canonical preparation requires dedicated "
+            "option capability/payoff authority"
+        )
     normalized_type = _text(order_type, name="order_type").upper()
     normalized_tif = _text(time_in_force, name="time_in_force").upper()
     if not capability.admits(

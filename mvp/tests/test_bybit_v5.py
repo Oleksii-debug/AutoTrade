@@ -263,6 +263,29 @@ class BybitV5AdapterTests(unittest.TestCase):
                 time_in_force="GTC",
             )
 
+    def test_canonical_preparation_refuses_options_without_payoff_authority(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "dedicated option capability/payoff authority",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="OPTIONS",
+                symbol="BTC-30OCT26-100000-C",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.1",
+                price="100",
+                client_order_id="option-authority-required",
+                time_in_force="GTC",
+            )
+
     def test_derivative_scope_maps_reduce_only_and_verified_hedge_mode(self):
         payload = build_order_payload(
             product_family="LINEAR_DERIVATIVES",

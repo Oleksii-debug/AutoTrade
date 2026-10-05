@@ -2862,6 +2862,17 @@ class ProviderTransportTests(unittest.TestCase):
                 wire_client=RecordingWire(events),
             )
 
+    def test_binance_raw_response_without_http_status_requires_reconciliation(self):
+        exact = _binance_exact_trading_response(
+            b'{"code":0,"orderId":"provider-raw"}'
+        )
+        self.assertTrue(exact.requires_reconciliation)
+        self.assertEqual(
+            exact.ambiguity_reason,
+            "binance_spot_http_status_unavailable_execution_unknown",
+        )
+        self.assertIsNone(exact.http_status)
+
     def test_binance_5xx_and_backend_timeout_are_unknown_not_definitive(self):
         cases = (
             (503, b'{"code":-1000,"msg":"backend failure"}',

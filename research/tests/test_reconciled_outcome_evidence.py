@@ -258,8 +258,11 @@ class ReconciledOutcomeEvidenceTests(unittest.TestCase):
                 raise AssertionError("instance shadow executed")
 
             store.coverage_population_snapshot = hostile
-            evidence = self._resolve(store, cutoff=BASE + timedelta(days=1))
-            self.assertEqual(evidence.episode_id, EPISODE_ID)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "shadows canonical executables",
+            ):
+                self._resolve(store, cutoff=BASE + timedelta(days=1))
             self.assertEqual(calls, [])
 
     def test_non_utc_cut_is_rejected_without_normalization(self):

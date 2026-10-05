@@ -2740,6 +2740,52 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             )
             self.assertEqual(outcome.output, {"answer": 7})
 
+    def test_descriptor_iterable_cannot_redirect_orchestrator_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            trusted_clock = orchestrator.clock
+            call_spec = spec()
+
+            class HostileDescriptors:
+                def __iter__(self):
+                    orchestrator.budget = object()
+                    orchestrator.journal = object()
+                    orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                    yield descriptor()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "descriptor iterable mutated orchestrator authority",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=HostileDescriptors(),
+                    call=lambda *_args: self.fail(
+                        "mutated descriptor authority must fail before inference"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, trusted_clock)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
     def test_cancel_callback_cannot_redirect_not_sent_authority(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

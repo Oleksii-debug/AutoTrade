@@ -555,10 +555,18 @@ class AccountingFoundationTests(unittest.TestCase):
             del accounting_module._cached_transaction_digest
 
     def test_scoped_economic_book_constructor_ignores_rebound_module_authorities(self):
+        self.assertFalse(
+            hasattr(accounting_module, "_bind_scoped_economic_book_owner")
+        )
+        self.assertFalse(
+            hasattr(accounting_module, "_require_scoped_economic_book_owner")
+        )
+
         original_class = accounting_module.ScopedEconomicBook
         original_book_type = accounting_module.EconomicBook
-        original_bind = accounting_module._bind_scoped_economic_book_owner
         original_name = accounting_module._name
+        original_weakref = accounting_module.weakref
+        original_environments = ScopedEconomicBook._ENVIRONMENTS
         hostile_calls = []
 
         class HostileBook:
@@ -576,9 +584,17 @@ class AccountingFoundationTests(unittest.TestCase):
         accounting_module._bind_scoped_economic_book_owner = (
             lambda *_args: hostile_calls.append("bind")
         )
+        accounting_module._require_scoped_economic_book_owner = (
+            lambda _value: (
+                hostile_calls.append("require")
+                or ("LIVE", "forged-account", EconomicBook())
+            )
+        )
         accounting_module._name = lambda *_args, **_kwargs: (
             hostile_calls.append("name") or "FORGED"
         )
+        accounting_module.weakref = object()
+        ScopedEconomicBook._ENVIRONMENTS = frozenset({"FORGED"})
         try:
             scoped = ScopedEconomicBook(
                 environment="paper",
@@ -593,18 +609,26 @@ class AccountingFoundationTests(unittest.TestCase):
                 original_book_type,
             )
 
-            # _name is a broader EconomicBook dependency; restore it after the
-            # constructor assertion while retaining the hostile class/book/bind
-            # module aliases so the facade read still proves retained owner
-            # type and canonical book type authority.
+            # _name is also consulted by EconomicBook projections. Restore only
+            # that broader primitive while keeping every scoped-owner decoy in
+            # place; the facade must continue using its captured authority.
             accounting_module._name = original_name
             self.assertEqual(scoped.cash("USD"), Decimal("100"))
             self.assertEqual(hostile_calls, [])
+
+            with self.assertRaisesRegex(ValueError, "unsupported environment"):
+                ScopedEconomicBook(
+                    environment="FORGED",
+                    account_id="acct-forged",
+                )
         finally:
             accounting_module.ScopedEconomicBook = original_class
             accounting_module.EconomicBook = original_book_type
-            accounting_module._bind_scoped_economic_book_owner = original_bind
             accounting_module._name = original_name
+            accounting_module.weakref = original_weakref
+            ScopedEconomicBook._ENVIRONMENTS = original_environments
+            del accounting_module._bind_scoped_economic_book_owner
+            del accounting_module._require_scoped_economic_book_owner
 
     def test_scoped_economic_book_rejects_post_construction_owner_retargeting(self):
         scoped = ScopedEconomicBook(
@@ -621,19 +645,21 @@ class AccountingFoundationTests(unittest.TestCase):
         )
         expected = scoped.audit_digest()
 
-        original_require = accounting_module._require_scoped_economic_book_owner
+        self.assertFalse(
+            hasattr(accounting_module, "_require_scoped_economic_book_owner")
+        )
         original_payload_digest = accounting_module.payload_digest
         accounting_module._require_scoped_economic_book_owner = (
             lambda _value: ("LIVE", "forged-account", EconomicBook())
         )
         accounting_module.payload_digest = lambda _payload: "sha256:" + "0" * 64
         try:
-            # Facade methods retain the owner verifier and digest primitive
-            # selected during module construction.
+            # Facade methods retain the verifier and digest primitive selected
+            # during module construction.
             self.assertEqual(scoped.audit_digest(), expected)
             self.assertEqual(scoped.cash("USD"), Decimal("100"))
         finally:
-            accounting_module._require_scoped_economic_book_owner = original_require
+            del accounting_module._require_scoped_economic_book_owner
             accounting_module.payload_digest = original_payload_digest
 
         object.__setattr__(scoped, "environment", "LIVE")
@@ -666,6 +692,86 @@ class AccountingFoundationTests(unittest.TestCase):
                 )
             )
         self.assertEqual(replacement.cash("USD"), Decimal("999"))
+
+    def test_scoped_economic_book_owner_writer_is_not_public_authority(self):
+        self.assertFalse(
+            hasattr(accounting_module, "_bind_scoped_economic_book_owner")
+        )
+        self.assertFalse(
+            hasattr(accounting_module, "_require_scoped_economic_book_owner")
+        )
+
+        forged = object.__new__(ScopedEconomicBook)
+        object.__setattr__(forged, "environment", "PAPER")
+        object.__setattr__(forged, "account_id", "acct-forged")
+        object.__setattr__(forged, "_book", EconomicBook())
+
+        with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
+            forged.cash("USD")
+        with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
+            forged.audit_digest()
+
+    def test_scoped_economic_book_reinit_rejected_before_state_mutation(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-reinit",
+            transactions=(
+                book_external_cash_flow(
+                    transaction_id="reinit-seed",
+                    cause_event_id="reinit-seed-cause",
+                    currency="USD",
+                    amount="40",
+                ),
+            ),
+        )
+        before_digest = scoped.audit_digest()
+        before_book = object.__getattribute__(scoped, "_book")
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "owner is already initialized",
+        ):
+            ScopedEconomicBook.__init__(
+                scoped,
+                environment="LIVE",
+                account_id="attacker-account",
+                transactions=(
+                    book_external_cash_flow(
+                        transaction_id="attacker-seed",
+                        cause_event_id="attacker-seed-cause",
+                        currency="USD",
+                        amount="999",
+                    ),
+                ),
+            )
+
+        self.assertEqual(scoped.environment, "PAPER")
+        self.assertEqual(scoped.account_id, "acct-reinit")
+        self.assertIs(object.__getattribute__(scoped, "_book"), before_book)
+        self.assertEqual(scoped.cash("USD"), Decimal("40"))
+        self.assertEqual(scoped.audit_digest(), before_digest)
+
+    def test_scoped_economic_book_subclass_rejected_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileScopedBook(ScopedEconomicBook):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(("get", name))
+                    raise AssertionError("hostile scoped-book attribute dispatch")
+                return super().__getattribute__(name)
+
+            def __setattr__(self, name, value):
+                touched.append(("set", name))
+                raise AssertionError("hostile scoped-book attribute dispatch")
+
+        with self.assertRaisesRegex(TypeError, "exact ScopedEconomicBook"):
+            HostileScopedBook(
+                environment="PAPER",
+                account_id="acct-hostile",
+            )
+
+        self.assertEqual(touched, [])
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

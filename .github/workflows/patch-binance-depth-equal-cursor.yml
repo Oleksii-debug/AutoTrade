@@ -1,0 +1,42 @@
+name: Patch Binance depth equal-cursor boundary
+
+on:
+  push:
+    branches:
+      - fix/binance-depth-equal-cursor-discard-20261005-sol56
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python tools/_patch_binance_depth_equal_cursor.py
+      - run: python -m py_compile mvp/autotrade_mvp/binance_spot.py mvp/tests/test_binance_depth_equal_cursor.py
+      - run: >-
+          python -m unittest
+          mvp.tests.test_binance_depth_equal_cursor
+          mvp.tests.test_binance_spot
+          mvp.tests.test_binance_provider_ingress_regression
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Commit bounded repair and remove one-shot machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Oleksii-debug'
+          git config user.email 'oleksiy.az.09@gmail.com'
+          git rm tools/_patch_binance_depth_equal_cursor.py .github/workflows/patch-binance-depth-equal-cursor.yml
+          git add mvp/autotrade_mvp/binance_spot.py mvp/tests/test_binance_depth_equal_cursor.py
+          git commit -m 'Fix: discard fully consumed Binance depth ranges'
+          git push origin HEAD:${GITHUB_REF_NAME}

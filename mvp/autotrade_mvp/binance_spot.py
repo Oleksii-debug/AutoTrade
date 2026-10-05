@@ -54,6 +54,7 @@ BINANCE_SPOT_ENDPOINTS: Mapping[str, str] = MappingProxyType(
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
+_PREPARED_REQUEST_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
 _MAX_UNIX_MILLIS = 253_402_300_799_999
 _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -1439,8 +1440,13 @@ class BinanceSpotPreparedRequest:
     market_reference_source_sha256: str | None = None
     market_reference_kind: str | None = None
     market_reference_window_minutes: int | None = None
+    _preparation_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _preparation_token: object | None) -> None:
+        if _preparation_token is not _PREPARED_REQUEST_TOKEN:
+            raise BinanceSpotAdapterError(
+                "prepared request must come from canonical order preparation"
+            )
         digest = _text(self.filter_source_sha256, name="filter_source_sha256")
         if (
             len(digest) != 71
@@ -1562,22 +1568,43 @@ def prepare_order_request(
         raise TypeError("capability must be exact CapabilitySnapshot")
     if type(symbol_rules) is not BinanceSpotSymbolRules:
         raise TypeError("symbol_rules must be exact BinanceSpotSymbolRules")
+    if (
+        reference_price_observation is not None
+        and type(reference_price_observation) is not BinanceSpotReferencePrice
+    ):
+        raise BinanceSpotAdapterError(
+            "reference_price_observation must be exact BinanceSpotReferencePrice"
+        )
+    if market_reference is not None and type(market_reference) is not BinanceSpotReferencePrice:
+        raise BinanceSpotAdapterError(
+            "market_reference must be exact BinanceSpotReferencePrice"
+        )
+
+    canonical_intent = BinanceSpotOrderIntent.create(
+        instrument_version=intent.instrument_version,
+        symbol=intent.symbol,
+        side=intent.side,
+        order_type=intent.order_type,
+        quantity=intent.quantity,
+        price=intent.price,
+        time_in_force=intent.time_in_force,
+    )
     point = _utc(at, name="at")
     client_id = validate_client_order_id(client_order_id)
     if capability.provider_id.upper() != "BINANCE":
         raise BinanceSpotAdapterError("capability belongs to another provider")
-    if capability.instrument_version != intent.instrument_version:
+    if capability.instrument_version != canonical_intent.instrument_version:
         raise BinanceSpotAdapterError("capability instrument version does not match intent")
     if not capability.admits(
         at=point,
-        order_type=intent.order_type,
-        time_in_force=intent.time_in_force or "NONE",
+        order_type=canonical_intent.order_type,
+        time_in_force=canonical_intent.time_in_force or "NONE",
         permission_scope="ORDER_WRITE",
     ):
         raise BinanceSpotAdapterError("exact capability evidence does not admit this order")
 
     selected_market_reference = symbol_rules.validate(
-        intent,
+        canonical_intent,
         at=point,
         reference_price_observation=reference_price_observation,
         market_reference=market_reference,
@@ -1585,17 +1612,17 @@ def prepare_order_request(
     )
 
     body: dict[str, str] = {
-        "symbol": intent.symbol,
-        "side": intent.side,
-        "type": intent.order_type,
-        "quantity": _decimal_text(intent.quantity),
+        "symbol": canonical_intent.symbol,
+        "side": canonical_intent.side,
+        "type": canonical_intent.order_type,
+        "quantity": _decimal_text(canonical_intent.quantity),
         "newClientOrderId": client_id,
         "newOrderRespType": "ACK",
     }
-    if intent.price is not None:
-        body["price"] = _decimal_text(intent.price)
-    if intent.time_in_force is not None:
-        body["timeInForce"] = intent.time_in_force
+    if canonical_intent.price is not None:
+        body["price"] = _decimal_text(canonical_intent.price)
+    if canonical_intent.time_in_force is not None:
+        body["timeInForce"] = canonical_intent.time_in_force
 
     # timestamp, recvWindow, API key and signature belong to the qualified
     # transport wrapper after the dispatcher's final authority barrier.
@@ -1624,6 +1651,7 @@ def prepare_order_request(
             if selected_market_reference is None
             else selected_market_reference.averaging_window_minutes
         ),
+        _preparation_token=_PREPARED_REQUEST_TOKEN,
     )
 
 

@@ -477,9 +477,10 @@ def _load_direct_wire_execution_claim(
     store: JournalStore,
     *,
     attempt_id: str,
+    _load_events=JournalStore.load_events,
 ) -> dict[str, object]:
     attempt = _exact_text(attempt_id, name="wire execution attempt_id")
-    events = JournalStore.load_events(
+    events = _load_events(
         store,
         _WIRE_EXECUTION_AGGREGATE_TYPE,
         attempt,
@@ -587,6 +588,8 @@ def _claim_direct_wire_execution(
     wire_request_semantics_sha256: str,
     terminal_authority_journal_sequence_cut: int,
     terminal_authority_verified_at: str,
+    _append_event=JournalStore.append_event,
+    _current_journal_sequence=JournalStore.current_journal_sequence,
 ) -> None:
     expected = _direct_wire_execution_claim_payload(
         attempt_id=attempt_id,
@@ -600,7 +603,7 @@ def _claim_direct_wire_execution(
         terminal_authority_journal_sequence_cut=terminal_authority_journal_sequence_cut,
         terminal_authority_verified_at=terminal_authority_verified_at,
     )
-    current_cut = JournalStore.current_journal_sequence(store)
+    current_cut = _current_journal_sequence(store)
     if terminal_authority_journal_sequence_cut > current_cut:
         raise ProviderOriginError(
             "direct wire execution terminal authority cut is ahead of durable journal"
@@ -611,7 +614,7 @@ def _claim_direct_wire_execution(
         committed_at=observed_at,
     )
     try:
-        JournalStore.append_event(store, event)
+        _append_event(store, event)
     except ValueError as error:
         try:
             actual = _load_direct_wire_execution_claim(
@@ -898,6 +901,15 @@ class ProviderOriginJournal:
         self._store_identity = store.store_identity
         self._response_store = response_store
         self._response_store_root = response_store.root.resolve(strict=False)
+        # Retain the exact installed persistence/artifact executables at composition.
+        # Durable object identity alone is insufficient if class dispatch can be
+        # rebound after this authority has been composed.
+        self._journal_append_event = JournalStore.append_event
+        self._journal_load_events = JournalStore.load_events
+        self._artifact_publish_bytes = ArtifactStore.publish_bytes
+        self._artifact_read_authenticated_snapshot = (
+            ArtifactStore.read_authenticated_snapshot
+        )
 
     def _require_store(self) -> JournalStore:
         if type(self._store) is not JournalStore:
@@ -936,7 +948,7 @@ class ProviderOriginJournal:
             "transport_identity": transport,
             "network_policy_identity": policy,
         }
-        JournalStore.append_event(
+        self._journal_append_event(
             self._require_store(),
             _event(
                 event_id=attempt_id + ":prepared",
@@ -1114,7 +1126,7 @@ class ProviderOriginJournal:
             name="terminal_authority_verified_at",
         )
         store = self._require_store()
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
+        events = self._journal_load_events(store, _AGGREGATE_TYPE, attempt)
         if len(events) != 1:
             raise ProviderOriginError(
                 "provider-origin response requires one exact durable Prepared event"
@@ -1184,7 +1196,7 @@ class ProviderOriginJournal:
             "terminal_authority_verified_at": terminal_verified_at,
         }
         try:
-            manifest = ArtifactStore.publish_bytes(
+            manifest = self._artifact_publish_bytes(
                 self._response_store,
                 artifact_id=artifact_id,
                 data=raw,
@@ -1244,7 +1256,7 @@ class ProviderOriginJournal:
             "terminal_authority_verified_at": terminal_verified_at,
         }
         retained_id = attempt + ":retained"
-        JournalStore.append_event(
+        self._journal_append_event(
             store,
             _event(
                 event_id=retained_id,
@@ -1256,7 +1268,7 @@ class ProviderOriginJournal:
             ),
         )
         observed_payload = {**common, "retained_event_id": retained_id}
-        JournalStore.append_event(
+        self._journal_append_event(
             store,
             _event(
                 event_id=attempt + ":observed",
@@ -1276,7 +1288,7 @@ class ProviderOriginJournal:
     ) -> AuthenticatedReadResponseBinding:
         attempt = _exact_text(attempt_id, name="attempt_id")
         store = self._require_store()
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
+        events = self._journal_load_events(store, _AGGREGATE_TYPE, attempt)
         if len(events) == 3:
             return self.load_response_binding(attempt, query_binding)
         if len(events) not in {1, 2}:
@@ -1389,7 +1401,7 @@ class ProviderOriginJournal:
                 ],
             }
             try:
-                manifest, raw = ArtifactStore.read_authenticated_snapshot(
+                manifest, raw = self._artifact_read_authenticated_snapshot(
                     self._response_store,
                     artifact_id,
                 )
@@ -1451,7 +1463,7 @@ class ProviderOriginJournal:
                 ],
             }
             retained_id = attempt + ":retained"
-            JournalStore.append_event(
+            self._journal_append_event(
                 store,
                 _event(
                     event_id=retained_id,
@@ -1462,7 +1474,7 @@ class ProviderOriginJournal:
                     committed_at=observed_text,
                 ),
             )
-            events = JournalStore.load_events(
+            events = self._journal_load_events(
                 store,
                 _AGGREGATE_TYPE,
                 attempt,
@@ -1614,7 +1626,7 @@ class ProviderOriginJournal:
             "terminal_authority_verified_at": terminal_verified_at,
         }
         try:
-            manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            manifest, raw = self._artifact_read_authenticated_snapshot(
                 self._response_store,
                 artifact_id,
             )
@@ -1702,7 +1714,7 @@ class ProviderOriginJournal:
             retained_payload.get("observed_at"),
             name="observed_at",
         )
-        JournalStore.append_event(
+        self._journal_append_event(
             store,
             _event(
                 event_id=attempt + ":observed",
@@ -1725,7 +1737,7 @@ class ProviderOriginJournal:
     ) -> AuthenticatedReadResponseBinding:
         attempt = _exact_text(attempt_id, name="attempt_id")
         snapshot = _qualified_query_snapshot(query_binding)
-        events = JournalStore.load_events(self._require_store(), _AGGREGATE_TYPE, attempt)
+        events = self._journal_load_events(self._require_store(), _AGGREGATE_TYPE, attempt)
         if len(events) != 3:
             raise ProviderOriginError(
                 "provider-origin response is incomplete; Prepared, Retained and Observed are required"
@@ -1785,7 +1797,7 @@ class ProviderOriginJournal:
             retained_payload.get("response_artifact_id"), name="response_artifact_id"
         )
         try:
-            manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            manifest, raw = self._artifact_read_authenticated_snapshot(
                 self._response_store,
                 artifact_id,
             )

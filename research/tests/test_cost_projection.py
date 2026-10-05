@@ -58,7 +58,7 @@ def cut(*transactions: JournalTransaction, digest: str | None = None) -> Economi
 
 
 class JournalCostProjectionTests(unittest.TestCase):
-    def test_projects_only_unambiguous_journal_cost_components(self):
+    def test_generic_fee_funding_and_financing_accounts_remain_unresolved(self):
         fee = transaction(
             transaction_id="fee-1",
             cause_event_id="fill-1",
@@ -83,19 +83,58 @@ class JournalCostProjectionTests(unittest.TestCase):
 
         result = project_economic_cut_costs(cut(fee, funding, financing))
 
+        self.assertEqual(result.components, ())
         self.assertEqual(
-            [(item.component, item.unit, item.net_amount) for item in result.components],
-            [
-                ("commission", "USD", Decimal("1.25")),
-                ("funding", "USD", Decimal("2.5")),
-            ],
+            result.ambiguous_accounts,
+            (
+                "FEE_EXPENSE:USD",
+                "FINANCING_EXPENSE:USD",
+                "FUNDING_PNL:USD",
+            ),
         )
-        self.assertEqual(result.ambiguous_accounts, ("FINANCING_EXPENSE:USD",))
-        self.assertIn("financing", result.missing_components)
-        self.assertIn("borrow", result.missing_components)
-        self.assertIn("spread", result.missing_components)
+        for component in ("commission", "funding", "financing", "borrow"):
+            self.assertIn(component, result.missing_components)
         self.assertFalse(result.complete)
         self.assertTrue(result.evidence_digest.startswith("sha256:"))
+
+    def test_fee_expense_cannot_self_classify_as_commission(self):
+        fee = transaction(
+            transaction_id="fee-1",
+            cause_event_id="fill-1",
+            expense_account="FEE_EXPENSE:USD",
+            unit="USD",
+            amount="1",
+        )
+
+        result = project_economic_cut_costs(cut(fee))
+
+        self.assertEqual(result.components, ())
+        self.assertEqual(result.ambiguous_accounts, ("FEE_EXPENSE:USD",))
+        self.assertIn("commission", result.missing_components)
+
+    def test_signed_funding_pnl_cannot_self_project_as_cost(self):
+        debit = transaction(
+            transaction_id="funding-debit",
+            cause_event_id="funding-debit-event",
+            expense_account="FUNDING_PNL:USD",
+            unit="USD",
+            amount="2",
+        )
+        credit = transaction(
+            transaction_id="funding-credit",
+            cause_event_id="funding-credit-event",
+            expense_account="FUNDING_PNL:USD",
+            unit="USD",
+            amount="-5",
+        )
+
+        debit_result = project_economic_cut_costs(cut(debit))
+        credit_result = project_economic_cut_costs(cut(credit))
+
+        for result in (debit_result, credit_result):
+            self.assertEqual(result.components, ())
+            self.assertEqual(result.ambiguous_accounts, ("FUNDING_PNL:USD",))
+            self.assertIn("funding", result.missing_components)
 
     def test_missing_components_are_not_silently_projected_as_zero(self):
         result = project_economic_cut_costs(cut())
@@ -104,7 +143,7 @@ class JournalCostProjectionTests(unittest.TestCase):
         self.assertEqual(result.missing_components, REQUIRED_ABLATION_COST_COMPONENTS)
         self.assertFalse(result.complete)
 
-    def test_explicit_reversal_can_prove_zero_without_implicit_zero(self):
+    def test_reversal_does_not_upgrade_unclassified_fee_to_zero_commission(self):
         fee = transaction(
             transaction_id="fee-original",
             cause_event_id="fill-original",
@@ -119,14 +158,13 @@ class JournalCostProjectionTests(unittest.TestCase):
         )
 
         result = project_economic_cut_costs(cut(fee, reversal))
-        commission = next(item for item in result.components if item.component == "commission")
 
-        self.assertEqual(commission.net_amount, Decimal("0"))
-        self.assertEqual(len(commission.transaction_digests), 2)
-        self.assertNotIn("commission", result.missing_components)
+        self.assertEqual(result.components, ())
+        self.assertEqual(result.ambiguous_accounts, ("FEE_EXPENSE:USD",))
+        self.assertIn("commission", result.missing_components)
         self.assertFalse(result.complete)
 
-    def test_native_units_remain_separate_until_independent_fx_authority(self):
+    def test_native_units_do_not_create_implicit_commission_classification(self):
         usd = transaction(
             transaction_id="fee-usd",
             cause_event_id="fill-usd",
@@ -144,14 +182,12 @@ class JournalCostProjectionTests(unittest.TestCase):
 
         result = project_economic_cut_costs(cut(usd, usdt))
 
+        self.assertEqual(result.components, ())
         self.assertEqual(
-            [(item.component, item.unit, item.net_amount) for item in result.components],
-            [
-                ("commission", "USD", Decimal("1")),
-                ("commission", "USDT", Decimal("2")),
-            ],
+            result.ambiguous_accounts,
+            ("FEE_EXPENSE:USD", "FEE_EXPENSE:USDT"),
         )
-        self.assertNotIn("commission", result.missing_components)
+        self.assertIn("commission", result.missing_components)
         self.assertFalse(result.complete)
 
     def test_cut_digest_is_recomputed_instead_of_trusted(self):

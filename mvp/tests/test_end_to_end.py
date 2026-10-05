@@ -660,6 +660,49 @@ class VerticalSliceTests(unittest.TestCase):
             )
             self.assertFalse(verify_replay(directory))
 
+    def test_replay_rejects_checkpoint_posting_tamper(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertTrue(checkpoint["postings"])
+            checkpoint["postings"][0]["cash_delta"] = "0"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            self.assertFalse(verify_replay(directory))
+
+    def test_replay_rejects_checkpoint_fill_tamper(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            self.assertTrue(checkpoint["fills"])
+            fill = next(iter(checkpoint["fills"].values()))
+            fill["quantity"] = "2"
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            self.assertFalse(verify_replay(directory))
+
+    def test_replay_rejects_unrelated_journal_aggregate(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            payload = {"kind": "unrelated"}
+            store.append_event(
+                {
+                    "event_id": "unrelated-journal-event",
+                    "event_type": "UnrelatedEvent",
+                    "aggregate_type": "unrelated",
+                    "aggregate_id": "noise",
+                    "aggregate_version": "1",
+                    "committed_at": "2026-10-06T00:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+
+            self.assertFalse(verify_replay(directory))
+
     def test_replay_rejects_incomplete_evidence_schema_even_when_checkpoint_matches(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

@@ -56,6 +56,8 @@ from mvp.autotrade_mvp.provider_transport import (
     _exact_trading_response,
     _bybit_exact_trading_response,
     _binance_exact_trading_response,
+    _kraken_spot_exact_trading_response,
+    _alpaca_exact_trading_response,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenFuturesSigner,
@@ -699,6 +701,29 @@ class AlpacaProviderTransportTests(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
+
+    def test_alpaca_post_send_missing_status_and_5xx_require_reconciliation(self):
+        cases = (
+            (
+                b'{"id":"raw-order","status":"accepted"}',
+                None,
+                "alpaca_http_status_unavailable_execution_unknown",
+            ),
+            (
+                TradingWireResponse(
+                    http_status=503,
+                    body=b'{"message":"service unavailable"}',
+                ),
+                503,
+                "alpaca_http_5xx_execution_unknown",
+            ),
+        )
+        for response, status, reason in cases:
+            with self.subTest(status=status):
+                exact = _alpaca_exact_trading_response(response)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
 
     def test_alpaca_wrong_scoped_trade_handle_is_rejected(self):
         events = []
@@ -2041,6 +2066,29 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 )
             self.assertEqual(events, [])
 
+
+    def test_kraken_spot_post_send_missing_status_and_5xx_require_reconciliation(self):
+        cases = (
+            (
+                b'{"error":[],"result":{"txid":["O-raw"]}}',
+                None,
+                "kraken_spot_http_status_unavailable_execution_unknown",
+            ),
+            (
+                TradingWireResponse(
+                    http_status=503,
+                    body=b'{"error":["EService:Unavailable"],"result":null}',
+                ),
+                503,
+                "kraken_spot_http_5xx_execution_unknown",
+            ),
+        )
+        for response, status, reason in cases:
+            with self.subTest(status=status):
+                exact = _kraken_spot_exact_trading_response(response)
+                self.assertEqual(exact.http_status, status)
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
 
     def test_transport_orders_quota_secret_nonce_guard_and_one_wire_send(self):
         events = []

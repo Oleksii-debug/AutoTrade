@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotReferencePrice,
     BinanceSpotSymbolRules,
     parse_account_trades as parse_spot_account_trades,
+    parse_order_ack as parse_spot_order_ack,
 )
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
@@ -365,6 +366,38 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                 response=response,
             )
         self.assertEqual(callbacks, [])
+
+    def test_spot_ack_rejects_oversized_integer_timestamp_before_datetime_conversion(self):
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "supported UTC millisecond range",
+        ):
+            parse_spot_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="spot-huge-time",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 9,
+                    "clientOrderId": "spot-huge-time",
+                    "transactTime": 10 ** 1000,
+                },
+            )
+
+    def test_usdm_ack_rejects_oversized_digit_text_before_integer_materialization(self):
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "supported UTC millisecond range",
+        ):
+            parse_usdm_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="usdm-huge-time",
+                response={
+                    "symbol": "BTCUSDT",
+                    "orderId": 10,
+                    "clientOrderId": "usdm-huge-time",
+                    "updateTime": "9" * 5000,
+                },
+            )
 
     def test_usdm_ack_rejects_int_subclass_before_comparison_callback(self):
         callbacks = []

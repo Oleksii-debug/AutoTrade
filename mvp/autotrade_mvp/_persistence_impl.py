@@ -1942,15 +1942,27 @@ class JournalStore:
         self,
         event_id: str,
         *,
-        topic: str,
+        topic: str | None = None,
     ) -> dict[str, Any] | None:
-        """Read one exact outbox row after canonical event-envelope checks."""
+        """Read one exact outbox row after canonical event-envelope checks.
+
+        event_id is unique in the durable outbox. Callers that already own an
+        exact journal event may omit topic so foreign backlog cannot force a
+        global pending-page scan. Supplying topic preserves the stricter
+        event-and-topic lookup used by external delivery/recovery paths.
+        """
 
         event_id = self._require_text(event_id, "event_id")
-        topic = self._require_text(topic, "topic")
+        if topic is None:
+            where = "outbox.event_id = ?"
+            parameters = (event_id,)
+        else:
+            topic = self._require_text(topic, "topic")
+            where = "outbox.event_id = ? AND outbox.topic = ?"
+            parameters = (event_id, topic)
         with self._connect() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT
                     outbox.outbox_id,
                     outbox.event_id,
@@ -1970,9 +1982,9 @@ class JournalStore:
                     events.envelope_hash AS event_envelope_hash
                 FROM outbox
                 JOIN events ON events.event_id = outbox.event_id
-                WHERE outbox.event_id = ? AND outbox.topic = ?
+                WHERE {where}
                 """,
-                (event_id, topic),
+                parameters,
             ).fetchone()
         if row is None:
             return None

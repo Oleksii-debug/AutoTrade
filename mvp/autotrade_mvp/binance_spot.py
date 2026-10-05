@@ -1611,8 +1611,8 @@ def parse_order_ack(
     except ValueError as error:
         raise BinanceSpotAdapterError("attempt_id must be a UUID") from error
     cid = validate_client_order_id(client_order_id)
-    if not isinstance(response, Mapping):
-        raise BinanceSpotAdapterError("response must be an object")
+    if type(response) is not dict:
+        raise BinanceSpotAdapterError("response must be an exact decoded object")
 
     echoed = validate_client_order_id(response.get("clientOrderId"))
     if echoed != cid:
@@ -1623,7 +1623,7 @@ def parse_order_ack(
             "response.symbol must be canonical uppercase"
         )
     order_id = response.get("orderId")
-    if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
+    if type(order_id) is not int or order_id < 0:
         raise BinanceSpotAdapterError("response.orderId must be a non-negative integer")
     when = _millis(response.get("transactTime"), name="response.transactTime")
 
@@ -1661,8 +1661,8 @@ def parse_account_trades(
     rows = observation.payload
     account_id = observation.account_id
     environment = observation.environment
-    if not isinstance(rows, (list, tuple)):
-        raise BinanceSpotAdapterError("trade rows must be an array")
+    if type(rows) is not list:
+        raise BinanceSpotAdapterError("trade rows must be an exact decoded array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceSpotAdapterError("instrument_versions must be a mapping")
     normalized_instruments: dict[str, str] = {}
@@ -1692,8 +1692,7 @@ def parse_account_trades(
     seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():
         if (
-            isinstance(raw_order_id, bool)
-            or not isinstance(raw_order_id, int)
+            type(raw_order_id) is not int
             or raw_order_id < 0
         ):
             raise BinanceSpotAdapterError(
@@ -1709,7 +1708,7 @@ def parse_account_trades(
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
-        if not isinstance(raw, Mapping):
+        if type(raw) is not dict:
             raise BinanceSpotAdapterError(f"trade row {index} must be an object")
         symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
         if symbol not in normalized_instruments:
@@ -1717,8 +1716,7 @@ def parse_account_trades(
         trade_id = raw.get("id")
         order_id = raw.get("orderId")
         if (
-            isinstance(trade_id, bool)
-            or not isinstance(trade_id, int)
+            type(trade_id) is not int
             or trade_id < 0
             or isinstance(order_id, bool)
             or not isinstance(order_id, int)

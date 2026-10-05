@@ -323,6 +323,24 @@ if type(_disk_usage) is FunctionType:
             )
 
 
+_RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY = ()
+if _os_name == "nt":
+    _RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY = tuple(
+        (
+            dependency_name,
+            dependency,
+            attribute_name,
+            object.__getattribute__(dependency, attribute_name),
+        )
+        for dependency_name, dependency in (
+            ("GetCurrentProcess", _get_current_process),
+            ("GetProcessMemoryInfo", _get_process_memory_info),
+            ("GetProcessIoCounters", _get_process_io_counters),
+        )
+        for attribute_name in ("argtypes", "restype", "errcheck")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
     process_id: int
@@ -996,6 +1014,9 @@ def run_declared_target_host_campaign_with_resources(
     resource_platform_class_function_states = (
         _RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY
     )
+    resource_platform_mutable_attribute_states = (
+        _RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY
+    )
     capture_snapshot = capture_runtime_target_host_resource_snapshot
     issue_evidence = issue_runtime_target_host_resource_evidence
     publish_evidence = publish_runtime_target_host_resource_evidence
@@ -1094,6 +1115,26 @@ def run_declared_target_host_campaign_with_resources(
                     "resource platform dependency changed "
                     f"{phase}: {dependency_name}"
                 ) from error
+
+
+        for (
+            dependency_name,
+            dependency,
+            attribute_name,
+            expected,
+        ) in resource_platform_mutable_attribute_states:
+            try:
+                current = raw_object_getattribute(dependency, attribute_name)
+            except AttributeError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}.{attribute_name}"
+                ) from error
+            if current is not expected:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}.{attribute_name}"
+                )
 
 
     def require_resource_class_authority(*, phase: str) -> None:

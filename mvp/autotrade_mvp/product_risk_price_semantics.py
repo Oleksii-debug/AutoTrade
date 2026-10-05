@@ -11,7 +11,7 @@ Generic callable risk resolvers remain SIMULATION-only in AuthorityService.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -36,7 +36,6 @@ class ProductRiskPriceSemanticsError(PermissionError):
     """Prepared request and admitted risk/instrument authority do not compose."""
 
 
-_FACTORY_TOKEN = object()
 _REQUEST_TYPE = RiskAuthorityRequest
 _SNAPSHOT_TYPE = AuthoritativeRiskSnapshot
 _PREPARED_TYPE = BybitPreparedSubmission
@@ -145,13 +144,9 @@ class ProductRiskPriceSemanticsBinding:
     prepared_body_sha256: str
     price_semantics_digest: str
     instrument_evidence_binding: str
-    _factory_token: object = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if self._factory_token is not _FACTORY_TOKEN:
-            raise ProductRiskPriceSemanticsError(
-                "price-semantics binding requires canonical product composition"
-            )
+    # This is an immutable value, not a capability. bind_snapshot() recomputes
+    # the canonical composition and requires exact value equality before use.
 
 
 class ProductRiskPriceSemanticsComposer:
@@ -373,7 +368,6 @@ class ProductRiskPriceSemanticsComposer:
             prepared_body_sha256=prepared_request.body_sha256,
             price_semantics_digest=price_evidence.digest,
             instrument_evidence_binding=price_evidence.instrument_metadata_binding,
-            _factory_token=_FACTORY_TOKEN,
         )
 
     def bind_snapshot(
@@ -403,14 +397,20 @@ class ProductRiskPriceSemanticsComposer:
             raise TypeError(
                 "prepared_request must be exact BybitPreparedSubmission"
             )
-        if object.__getattribute__(binding, "_factory_token") is not _FACTORY_TOKEN:
-            raise ProductRiskPriceSemanticsError(
-                "price-semantics binding provenance changed"
-            )
         _REQUIRE_PREPARED(prepared_request)
         if prepared_request.body_sha256 != binding.prepared_body_sha256:
             raise ProductRiskPriceSemanticsError(
                 "prepared request differs from issued price-semantics binding"
+            )
+
+        # A binding is never authority by possession. Re-run the same sealed
+        # composition at the immutable evaluated cut and require every bound
+        # value to match. This makes direct construction or post-issue mutation
+        # harmless unless it is exactly equivalent to canonical composition.
+        canonical_binding = self.compose(request, prepared_request)
+        if binding != canonical_binding:
+            raise ProductRiskPriceSemanticsError(
+                "price-semantics binding differs from fresh canonical composition"
             )
 
         expected = (

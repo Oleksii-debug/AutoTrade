@@ -420,6 +420,35 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 binding.instrument_evidence_binding,
             )
 
+    def test_caller_constructed_binding_cannot_inject_semantic_authority(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            canonical = composer.compose(request, prepared)
+
+            for field_name in (
+                "price_semantics_digest",
+                "instrument_evidence_binding",
+            ):
+                with self.subTest(field_name=field_name):
+                    forged = replace(
+                        canonical,
+                        **{field_name: "sha256:" + "f" * 64},
+                    )
+                    with self.assertRaisesRegex(
+                        ProductRiskPriceSemanticsError,
+                        "fresh canonical composition",
+                    ):
+                        composer.bind_snapshot(
+                            request,
+                            base,
+                            forged,
+                            prepared,
+                        )
+
     def test_snapshot_binding_rejects_a_different_canonical_prepared_request(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)

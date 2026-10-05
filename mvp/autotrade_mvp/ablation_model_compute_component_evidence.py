@@ -26,6 +26,7 @@ from .persistence import JournalStore, payload_digest
 
 _BUDGET_EVENTS_RAW = DurableModelBudget.__dict__["_events"]
 _CALL_EVENTS_RAW = DurableModelCallOrchestrator.__dict__["_events"]
+_CALL_AGGREGATE_ID_RAW = DurableModelCallOrchestrator.__dict__["_aggregate_id"]
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EVIDENCE_KIND = "CANONICAL_MODEL_COMPUTE_COMPONENT"
 _COMPONENT = "model_compute"
@@ -112,6 +113,11 @@ def _assert_owners(
         raise ValueError("durable model-budget event reader changed after composition")
     if DurableModelCallOrchestrator.__dict__.get("_events") is not _CALL_EVENTS_RAW:
         raise ValueError("durable model-call event reader changed after composition")
+    if (
+        DurableModelCallOrchestrator.__dict__.get("_aggregate_id")
+        is not _CALL_AGGREGATE_ID_RAW
+    ):
+        raise ValueError("durable model-call aggregate identity changed after composition")
     call_state = object.__getattribute__(calls, "__dict__")
     if type(call_state) is not dict:
         raise ValueError("durable model-call owner state is not canonical")
@@ -120,8 +126,14 @@ def _assert_owners(
     journal = call_state.get("journal")
     if type(journal) is not JournalStore or journal is not budget.journal:
         raise ValueError("model-call and model-budget authorities do not share one JournalStore")
-    if "_events" in call_state:
-        raise ValueError("durable model-call owner shadows canonical event reader")
+    shadowed = tuple(
+        name for name in ("_events", "_aggregate_id") if name in call_state
+    )
+    if shadowed:
+        raise ValueError(
+            "durable model-call owner shadows canonical methods: "
+            + ", ".join(shadowed)
+        )
 
 
 def _event_identity(event: dict[str, object]) -> tuple[str, str, str, int, int]:

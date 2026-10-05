@@ -228,6 +228,34 @@ class SubmissionIntentFenceTests(unittest.TestCase):
                     transport=lambda *_args: self.fail("divergent legacy replay reached provider"),
                 )
 
+    def test_pre_fence_provider_case_alias_cannot_bypass_history(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner"
+            )
+            self.seed_legacy_attempt(
+                dispatcher,
+                attempt_id="legacy-provider-case",
+                request={"qty": "1"},
+                terminal="SubmissionSent",
+            )
+            with self.assertRaisesRegex(
+                ValueError, "historical submission content"
+            ):
+                dispatcher.dispatch(
+                    attempt_id="post-upgrade",
+                    intent_id="economic-intent-1",
+                    intent_hash="ih",
+                    provider="SIM",
+                    request={"qty": "1"},
+                    now="2026-10-05T08:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=lambda *_args: self.fail(
+                        "provider-case alias replay reached provider"
+                    ),
+                )
+
     def test_multiple_pre_fence_nonblocked_attempts_fail_closed(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

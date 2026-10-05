@@ -28,18 +28,18 @@ _EVIDENCE_SCHEMA_VERSION = "1.1.0"
 
 
 def _json_native_identity(value: object) -> object:
-    """Normalize immutable/generic containers without weakening identity semantics."""
+    """Normalize only inert built-in JSON carriers before identity hashing."""
 
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or type(value) in (str, bool, int, float):
         return value
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         normalized: dict[str, object] = {}
         for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("identity mapping keys must be strings")
+            if type(key) is not str:
+                raise TypeError("identity mapping keys must be exact strings")
             normalized[key] = _json_native_identity(item)
         return normalized
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    if type(value) in (list, tuple):
         return [_json_native_identity(item) for item in value]
     raise TypeError(
         f"identity contains unsupported non-JSON value: {type(value).__name__}"
@@ -81,7 +81,7 @@ def _observed_source_sha() -> str:
 
 def _require_exact_source(expected_source_sha: str) -> str:
     if (
-        not isinstance(expected_source_sha, str)
+        type(expected_source_sha) is not str
         or len(expected_source_sha) not in {40, 64}
         or expected_source_sha != expected_source_sha.strip().lower()
         or any(ch not in "0123456789abcdef" for ch in expected_source_sha)
@@ -95,19 +95,17 @@ def _require_exact_source(expected_source_sha: str) -> str:
     return observed
 
 
-def capture_runtime_host_identity() -> Mapping[str, object]:
-    """Capture stable-enough host/runtime facts for a predeclared qualification spec."""
+def capture_runtime_host_identity() -> dict[str, object]:
+    """Capture stable-enough host/runtime facts as a detached inert built-in dict."""
 
-    return MappingProxyType(
-        {
-            "system": platform.system(),
-            "release": platform.release(),
-            "machine": platform.machine(),
-            "python_implementation": platform.python_implementation(),
-            "python_version": platform.python_version(),
-            "cpu_count": os.cpu_count(),
-        }
-    )
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "cpu_count": os.cpu_count(),
+    }
 
 
 def _recovered_simulation_event_records(
@@ -148,8 +146,8 @@ class RuntimeLoadCampaignEvidence:
     host_identity: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.observation, RuntimeLoadObservation):
-            raise TypeError("observation must be RuntimeLoadObservation")
+        if type(self.observation) is not RuntimeLoadObservation:
+            raise TypeError("observation must be exact RuntimeLoadObservation")
         if type(self.journal_sequence_before) is not int or self.journal_sequence_before < 0:
             raise ValueError("journal_sequence_before must be non-negative integer")
         if (
@@ -157,17 +155,34 @@ class RuntimeLoadCampaignEvidence:
             or self.journal_sequence_after < self.journal_sequence_before
         ):
             raise ValueError("journal_sequence_after must not precede the starting cut")
+        if type(self.recovered_event_ids) is not tuple or any(
+            type(event_id) is not str or not event_id
+            for event_id in self.recovered_event_ids
+        ):
+            raise ValueError("recovered event identities must be exact non-empty strings")
+        if type(self.recovered_journal_sequences) is not tuple or any(
+            type(sequence) is not int
+            or sequence <= self.journal_sequence_before
+            or sequence > self.journal_sequence_after
+            for sequence in self.recovered_journal_sequences
+        ):
+            raise ValueError("recovered journal sequences must lie inside the exact campaign cut")
         if len(self.recovered_event_ids) != len(set(self.recovered_event_ids)):
             raise ValueError("recovered event identities must be unique")
         if len(self.recovered_event_ids) != len(self.recovered_journal_sequences):
             raise ValueError("recovered event identities and sequences must align")
-        if tuple(self.observation.recovered_financial_event_ids) != tuple(
-            self.recovered_event_ids
-        ):
+        if self.recovered_journal_sequences != tuple(sorted(self.recovered_journal_sequences)):
+            raise ValueError("recovered journal sequences must be ordered")
+        if len(self.recovered_journal_sequences) != len(set(self.recovered_journal_sequences)):
+            raise ValueError("recovered journal sequences must be unique")
+        if self.observation.recovered_financial_event_ids != self.recovered_event_ids:
             raise ValueError(
                 "observation recovered financial identities must match retained journal cut"
             )
-        object.__setattr__(self, "host_identity", MappingProxyType(dict(self.host_identity)))
+        normalized_host = _json_native_identity(self.host_identity)
+        if type(normalized_host) is not dict:
+            raise TypeError("host_identity must be an exact JSON object")
+        object.__setattr__(self, "host_identity", MappingProxyType(normalized_host))
 
     @property
     def evidence_digest(self) -> str:
@@ -227,8 +242,8 @@ def collect_vertical_slice_load_evidence(
     reconnect result from missing measurement authority.
     """
 
-    if not isinstance(spec, RuntimeBudgetSpec):
-        raise TypeError("spec must be RuntimeBudgetSpec")
+    if type(spec) is not RuntimeBudgetSpec:
+        raise TypeError("spec must be exact RuntimeBudgetSpec")
     _require_exact_source(spec.release_sha)
     if type(declared_duration_us) is not int or declared_duration_us <= 0:
         raise ValueError("declared_duration_us must be a positive integer")

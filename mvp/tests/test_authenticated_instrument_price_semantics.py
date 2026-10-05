@@ -13,7 +13,9 @@ from mvp.autotrade_mvp.instruments import (
     InstrumentNotFound,
     InstrumentRegistry,
     InstrumentRegistryError,
+    AuthenticatedPriceSemanticsEvidence,
     authenticated_price_semantics_digest,
+    authenticated_price_semantics_evidence,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.durable_financial_request_binding import (
@@ -97,6 +99,79 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
             )
             self.assertNotEqual(first, changed_policy)
             self.assertNotEqual(first, changed_side)
+
+    def test_evidence_pairs_digest_with_exact_authenticated_instrument_binding(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            evidence = authenticated_price_semantics_evidence(
+                registry,
+                artifact_store,
+                instrument_version=f"{A}@1",
+                evaluated_at=when(2),
+                provider_id="SIMULATED",
+                entity_policy_id="linear-order-v1",
+                side="BUY",
+                order_type="LIMIT",
+                price="100.00",
+            )
+
+            self.assertIs(type(evidence), AuthenticatedPriceSemanticsEvidence)
+            self.assertEqual(evidence.digest, self._digest(registry, artifact_store))
+            self.assertEqual(evidence.instrument_version, f"{A}@1")
+            self.assertEqual(
+                evidence.instrument_metadata_binding,
+                registry.exact(f"{A}@1").metadata_evidence_binding(),
+            )
+            self.assertEqual(evidence.provider_symbol, "ABC")
+            self.assertEqual(evidence.price_constraint, "EXACT_ADMITTED_PRICE")
+
+    def test_composer_authorities_are_closure_owned_against_coherent_module_rebinding(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+
+            class ForgedRegistry:
+                callbacks = 0
+
+                @property
+                def at_known(self):
+                    type(self).callbacks += 1
+                    raise AssertionError("forged registry callback executed")
+
+            with patch.object(instruments_module, "InstrumentRegistry", ForgedRegistry()):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+            self.assertEqual(ForgedRegistry.callbacks, 0)
+
+            class ForgedArtifactStore:
+                pass
+
+            with patch.object(instruments_module, "ArtifactStore", ForgedArtifactStore):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "price-semantics executable authority changed",
+                ):
+                    self._digest(registry, artifact_store)
+
+    def test_digest_wrapper_does_not_delegate_to_rebindable_public_composer(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            calls = []
+
+            def forged(*_args, **_kwargs):
+                calls.append("forged")
+                raise AssertionError("rebound public composer executed")
+
+            with patch.object(
+                instruments_module,
+                "authenticated_price_semantics_evidence",
+                forged,
+            ):
+                digest = self._digest(registry, artifact_store)
+            self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+            self.assertEqual(calls, [])
 
     def test_limit_price_is_validated_exactly_and_never_rounded(self):
         with TemporaryDirectory() as directory:

@@ -1306,193 +1306,280 @@ class InstrumentRegistry:
 # Retain the exact causal instrument-evidence path used to mint financial price
 # semantics.  This is a composer over the existing registry/artifact authorities,
 # not an independent instrument owner.
-_PRICE_SEMANTICS_REGISTRY_TYPE = InstrumentRegistry
-_PRICE_SEMANTICS_VERSION_TYPE = InstrumentVersion
-_PRICE_SEMANTICS_AT_KNOWN = InstrumentRegistry.at_known
-_PRICE_SEMANTICS_AT_KNOWN_CODE = InstrumentRegistry.at_known.__code__
-_PRICE_SEMANTICS_METADATA_KNOWN_BY = InstrumentRegistry._metadata_known_by
-_PRICE_SEMANTICS_METADATA_KNOWN_BY_CODE = InstrumentRegistry._metadata_known_by.__code__
-_PRICE_SEMANTICS_VALIDATE_PRICE = InstrumentVersion.validate_price
-_PRICE_SEMANTICS_VALIDATE_PRICE_CODE = InstrumentVersion.validate_price.__code__
-_PRICE_SEMANTICS_METADATA_BINDING = InstrumentVersion.metadata_evidence_binding
-_PRICE_SEMANTICS_METADATA_BINDING_CODE = InstrumentVersion.metadata_evidence_binding.__code__
-_PRICE_SEMANTICS_VERSIONS_FOR = _registry_versions_for
-_PRICE_SEMANTICS_TRUSTED_READER = trusted_authenticated_reader
-_PRICE_SEMANTICS_DETACH = _detached_instrument_version
-_PRICE_SEMANTICS_DETACH_CODE = _detached_instrument_version.__code__
-_PRICE_SEMANTICS_REF = _instrument_version_ref
-_PRICE_SEMANTICS_REF_CODE = _instrument_version_ref.__code__
-_PRICE_SEMANTICS_SPLIT_REF = _split_instrument_version_ref
-_PRICE_SEMANTICS_SPLIT_REF_CODE = _split_instrument_version_ref.__code__
-_PRICE_SEMANTICS_UTC = _utc
-_PRICE_SEMANTICS_UTC_CODE = _utc.__code__
-_PRICE_SEMANTICS_JSON_DUMPS = json.dumps
-_PRICE_SEMANTICS_SHA256 = sha256
+@dataclass(frozen=True, slots=True)
+class AuthenticatedPriceSemanticsEvidence:
+    """Immutable result of one causal instrument price-semantics composition.
 
-
-def authenticated_price_semantics_digest(
-    registry: InstrumentRegistry,
-    artifact_store: ArtifactStore,
-    *,
-    instrument_version: str,
-    evaluated_at: datetime,
-    provider_id: str,
-    entity_policy_id: str,
-    side: str,
-    order_type: str,
-    price: Decimal | str | int | None,
-) -> str:
-    """Mint one causal instrument-owned price-rule identity for financial binding.
-
-    The digest is intentionally independent of the concrete limit price: the
-    financial request already binds that value separately.  This function proves
-    that the admitted value is valid under the authenticated instrument rules and
-    binds those rules to the explicit product policy/constraint identity.
-
-    LIMIT means the already-risked exact price must be valid as-is.  This function
-    never rounds.  MARKET is a distinct no-wire-price semantic.  Any future
-    economically meaningful rounding mode must therefore become a new explicit
-    policy/constraint identity and be risk-evaluated before this composer runs.
+    Possession of this value is not financial authority.  Product composition must
+    call the authenticated composer at the admitted risk cut; consumers must not
+    accept caller-constructed instances as proof.
     """
 
-    if type(registry) is not _PRICE_SEMANTICS_REGISTRY_TYPE:
-        raise TypeError("registry must be exact InstrumentRegistry")
-    if type(artifact_store) is not ArtifactStore:
-        raise TypeError("artifact_store must be the canonical ArtifactStore")
-    if (
-        InstrumentRegistry.at_known is not _PRICE_SEMANTICS_AT_KNOWN
-        or InstrumentRegistry.at_known.__code__ is not _PRICE_SEMANTICS_AT_KNOWN_CODE
-        or InstrumentRegistry._metadata_known_by is not _PRICE_SEMANTICS_METADATA_KNOWN_BY
-        or InstrumentRegistry._metadata_known_by.__code__
-        is not _PRICE_SEMANTICS_METADATA_KNOWN_BY_CODE
-        or InstrumentVersion.validate_price is not _PRICE_SEMANTICS_VALIDATE_PRICE
-        or InstrumentVersion.validate_price.__code__ is not _PRICE_SEMANTICS_VALIDATE_PRICE_CODE
-        or InstrumentVersion.metadata_evidence_binding
-        is not _PRICE_SEMANTICS_METADATA_BINDING
-        or InstrumentVersion.metadata_evidence_binding.__code__
-        is not _PRICE_SEMANTICS_METADATA_BINDING_CODE
-        or _registry_versions_for is not _PRICE_SEMANTICS_VERSIONS_FOR
-        or trusted_authenticated_reader is not _PRICE_SEMANTICS_TRUSTED_READER
-        or _detached_instrument_version is not _PRICE_SEMANTICS_DETACH
-        or _detached_instrument_version.__code__ is not _PRICE_SEMANTICS_DETACH_CODE
-        or _instrument_version_ref is not _PRICE_SEMANTICS_REF
-        or _instrument_version_ref.__code__ is not _PRICE_SEMANTICS_REF_CODE
-        or _split_instrument_version_ref is not _PRICE_SEMANTICS_SPLIT_REF
-        or _split_instrument_version_ref.__code__ is not _PRICE_SEMANTICS_SPLIT_REF_CODE
-        or _utc is not _PRICE_SEMANTICS_UTC
-        or _utc.__code__ is not _PRICE_SEMANTICS_UTC_CODE
-        or json.dumps is not _PRICE_SEMANTICS_JSON_DUMPS
-        or sha256 is not _PRICE_SEMANTICS_SHA256
-    ):
-        raise InstrumentRegistryError(
-            "instrument price-semantics executable authority changed"
-        )
+    digest: str
+    instrument_version: str
+    instrument_metadata_binding: str
+    provider_id: str
+    venue_id: str
+    provider_symbol: str
+    entity_policy_id: str
+    side: str
+    order_type: str
+    price_constraint: str
 
-    exact_text_inputs = {
-        "instrument_version": instrument_version,
-        "provider_id": provider_id,
-        "entity_policy_id": entity_policy_id,
-        "side": side,
-        "order_type": order_type,
-    }
-    for name, value in exact_text_inputs.items():
-        if type(value) is not str:
-            raise TypeError(f"{name} must be exact text")
-        if not value or value != value.strip():
+
+def _install_authenticated_price_semantics_authority():
+    """Capture causal instrument authorities outside caller-writable module state."""
+
+    registry_type = InstrumentRegistry
+    version_type = InstrumentVersion
+    artifact_store_type = ArtifactStore
+    datetime_type = datetime
+    decimal_type = Decimal
+    evidence_type = AuthenticatedPriceSemanticsEvidence
+
+    at_known = registry_type.at_known
+    at_known_code = at_known.__code__
+    metadata_known_by = registry_type._metadata_known_by
+    metadata_known_by_code = metadata_known_by.__code__
+    validate_price = version_type.validate_price
+    validate_price_code = validate_price.__code__
+    metadata_binding = version_type.metadata_evidence_binding
+    metadata_binding_code = metadata_binding.__code__
+    versions_for = _registry_versions_for
+    versions_for_code = getattr(versions_for, "__code__", None)
+    trusted_reader = trusted_authenticated_reader
+    trusted_reader_code = getattr(trusted_reader, "__code__", None)
+    detach = _detached_instrument_version
+    detach_code = detach.__code__
+    canonical_ref = _instrument_version_ref
+    canonical_ref_code = canonical_ref.__code__
+    split_ref = _split_instrument_version_ref
+    split_ref_code = split_ref.__code__
+    utc = _utc
+    utc_code = utc.__code__
+    json_module = json
+    json_dumps = json.dumps
+    json_dumps_code = getattr(json_dumps, "__code__", None)
+    sha256_function = sha256
+
+    def require_executable_authority() -> None:
+        if (
+            InstrumentRegistry is not registry_type
+            or InstrumentVersion is not version_type
+            or ArtifactStore is not artifact_store_type
+            or datetime is not datetime_type
+            or Decimal is not decimal_type
+            or AuthenticatedPriceSemanticsEvidence is not evidence_type
+            or registry_type.at_known is not at_known
+            or registry_type.at_known.__code__ is not at_known_code
+            or registry_type._metadata_known_by is not metadata_known_by
+            or registry_type._metadata_known_by.__code__ is not metadata_known_by_code
+            or version_type.validate_price is not validate_price
+            or version_type.validate_price.__code__ is not validate_price_code
+            or version_type.metadata_evidence_binding is not metadata_binding
+            or version_type.metadata_evidence_binding.__code__ is not metadata_binding_code
+            or _registry_versions_for is not versions_for
+            or getattr(versions_for, "__code__", None) is not versions_for_code
+            or trusted_authenticated_reader is not trusted_reader
+            or getattr(trusted_reader, "__code__", None) is not trusted_reader_code
+            or _detached_instrument_version is not detach
+            or _detached_instrument_version.__code__ is not detach_code
+            or _instrument_version_ref is not canonical_ref
+            or _instrument_version_ref.__code__ is not canonical_ref_code
+            or _split_instrument_version_ref is not split_ref
+            or _split_instrument_version_ref.__code__ is not split_ref_code
+            or _utc is not utc
+            or _utc.__code__ is not utc_code
+            or json is not json_module
+            or json.dumps is not json_dumps
+            or getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or sha256 is not sha256_function
+        ):
             raise InstrumentRegistryError(
-                f"{name} must be canonical non-empty text"
+                "instrument price-semantics executable authority changed"
             )
-    if type(evaluated_at) is not datetime:
-        raise TypeError("evaluated_at must be exact datetime")
 
-    canonical_ref = _PRICE_SEMANTICS_REF(
-        instrument_version,
-        "instrument_version",
-    )
-    instrument_id, expected_version = _PRICE_SEMANTICS_SPLIT_REF(
-        canonical_ref,
-        "instrument_version",
-    )
-    point = _PRICE_SEMANTICS_UTC(evaluated_at, "evaluated_at")
-    selected = _PRICE_SEMANTICS_AT_KNOWN(
-        registry,
-        instrument_id,
-        point,
-        knowledge_cutoff=point,
-        artifact_store=artifact_store,
-    )
-    if type(selected) is not _PRICE_SEMANTICS_VERSION_TYPE:
-        raise InstrumentRegistryError(
-            "causal instrument lookup returned non-canonical version"
-        )
-    version = _PRICE_SEMANTICS_DETACH(selected)
-    trusted_read = _PRICE_SEMANTICS_TRUSTED_READER(
-        artifact_store.root,
-        publication_store=artifact_store,
-    )
-    if not _PRICE_SEMANTICS_METADATA_KNOWN_BY(
-        version,
-        point,
-        artifact_store=artifact_store,
-        trusted_read=trusted_read,
-    ):
-        raise InstrumentRegistryError(
-            "instrument metadata evidence is not causally known at evaluated_at"
-        )
-    if version.version != expected_version:
-        raise InstrumentRegistryError(
-            "causal instrument version differs from admitted instrument_version"
-        )
+    def compose(
+        registry: InstrumentRegistry,
+        artifact_store: ArtifactStore,
+        *,
+        instrument_version: str,
+        evaluated_at: datetime,
+        provider_id: str,
+        entity_policy_id: str,
+        side: str,
+        order_type: str,
+        price: Decimal | str | int | None,
+    ) -> AuthenticatedPriceSemanticsEvidence:
+        """Compose exact authenticated rule identity plus its metadata binding."""
 
-    provider = provider_id.upper()
-    if version.provider_id.upper() != provider:
-        raise InstrumentRegistryError(
-            "causal instrument provider differs from financial provider"
-        )
-    policy = entity_policy_id
-    canonical_side = side.upper()
-    if canonical_side not in {"BUY", "SELL"}:
-        raise InstrumentRegistryError("side is unsupported")
-    canonical_order_type = order_type.upper()
+        require_executable_authority()
+        if type(registry) is not registry_type:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        if type(artifact_store) is not artifact_store_type:
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
 
-    if canonical_order_type == "LIMIT":
-        if price is None:
-            raise InstrumentRegistryError("LIMIT price semantics require an exact price")
-        if type(price) not in {Decimal, str, int} or type(price) is bool:
-            raise TypeError("LIMIT price must use exact Decimal, string or integer input")
-        _PRICE_SEMANTICS_VALIDATE_PRICE(version, price)
-        price_constraint = "EXACT_ADMITTED_PRICE"
-    elif canonical_order_type == "MARKET":
-        if price is not None:
+        exact_text_inputs = {
+            "instrument_version": instrument_version,
+            "provider_id": provider_id,
+            "entity_policy_id": entity_policy_id,
+            "side": side,
+            "order_type": order_type,
+        }
+        for name, value in exact_text_inputs.items():
+            if type(value) is not str:
+                raise TypeError(f"{name} must be exact text")
+            if not value or value != value.strip():
+                raise InstrumentRegistryError(
+                    f"{name} must be canonical non-empty text"
+                )
+        if type(evaluated_at) is not datetime_type:
+            raise TypeError("evaluated_at must be exact datetime")
+
+        canonical_version_ref = canonical_ref(
+            instrument_version,
+            "instrument_version",
+        )
+        instrument_id, expected_version = split_ref(
+            canonical_version_ref,
+            "instrument_version",
+        )
+        point = utc(evaluated_at, "evaluated_at")
+        selected = at_known(
+            registry,
+            instrument_id,
+            point,
+            knowledge_cutoff=point,
+            artifact_store=artifact_store,
+        )
+        if type(selected) is not version_type:
             raise InstrumentRegistryError(
-                "MARKET no-wire-price semantics require price to be absent"
+                "causal instrument lookup returned non-canonical version"
             )
-        price_constraint = "NO_WIRE_PRICE"
-    else:
-        raise InstrumentRegistryError(
-            "order_type has no canonical financial price-semantics contract"
+        version = detach(selected)
+        trusted_read = trusted_reader(
+            artifact_store.root,
+            publication_store=artifact_store,
+        )
+        if not metadata_known_by(
+            version,
+            point,
+            artifact_store=artifact_store,
+            trusted_read=trusted_read,
+        ):
+            raise InstrumentRegistryError(
+                "instrument metadata evidence is not causally known at evaluated_at"
+            )
+        if version.version != expected_version:
+            raise InstrumentRegistryError(
+                "causal instrument version differs from admitted instrument_version"
+            )
+
+        provider = provider_id.upper()
+        if version.provider_id.upper() != provider:
+            raise InstrumentRegistryError(
+                "causal instrument provider differs from financial provider"
+            )
+        policy = entity_policy_id
+        canonical_side = side.upper()
+        if canonical_side not in {"BUY", "SELL"}:
+            raise InstrumentRegistryError("side is unsupported")
+        canonical_order_type = order_type.upper()
+
+        if canonical_order_type == "LIMIT":
+            if price is None:
+                raise InstrumentRegistryError(
+                    "LIMIT price semantics require an exact price"
+                )
+            if type(price) not in {decimal_type, str, int} or type(price) is bool:
+                raise TypeError(
+                    "LIMIT price must use exact Decimal, string or integer input"
+                )
+            validate_price(version, price)
+            price_constraint = "EXACT_ADMITTED_PRICE"
+        elif canonical_order_type == "MARKET":
+            if price is not None:
+                raise InstrumentRegistryError(
+                    "MARKET no-wire-price semantics require price to be absent"
+                )
+            price_constraint = "NO_WIRE_PRICE"
+        else:
+            raise InstrumentRegistryError(
+                "order_type has no canonical financial price-semantics contract"
+            )
+
+        instrument_binding = metadata_binding(version)
+        payload = {
+            "schema_version": "instrument-price-semantics.v1",
+            "instrument_version": canonical_version_ref,
+            "instrument_version_binding": instrument_binding,
+            "provider_id": provider,
+            "venue_id": version.venue_id,
+            "provider_symbol": version.provider_symbol,
+            "entity_policy_id": policy,
+            "side": canonical_side,
+            "order_type": canonical_order_type,
+            "price_constraint": price_constraint,
+            "rounding": "NONE",
+        }
+        digest_value = "sha256:" + sha256_function(
+            json_dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return evidence_type(
+            digest=digest_value,
+            instrument_version=canonical_version_ref,
+            instrument_metadata_binding=instrument_binding,
+            provider_id=provider,
+            venue_id=version.venue_id,
+            provider_symbol=version.provider_symbol,
+            entity_policy_id=policy,
+            side=canonical_side,
+            order_type=canonical_order_type,
+            price_constraint=price_constraint,
         )
 
-    payload = {
-        "schema_version": "instrument-price-semantics.v1",
-        "instrument_version": canonical_ref,
-        "instrument_version_binding": _PRICE_SEMANTICS_METADATA_BINDING(version),
-        "provider_id": provider,
-        "venue_id": version.venue_id,
-        "provider_symbol": version.provider_symbol,
-        "entity_policy_id": policy,
-        "side": canonical_side,
-        "order_type": canonical_order_type,
-        "price_constraint": price_constraint,
-        "rounding": "NONE",
-    }
-    return "sha256:" + _PRICE_SEMANTICS_SHA256(
-        _PRICE_SEMANTICS_JSON_DUMPS(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    def digest(
+        registry: InstrumentRegistry,
+        artifact_store: ArtifactStore,
+        *,
+        instrument_version: str,
+        evaluated_at: datetime,
+        provider_id: str,
+        entity_policy_id: str,
+        side: str,
+        order_type: str,
+        price: Decimal | str | int | None,
+    ) -> str:
+        """Return only the canonical digest while retaining the sealed composer."""
 
+        evidence = compose(
+            registry,
+            artifact_store,
+            instrument_version=instrument_version,
+            evaluated_at=evaluated_at,
+            provider_id=provider_id,
+            entity_policy_id=entity_policy_id,
+            side=side,
+            order_type=order_type,
+            price=price,
+        )
+        if type(evidence) is not evidence_type:
+            raise InstrumentRegistryError(
+                "instrument price-semantics evidence authority changed"
+            )
+        return evidence.digest
+
+    return compose, digest
+
+
+(
+    authenticated_price_semantics_evidence,
+    authenticated_price_semantics_digest,
+) = _install_authenticated_price_semantics_authority()
+del _install_authenticated_price_semantics_authority

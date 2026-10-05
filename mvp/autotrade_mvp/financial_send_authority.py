@@ -279,12 +279,26 @@ def _require_binding_matches_durable_admission(
     durable_side = durable_intent.get("side")
     durable_quantity = durable_intent.get("quantity")
     durable_price = durable_intent.get("price")
+    durable_reduce_only = durable_intent.get("reduce_only")
+    durable_action = durable_intent.get("action")
+    canonical_action = _exact_text(action, name="action").upper()
     if durable_side != binding.side:
         raise FinancialSendAuthorityError("financial binding side differs from admitted risk")
     if durable_quantity != binding.quantity:
         raise FinancialSendAuthorityError("financial binding quantity differs from admitted risk")
     if durable_price != binding.price:
         raise FinancialSendAuthorityError("financial binding price differs from admitted risk")
+    if (
+        type(durable_reduce_only) is not bool
+        or durable_reduce_only != binding.reduce_only
+    ):
+        raise FinancialSendAuthorityError(
+            "financial binding reduce-only differs from admitted risk"
+        )
+    if durable_action != canonical_action:
+        raise FinancialSendAuthorityError(
+            "financial send action differs from evaluated admitted risk"
+        )
 
     return admission
 

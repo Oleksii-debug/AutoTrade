@@ -122,7 +122,12 @@ def _detached_object(value: object, *, name: str) -> dict[str, Any]:
 
     if type(value) is not dict:
         raise TypeError(f"{name} must be an exact dict")
-    detached = _exact_json_value(value, name=name)
+    try:
+        detached = _exact_json_value(value, name=name)
+    except RecursionError as error:
+        raise AdmittedFinancialRequestAuthorityError(
+            f"{name} JSON material is too deeply nested"
+        ) from error
     if type(detached) is not dict:
         raise TypeError(f"{name} must be an exact dict")
     return detached

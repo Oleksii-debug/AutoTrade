@@ -53,6 +53,24 @@ _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
 _INSTRUMENT_REGISTRY_AT = InstrumentRegistry.at
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
+# The retained registered-run verifier is itself Python code whose globals are
+# resolved at call time. Snapshot the exact replay dependencies it was installed
+# with so a later public/private module rebind cannot silently redirect the
+# supposedly retained verifier and close an owner with different code.
+_REGISTERED_RUN_REPLAY_GLOBALS = _VERIFY_REGISTERED_STRATEGY_RUN.__globals__
+_REGISTERED_RUN_REPLAY_DEPENDENCIES = tuple(
+    (
+        name,
+        _REGISTERED_RUN_REPLAY_GLOBALS.get(name),
+    )
+    for name in (
+        "run_baseline",
+        "_restore_threshold_strategy_snapshot",
+        "_readmit_deterministic_proposal",
+        "_readmit_registered_strategy_run_receipt",
+    )
+)
+
 _BASE_REQUIRED_OWNERS = (
     "registered_strategy_run_receipt",
     "execution_calibration_authority",
@@ -113,6 +131,17 @@ def _snapshot_proposal(value: object) -> DeterministicProposal:
         raise StrategyEconomicsAuthorityError(
             "deterministic proposal cannot be reconstructed canonically"
         ) from error
+
+
+def _require_installed_registered_run_replay_dependencies() -> None:
+    for name, installed in _REGISTERED_RUN_REPLAY_DEPENDENCIES:
+        if (
+            installed is None
+            or _REGISTERED_RUN_REPLAY_GLOBALS.get(name) is not installed
+        ):
+            raise StrategyEconomicsAuthorityError(
+                "registered strategy-run verifier dependency changed"
+            )
 
 
 _ISSUE_TOKEN = object()
@@ -322,6 +351,7 @@ def assess_strategy_economics_authority(
             raise TypeError(
                 "registered_run_receipt must be exact RegisteredStrategyRunReceipt"
             )
+        _require_installed_registered_run_replay_dependencies()
         try:
             receipt_digest = _VERIFY_REGISTERED_STRATEGY_RUN(
                 proposal,

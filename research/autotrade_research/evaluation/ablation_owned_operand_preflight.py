@@ -33,6 +33,10 @@ from autotrade_research.evaluation.ablation_utility_rule_provenance import (
     ResolvedAblationUtilityRuleProvenance,
     resolve_ablation_utility_rule_provenance,
 )
+from autotrade_research.evaluation.utility_projection import (
+    UtilityProjectionRuleError,
+    build_utility_projection_rule,
+)
 from autotrade_research.memory.episodes import MemoryIntegrityError
 
 
@@ -239,6 +243,19 @@ def _compose(
     if utility_rule.utility_fact_provenance_digest != facts.provenance_digest:
         raise MemoryIntegrityError(
             "utility rule does not bind the resolved utility facts"
+        )
+    try:
+        installed_utility_rule = build_utility_projection_rule(utility_rule.value_unit)
+    except UtilityProjectionRuleError as error:
+        raise MemoryIntegrityError(
+            "registered utility projection rule is not source-owned"
+        ) from error
+    if (
+        utility_rule.projection_artifact_id != installed_utility_rule.artifact_id
+        or utility_rule.projection_artifact_digest != installed_utility_rule.sha256
+    ):
+        raise MemoryIntegrityError(
+            "registered utility projection rule identity is not source-owned"
         )
     if utility_rule.value_unit != cost_rule.value_unit:
         raise MemoryIntegrityError(

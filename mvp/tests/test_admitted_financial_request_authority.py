@@ -97,6 +97,21 @@ class _ExplosiveText(str):
         return self._explode()
 
 
+class _IssuerSubclass(AdmittedFinancialRequestAuthorityIssuer):
+    __slots__ = ()
+
+
+class _ExplosiveIssuerSubclass(AdmittedFinancialRequestAuthorityIssuer):
+    __slots__ = ("calls",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def _registry(self):
+        self.calls += 1
+        raise AssertionError("caller issuer override executed")
+
+
 class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
     @staticmethod
     def _bound_case(store: JournalStore):
@@ -169,6 +184,34 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     request=request,
                     submission_scope=scope,
                 )
+
+    def test_issuer_subclass_cannot_initialize_or_mint_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "issuer must be exact",
+            ):
+                _IssuerSubclass(store)
+
+            hostile = _ExplosiveIssuerSubclass()
+            with self.assertRaisesRegex(
+                TypeError,
+                "issuer must be exact",
+            ):
+                hostile.issue("admission:forged")
+            self.assertEqual(hostile.calls, 0)
+
+    def test_private_resolver_rejects_issuer_subclass_before_override_dispatch(self) -> None:
+        hostile = _ExplosiveIssuerSubclass()
+        forged = object.__new__(AdmittedFinancialRequestAuthority)
+        with self.assertRaisesRegex(
+            TypeError,
+            "issuer must be exact",
+        ):
+            hostile._resolved(forged)
+        self.assertEqual(hostile.calls, 0)
 
     def test_authority_is_bound_to_one_issuer_instance(self) -> None:
         with TemporaryDirectory() as directory:

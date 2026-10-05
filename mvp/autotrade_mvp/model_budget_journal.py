@@ -7,7 +7,7 @@ rebuilds that projection after restart. It performs no model/network call.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 from typing import Any, Callable, Iterable, Mapping
@@ -49,6 +49,21 @@ def _environment(value: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _clock_text(value: object) -> str:
+    if type(value) is not str or not value:
+        raise ValueError("clock result must be canonical UTC text")
+    try:
+        point = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("clock result must be canonical UTC text") from error
+    if point.tzinfo is None or point.utcoffset() != timedelta(0):
+        raise ValueError("clock result must be canonical UTC text")
+    canonical = point.astimezone(timezone.utc).isoformat()
+    if value != canonical:
+        raise ValueError("clock result must be canonical UTC text")
+    return value
 
 
 def _route_now(value: datetime | None) -> datetime:
@@ -218,7 +233,7 @@ class DurableModelBudget:
             "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "committed_at": _text(self._clock(), name="clock result"),
+            "committed_at": _clock_text(self._clock()),
         }
 
     @staticmethod

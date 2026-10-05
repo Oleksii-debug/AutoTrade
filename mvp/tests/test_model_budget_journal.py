@@ -136,7 +136,7 @@ class DurableModelBudgetTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")
-            with self.assertRaisesRegex(ValueError, "clock result is required"):
+            with self.assertRaisesRegex(ValueError, "canonical UTC text"):
                 DurableModelBudget(
                     journal=journal,
                     budget_id="policy-hostile-clock-result",
@@ -149,6 +149,30 @@ class DurableModelBudgetTests(unittest.TestCase):
                 journal.load_events("model_budget", "policy-hostile-clock-result"),
                 [],
             )
+
+    def test_noncanonical_clock_text_fails_before_journal_mutation(self):
+        invalid_values = (
+            "not-a-time",
+            "2026-09-24T21:45:00",
+            "2026-09-24T23:45:00+02:00",
+            "2026-09-24T21:45:00Z",
+        )
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid), TemporaryDirectory() as directory:
+                journal = JournalStore(Path(directory) / "journal.db")
+                budget_id = "policy-invalid-clock"
+                with self.assertRaisesRegex(ValueError, "canonical UTC text"):
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id=budget_id,
+                        ceiling="1",
+                        environment="SIMULATION",
+                        clock=lambda value=invalid: value,
+                    )
+                self.assertEqual(
+                    journal.load_events("model_budget", budget_id),
+                    [],
+                )
 
     def test_initialization_uses_canonical_sequence_text(self):
         with TemporaryDirectory() as directory:

@@ -1,6 +1,7 @@
 import unittest
 
 from mvp.autotrade_mvp import durable_financial_bybit_sender as module
+from mvp.autotrade_mvp.bybit_v5 import BybitPreparedSubmission
 from mvp.autotrade_mvp.durable_financial_bybit_sender import (
     DurableFinancialBybitSenderError,
     DurableFinanciallyBoundBybitOrderSender,
@@ -26,11 +27,45 @@ def _forged_require_store(_self):
     raise AssertionError("forged registry store executable ran")
 
 
+def _forged_projection(_prepared):
+    _FORGED_CALLS.append("projection")
+    raise AssertionError("forged Bybit prepared projection executed")
+
+
 class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
     @staticmethod
     def _arguments(function):
         code = function.__code__
         return code.co_varnames[: code.co_argcount + code.co_kwonlyargcount]
+
+    @staticmethod
+    def _prepared_shell():
+        prepared = object.__new__(BybitPreparedSubmission)
+        values = {
+            "endpoint": "/v5/order/create",
+            "body": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "2",
+                "timeInForce": "GTC",
+                "orderLinkId": "client-order-1",
+                "price": "30000",
+                "reduceOnly": False,
+                "positionIdx": 0,
+            },
+            "account_id": "account-1",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "capability_snapshot_id": "capability-1",
+            "entity_id": "entity-1",
+            "instrument_version": "7",
+            "body_sha256": "sha256:" + "1" * 64,
+        }
+        for name, value in values.items():
+            object.__setattr__(prepared, name, value)
+        return prepared
 
     @staticmethod
     def _dispatch_shell():
@@ -121,6 +156,8 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
         self.assertIn("attempt_id", arguments)
         self.assertIn("intent_id", arguments)
         self.assertIn("intent_hash", arguments)
+        self.assertIn("prepared_request", arguments)
+        self.assertNotIn("request", arguments)
         self.assertNotIn("binding", arguments)
         self.assertNotIn("authority", arguments)
         self.assertNotIn("authority_check", arguments)
@@ -151,11 +188,50 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
                     attempt_id="attempt-1",
                     intent_id="intent-1",
                     intent_hash="intent-hash-1",
-                    request={},
+                    prepared_request=self._prepared_shell(),
                     now="2026-10-05T08:00:00Z",
                 )
         finally:
             DurableFinancialRequestBindingRegistry._require_store = original
+        self.assertEqual(_FORGED_CALLS, [])
+
+    def test_product_dispatch_rejects_raw_or_forged_prepared_object(self):
+        product = self._dispatch_shell()
+        with self.assertRaisesRegex(
+            TypeError,
+            "prepared_request must be exact BybitPreparedSubmission",
+        ):
+            product.dispatch(
+                admission_id="admission-1",
+                action="TRADE",
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                prepared_request=object(),
+                now="2026-10-05T08:00:00Z",
+            )
+
+    def test_prepared_projection_rebinding_fails_before_forged_executable(self):
+        product = self._dispatch_shell()
+        original = module.guarded_order_projection
+        _FORGED_CALLS.clear()
+        try:
+            module.guarded_order_projection = _forged_projection
+            with self.assertRaisesRegex(
+                DurableFinancialBybitSenderError,
+                "prepared-request projection executable authority changed",
+            ):
+                product.dispatch(
+                    admission_id="admission-1",
+                    action="TRADE",
+                    attempt_id="attempt-1",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash-1",
+                    prepared_request=self._prepared_shell(),
+                    now="2026-10-05T08:00:00Z",
+                )
+        finally:
+            module.guarded_order_projection = original
         self.assertEqual(_FORGED_CALLS, [])
 
     def test_structural_preflight_does_not_execute_registry_resolver(self):

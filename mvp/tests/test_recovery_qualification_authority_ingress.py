@@ -66,7 +66,7 @@ class RecoveryQualificationAuthorityIngressTests(unittest.TestCase):
                 touched.append("items")
                 raise AssertionError("hostile recovery mapping iteration")
 
-        with self.assertRaisesRegex(TypeError, "max_downtime_ms must be a mapping"):
+        with self.assertRaisesRegex(TypeError, "max_downtime_ms must be an exact dict"):
             RecoveryQualificationPolicy(
                 source_sha=SOURCE_SHA,
                 release_artifact_id=RELEASE_ARTIFACT_ID,
@@ -79,7 +79,24 @@ class RecoveryQualificationAuthorityIngressTests(unittest.TestCase):
                         for scenario in recovery_module.RecoveryScenario
                     }
                 ),
-                required_tests=REQUIRED_TESTS,
+                required_tests=dict(REQUIRED_TESTS),
+            )
+        self.assertEqual(touched, [])
+
+    def test_tuple_subclass_is_rejected_before_iteration_dispatch(self):
+        touched: list[str] = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile recovery tuple iteration")
+
+        with self.assertRaisesRegex(TypeError, "must be an exact tuple"):
+            evidence(
+                recovery_module.RecoveryScenario.NETWORK_LOSS,
+                tests_run=HostileTuple(
+                    REQUIRED_TESTS[recovery_module.RecoveryScenario.NETWORK_LOSS]
+                ),
             )
         self.assertEqual(touched, [])
 
@@ -92,7 +109,7 @@ class RecoveryQualificationAuthorityIngressTests(unittest.TestCase):
                 raise AssertionError("hostile recovery evidence iteration")
 
         values = HostileList(complete_evidence())
-        with self.assertRaisesRegex(TypeError, "evidence must be a sequence"):
+        with self.assertRaisesRegex(TypeError, "evidence must be an exact list or tuple"):
             qualify_recovery_release(
                 policy=policy(),
                 evidence=values,

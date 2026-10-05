@@ -9,7 +9,9 @@ on:
       - "mvp/autotrade_mvp/qualification_attestation.py"
       - "mvp/autotrade_mvp/qualification_trust_policy.json"
       - "mvp/tests/test_recovery_qualification.py"
+      - "mvp/tests/test_recovery_qualification_authority_ingress.py"
       - "mvp/tests/test_qualification_attestation.py"
+      - "mvp/tests/test_qualification_attestation_authority_ingress.py"
       - "mvp/tests/test_verify_scope.py"
       - "autotrade_runtime/artifacts/**"
       - "research/autotrade_research/artifacts/**"
@@ -23,7 +25,9 @@ on:
       - "mvp/autotrade_mvp/qualification_attestation.py"
       - "mvp/autotrade_mvp/qualification_trust_policy.json"
       - "mvp/tests/test_recovery_qualification.py"
+      - "mvp/tests/test_recovery_qualification_authority_ingress.py"
       - "mvp/tests/test_qualification_attestation.py"
+      - "mvp/tests/test_qualification_attestation_authority_ingress.py"
       - "mvp/tests/test_verify_scope.py"
       - "autotrade_runtime/artifacts/**"
       - "research/autotrade_research/artifacts/**"
@@ -62,14 +66,16 @@ jobs:
         run: >-
           python -m unittest
           mvp.tests.test_recovery_qualification
+          mvp.tests.test_recovery_qualification_authority_ingress
           mvp.tests.test_qualification_attestation
+          mvp.tests.test_qualification_attestation_authority_ingress
           mvp.tests.test_verify_scope
           -v
       - name: Write exact-head recovery qualification evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite recovery-qualification-foundation
-          --command "python -m unittest mvp.tests.test_recovery_qualification mvp.tests.test_qualification_attestation mvp.tests.test_verify_scope -v"
+          --command "python -m unittest mvp.tests.test_recovery_qualification mvp.tests.test_recovery_qualification_authority_ingress mvp.tests.test_qualification_attestation mvp.tests.test_qualification_attestation_authority_ingress mvp.tests.test_verify_scope -v"
           --output "artifacts/recovery-qualification-${{ runner.os }}.json"
       - name: Upload exact-head recovery qualification evidence
         uses: actions/upload-artifact@v4

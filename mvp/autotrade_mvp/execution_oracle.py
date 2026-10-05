@@ -11,7 +11,7 @@ from datetime import timedelta
 from decimal import Decimal, ROUND_DOWN
 from fractions import Fraction
 
-from .exact_decimal import as_fraction, round_fraction_to_quantum
+from .exact_decimal import as_fraction, exact_multiply, round_fraction_to_quantum
 
 from .execution_realism import (
     ExecutionModel,
@@ -28,8 +28,11 @@ class ExecutionOracleError(ValueError):
 
 
 def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
-    lots = (quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    return lots * lot_size
+    return round_fraction_to_quantum(
+        as_fraction(quantity),
+        lot_size,
+        mode="FLOOR",
+    )
 
 
 def assert_conservative_execution(
@@ -67,7 +70,7 @@ def assert_conservative_execution(
     independent_capacity = _round_down(
         min(
             order.quantity,
-            observation.available_volume * model.max_participation,
+            exact_multiply(observation.available_volume, model.max_participation),
         ),
         order.lot_size,
     )
@@ -189,7 +192,10 @@ def assert_conservative_execution(
                 raise ExecutionOracleError("sell limit filled below limit")
 
         independent_min_fee = max(
-            result.filled_quantity * result.fill_price * model.fee_rate,
+            exact_multiply(
+                exact_multiply(result.filled_quantity, result.fill_price),
+                model.fee_rate,
+            ),
             model.minimum_fee,
         )
         if result.fee < independent_min_fee:

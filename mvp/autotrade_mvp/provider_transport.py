@@ -1189,16 +1189,40 @@ def _exact_trading_response(
 def _bybit_exact_trading_response(
     value: object,
 ) -> ExactJsonTransportResponse:
-    """Preserve post-send Bybit 5xx uncertainty for reconciliation."""
+    """Preserve Bybit post-send uncertainty for reconciliation.
+
+    Durable dispatch must agree with the canonical Bybit response parser:
+    every HTTP non-2xx write result is reconciliation-first, and documented
+    ambiguous business codes remain UNKNOWN even when the HTTP layer is 2xx.
+    """
 
     exact = _exact_trading_response(value)
     status = exact.http_status
+    parsed = exact.payload
     if status is not None and 500 <= status <= 599:
         return ExactJsonTransportResponse(
             exact.response_bytes,
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_5xx_execution_unknown",
+        )
+    if status is not None and (status < 200 or status > 299):
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_http_non_2xx_execution_unknown",
+        )
+    if (
+        type(parsed) is dict
+        and type(parsed.get("retCode")) is int
+        and parsed["retCode"] in {429, 10000, 10014, 10016}
+    ):
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_ambiguous_ret_code_execution_unknown",
         )
     return exact
 

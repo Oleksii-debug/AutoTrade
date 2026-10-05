@@ -42,6 +42,26 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("ProductWebViewHost.Visibility = Visibility.Visible;", code)
         self.assertIn("FocusWebButton.IsEnabled = true;", code)
 
+    def test_window_access_keys_are_unique(self):
+        root = ET.parse(XAML).getroot()
+        access_keys = []
+        for element in root.iter():
+            content = element.attrib.get("Content")
+            if not content:
+                continue
+            marker = content.find("_")
+            if marker < 0 or marker + 1 >= len(content):
+                continue
+            access_keys.append((content[marker + 1].casefold(), content))
+
+        key_names = [key for key, _ in access_keys]
+        self.assertEqual(
+            len(key_names),
+            len(set(key_names)),
+            "Window access keys must be unique: " + repr(access_keys),
+        )
+        self.assertIn(("w", "Reload application _web interface"), access_keys)
+
     def test_default_window_construction_keeps_native_and_web_on_one_connection(self):
         code = CODE.read_text(encoding="utf-8")
         constructor = code.split("public MainWindow()", 1)[1].split(

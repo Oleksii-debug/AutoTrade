@@ -1134,6 +1134,32 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
         self.assertEqual(self.book.position("ABC"), Decimal("0"))
         self.assertEqual(self.book.cash("USD"), Decimal("4901"))
+
+    def test_partially_covered_assignment_cannot_create_residual_short(self):
+        self.seed_option_position("-1")
+        self.seed_underlying_position("50")
+        before_transactions = tuple(self.book.transactions)
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "without atomic borrow authority",
+        ):
+            self.authority.apply(
+                self.evidence(
+                    external_event_id="partial-cover-assignment",
+                    event_kind="ASSIGNMENT",
+                    signed_contracts="-1",
+                )
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("-1"))
+        self.assertEqual(self.book.position("ABC"), Decimal("50"))
+        self.assertEqual(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
+            [],
+        )
+
     def test_correction_reusing_provider_revision_fails_closed(self):
         self.seed_option_position("-2")
         self.seed_underlying_position("200")
@@ -1166,6 +1192,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             len(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
             1,
         )
+
     def test_correction_atomically_reverses_and_replaces_economics(self):
         self.seed_option_position("-2")
         self.seed_underlying_position("200")
@@ -1221,6 +1248,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         self.assertEqual(restarted.position("ABC"), Decimal("0"))
         self.assertEqual(restarted.cash("USD"), Decimal("9802"))
         self.assertEqual(len(restarted.transactions), 5)
+
     def test_adjusted_deliverable_without_explicit_exercise_cash_fails_closed(self):
         self.seed_option_position("1")
         registry = InstrumentRegistry(

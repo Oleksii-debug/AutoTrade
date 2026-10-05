@@ -1661,7 +1661,7 @@ def parse_account_trades(
     rows = observation.payload
     account_id = observation.account_id
     environment = observation.environment
-    if type(rows) is not list:
+    if type(rows) is not tuple:
         raise BinanceSpotAdapterError("trade rows must be an exact decoded array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceSpotAdapterError("instrument_versions must be a mapping")
@@ -1708,7 +1708,7 @@ def parse_account_trades(
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
-        if type(raw) is not dict:
+        if type(raw) is not MappingProxyType:
             raise BinanceSpotAdapterError(f"trade row {index} must be an object")
         symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
         if symbol not in normalized_instruments:
@@ -1718,8 +1718,7 @@ def parse_account_trades(
         if (
             type(trade_id) is not int
             or trade_id < 0
-            or isinstance(order_id, bool)
-            or not isinstance(order_id, int)
+            or type(order_id) is not int
             or order_id < 0
         ):
             raise BinanceSpotAdapterError("trade id and orderId must be non-negative integers")

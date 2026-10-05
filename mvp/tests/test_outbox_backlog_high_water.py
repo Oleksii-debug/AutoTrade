@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from mvp.autotrade_mvp import _persistence_impl as persistence_impl
@@ -71,6 +72,77 @@ class OutboxBacklogHighWaterTests(unittest.TestCase):
                     "high_water": 2,
                 },
             )
+
+    def test_tail_cut_avoids_full_transition_scan_and_is_replay_candidate(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JournalStore(Path(root) / "journal.sqlite3")
+            start = store.outbox_backlog_cut()
+            store.append_event(
+                _event("evt-tail-cut", aggregate_id="tail-cut"),
+                outbox_topic="events",
+            )
+
+            with patch.object(
+                JournalStore,
+                "_outbox_transition_sequence_value",
+                side_effect=AssertionError("full transition scan executed"),
+            ):
+                tail = store.outbox_backlog_tail_cut(
+                    start_transition_sequence=start["transition_sequence"],
+                    start_pending_count=start["pending_count"],
+                )
+
+            self.assertEqual(
+                tail,
+                {"transition_sequence": 1, "pending_count": 1},
+            )
+            replay = store.outbox_backlog_high_water_since(
+                start_transition_sequence=start["transition_sequence"],
+                start_pending_count=start["pending_count"],
+            )
+            self.assertEqual(replay["end_transition_sequence"], 1)
+            self.assertEqual(replay["end_pending_count"], 1)
+            self.assertEqual(replay["high_water"], 1)
+
+    def test_tail_cut_candidate_does_not_authenticate_tampered_transition(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "journal.sqlite3"
+            store = JournalStore(path)
+            start = store.outbox_backlog_cut()
+            store.append_event(
+                _event("evt-tail-tamper", aggregate_id="tail-tamper"),
+                outbox_topic="events",
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    UPDATE outbox_backlog_transitions
+                    SET pending_count = 9
+                    WHERE transition_sequence = 1
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            candidate = store.outbox_backlog_tail_cut(
+                start_transition_sequence=start["transition_sequence"],
+                start_pending_count=start["pending_count"],
+            )
+            self.assertEqual(
+                candidate,
+                {"transition_sequence": 1, "pending_count": 9},
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "transition pending count conflicts with replayed authority",
+            ):
+                store.outbox_backlog_high_water_since(
+                    start_transition_sequence=start["transition_sequence"],
+                    start_pending_count=start["pending_count"],
+                )
 
     def test_idempotent_enqueue_and_delivery_replays_do_not_duplicate_transitions(self):
         with tempfile.TemporaryDirectory() as root:
@@ -160,6 +232,13 @@ class OutboxBacklogHighWaterTests(unittest.TestCase):
             self.assertEqual(
                 start,
                 {"transition_sequence": 0, "pending_count": 1},
+            )
+            self.assertEqual(
+                store.outbox_backlog_tail_cut(
+                    start_transition_sequence=start["transition_sequence"],
+                    start_pending_count=start["pending_count"],
+                ),
+                start,
             )
 
             pending = store.pending_outbox()[0]

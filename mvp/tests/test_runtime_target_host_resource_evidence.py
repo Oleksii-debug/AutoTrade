@@ -501,6 +501,62 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
 
+    def test_wrapper_rejects_preentry_backlog_tail_cut_replacement(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+
+        def forged_tail_cut(
+            _self,
+            *,
+            start_transition_sequence,
+            start_pending_count,
+        ):
+            return {
+                "transition_sequence": start_transition_sequence,
+                "pending_count": start_pending_count,
+            }
+
+        with tempfile.TemporaryDirectory() as root:
+            journal = JournalStore(Path(root) / "journal.sqlite")
+            store = ArtifactStore(Path(root) / "evidence")
+            with (
+                patch.object(
+                    JournalStore,
+                    "outbox_backlog_tail_cut",
+                    forged_tail_cut,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                    side_effect=(before, after),
+                ) as capture,
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    return_value=run,
+                ) as runner,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostResourceEvidenceError,
+                    "JournalStore backlog authority changed before target-host run",
+                ):
+                    run_declared_target_host_campaign_with_resources(
+                        journal=journal,
+                        evidence_store=store,
+                        spec=object(),
+                        authority_id="resource-authority",
+                        research_plan_id="resource-research-plan",
+                        financial_operations={},
+                        research_operations={},
+                        inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                        measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                        run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                        resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                    )
+            capture.assert_not_called()
+            runner.assert_not_called()
+            with self.assertRaises(FileNotFoundError):
+                store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+
     def test_opening_cut_transient_backlog_fails_before_workload(self):
         run = _run_result()
         before = _snapshot(monotonic_ns=100, process_cpu_ns=10)

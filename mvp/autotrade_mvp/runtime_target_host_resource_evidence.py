@@ -327,6 +327,7 @@ if type(_disk_usage) is FunctionType:
 _RESOURCE_JOURNAL_STORE_TYPE = JournalStore
 _RESOURCE_JOURNAL_AUTHORITY_CHECK = require_exact_journal_store_authority
 _RESOURCE_OUTBOX_BACKLOG_CUT = JournalStore.outbox_backlog_cut
+_RESOURCE_OUTBOX_BACKLOG_TAIL_CUT = JournalStore.outbox_backlog_tail_cut
 _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER = JournalStore.outbox_backlog_high_water_since
 _RESOURCE_JOURNAL_CALLABLE_AUTHORITY = (
     (
@@ -338,6 +339,11 @@ _RESOURCE_JOURNAL_CALLABLE_AUTHORITY = (
         "JournalStore outbox backlog cut",
         _RESOURCE_OUTBOX_BACKLOG_CUT,
         _capture_callable_authority(_RESOURCE_OUTBOX_BACKLOG_CUT),
+    ),
+    (
+        "JournalStore outbox backlog tail cut",
+        _RESOURCE_OUTBOX_BACKLOG_TAIL_CUT,
+        _capture_callable_authority(_RESOURCE_OUTBOX_BACKLOG_TAIL_CUT),
     ),
     (
         "JournalStore outbox backlog high-water",
@@ -1105,6 +1111,7 @@ def run_declared_target_host_campaign_with_resources(
     journal_store_type = _RESOURCE_JOURNAL_STORE_TYPE
     journal_authority_check = _RESOURCE_JOURNAL_AUTHORITY_CHECK
     outbox_backlog_cut = _RESOURCE_OUTBOX_BACKLOG_CUT
+    outbox_backlog_tail_cut = _RESOURCE_OUTBOX_BACKLOG_TAIL_CUT
     outbox_backlog_high_water = _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER
     journal_callable_states = _RESOURCE_JOURNAL_CALLABLE_AUTHORITY
     store_authority = _capture_artifact_store_authority(evidence_store)
@@ -1236,6 +1243,11 @@ def run_declared_target_host_campaign_with_resources(
             is not outbox_backlog_cut
             or raw_type_getattribute(
                 journal_store_type,
+                "outbox_backlog_tail_cut",
+            )
+            is not outbox_backlog_tail_cut
+            or raw_type_getattribute(
+                journal_store_type,
                 "outbox_backlog_high_water_since",
             )
             is not outbox_backlog_high_water
@@ -1281,7 +1293,11 @@ def run_declared_target_host_campaign_with_resources(
     require_resource_class_authority(phase="before target-host run")
     backlog_start = outbox_backlog_cut(journal)
     before = capture_snapshot(evidence_root=evidence_store.root)
-    backlog_start_after_snapshot = outbox_backlog_cut(journal)
+    backlog_start_after_snapshot = outbox_backlog_tail_cut(
+        journal,
+        start_transition_sequence=backlog_start["transition_sequence"],
+        start_pending_count=backlog_start["pending_count"],
+    )
     if backlog_start_after_snapshot != backlog_start:
         raise RuntimeTargetHostResourceEvidenceError(
             "outbox backlog changed while opening the resource measurement cut"
@@ -1357,11 +1373,15 @@ def run_declared_target_host_campaign_with_resources(
     # no outbox transition occurred after this endpoint. This prevents a
     # post-resource-cut ENQUEUED->DELIVERED pair from inflating the retained
     # campaign high-water while restoring the same terminal pending count.
-    backlog_end = outbox_backlog_cut(journal)
+    backlog_end = outbox_backlog_tail_cut(
+        journal,
+        start_transition_sequence=backlog_start["transition_sequence"],
+        start_pending_count=backlog_start["pending_count"],
+    )
 
     # Preserve the inherited resource-measurement boundary: the second
     # process/disk cut closes after the caller workload, authority revalidation,
-    # and the O(1) durable backlog endpoint cut. Full backlog replay is
+    # and the indexed durable backlog tail cut. Full backlog replay is
     # qualification work and may perform SQLite reads proportional to the
     # campaign transition count, so it remains outside elapsed/CPU/I/O metrics.
     after = capture_snapshot(evidence_root=evidence_store.root)

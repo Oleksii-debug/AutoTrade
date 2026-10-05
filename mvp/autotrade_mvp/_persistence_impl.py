@@ -1291,6 +1291,91 @@ class JournalStore:
             "pending_count": pending_count,
         }
 
+    def outbox_backlog_tail_cut(
+        self,
+        *,
+        start_transition_sequence: int,
+        start_pending_count: int,
+    ) -> dict[str, int]:
+        """Capture a cheap candidate endpoint for later full backlog replay.
+
+        This intentionally does not re-scan or authenticate the complete
+        transition history. The caller must subsequently validate the candidate
+        with outbox_backlog_high_water_since() before treating it as evidence.
+        Its purpose is to fence a measurement boundary without moving the O(n)
+        replay cost inside that measured interval.
+        """
+
+        if self.SCHEMA_VERSION < 10:
+            raise RuntimeError(
+                "outbox backlog transition authority requires schema version 10"
+            )
+        if (
+            type(start_transition_sequence) is not int
+            or start_transition_sequence < 0
+        ):
+            raise ValueError(
+                "start_transition_sequence must be a non-negative integer"
+            )
+        if type(start_pending_count) is not int or start_pending_count < 0:
+            raise ValueError(
+                "start_pending_count must be a non-negative integer"
+            )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT transition_sequence, pending_count
+                    FROM outbox_backlog_transitions
+                    ORDER BY transition_sequence DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row is None:
+                    if start_transition_sequence != 0:
+                        raise ValueError(
+                            "outbox backlog start transition is ahead of durable tail"
+                        )
+                    transition_sequence = 0
+                    pending_count = start_pending_count
+                else:
+                    transition_sequence = row["transition_sequence"]
+                    pending_count = row["pending_count"]
+                    if (
+                        type(transition_sequence) is not int
+                        or transition_sequence <= 0
+                    ):
+                        raise ValueError(
+                            "outbox backlog tail transition is not canonical"
+                        )
+                    if type(pending_count) is not int or pending_count < 0:
+                        raise ValueError(
+                            "outbox backlog tail pending count is not canonical"
+                        )
+                    if transition_sequence < start_transition_sequence:
+                        raise ValueError(
+                            "outbox backlog start transition is ahead of durable tail"
+                        )
+                    if (
+                        transition_sequence == start_transition_sequence
+                        and pending_count != start_pending_count
+                    ):
+                        raise ValueError(
+                            "outbox backlog start pending count conflicts "
+                            "with durable tail authority"
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        return {
+            "transition_sequence": transition_sequence,
+            "pending_count": pending_count,
+        }
+
     def outbox_backlog_high_water_since(
         self,
         *,

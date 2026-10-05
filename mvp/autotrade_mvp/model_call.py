@@ -36,6 +36,7 @@ from .model_gateway import (
     route_model,
 )
 from .persistence import (
+    JournalStore,
     canonical_json,
     payload_digest,
     require_exact_journal_store_authority,
@@ -53,6 +54,51 @@ class ModelCallError(RuntimeError):
 
 class ModelCallNotSent(ModelCallError):
     """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
+
+
+# Per-callback class snapshots can safely restore mutations that occur *during*
+# a callback only if the class graph was canonical when the snapshot began.
+# Retain the trusted JournalStore facade + implementation MRO from module import
+# so a preinstalled dispatch rebind cannot silently become the next snapshot's
+# expected authority.
+_MODEL_JOURNAL_CLASS_BASELINE = tuple(
+    (
+        cls,
+        tuple(cls.__bases__),
+        MappingProxyType(dict(vars(cls))),
+    )
+    for cls in JournalStore.__mro__
+    if cls is not object
+)
+
+
+def _require_canonical_model_journal_class_authority(
+    baseline=_MODEL_JOURNAL_CLASS_BASELINE,
+) -> None:
+    for cls, expected_bases, expected_state in baseline:
+        current_bases = tuple(cls.__bases__)
+        if (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        ):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
+        current_state = vars(cls)
+        if set(current_state) != set(expected_state):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
+        if any(
+            current_state[name] is not expected_state[name]
+            for name in expected_state
+        ):
+            raise ModelCallError(
+                "durable model budget journal class authority is invalid"
+            )
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -503,6 +549,7 @@ class DurableModelCallOrchestrator:
             raise ValueError(
                 "started_lease_seconds must be an integer from 1 through 3600"
             )
+        _require_canonical_model_journal_class_authority()
         try:
             require_exact_journal_store_authority(
                 budget.journal,
@@ -623,6 +670,7 @@ class DurableModelCallOrchestrator:
         tuple[tuple[type, str, Mapping[str, object]], ...],
     ]:
         """Freeze exact class and instance authority around caller callbacks."""
+        _require_canonical_model_journal_class_authority()
         orchestrator_class = object.__getattribute__(self, "__class__")
         if orchestrator_class is not DurableModelCallOrchestrator:
             raise ModelCallError("model orchestrator class authority is invalid")

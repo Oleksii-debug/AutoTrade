@@ -142,7 +142,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -304,6 +304,27 @@ class JournalStore:
                 "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
                 "WHERE effect_kind IS NULL",
             )
+        if version == 10:
+            # Historical outbox rows retain their enqueue and terminal delivery
+            # timestamps, but wall clock text is not a causal ordering authority
+            # and cannot prove a campaign backlog peak after rows drain. Record
+            # every future enqueue/delivery transition under one contiguous
+            # durable sequence. Migration intentionally invents no pre-v10
+            # history: a campaign starts from an exact pending-count baseline.
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS outbox_backlog_transitions (
+                    transition_sequence INTEGER PRIMARY KEY
+                        CHECK (transition_sequence > 0),
+                    transition_kind TEXT NOT NULL
+                        CHECK (transition_kind IN ('ENQUEUED', 'DELIVERED')),
+                    outbox_id TEXT NOT NULL
+                        REFERENCES outbox(outbox_id) ON DELETE RESTRICT,
+                    pending_count INTEGER NOT NULL CHECK (pending_count >= 0),
+                    UNIQUE (outbox_id, transition_kind)
+                )
+                """,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -340,6 +361,13 @@ class JournalStore:
             required["global_projection_checkpoints"] = frozenset({
                 "projection_name", "journal_sequence",
                 "state_json", "state_hash", "updated_at",
+            })
+        if cls.SCHEMA_VERSION >= 10:
+            required["outbox_backlog_transitions"] = frozenset({
+                "transition_sequence",
+                "transition_kind",
+                "outbox_id",
+                "pending_count",
             })
         return required
 
@@ -446,6 +474,13 @@ class JournalStore:
                 "state_hash": ("TEXT", True),
                 "updated_at": ("TEXT", True),
             }
+        if cls.SCHEMA_VERSION >= 10:
+            required["outbox_backlog_transitions"] = {
+                "transition_sequence": ("INTEGER", False),
+                "transition_kind": ("TEXT", True),
+                "outbox_id": ("TEXT", True),
+                "pending_count": ("INTEGER", True),
+            }
         return required
 
     @classmethod
@@ -525,6 +560,10 @@ class JournalStore:
             expected_primary_keys["global_projection_checkpoints"] = (
                 "projection_name",
             )
+        if cls.SCHEMA_VERSION >= 10:
+            expected_primary_keys["outbox_backlog_transitions"] = (
+                "transition_sequence",
+            )
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
@@ -540,6 +579,10 @@ class JournalStore:
                 else {("idempotency_key",)}
             ),
         }
+        if cls.SCHEMA_VERSION >= 10:
+            expected_unique["outbox_backlog_transitions"] = {
+                ("outbox_id", "transition_kind"),
+            }
         for table_name, expected_pk in expected_primary_keys.items():
             pk_columns = tuple(
                 str(row["name"])
@@ -584,6 +627,26 @@ class JournalStore:
                     "journal sequence authority is not a contiguous canonical positive integer series"
                 )
 
+        if cls.SCHEMA_VERSION >= 10:
+            transition_sequences = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT transition_sequence "
+                    "FROM outbox_backlog_transitions "
+                    "ORDER BY transition_sequence"
+                )
+            ]
+            if any(
+                type(value) is not int or value <= 0
+                for value in transition_sequences
+            ) or transition_sequences != list(
+                range(1, len(transition_sequences) + 1)
+            ):
+                raise ValueError(
+                    "outbox backlog transition authority is not a contiguous "
+                    "canonical positive integer series"
+                )
+
         foreign_keys = [
             row
             for row in connection.execute("PRAGMA foreign_key_list(outbox)")
@@ -598,6 +661,24 @@ class JournalStore:
             raise ValueError(
                 "Journal schema table outbox is missing event ownership foreign key"
             )
+        if cls.SCHEMA_VERSION >= 10:
+            transition_foreign_keys = [
+                row
+                for row in connection.execute(
+                    "PRAGMA foreign_key_list(outbox_backlog_transitions)"
+                )
+                if (
+                    str(row["table"]) == "outbox"
+                    and str(row["from"]) == "outbox_id"
+                    and str(row["to"]) == "outbox_id"
+                    and str(row["on_delete"]).upper() == "RESTRICT"
+                )
+            ]
+            if not transition_foreign_keys:
+                raise ValueError(
+                    "Journal schema table outbox_backlog_transitions "
+                    "is missing outbox ownership foreign key"
+                )
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -817,6 +898,8 @@ class JournalStore:
                     required_tables.add("projection_checkpoints")
                 if self.SCHEMA_VERSION >= 7:
                     required_tables.add("global_projection_checkpoints")
+                if self.SCHEMA_VERSION >= 10:
+                    required_tables.add("outbox_backlog_transitions")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -1089,6 +1172,250 @@ class JournalStore:
 
         with self._connect() as connection:
             return self._journal_sequence_value(connection)
+
+    @staticmethod
+    def _outbox_transition_sequence_value(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS transition_count,
+                MIN(transition_sequence) AS min_sequence,
+                MAX(transition_sequence) AS max_sequence,
+                SUM(
+                    CASE
+                        WHEN typeof(transition_sequence) != 'integer'
+                          OR transition_sequence <= 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS invalid_sequence_count,
+                COUNT(DISTINCT transition_sequence) AS distinct_sequence_count
+            FROM outbox_backlog_transitions
+            """
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                "outbox backlog transition authority query returned no row"
+            )
+        transition_count = row["transition_count"]
+        if type(transition_count) is not int or transition_count < 0:
+            raise ValueError(
+                "outbox backlog transition cardinality is not canonical"
+            )
+        if transition_count == 0:
+            return 0
+        minimum = row["min_sequence"]
+        maximum = row["max_sequence"]
+        invalid_count = row["invalid_sequence_count"]
+        distinct_count = row["distinct_sequence_count"]
+        if (
+            type(minimum) is not int
+            or type(maximum) is not int
+            or type(invalid_count) is not int
+            or type(distinct_count) is not int
+            or invalid_count != 0
+            or minimum != 1
+            or maximum != transition_count
+            or distinct_count != transition_count
+        ):
+            raise ValueError(
+                "outbox backlog transition authority is not a contiguous "
+                "canonical positive integer series"
+            )
+        return maximum
+
+    @staticmethod
+    def _pending_outbox_count_value(connection: sqlite3.Connection) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) AS pending_count "
+            "FROM outbox WHERE delivered_at IS NULL"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("pending outbox count query returned no row")
+        value = row["pending_count"]
+        if type(value) is not int or value < 0:
+            raise ValueError("pending outbox count is not a canonical integer")
+        return value
+
+    def _append_outbox_backlog_transition(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        transition_kind: str,
+        outbox_id: str,
+    ) -> None:
+        if self.SCHEMA_VERSION < 10:
+            return
+        if transition_kind not in {"ENQUEUED", "DELIVERED"}:
+            raise ValueError("outbox backlog transition kind is invalid")
+        outbox_id = self._require_text(outbox_id, "outbox_id")
+        next_sequence = self._outbox_transition_sequence_value(connection) + 1
+        pending_count = self._pending_outbox_count_value(connection)
+        connection.execute(
+            """
+            INSERT INTO outbox_backlog_transitions(
+                transition_sequence,
+                transition_kind,
+                outbox_id,
+                pending_count
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                next_sequence,
+                transition_kind,
+                outbox_id,
+                pending_count,
+            ),
+        )
+
+    def outbox_backlog_cut(self) -> dict[str, int]:
+        """Freeze the exact durable backlog transition cursor and pending count."""
+
+        if self.SCHEMA_VERSION < 10:
+            raise RuntimeError(
+                "outbox backlog transition authority requires schema version 10"
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                transition_sequence = self._outbox_transition_sequence_value(
+                    connection
+                )
+                pending_count = self._pending_outbox_count_value(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "transition_sequence": transition_sequence,
+            "pending_count": pending_count,
+        }
+
+    def outbox_backlog_high_water_since(
+        self,
+        *,
+        start_transition_sequence: int,
+        start_pending_count: int,
+    ) -> dict[str, int]:
+        """Derive an exact backlog peak from durable post-cut transitions.
+
+        The caller supplies the immutable values returned by
+        outbox_backlog_cut() before workload execution. Every subsequent
+        canonical enqueue/delivery records the resulting pending count under one
+        contiguous sequence in the same SQLite transaction as the outbox
+        mutation. Replaying those +/-1 transitions proves the campaign peak
+        without trusting wall clocks or a sampling thread.
+        """
+
+        if self.SCHEMA_VERSION < 10:
+            raise RuntimeError(
+                "outbox backlog transition authority requires schema version 10"
+            )
+        if (
+            type(start_transition_sequence) is not int
+            or start_transition_sequence < 0
+        ):
+            raise ValueError(
+                "start_transition_sequence must be a non-negative integer"
+            )
+        if type(start_pending_count) is not int or start_pending_count < 0:
+            raise ValueError(
+                "start_pending_count must be a non-negative integer"
+            )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                end_sequence = self._outbox_transition_sequence_value(connection)
+                if start_transition_sequence > end_sequence:
+                    raise ValueError(
+                        "outbox backlog start transition is ahead of durable authority"
+                    )
+
+                if start_transition_sequence > 0:
+                    start_row = connection.execute(
+                        """
+                        SELECT pending_count
+                        FROM outbox_backlog_transitions
+                        WHERE transition_sequence = ?
+                        """,
+                        (start_transition_sequence,),
+                    ).fetchone()
+                    if start_row is None:
+                        raise ValueError(
+                            "outbox backlog start transition authority is missing"
+                        )
+                    if start_row["pending_count"] != start_pending_count:
+                        raise ValueError(
+                            "outbox backlog start pending count conflicts "
+                            "with durable transition authority"
+                        )
+
+                rows = connection.execute(
+                    """
+                    SELECT
+                        transition_sequence,
+                        transition_kind,
+                        outbox_id,
+                        pending_count
+                    FROM outbox_backlog_transitions
+                    WHERE transition_sequence > ?
+                    ORDER BY transition_sequence
+                    """,
+                    (start_transition_sequence,),
+                ).fetchall()
+
+                expected_sequence = start_transition_sequence + 1
+                pending_count = start_pending_count
+                high_water = start_pending_count
+                for row in rows:
+                    sequence = row["transition_sequence"]
+                    if sequence != expected_sequence:
+                        raise ValueError(
+                            "outbox backlog transition sequence is not contiguous "
+                            "after the campaign cut"
+                        )
+                    expected_sequence += 1
+
+                    transition_kind = row["transition_kind"]
+                    if transition_kind == "ENQUEUED":
+                        pending_count += 1
+                    elif transition_kind == "DELIVERED":
+                        if pending_count == 0:
+                            raise ValueError(
+                                "outbox backlog delivery transition underflows "
+                                "the campaign backlog"
+                            )
+                        pending_count -= 1
+                    else:
+                        raise ValueError(
+                            "outbox backlog transition kind is invalid"
+                        )
+                    if row["pending_count"] != pending_count:
+                        raise ValueError(
+                            "outbox backlog transition pending count conflicts "
+                            "with replayed authority"
+                        )
+                    high_water = max(high_water, pending_count)
+
+                actual_pending = self._pending_outbox_count_value(connection)
+                if actual_pending != pending_count:
+                    raise ValueError(
+                        "outbox backlog durable state changed without a "
+                        "canonical transition"
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        return {
+            "start_transition_sequence": start_transition_sequence,
+            "end_transition_sequence": end_sequence,
+            "start_pending_count": start_pending_count,
+            "end_pending_count": pending_count,
+            "high_water": high_water,
+        }
 
     def load_events_after_journal_sequence(
         self,
@@ -1381,6 +1708,12 @@ class JournalStore:
                             outbox_payload,
                             self._now(),
                         ),
+                    )
+                if self.SCHEMA_VERSION >= 10:
+                    self._append_outbox_backlog_transition(
+                        connection,
+                        transition_kind="ENQUEUED",
+                        outbox_id=outbox_id,
                     )
             connection.commit()
         return AppendResult(event_id, aggregate_version, True)
@@ -2215,6 +2548,12 @@ class JournalStore:
                     raise ValueError(
                         "outbox delivery state changed before acknowledgement"
                     )
+                if self.SCHEMA_VERSION >= 10:
+                    self._append_outbox_backlog_transition(
+                        connection,
+                        transition_kind="DELIVERED",
+                        outbox_id=outbox_id,
+                    )
                 connection.commit()
                 return True
             except Exception:
@@ -2837,6 +3176,12 @@ class JournalStore:
                                 outbox_hash,
                             ),
                         )
+                        if self.SCHEMA_VERSION >= 10:
+                            self._append_outbox_backlog_transition(
+                                connection,
+                                transition_kind="ENQUEUED",
+                                outbox_id=outbox_id,
+                            )
                     appended.append(
                         AppendResult(item["event_id"], item["aggregate_version"], True)
                     )

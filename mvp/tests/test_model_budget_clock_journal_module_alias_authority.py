@@ -25,7 +25,7 @@ class ModelBudgetClockJournalModuleAliasAuthorityTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     ValueError,
-                    "model budget clock mutated authority",
+                    r"model budget clock mutated authority:.*module\.JournalStore",
                 ):
                     ORIGINAL_BUDGET_CLASS(
                         journal=journal,
@@ -35,8 +35,6 @@ class ModelBudgetClockJournalModuleAliasAuthorityTests(unittest.TestCase):
                         clock=hostile_clock,
                     )
             finally:
-                # Isolate the regression against the vulnerable pre-fix source,
-                # which currently leaves this imported trust-root alias poisoned.
                 budget_module.JournalStore = ORIGINAL_JOURNAL_CLASS
 
             self.assertIs(budget_module.JournalStore, ORIGINAL_JOURNAL_CLASS)
@@ -44,6 +42,60 @@ class ModelBudgetClockJournalModuleAliasAuthorityTests(unittest.TestCase):
                 journal.load_events(
                     "model_budget",
                     "clock-journal-module-alias-budget",
+                ),
+                [],
+            )
+
+            stable = ORIGINAL_BUDGET_CLASS(
+                journal=journal,
+                budget_id="clock-journal-module-alias-stable-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            self.assertEqual(stable.snapshot().ceiling, 5)
+            stable_events = journal.load_events(
+                "model_budget",
+                "clock-journal-module-alias-stable-budget",
+            )
+            self.assertEqual(len(stable_events), 1)
+            self.assertEqual(stable_events[0]["committed_at"], NOW_TEXT)
+
+    def test_clock_exception_still_restores_journalstore_module_alias(self):
+        class DecoyJournalStore:
+            pass
+
+        class ClockFailure(RuntimeError):
+            pass
+
+        with TemporaryDirectory() as directory:
+            journal = ORIGINAL_JOURNAL_CLASS(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                budget_module.JournalStore = DecoyJournalStore
+                raise ClockFailure("clock exploded after alias mutation")
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*module\.JournalStore",
+                ) as caught:
+                    ORIGINAL_BUDGET_CLASS(
+                        journal=journal,
+                        budget_id="clock-journal-module-alias-exception-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+            finally:
+                budget_module.JournalStore = ORIGINAL_JOURNAL_CLASS
+
+            self.assertIsInstance(caught.exception.__cause__, ClockFailure)
+            self.assertIs(budget_module.JournalStore, ORIGINAL_JOURNAL_CLASS)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "clock-journal-module-alias-exception-budget",
                 ),
                 [],
             )

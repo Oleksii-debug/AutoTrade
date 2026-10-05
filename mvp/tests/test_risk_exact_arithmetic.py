@@ -743,6 +743,278 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 borrow_available=True,
             )
 
+    def test_risk_intent_hash_is_content_derived_for_financial_dimensions(self):
+        intents = (
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="XYZ",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1.1",
+                price="2",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2.1",
+                expected_state_version=7,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=8,
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="SELL",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+                reduce_only=True,
+                action="REDUCE",
+            ),
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="2",
+                expected_state_version=7,
+                instrument_type="FUTURE",
+            ),
+        )
+        digests = {risk_module.risk_intent_hash(intent) for intent in intents}
+        self.assertEqual(len(digests), len(intents))
+        for digest in digests:
+            self.assertRegex(digest, r"^risk-intent:sha256:[0-9a-f]{64}$")
+
+    def test_bind_preserves_command_identity_separately_from_evaluated_risk_intent(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        raw = evaluate_risk(intent, exact_context(), policy())
+        command_identity = "sha256:" + "a" * 64
+        bound = bind_risk_decision(
+            raw,
+            intent_hash=command_identity,
+            state_version=7,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"CASH:USD": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        self.assertEqual(bound.intent_hash, command_identity)
+        self.assertEqual(
+            bound.evaluated_intent_hash,
+            risk_module.risk_intent_hash(intent),
+        )
+        self.assertNotEqual(bound.intent_hash, bound.evaluated_intent_hash)
+
+    def test_bind_rejects_missing_or_noncanonical_evaluated_intent_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        raw = evaluate_risk(intent, exact_context(), policy())
+        canonical = risk_module.risk_intent_hash(intent)
+
+        missing = type(raw)(
+            **{
+                **vars(raw),
+                "evaluated_intent_hash": None,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "lacks evaluated intent identity",
+        ):
+            bind_risk_decision(
+                missing,
+                intent_hash=canonical,
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
+        noncanonical = "risk-intent:sha256:" + "A" * 64
+        malformed = type(raw)(
+            **{
+                **vars(raw),
+                "evaluated_intent_hash": noncanonical,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated intent identity is malformed",
+        ):
+            bind_risk_decision(
+                malformed,
+                intent_hash=noncanonical,
+                state_version=7,
+                policy_version=1,
+                reservation_version=0,
+                reservation_requirements={"CASH:USD": "1"},
+                capability_snapshot_id="capability",
+                evaluated_at="2026-10-05T10:00:00Z",
+                valid_until="2026-10-05T10:01:00Z",
+            )
+
+    def test_bound_risk_keeps_evaluated_identity_separate_from_caller_command_hash(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        substituted = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        caller_hash = risk_module.risk_intent_hash(substituted)
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash=caller_hash,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        self.assertEqual(bound.intent_hash, caller_hash)
+        self.assertEqual(
+            bound.evaluated_intent_hash,
+            risk_module.risk_intent_hash(intent),
+        )
+        self.assertNotEqual(bound.intent_hash, bound.evaluated_intent_hash)
+
+    def test_evaluated_intent_identity_participates_in_bound_fingerprint(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash="sha256:" + "a" * 64,
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        substituted = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        rehydrated = type(bound)(
+            **{
+                **vars(bound),
+                "evaluated_intent_hash": risk_module.risk_intent_hash(substituted),
+            }
+        )
+        self.assertNotEqual(
+            risk_module.risk_decision_fingerprint(bound),
+            risk_module.risk_decision_fingerprint(rehydrated),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "risk_decision_id does not match bound evidence",
+        ):
+            risk_module.validate_bound_risk_decision(
+                rehydrated,
+                now="2026-10-05T10:00:30Z",
+            )
+
+    def test_bound_fingerprint_rejects_malformed_rehydrated_intent_identity(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        bound = risk_module.evaluate_bound_risk(
+            intent,
+            exact_context(),
+            policy(),
+            intent_hash=risk_module.risk_intent_hash(intent),
+            policy_version=1,
+            reservation_version=0,
+            reservation_requirements={"POSITION:ABC": "1"},
+            capability_snapshot_id="capability",
+            evaluated_at="2026-10-05T10:00:00Z",
+            valid_until="2026-10-05T10:01:00Z",
+        )
+        malformed = type(bound)(
+            **{
+                **vars(bound),
+                "evaluated_intent_hash": "risk-intent:sha256:" + "A" * 64,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated_intent_hash must be canonical lowercase",
+        ):
+            risk_module.risk_decision_fingerprint(malformed)
+        with self.assertRaisesRegex(
+            ValueError,
+            "evaluated_intent_hash must be canonical lowercase",
+        ):
+            risk_module.validate_bound_risk_decision(
+                malformed,
+                now="2026-10-05T10:00:30Z",
+            )
+
     def test_bound_risk_uses_the_same_resealed_state_version_after_evaluation(self):
         original_context = exact_context()
         intent = RiskIntent.create(
@@ -780,7 +1052,7 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 intent,
                 original_context,
                 policy(),
-                intent_hash="intent",
+                intent_hash=risk_module.risk_intent_hash(intent),
                 policy_version=1,
                 reservation_version=0,
                 reservation_requirements=reservation_requirements,
@@ -1142,6 +1414,176 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 self.assertTrue(decision.admitted)
                 outcomes.add(risk_decision_fingerprint(decision))
         self.assertEqual(len(outcomes), 1)
+
+
+    def test_large_factor_cancellation_retains_tiny_exact_residual(self):
+        large = "1234567890123456789012345678"
+        intent = RiskIntent.create(
+            symbol="TINY",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        configured = policy(max_abs_factor_exposure="0.05")
+        outcomes = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            RiskContext.create(
+                                state_version=7,
+                                equity="9999999999999999999999999999",
+                                positions={
+                                    "LONG": large,
+                                    "SHORT": "-" + large,
+                                },
+                                marks={
+                                    "LONG": "1",
+                                    "SHORT": "1",
+                                    "TINY": "1",
+                                },
+                                reserved_position_delta={},
+                                daily_pnl="0",
+                                drawdown_fraction="0",
+                                market_data_age_seconds="0",
+                                fx_age_seconds={},
+                                margin_headroom="1",
+                                capability_allowed=True,
+                                borrow_available=True,
+                                stress_scenarios=(
+                                    {"LONG": "0", "SHORT": "0", "TINY": "0"},
+                                ),
+                                factor_loadings={
+                                    "LONG": {"SYSTEMATIC": "1"},
+                                    "SHORT": {"SYSTEMATIC": "1"},
+                                    "TINY": {"SYSTEMATIC": "1"},
+                                },
+                                instrument_types={
+                                    "LONG": "GENERIC",
+                                    "SHORT": "GENERIC",
+                                },
+                            ),
+                            configured,
+                        )
+                    factor_rule = next(
+                        item
+                        for item in decision.rules
+                        if item.rule == "factor_exposure"
+                    )
+                    self.assertFalse(factor_rule.passed)
+                    self.assertEqual(factor_rule.observed, "0.1")
+                    self.assertEqual(factor_rule.limit, "0.05")
+                    self.assertFalse(decision.admitted)
+                    outcomes.add(
+                        (
+                            factor_rule.observed,
+                            factor_rule.limit,
+                            decision.input_fingerprint,
+                            risk_decision_fingerprint(decision),
+                        )
+                    )
+        self.assertEqual(len(outcomes), 1)
+
+    def test_protective_reduce_only_is_context_independent_at_hard_limits(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+            reduce_only=True,
+            action="REDUCE",
+        )
+        configured = policy(
+            max_abs_position="5",
+            max_single_notional="5",
+            max_gross_leverage="0.5",
+            max_net_leverage="0.5",
+            max_stress_loss="5",
+        )
+        outcomes = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            RiskContext.create(
+                                state_version=7,
+                                equity="10",
+                                positions={"ABC": "10"},
+                                marks={"ABC": "1"},
+                                reserved_position_delta={},
+                                daily_pnl="0",
+                                drawdown_fraction="0",
+                                market_data_age_seconds="0",
+                                fx_age_seconds={},
+                                margin_headroom="1",
+                                capability_allowed=True,
+                                borrow_available=True,
+                                stress_scenarios=({"ABC": "-1"},),
+                                instrument_types={"ABC": "GENERIC"},
+                            ),
+                            configured,
+                        )
+                    rules = {item.rule: item for item in decision.rules}
+                    self.assertTrue(decision.admitted)
+                    self.assertEqual(decision.resulting_position, Decimal("9"))
+                    for rule_name in (
+                        "position_limit",
+                        "single_notional",
+                        "gross_leverage",
+                        "net_leverage",
+                        "stress_loss",
+                        "reduce_only",
+                    ):
+                        self.assertTrue(rules[rule_name].passed, rule_name)
+                    outcomes.add(
+                        (
+                            decision.input_fingerprint,
+                            risk_decision_fingerprint(decision),
+                            tuple(
+                                (item.rule, item.passed, item.observed, item.limit)
+                                for item in decision.rules
+                            ),
+                        )
+                    )
+        self.assertEqual(len(outcomes), 1)
+
+    def test_exact_product_resource_boundary_is_context_independent(self):
+        at_limit = Decimal("9" * 128)
+        over_limit = Decimal("9" * 129)
+        expected = Decimal(str(int("9" * 128) * int("9" * 128)))
+        admitted = set()
+        failures = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        product = risk_module._risk_product(at_limit, at_limit)
+                        self.assertEqual(product, expected)
+                        admitted.add(risk_module._canonical_decimal_text(product))
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "risk product exceeds the exact arithmetic resource envelope",
+                        ) as captured:
+                            risk_module._risk_product(over_limit, at_limit)
+                        failures.add(str(captured.exception))
+        self.assertEqual(len(admitted), 1)
+        self.assertEqual(len(next(iter(admitted))), 256)
+        self.assertEqual(
+            failures,
+            {"risk product exceeds the exact arithmetic resource envelope"},
+        )
 
 
 if __name__ == "__main__":

@@ -52,6 +52,7 @@ from .risk import (
     normalize_reservation_requirements,
     reservation_requirements_payload,
     risk_decision_fingerprint,
+    risk_intent_hash,
     validate_bound_risk_decision,
 )
 from .risk_policy_authority import (
@@ -1265,6 +1266,11 @@ def _risk_intent_payload(intent: RiskIntent) -> dict[str, object]:
     }
 
 
+def _durable_risk_intent_hash(value: object) -> str:
+    payload = _durable_risk_intent_payload(value)
+    return risk_intent_hash(RiskIntent.create(**payload))
+
+
 def _durable_risk_intent_payload(value: object) -> dict[str, object]:
     expected = {
         "symbol",
@@ -2421,6 +2427,12 @@ class AuthorityService:
         durable_risk_intent = _durable_risk_intent_payload(
             durable_risk_intent
         )
+        if risk_payload.get("evaluated_intent_hash") != _durable_risk_intent_hash(
+            durable_risk_intent
+        ):
+            raise AuthorityConflict(
+                "historical risk evaluated intent identity is missing or inconsistent"
+            )
         durable_idempotency_key = _text(
             durable_idempotency_key,
             name="durable financial idempotency key",
@@ -2754,6 +2766,12 @@ class AuthorityService:
             durable_risk_intent = _durable_risk_intent_payload(
                 durable_risk_intent
             )
+            if risk_payload.get("evaluated_intent_hash") != _durable_risk_intent_hash(
+                durable_risk_intent
+            ):
+                raise AuthorityConflict(
+                    "durable risk evaluated intent identity is missing or inconsistent"
+                )
             durable_idempotency_key = _text(
                 durable_idempotency_key,
                 name="durable financial idempotency key",
@@ -4862,6 +4880,11 @@ class AuthorityService:
             raise AuthorityConflict(
                 "risk decision id does not match bound evidence"
             )
+        expected_evaluated_intent_hash = risk_intent_hash(canonical_risk_intent)
+        if risk_decision.evaluated_intent_hash != expected_evaluated_intent_hash:
+            raise AuthorityConflict(
+                "risk decision evaluated intent does not match risk_intent"
+            )
         normalized_requirements = normalize_reservation_requirements(
             reservation_requirements
         )
@@ -4974,6 +4997,19 @@ class AuthorityService:
             ):
                 raise AuthorityConflict(
                     "authoritative risk snapshot changed for an existing financial command"
+                )
+            durable_risk_intent = _durable_risk_intent_payload(
+                durable_risk_payload.get("risk_intent")
+            )
+            if (
+                durable_risk_intent != canonical_risk_intent_payload
+                or durable_risk_payload.get("evaluated_intent_hash")
+                != expected_evaluated_intent_hash
+                or risk_decision.evaluated_intent_hash
+                != expected_evaluated_intent_hash
+            ):
+                raise AuthorityConflict(
+                    "evaluated risk intent changed for an existing financial command"
                 )
             if (
                 durable_risk_payload.get("arithmetic_policy_id")
@@ -5090,6 +5126,7 @@ class AuthorityService:
             "fingerprint": risk_decision_fingerprint(risk_decision),
             "arithmetic_policy_id": risk_decision.arithmetic_policy_id,
             "intent_hash": risk_decision.intent_hash,
+            "evaluated_intent_hash": risk_decision.evaluated_intent_hash,
             "risk_intent": canonical_risk_intent_payload,
             "financial_idempotency_key": scoped_idempotency_key,
             "financial_reservation_id": rid,

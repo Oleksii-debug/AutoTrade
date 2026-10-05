@@ -25,9 +25,10 @@ from .bybit_v5 import (
     require_canonical_bybit_prepared_submission,
 )
 from .instruments import (
+    AuthenticatedPriceSemanticsEvidence,
     InstrumentRegistry,
     InstrumentVersion,
-    authenticated_price_semantics_digest,
+    authenticated_price_semantics_evidence,
 )
 
 
@@ -43,8 +44,9 @@ _REGISTRY_TYPE = InstrumentRegistry
 _ARTIFACT_STORE_TYPE = ArtifactStore
 _REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
 _REQUIRE_PREPARED_CODE = _REQUIRE_PREPARED.__code__
-_AUTHENTICATED_DIGEST = authenticated_price_semantics_digest
-_AUTHENTICATED_DIGEST_CODE = _AUTHENTICATED_DIGEST.__code__
+_PRICE_EVIDENCE_TYPE = AuthenticatedPriceSemanticsEvidence
+_AUTHENTICATED_EVIDENCE = authenticated_price_semantics_evidence
+_AUTHENTICATED_EVIDENCE_CODE = _AUTHENTICATED_EVIDENCE.__code__
 _AT_KNOWN = InstrumentRegistry.at_known
 _AT_KNOWN_CODE = _AT_KNOWN.__code__
 _METADATA_BINDING = InstrumentVersion.metadata_evidence_binding
@@ -66,9 +68,11 @@ def _require_module_authority() -> None:
     if (
         _instruments_module.InstrumentRegistry is not _REGISTRY_TYPE
         or _instruments_module.InstrumentVersion is not InstrumentVersion
-        or _instruments_module.authenticated_price_semantics_digest
-        is not _AUTHENTICATED_DIGEST
-        or _AUTHENTICATED_DIGEST.__code__ is not _AUTHENTICATED_DIGEST_CODE
+        or _instruments_module.AuthenticatedPriceSemanticsEvidence
+        is not _PRICE_EVIDENCE_TYPE
+        or _instruments_module.authenticated_price_semantics_evidence
+        is not _AUTHENTICATED_EVIDENCE
+        or _AUTHENTICATED_EVIDENCE.__code__ is not _AUTHENTICATED_EVIDENCE_CODE
         or _REGISTRY_TYPE.at_known is not _AT_KNOWN
         or _AT_KNOWN.__code__ is not _AT_KNOWN_CODE
         or InstrumentVersion.metadata_evidence_binding is not _METADATA_BINDING
@@ -277,31 +281,10 @@ class ProductRiskPriceSemanticsComposer:
         registry = self.__registry
         artifact_store = self.__artifact_store
 
-        # The digest helper performs causal evidence authentication. Surrounding
-        # reads make an instrument-rule advance during composition fail closed.
-        before = _AT_KNOWN(
-            registry,
-            request.instrument_version.instrument_id,
-            point,
-            knowledge_cutoff=point,
-            artifact_store=artifact_store,
-        )
-        if type(before) is not InstrumentVersion:
-            raise ProductRiskPriceSemanticsError(
-                "instrument registry returned non-canonical version"
-            )
-        before_binding = _METADATA_BINDING(before)
-        if before.provider_symbol != body.get("symbol"):
-            raise ProductRiskPriceSemanticsError(
-                "prepared symbol differs from causal instrument authority"
-            )
-        validated_quantity = _VALIDATE_QUANTITY(before, intent.quantity)
-        if validated_quantity != intent.quantity:
-            raise ProductRiskPriceSemanticsError(
-                "canonical quantity validation changed admitted quantity"
-            )
-
-        digest = _AUTHENTICATED_DIGEST(
+        # Parent #1979 owns causal price-rule authentication and returns the exact
+        # metadata binding it used.  Consume that evidence object rather than
+        # reconstructing a parallel price authority here.
+        price_evidence = _AUTHENTICATED_EVIDENCE(
             registry,
             artifact_store,
             instrument_version=instrument_ref,
@@ -312,26 +295,65 @@ class ProductRiskPriceSemanticsComposer:
             order_type=order_type,
             price=semantic_price,
         )
+        if type(price_evidence) is not _PRICE_EVIDENCE_TYPE:
+            raise ProductRiskPriceSemanticsError(
+                "instrument price-semantics evidence is non-canonical"
+            )
+        expected_evidence = (
+            instrument_ref,
+            request.provider_id,
+            body.get("symbol"),
+            request.entity_policy_id,
+            intent.side,
+            order_type,
+            "EXACT_ADMITTED_PRICE" if order_type == "LIMIT" else "NO_WIRE_PRICE",
+        )
+        actual_evidence = (
+            price_evidence.instrument_version,
+            price_evidence.provider_id,
+            price_evidence.provider_symbol,
+            price_evidence.entity_policy_id,
+            price_evidence.side,
+            price_evidence.order_type,
+            price_evidence.price_constraint,
+        )
+        if actual_evidence != expected_evidence:
+            raise ProductRiskPriceSemanticsError(
+                "authenticated price semantics differ from prepared risk scope"
+            )
 
-        after = _AT_KNOWN(
+        # Quantity rules are owned by the same causal instrument version. Re-read
+        # that version after price evidence composition and require its metadata
+        # binding to be the exact one returned by #1979. This catches an in-process
+        # rule mutation/advance across the bounded composition while validating
+        # quantity step/min/max without rounding.
+        selected = _AT_KNOWN(
             registry,
             request.instrument_version.instrument_id,
             point,
             knowledge_cutoff=point,
             artifact_store=artifact_store,
         )
-        if type(after) is not InstrumentVersion:
+        if type(selected) is not InstrumentVersion:
             raise ProductRiskPriceSemanticsError(
                 "instrument registry returned non-canonical version"
             )
-        after_binding = _METADATA_BINDING(after)
+        selected_binding = _METADATA_BINDING(selected)
         if (
-            before.version != request.instrument_version.version
-            or after.version != request.instrument_version.version
-            or before_binding != after_binding
+            selected.version != request.instrument_version.version
+            or selected_binding != price_evidence.instrument_metadata_binding
         ):
             raise ProductRiskPriceSemanticsError(
                 "instrument authority changed during price-semantics composition"
+            )
+        if selected.provider_symbol != body.get("symbol"):
+            raise ProductRiskPriceSemanticsError(
+                "prepared symbol differs from causal instrument authority"
+            )
+        validated_quantity = _VALIDATE_QUANTITY(selected, intent.quantity)
+        if validated_quantity != intent.quantity:
+            raise ProductRiskPriceSemanticsError(
+                "canonical quantity validation changed admitted quantity"
             )
 
         return ProductRiskPriceSemanticsBinding(
@@ -349,8 +371,8 @@ class ProductRiskPriceSemanticsComposer:
             reduce_only=intent.reduce_only,
             order_type=order_type,
             prepared_body_sha256=prepared_request.body_sha256,
-            price_semantics_digest=digest,
-            instrument_evidence_binding=after_binding,
+            price_semantics_digest=price_evidence.digest,
+            instrument_evidence_binding=price_evidence.instrument_metadata_binding,
             _factory_token=_FACTORY_TOKEN,
         )
 

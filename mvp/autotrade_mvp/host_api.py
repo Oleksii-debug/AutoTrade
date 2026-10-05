@@ -23,6 +23,31 @@ class EventGap(RuntimeError):
     """Raised when a client cursor predates retained host events."""
 
 
+def canonical_event_cursor(after: str | int) -> int:
+    """Return the integer value of one canonical common-contract Sequence.
+
+    Host APIs expose cursor identity as common-contract Sequence text. Internal
+    callers may supply an exact non-negative int, which has one canonical text
+    representation. Bool, float and textual aliases are rejected before any
+    event-store lookup.
+    """
+
+    if type(after) is int:
+        if after < 0:
+            raise ValueError("Cursor must be a canonical Sequence")
+        sequence = str(after)
+    elif type(after) is str:
+        sequence = after
+    else:
+        raise TypeError("Cursor must be canonical Sequence text or exact int")
+    if not is_valid_common_scalar("Sequence", sequence):
+        raise ValueError("Cursor must be a canonical Sequence")
+    try:
+        return int(sequence)
+    except ValueError as error:
+        raise ValueError("Cursor must be a supported canonical Sequence") from error
+
+
 def scoped_host_operation_id(
     *,
     account_id: str,
@@ -382,12 +407,7 @@ class HostCommandStore:
         }
 
     def events_after(self, after: str | int) -> tuple[HostEvent, ...]:
-        try:
-            cursor = int(after)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Cursor must be an integer sequence") from error
-        if cursor < 0:
-            raise ValueError("Cursor must be non-negative")
+        cursor = canonical_event_cursor(after)
         if cursor > self.cursor:
             raise ValueError("Cursor is ahead of host state")
         if self._events:

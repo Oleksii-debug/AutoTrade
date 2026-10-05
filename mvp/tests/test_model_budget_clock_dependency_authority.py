@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 import mvp.autotrade_mvp.model_budget_journal as budget_module
+from mvp.autotrade_mvp import _persistence_impl as persistence_impl
 from mvp.autotrade_mvp.persistence import JournalStore
 
 
@@ -259,6 +260,62 @@ class ModelBudgetClockDependencyAuthorityTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_clock_cannot_poison_transitive_journal_module_before_first_write(self):
+        original_canonical_json = persistence_impl.canonical_json
+        decoy_calls = 0
+
+        def hostile_canonical_json(_value):
+            nonlocal decoy_calls
+            decoy_calls += 1
+            return '{"poisoned":true}'
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+
+            def hostile_clock():
+                persistence_impl.canonical_json = hostile_canonical_json
+                return NOW_TEXT
+
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "model budget clock mutated authority",
+                ):
+                    budget_module.DurableModelBudget(
+                        journal=journal,
+                        budget_id="clock-transitive-journal-module-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=hostile_clock,
+                    )
+            finally:
+                persistence_impl.canonical_json = original_canonical_json
+
+            self.assertEqual(decoy_calls, 0)
+            self.assertIs(persistence_impl.canonical_json, original_canonical_json)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "clock-transitive-journal-module-budget",
+                ),
+                [],
+            )
+
+            stable = budget_module.DurableModelBudget(
+                journal=journal,
+                budget_id="clock-transitive-journal-module-follow-up",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            self.assertEqual(stable.snapshot().ceiling, 5)
+            follow_up = journal.load_events(
+                "model_budget",
+                "clock-transitive-journal-module-follow-up",
+            )
+            self.assertEqual(len(follow_up), 1)
+            self.assertEqual(follow_up[0]["committed_at"], NOW_TEXT)
 
 
 if __name__ == "__main__":

@@ -624,6 +624,12 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
             "control/tools/reconvergence_integrity.py",
             workflow,
         )
+        self.assertIn(
+            'if [ "$AUTHOR_LOGIN" = "$REPOSITORY_OWNER" ]; then',
+            workflow,
+        )
+        self.assertIn('EVENT_BASE_SHA', workflow)
+        self.assertIn('target_tip="$(git ls-remote origin', workflow)
         self.assertNotIn("github.event.pull_request.body", workflow)
         self.assertNotIn("github.event.pull_request.title", workflow)
 

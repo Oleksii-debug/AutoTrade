@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
+import mvp.autotrade_mvp.accounting as accounting_module
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
@@ -420,6 +421,113 @@ class AccountingFoundationTests(unittest.TestCase):
         digest = book.audit_digest()
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(book.cash("USD"), Decimal("100"))
+
+    def test_audit_digest_cache_detects_direct_transaction_list_mutation(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        before = book.audit_digest()
+        book._transactions.append(book_external_cash_flow(
+            transaction_id="cash-2",
+            cause_event_id="deposit-2",
+            currency="USD",
+            amount="50",
+        ))
+        self.assertNotEqual(book.audit_digest(), before)
+
+    def test_audit_digest_cache_detects_frozen_transaction_tampering(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        before = book.audit_digest()
+        object.__setattr__(book._transactions[0], "transaction_id", "tampered")
+        self.assertNotEqual(book.audit_digest(), before)
+
+    def test_audit_digest_rejects_hostile_transaction_container_without_callback(self):
+        class HostileList(list):
+            iterated = False
+
+            def __iter__(self):
+                self.iterated = True
+                raise AssertionError("hostile iterator callback")
+
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        hostile = HostileList(book._transactions)
+        book._transactions = hostile
+        with self.assertRaisesRegex(TypeError, "exact list"):
+            book.audit_digest()
+        self.assertFalse(hostile.iterated)
+
+    def test_audit_digest_cache_cannot_be_retargeted_through_module_state(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        expected = book.audit_digest()
+        transaction = book._transactions[0]
+        fingerprint = accounting_module._transaction_digest_fingerprint(transaction)
+        self.assertIsNotNone(fingerprint)
+        forged = "sha256:" + "0" * 64
+
+        # A module-global memoization dictionary would become a second mutable
+        # authority over the audit result. A same-named hostile module binding
+        # must be irrelevant to the cache selected by product construction.
+        self.assertFalse(hasattr(accounting_module, "_transaction_digest_cache"))
+        self.assertFalse(hasattr(accounting_module, "_cached_transaction_digest"))
+        original_payload_digest = accounting_module.payload_digest
+        original_transaction_digest = accounting_module.transaction_digest
+        accounting_module._transaction_digest_cache = {fingerprint: forged}
+        accounting_module._transaction_digest_cache_lock = object()
+        accounting_module._cached_transaction_digest = lambda _transaction: forged
+        accounting_module.payload_digest = lambda _payload: forged
+        accounting_module.transaction_digest = lambda _transaction: forged
+        try:
+            self.assertEqual(book.audit_digest(), expected)
+            self.assertNotEqual(book.audit_digest(), forged)
+
+            # Exercise a cache miss after the hostile module rebinding. The
+            # selected memoizer must retain the original transaction digest
+            # function, and that function must retain the original payload
+            # digest primitive rather than resolving the rebound global.
+            second_transaction = book_external_cash_flow(
+                transaction_id="cash-2",
+                cause_event_id="deposit-2",
+                currency="USD",
+                amount="50",
+            )
+            second_expected = original_payload_digest(
+                {
+                    "schema_version": "1.0.0",
+                    "transactions": [
+                        {
+                            "transaction_id": "cash-2",
+                            "digest": original_transaction_digest(second_transaction),
+                        }
+                    ],
+                }
+            )
+            second_book = EconomicBook((second_transaction,))
+            self.assertEqual(second_book.audit_digest(), second_expected)
+            self.assertNotEqual(second_book.audit_digest(), forged)
+        finally:
+            accounting_module.payload_digest = original_payload_digest
+            accounting_module.transaction_digest = original_transaction_digest
+            del accounting_module._transaction_digest_cache
+            del accounting_module._transaction_digest_cache_lock
+            del accounting_module._cached_transaction_digest
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

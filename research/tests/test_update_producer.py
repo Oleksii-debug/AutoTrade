@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -322,6 +323,21 @@ class ProducerFixture:
 
 
 class UpdateProducerTests(unittest.TestCase):
+    def setUp(self):
+        writer_time = DECISION - timedelta(days=1)
+
+        def advancing_writer_time():
+            nonlocal writer_time
+            writer_time += timedelta(microseconds=1)
+            return writer_time
+
+        writer_clock = patch(
+            "research.autotrade_research.memory.episodes._utc_now",
+            side_effect=advancing_writer_time,
+        )
+        writer_clock.start()
+        self.addCleanup(writer_clock.stop)
+
     def ready_fixture(self, directory, *, max_step="2"):
         fixture = ProducerFixture(directory)
         fixture.seed_calibration()

@@ -835,8 +835,8 @@ def run_vertical_slice(
 
     if type(symbol) is not str:
         raise TypeError("symbol must be exact text")
-    if not symbol or not symbol.strip():
-        raise ValueError("A simulated symbol is required")
+    if not symbol or symbol != symbol.strip():
+        raise ValueError("A simulated symbol must be non-empty canonical text")
     starting_cash = _money(initial_cash)
     quantity = _money(order_quantity)
     position_limit = _money(max_abs_position)

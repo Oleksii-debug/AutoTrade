@@ -137,6 +137,41 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
 
+    def test_scope_and_cursor_evidence_resets_discard_old_context_speech_queue(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("announcementGeneration: 0", js)
+
+        discard = js[
+            js.index("function discardQueuedAnnouncementsForEvidenceReset"):
+            js.index("function queuePoliteAnnouncement")
+        ]
+        self.assertIn("state.announcementGeneration += 1", discard)
+        self.assertIn("window.clearTimeout(state.announcementTimer)", discard)
+        self.assertIn("window.clearTimeout(state.urgentAnnouncementTimer)", discard)
+        self.assertIn("state.pendingAnnouncements = []", discard)
+        self.assertIn("state.pendingUrgentAnnouncements = []", discard)
+        self.assertIn('text("polite-status", "")', discard)
+        self.assertIn('text("urgent-status", "")', discard)
+
+        live = js[js.index("function announceLiveText"):js.index(
+            "function discardQueuedAnnouncementsForEvidenceReset")]
+        self.assertIn("const generation = state.announcementGeneration", live)
+        self.assertIn("generation === state.announcementGeneration", live)
+
+        snapshot = js[js.index("function renderSnapshot"):js.index(
+            "async function refreshSnapshot")]
+        scope = snapshot.index("if (displayContextChanged)")
+        scope_discard = snapshot.index(
+            "discardQueuedAnnouncementsForEvidenceReset();", scope)
+        scope_history = snapshot.index("resetNotificationsForScope();", scope)
+        self.assertLess(scope_discard, scope_history)
+
+        gap = snapshot.index("if (skippedSameScopeEvents)")
+        gap_discard = snapshot.index(
+            "discardQueuedAnnouncementsForEvidenceReset();", gap)
+        gap_history = snapshot.index("resetNotificationsForScope(", gap)
+        self.assertLess(gap_discard, gap_history)
+
     def test_event_history_is_recorded_only_after_required_event_processing(self):
         js = APP.read_text(encoding="utf-8")
         poll = js.index("async function pollEvents()")
@@ -986,7 +1021,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for prefix in ("permissions", "strategy", "portfolio", "operations", "risk", "jobs", "event-history"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
-            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-controls="{prefix}-body" aria-describedby="{prefix}-filter-status"', html)
             self.assertIn(f'id="{prefix}-previous" type="button"', html)
             self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'id="{prefix}-filter-status"', html)
@@ -1062,12 +1097,22 @@ class SemanticWebClientContractTests(unittest.TestCase):
             self.assertEqual(tag, "p", status_id)
             self.assertNotIn("role", attrs, status_id)
             self.assertNotIn("aria-live", attrs, status_id)
-            tag, attrs = by_id[f"{prefix}-filter"]
+            for control_suffix in ("filter", "copy", "sort", "previous", "next"):
+                tag, attrs = by_id[f"{prefix}-{control_suffix}"]
+                self.assertEqual(
+                    attrs.get("aria-controls"),
+                    f"{prefix}-body",
+                    f"{prefix}-{control_suffix}",
+                )
+                self.assertIn(
+                    status_id,
+                    attrs.get("aria-describedby", "").split(),
+                    f"{prefix}-{control_suffix}",
+                )
+            tag, _ = by_id[f"{prefix}-filter"]
             self.assertEqual(tag, "input", prefix)
-            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
-            tag, attrs = by_id[f"{prefix}-sort"]
+            tag, _ = by_id[f"{prefix}-sort"]
             self.assertEqual(tag, "select", prefix)
-            self.assertIn(status_id, attrs.get("aria-describedby", "").split())
         # Native output is implicitly a polite status region even without ARIA.
         # Snapshot metadata must remain readable without announcing every poll.
         live_ids = [
@@ -1115,7 +1160,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         for prefix in ("permissions", "operations"):
             self.assertIn(f'id="{prefix}-filter" type="search"', html)
             self.assertIn(f'id="{prefix}-copy" type="button"', html)
-            self.assertIn(f'id="{prefix}-sort" aria-describedby="{prefix}-filter-status"', html)
+            self.assertIn(f'id="{prefix}-sort" aria-controls="{prefix}-body" aria-describedby="{prefix}-filter-status"', html)
             self.assertIn(f'id="{prefix}-previous" type="button"', html)
             self.assertIn(f'id="{prefix}-next" type="button"', html)
             self.assertIn(f'"{prefix}-filter"', js)

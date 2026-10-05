@@ -317,6 +317,71 @@ class BackupRestoreTests(unittest.TestCase):
             self.assertTrue((restored / "state" / "journal.sqlite3").is_file())
             self.assertTrue((restored / "artifacts" / "objects" / "sha256").is_dir())
 
+    def test_backup_publication_fsync_failure_removes_uncommitted_target(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            original_fsync_directory = backup_module._fsync_directory
+            failed = False
+
+            def fail_after_publication(path):
+                nonlocal failed
+                if Path(path) == target.parent and target.exists() and not failed:
+                    failed = True
+                    raise OSError("simulated backup publication directory fsync failure")
+                return original_fsync_directory(path)
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory",
+                side_effect=fail_after_publication,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "backup publication directory fsync failure",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(failed)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_restore_publication_fsync_failure_removes_uncommitted_destination(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            backup = create_backup(state, artifacts, root / "backup")
+            destination = root / "restored"
+            original_fsync_directory = backup_module._fsync_directory
+            failed = False
+
+            def fail_after_publication(path):
+                nonlocal failed
+                if (
+                    Path(path) == destination.parent
+                    and destination.exists()
+                    and not failed
+                ):
+                    failed = True
+                    raise OSError("simulated restore publication directory fsync failure")
+                return original_fsync_directory(path)
+
+            with patch.object(
+                backup_module,
+                "_fsync_directory",
+                side_effect=fail_after_publication,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "restore publication directory fsync failure",
+                ):
+                    restore_backup(backup, destination)
+
+            self.assertTrue(failed)
+            self.assertFalse(destination.exists())
+            self.assertFalse(any(root.glob(".autotrade-restore-*")))
+
     def test_journal_only_backup_declares_journal_only_consistency(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -493,6 +558,112 @@ class BackupRestoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     BackupError,
                     "Source changed before backup commit",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_source_aba_during_copy_cannot_publish_transient_generation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_bytes = checkpoint.read_bytes()
+            original_copy = backup_module._copy_stable_file
+            injected = False
+
+            def copy_transient_then_restore(source, destination):
+                nonlocal injected
+                if Path(source) == checkpoint and not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"transient_generation":true}\n',
+                        encoding="utf-8",
+                    )
+                    try:
+                        return original_copy(source, destination)
+                    finally:
+                        checkpoint.write_bytes(original_bytes)
+                return original_copy(source, destination)
+
+            with patch.object(
+                backup_module,
+                "_copy_stable_file",
+                side_effect=copy_transient_then_restore,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed across journal snapshot",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertEqual(checkpoint.read_bytes(), original_bytes)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_existing_source_change_during_sqlite_snapshot_aborts_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_backup = backup_module._backup_sqlite
+            injected = False
+
+            def backup_then_change_source(source, destination):
+                nonlocal injected
+                result = original_backup(source, destination)
+                if not injected:
+                    injected = True
+                    checkpoint.write_text(
+                        '{"changed_during_sqlite_backup":true}\n',
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(
+                backup_module,
+                "_backup_sqlite",
+                side_effect=backup_then_change_source,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "Source changed",
+                ):
+                    create_backup(state, artifacts, target)
+
+            self.assertTrue(injected)
+            self.assertFalse(target.exists())
+            self.assertFalse(any(root.glob(".autotrade-backup-*")))
+
+    def test_source_hash_io_race_is_a_controlled_backup_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            state, artifacts = self._build_sources(root)
+            target = root / "backup"
+            checkpoint = state / "checkpoint.json"
+            original_hash = backup_module._sha256_file
+            injected = False
+
+            def fail_checkpoint_hash(path):
+                nonlocal injected
+                if Path(path) == checkpoint and not injected:
+                    injected = True
+                    raise OSError("simulated concurrent source disappearance")
+                return original_hash(path)
+
+            with patch.object(
+                backup_module,
+                "_sha256_file",
+                side_effect=fail_checkpoint_hash,
+            ):
+                with self.assertRaisesRegex(
+                    BackupError,
+                    "changed before journal snapshot",
                 ):
                     create_backup(state, artifacts, target)
 

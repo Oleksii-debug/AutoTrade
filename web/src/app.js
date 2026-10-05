@@ -58,6 +58,7 @@
     pendingAnnouncements: [],
     urgentAnnouncementTimer: null,
     pendingUrgentAnnouncements: [],
+    announcementGeneration: 0,
     restoreFocusId: null,
     pendingCommand: null
   };
@@ -1003,11 +1004,32 @@
     const element = byId(id);
     if (!element) return;
     // A repeated identical message must still produce a DOM change so screen
-    // readers can announce a second independent material event.
+    // readers can announce a second independent material event. Bind the
+    // deferred mutation to the current display-context generation so a host or
+    // account switch cannot speak an old-context message after the reset.
+    const generation = state.announcementGeneration;
     element.textContent = "";
     window.setTimeout(() => {
-      element.textContent = message;
+      if (generation === state.announcementGeneration) {
+        element.textContent = message;
+      }
     }, 0);
+  }
+
+  function discardQueuedAnnouncementsForEvidenceReset() {
+    state.announcementGeneration += 1;
+    if (state.announcementTimer !== null) {
+      window.clearTimeout(state.announcementTimer);
+      state.announcementTimer = null;
+    }
+    if (state.urgentAnnouncementTimer !== null) {
+      window.clearTimeout(state.urgentAnnouncementTimer);
+      state.urgentAnnouncementTimer = null;
+    }
+    state.pendingAnnouncements = [];
+    state.pendingUrgentAnnouncements = [];
+    text("polite-status", "");
+    text("urgent-status", "");
   }
 
   function queuePoliteAnnouncement(message) {
@@ -1297,6 +1319,7 @@
     if (displayContextChanged) {
       state.cursor = 0n;
       state.version = 0n;
+      discardQueuedAnnouncementsForEvidenceReset();
       resetNotificationsForScope();
       resetTableFiltersForScopeChange();
       resetOperationsForScope();
@@ -1311,6 +1334,7 @@
         "Canonical snapshot advanced from event cursor " + priorCursor.toString() +
         " to " + parsed.cursor.toString() +
         " before those host events were received by this page.";
+      discardQueuedAnnouncementsForEvidenceReset();
       resetNotificationsForScope(
         "Notification history was cleared because " + gap);
       resetOperationsForScope(

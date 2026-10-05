@@ -742,6 +742,17 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 borrow_available=True,
             )
 
+    def test_ratio_domain_error_is_not_misreported_as_resource_exhaustion(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "gross leverage denominator must be positive",
+        ):
+            risk_module._exact_ratio(
+                Decimal("1"),
+                Decimal("0"),
+                name="gross leverage",
+            )
+
     def test_malformed_decimal_is_not_misreported_as_resource_exhaustion(self):
         with self.assertRaisesRegex(
             ValueError,

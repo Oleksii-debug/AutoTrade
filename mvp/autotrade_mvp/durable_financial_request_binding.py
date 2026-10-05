@@ -161,6 +161,51 @@ _CANONICAL_MATERIAL_FROM_PAYLOAD = _material_from_payload
 _CANONICAL_MATERIAL_FROM_PAYLOAD_CODE = _material_from_payload.__code__
 
 
+def _install_bybit_prepared_price_authority_reader():
+    """Read issued price authority without invoking mutable instance descriptors."""
+
+    canonical_type = type
+    prepared_type = _BYBIT_PREPARED_TYPE
+    object_getattribute = object.__getattribute__
+    attribute_error_type = AttributeError
+    error_type = DurableFinancialRequestBindingError
+
+    def read(prepared_request: object) -> tuple[object, object, object]:
+        if canonical_type(prepared_request) is not prepared_type:
+            raise error_type(
+                "Bybit prepared price authority requires exact prepared request"
+            )
+        try:
+            return (
+                object_getattribute(
+                    prepared_request,
+                    "price_rule_instrument_id",
+                ),
+                object_getattribute(
+                    prepared_request,
+                    "price_rule_instrument_version",
+                ),
+                object_getattribute(
+                    prepared_request,
+                    "price_semantics_digest",
+                ),
+            )
+        except attribute_error_type as error:
+            raise error_type(
+                "Bybit prepared price authority is unavailable"
+            ) from error
+
+    return read
+
+
+_bybit_prepared_price_authority = _install_bybit_prepared_price_authority_reader()
+_CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY = _bybit_prepared_price_authority
+_CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY_CODE = (
+    _bybit_prepared_price_authority.__code__
+)
+del _install_bybit_prepared_price_authority_reader
+
+
 def _production_request_origin_receipt(
     material: FinancialRequestBindingMaterial,
 ) -> dict[str, object] | None:
@@ -228,23 +273,41 @@ def _require_bybit_prepared_request_origin(
         raise DurableFinancialRequestBindingError(
             "Bybit prepared request lacks canonical issuance provenance"
         ) from error
+    if (
+        _bybit_prepared_price_authority
+        is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY
+        or getattr(
+            _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price authority executable changed"
+        )
+    (
+        prepared_price_rule_instrument_id,
+        prepared_price_rule_instrument_version,
+        prepared_price_semantics_digest,
+    ) = _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY(prepared_request)
     price_authority = (
-        prepared_request.price_rule_instrument_id,
-        prepared_request.price_rule_instrument_version,
-        prepared_request.price_semantics_digest,
+        prepared_price_rule_instrument_id,
+        prepared_price_rule_instrument_version,
+        prepared_price_semantics_digest,
     )
     if any(value is None for value in price_authority):
         raise DurableFinancialRequestBindingError(
             "Bybit PAPER/LIVE prepared request lacks authenticated price semantics authority"
         )
     if (
-        prepared_request.price_rule_instrument_id != material.instrument_id
-        or prepared_request.price_rule_instrument_version != material.instrument_version
+        prepared_price_rule_instrument_id != material.instrument_id
+        or prepared_price_rule_instrument_version != material.instrument_version
     ):
         raise DurableFinancialRequestBindingError(
             "Bybit prepared price-rule instrument differs from financial binding"
         )
-    if prepared_request.price_semantics_digest != material.price_semantics_digest:
+    if prepared_price_semantics_digest != material.price_semantics_digest:
         raise DurableFinancialRequestBindingError(
             "Bybit prepared price semantics differ from financial binding"
         )

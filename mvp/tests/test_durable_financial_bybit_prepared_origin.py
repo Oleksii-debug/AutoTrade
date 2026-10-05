@@ -720,6 +720,44 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         ):
             _require_bybit_prepared_request_origin(material, prepared)
 
+    def test_durable_origin_bypasses_prepared_getattribute_callbacks(self):
+        material, prepared = canonical_case()
+        calls = []
+
+        def forged(*_args, **_kwargs):
+            calls.append("forged")
+            raise AssertionError("prepared __getattribute__ callback executed")
+
+        with patch.object(
+            BybitPreparedSubmission,
+            "__getattribute__",
+            forged,
+        ):
+            receipt = _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(receipt, _production_request_origin_receipt(material))
+        self.assertEqual(calls, [])
+
+    def test_price_authority_reader_rebinding_fails_before_callback(self):
+        material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return (None, None, None)
+
+        with patch.object(
+            binding_module,
+            "_bybit_prepared_price_authority",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "price authority executable changed",
+            ):
+                _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(calls, [])
+
+
     def test_provenance_verifier_rebinding_fails_before_forged_verifier_executes(self):
         material, prepared = canonical_case()
         calls = []

@@ -555,5 +555,68 @@ class ModelCallClassRebindingAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_orchestrator_rejects_preinstalled_journal_class_dispatch_rebind(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            canonical_connect = JournalStore._connect
+            try:
+                JournalStore._connect = lambda *_args, **_kwargs: self.fail(
+                    "preinstalled rebound JournalStore._connect must not be trusted"
+                )
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    _orchestrator(budget)
+            finally:
+                JournalStore._connect = canonical_connect
+
+            self.assertIs(JournalStore._connect, canonical_connect)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_adapter_restores_journal_base_before_unknown_settlement(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            canonical_base = JournalStore.__bases__[0]
+
+            def hostile_load_events(_store, *_args, **_kwargs):
+                self.fail("hostile JournalStore base dispatch reached settlement")
+
+            hostile_base = type(
+                "HostileJournalStoreBase",
+                (canonical_base,),
+                {"load_events": hostile_load_events},
+            )
+
+            try:
+                def hostile_adapter(*_args):
+                    JournalStore.__bases__ = (hostile_base,)
+                    return observation()
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=_policy(),
+                    request=_request(orchestrator, call_spec),
+                    descriptors=[_descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn("JournalStore.__bases__", result.reason)
+                self.assertEqual(JournalStore.__bases__, (canonical_base,))
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                if JournalStore.__bases__ != (canonical_base,):
+                    JournalStore.__bases__ = (canonical_base,)
+
+
 if __name__ == "__main__":
     unittest.main()

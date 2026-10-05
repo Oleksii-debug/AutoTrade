@@ -26,7 +26,12 @@ from .market_data import (
     _issue_book_stream_policy_binding,
     _issue_qualified_book_range_admission,
 )
-from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_multiply,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -1262,7 +1267,13 @@ class BinanceSpotSymbolRules:
     def _require_step(value: Decimal, step: Decimal, *, name: str) -> None:
         if step == 0:
             return
-        if value % step != 0:
+        try:
+            is_multiple = is_exact_decimal_multiple(value, step)
+        except ExactDecimalError as error:
+            raise BinanceSpotAdapterError(
+                f"{name} exact grid arithmetic exceeds the numeric resource envelope"
+            ) from error
+        if not is_multiple:
             raise BinanceSpotAdapterError(
                 f"{name} is not an exact multiple of exchangeInfo step"
             )
@@ -1400,7 +1411,12 @@ class BinanceSpotSymbolRules:
                 effective_price = fallback.price
 
         if effective_price is not None:
-            notional = intent.quantity * effective_price
+            try:
+                notional = exact_multiply(intent.quantity, effective_price)
+            except ExactDecimalError as error:
+                raise BinanceSpotAdapterError(
+                    "notional exact arithmetic exceeds the numeric resource envelope"
+                ) from error
             if self.min_notional is not None and (
                 intent.order_type == "LIMIT" or self.min_notional_applies_to_market
             ) and notional < self.min_notional:

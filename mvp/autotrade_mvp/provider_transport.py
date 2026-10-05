@@ -38,6 +38,7 @@ from urllib.request import (
 )
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
+from .bybit_v5 import _AMBIGUOUS_RESPONSE_CODES as _BYBIT_AMBIGUOUS_RESPONSE_CODES
 from .dispatch import ExactJsonTransportResponse
 from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 from .persistence import JournalStore, payload_digest
@@ -1222,7 +1223,7 @@ def _bybit_exact_trading_response(
     if (
         type(parsed) is dict
         and type(parsed.get("retCode")) is int
-        and parsed["retCode"] in {429, 10000, 10014, 10016}
+        and parsed["retCode"] in _BYBIT_AMBIGUOUS_RESPONSE_CODES
     ):
         return ExactJsonTransportResponse(
             exact.response_bytes,

@@ -656,6 +656,46 @@ class AccountingFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(AccountingConflict, "owner is unavailable"):
             forged.audit_digest()
 
+    def test_scoped_economic_book_reinit_rejected_before_state_mutation(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-reinit",
+            transactions=(
+                book_external_cash_flow(
+                    transaction_id="reinit-seed",
+                    cause_event_id="reinit-seed-cause",
+                    currency="USD",
+                    amount="40",
+                ),
+            ),
+        )
+        before_digest = scoped.audit_digest()
+        before_book = object.__getattribute__(scoped, "_book")
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "owner is already initialized",
+        ):
+            ScopedEconomicBook.__init__(
+                scoped,
+                environment="LIVE",
+                account_id="attacker-account",
+                transactions=(
+                    book_external_cash_flow(
+                        transaction_id="attacker-seed",
+                        cause_event_id="attacker-seed-cause",
+                        currency="USD",
+                        amount="999",
+                    ),
+                ),
+            )
+
+        self.assertEqual(scoped.environment, "PAPER")
+        self.assertEqual(scoped.account_id, "acct-reinit")
+        self.assertIs(object.__getattribute__(scoped, "_book"), before_book)
+        self.assertEqual(scoped.cash("USD"), Decimal("40"))
+        self.assertEqual(scoped.audit_digest(), before_digest)
+
     def test_scoped_economic_book_owner_releases_dead_book_immediately(self):
         scoped = ScopedEconomicBook(
             environment="PAPER",

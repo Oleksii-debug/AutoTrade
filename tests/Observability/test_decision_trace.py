@@ -137,6 +137,18 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             path.write_text(raw + "\n", encoding="utf-8")
             self.assertFalse(store.verify())
 
+    def test_crlf_reencoding_fails_exact_byte_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-crlf"))
+            raw = path.read_bytes()
+            self.assertIn(b"\n", raw)
+            path.write_bytes(raw.replace(b"\n", b"\r\n"))
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
     def test_duplicate_key_textual_tamper_fails_verification(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

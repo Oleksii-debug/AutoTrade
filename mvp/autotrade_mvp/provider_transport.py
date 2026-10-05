@@ -1205,7 +1205,6 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_status_unavailable_execution_unknown",
         )
-    parsed = exact.payload
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
             exact.response_bytes,
@@ -1220,6 +1219,10 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
+    # Transport uncertainty is authoritative before response-body syntax.
+    # A gateway may emit HTML/text on 5xx; preserve exact post-SEND evidence
+    # without requiring provider JSON first.
+    parsed = exact.payload
     if (
         type(parsed) is dict
         and type(parsed.get("retCode")) is int
@@ -1307,7 +1310,6 @@ def _binance_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
         )
-    parsed = exact.payload
     if 500 <= status <= 599:
         return ExactJsonTransportResponse(
             exact.response_bytes,
@@ -1315,6 +1317,9 @@ def _binance_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
         )
+    # A post-SEND 5xx is execution-unknown even when an upstream proxy returns
+    # non-JSON bytes, so only decode payload after transport ambiguity is fenced.
+    parsed = exact.payload
     if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
         return ExactJsonTransportResponse(
             exact.response_bytes,

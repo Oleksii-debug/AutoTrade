@@ -2923,7 +2923,7 @@ class ProviderTransportTests(unittest.TestCase):
 
     def test_binance_5xx_and_backend_timeout_are_unknown_not_definitive(self):
         cases = (
-            (503, b'{"code":-1000,"msg":"backend failure"}',
+            (503, b"<html>upstream unavailable</html>",
              "binance_spot_http_5xx_execution_unknown"),
             (200, b'{"code":-1007,"msg":"Timeout waiting for response"}',
              "binance_spot_backend_timeout_execution_unknown"),
@@ -2950,7 +2950,7 @@ class ProviderTransportTests(unittest.TestCase):
 
     def test_binance_ambiguous_http_after_send_is_durable_unknown_without_retry(self):
         cases = (
-            (503, b'{"code":-1000,"msg":"server"}',
+            (503, b"<html>upstream unavailable</html>",
              "binance_spot_http_5xx_execution_unknown"),
             (200, b'{"code":-1007,"msg":"timeout"}',
              "binance_spot_backend_timeout_execution_unknown"),
@@ -4948,7 +4948,7 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             events = []
             wire = RecordingWire(
                 events,
-                response=b'{"retCode":10016,"retMsg":"server error","result":{}}',
+                response=b"<html>upstream unavailable</html>",
                 http_status=503,
             )
             store = JournalStore(f"{directory}/journal.sqlite3")

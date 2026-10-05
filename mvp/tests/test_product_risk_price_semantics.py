@@ -20,6 +20,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
 )
 from mvp.autotrade_mvp.instruments import InstrumentRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.autotrade_mvp.product_risk_price_semantics import (
     ProductRiskPriceSemanticsComposer,
     ProductRiskPriceSemanticsError,
@@ -353,7 +354,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(
-                Exception,
+                ProviderCoreError,
                 "prepared submission authority changed",
             ):
                 ProductRiskPriceSemanticsComposer(

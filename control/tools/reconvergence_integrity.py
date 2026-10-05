@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
 from typing import Iterable, Sequence
@@ -101,11 +102,14 @@ def assess_reconvergence(
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
     base_is_ancestor: bool = True,
     allowed_scopes: Sequence[str] | None = None,
+    allow_protected_sentinel_modification: bool = False,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
+    if type(allow_protected_sentinel_modification) is not bool:
+        raise TypeError("allow_protected_sentinel_modification must be boolean")
 
     normalized_base = tuple(dict.fromkeys(base_paths))
     base_count = len(normalized_base)
@@ -129,6 +133,9 @@ def assess_reconvergence(
             )
         if kind == "T" and change.path in protected_sentinels:
             protected_damage.add(f"{change.path} (type change)")
+        if kind == "M" and change.path in protected_sentinels:
+            if not allow_protected_sentinel_modification:
+                protected_damage.add(f"{change.path} (modification)")
     protected_violations = tuple(sorted(protected_damage))
 
     normalized_scopes: tuple[str, ...] | None = None
@@ -235,6 +242,7 @@ def assess_git_revisions(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     allowed_scopes: Sequence[str] | None = None,
+    allow_protected_sentinel_modification: bool = False,
     cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
     """Assess revisions inside one explicit Git repository/worktree.
@@ -263,6 +271,7 @@ def assess_git_revisions(
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,
         allowed_scopes=allowed_scopes,
+        allow_protected_sentinel_modification=allow_protected_sentinel_modification,
     )
 
 
@@ -284,8 +293,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "PR-authored metadata. When omitted, scope enforcement is disabled."
         ),
     )
+    parser.add_argument(
+        "--allow-protected-sentinel-modification",
+        action="store_true",
+        help=(
+            "Permit regular content modification of protected sentinels only when "
+            "the invoking trusted workflow has explicitly authorized it. "
+            "Deletion, rename and type-change remain blocked."
+        ),
+    )
     args = parser.parse_args(argv)
     allowed_scopes = args.allowed_scope
+    env_authorized = os.environ.get(
+        "AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_MODIFICATION",
+        "",
+    ) == "1"
+    allow_protected_sentinel_modification = (
+        args.allow_protected_sentinel_modification or env_authorized
+    )
 
     assessment = assess_git_revisions(
         args.base,
@@ -293,6 +318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
         allowed_scopes=allowed_scopes,
+        allow_protected_sentinel_modification=allow_protected_sentinel_modification,
     )
     print(
         "Reconvergence tree guard: "

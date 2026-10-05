@@ -17,6 +17,7 @@ from autotrade_runtime.resource_lock import ResourceLock
 
 
 GENESIS_HASH = "0" * 64
+_BUILD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+@-]{0,127}$")
 REQUIRED_FIELDS = (
     "trace_id",
     "input_hash",
@@ -206,6 +207,32 @@ def canonical_json(value: Any) -> str:
     )
 
 
+def _validate_digest_map(
+    name: str,
+    value: object,
+    expected_ids: Iterable[str],
+) -> None:
+    if type(value) is not dict:
+        raise ValueError(f"{name} must be an exact object")
+    expected_items = tuple(expected_ids)
+    if any(type(identity) is not str for identity in expected_items):
+        raise ValueError(f"{name} linked identities must be exact strings")
+    for identity, digest in value.items():
+        if type(identity) is not str:
+            raise ValueError(f"{name} keys must be exact strings")
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or digest != digest.lower()
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise ValueError(f"{name} must contain lowercase SHA-256 digests")
+    # Build sets only after exact-string admission so caller-defined hash/equality
+    # cannot execute inside the durable provenance boundary.
+    if set(value) != set(expected_items):
+        raise ValueError(f"{name} keys must exactly match linked identities")
+
+
 def _hash_record(record: dict[str, Any]) -> str:
     payload = {key: value for key, value in record.items() if key != "record_hash"}
     return sha256(canonical_json(payload).encode("utf-8")).hexdigest()
@@ -272,6 +299,22 @@ class DecisionTraceStore:
         ):
             raise ValueError("input_hash must be a lowercase SHA-256 hex digest")
 
+        source_sha = trace.get("source_sha")
+        if source_sha is not None and (
+            type(source_sha) is not str
+            or len(source_sha) not in {40, 64}
+            or source_sha != source_sha.lower()
+            or any(ch not in "0123456789abcdef" for ch in source_sha)
+        ):
+            raise ValueError("source_sha must be a canonical lowercase Git/object SHA")
+
+        build_id = trace.get("build_id")
+        if build_id is not None and (
+            type(build_id) is not str
+            or _BUILD_ID_PATTERN.fullmatch(build_id) is None
+        ):
+            raise ValueError("build_id must be a canonical bounded build token")
+
         refs = trace["evidence_refs"]
         if type(refs) is not list or any(
             type(item) is not str
@@ -304,6 +347,13 @@ class DecisionTraceStore:
                 raise ValueError("event_ids must contain canonical non-empty strings")
             if len(event_ids) != len(set(event_ids)):
                 raise ValueError("event_ids must not contain duplicates")
+
+        evidence_digests = trace.get("evidence_digests")
+        if evidence_digests is not None:
+            _validate_digest_map("evidence_digests", evidence_digests, refs)
+        event_digests = trace.get("event_digests")
+        if event_digests is not None:
+            _validate_digest_map("event_digests", event_digests, event_ids or [])
 
         attributes = trace.get("attributes")
         if attributes is not None and type(attributes) is not dict:
@@ -368,8 +418,8 @@ class DecisionTraceStore:
     ) -> dict[str, Any]:
         """Validate a durable trace against caller-declared link availability."""
 
-        if not isinstance(trace_id, str) or not trace_id.strip():
-            raise ValueError("trace_id is required")
+        if type(trace_id) is not str or not trace_id.strip():
+            raise ValueError("trace_id must be an exact non-empty string")
         events = set(available_event_ids)
         evidence = set(available_evidence_ids)
         record = next(
@@ -391,6 +441,72 @@ class DecisionTraceStore:
                 f"missing_events={missing_events}, missing_evidence={missing_evidence}"
             )
         return _semantic_payload(record)
+
+    def reconstruct_exact(
+        self,
+        trace_id: str,
+        *,
+        expected_source_sha: str,
+        expected_build_id: str,
+        available_event_digests: Mapping[str, str],
+        available_evidence_digests: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Reconstruct only exact source/build and linked content identity."""
+
+        if type(available_event_digests) is not dict:
+            raise ValueError("available_event_digests must be an exact object")
+        if type(available_evidence_digests) is not dict:
+            raise ValueError("available_evidence_digests must be an exact object")
+        _validate_digest_map(
+            "available_event_digests",
+            available_event_digests,
+            available_event_digests.keys(),
+        )
+        _validate_digest_map(
+            "available_evidence_digests",
+            available_evidence_digests,
+            available_evidence_digests.keys(),
+        )
+
+        candidate = {
+            "trace_id": "identity-check",
+            "input_hash": "0" * 64,
+            "strategy_version": "identity-check",
+            "decision": "identity-check",
+            "decision_reason": "identity-check",
+            "risk_outcome": "identity-check",
+            "evidence_refs": [],
+            "source_sha": expected_source_sha,
+            "build_id": expected_build_id,
+        }
+        self._validate_input(candidate)
+        record = self.reconstruct(
+            trace_id,
+            available_event_ids=available_event_digests.keys(),
+            available_evidence_ids=available_evidence_digests.keys(),
+        )
+        if record.get("source_sha") != expected_source_sha:
+            raise ValueError("trace source identity mismatch")
+        if record.get("build_id") != expected_build_id:
+            raise ValueError("trace build identity mismatch")
+
+        stored_event_digests = record.get("event_digests")
+        stored_evidence_digests = record.get("evidence_digests")
+        if (
+            type(stored_event_digests) is not dict
+            or type(stored_evidence_digests) is not dict
+        ):
+            raise ValueError("trace evidence digest identity missing")
+        for identity in record.get("event_ids", []):
+            if available_event_digests.get(identity) != stored_event_digests.get(identity):
+                raise ValueError("trace event digest mismatch")
+        for identity in record["evidence_refs"]:
+            if (
+                available_evidence_digests.get(identity)
+                != stored_evidence_digests.get(identity)
+            ):
+                raise ValueError("trace evidence digest mismatch")
+        return record
 
     def accessible_export(
         self,
@@ -448,13 +564,27 @@ class DecisionTraceStore:
         correlation_id = record.get("correlation_id")
         if correlation_id:
             lines.append(f"Correlation: {correlation_id}")
+        lines.append(f"Source SHA: {record.get('source_sha') or 'unavailable'}")
+        lines.append(f"Build: {record.get('build_id') or 'unavailable'}")
 
         lines.append("Durable events:")
         event_ids = record.get("event_ids", [])
-        lines.extend(f"- {item}" for item in event_ids) if event_ids else lines.append("- none")
+        event_digests = record.get("event_digests", {})
+        if event_ids:
+            for item in event_ids:
+                digest = event_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Evidence:")
-        lines.extend(f"- {item}" for item in evidence_refs) if evidence_refs else lines.append("- none")
+        evidence_digests = record.get("evidence_digests", {})
+        if evidence_refs:
+            for item in evidence_refs:
+                digest = evidence_digests.get(item)
+                lines.append(f"- {item}" + (f" sha256 {digest}" if digest else ""))
+        else:
+            lines.append("- none")
 
         lines.append("Attributes:")
         attributes = record.get("attributes", {})

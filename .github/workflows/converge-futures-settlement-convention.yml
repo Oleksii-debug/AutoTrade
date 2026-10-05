@@ -1,0 +1,62 @@
+name: Converge futures settlement convention authority
+
+on:
+  push:
+    branches:
+      - integrate/wp28-settlement-convention-1741-20261005-sol56
+
+permissions:
+  contents: write
+
+jobs:
+  converge-test-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+      - name: Fetch pinned reviewed donor ancestry
+        shell: bash
+        run: git fetch origin wp28/futures-settlement-convention-main-5350-20261003-sol56
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - run: python tools/_converge_futures_settlement_convention.py
+      - run: >-
+          python -m py_compile
+          mvp/autotrade_mvp/settlement_convention.py
+          mvp/autotrade_mvp/instruments.py
+          mvp/autotrade_mvp/futures.py
+          mvp/autotrade_mvp/futures_journal.py
+      - name: Focused futures economic-authority regression
+        run: >-
+          python -m unittest
+          mvp.tests.test_futures
+          mvp.tests.test_futures_exact_arithmetic
+          mvp.tests.test_futures_journal
+          mvp.tests.test_futures_settlement_snapshot_authority
+          mvp.tests.test_futures_settlement_convention_authority
+          -v
+        env:
+          PYTHONPATH: research:.
+      - name: Commit bounded convergence and retire one-shot machinery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Oleksii-debug'
+          git config user.email 'oleksiy.az.09@gmail.com'
+          git rm tools/_converge_futures_settlement_convention.py .github/workflows/converge-futures-settlement-convention.yml
+          git add \
+            .github/workflows/futures-qualification.yml \
+            mvp/autotrade_mvp/futures.py \
+            mvp/autotrade_mvp/instruments.py \
+            mvp/autotrade_mvp/futures_journal.py \
+            mvp/autotrade_mvp/settlement_convention.py \
+            mvp/tests/test_futures.py \
+            mvp/tests/test_futures_exact_arithmetic.py \
+            mvp/tests/test_futures_journal.py \
+            mvp/tests/test_futures_settlement_convention_authority.py
+          git commit -m 'Integrate immutable futures settlement convention authority'
+          git push origin HEAD:${GITHUB_REF_NAME}

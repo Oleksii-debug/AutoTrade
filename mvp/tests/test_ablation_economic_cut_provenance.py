@@ -117,6 +117,54 @@ class AblationProviderEconomicCutProvenanceTests(unittest.TestCase):
                     evidence=evidence,
                 )
 
+    def test_transaction_digest_must_remain_canonical_sha256(self):
+        with TemporaryDirectory() as directory:
+            _store, owner, cut = self._fixture(Path(directory))
+            evidence = resolve_ablation_provider_economic_cut_provenance(
+                owner,
+                cut,
+                expected_visibility_journal_sequence=cut.visibility_journal_sequence,
+            )
+            transaction_id, _digest = evidence.transaction_digests[0]
+            object.__setattr__(
+                evidence,
+                "transaction_digests",
+                ((transaction_id, "not-a-digest"),),
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "transaction_digest must be an exact canonical sha256 digest",
+            ):
+                reverify_ablation_provider_economic_cut_provenance(
+                    owner,
+                    cut,
+                    expected_visibility_journal_sequence=cut.visibility_journal_sequence,
+                    evidence=evidence,
+                )
+
+    def test_duplicate_transaction_identity_is_rejected_before_replay(self):
+        with TemporaryDirectory() as directory:
+            _store, owner, cut = self._fixture(Path(directory))
+            evidence = resolve_ablation_provider_economic_cut_provenance(
+                owner,
+                cut,
+                expected_visibility_journal_sequence=cut.visibility_journal_sequence,
+            )
+            item = evidence.transaction_digests[0]
+            object.__setattr__(evidence, "transaction_digests", (item, item))
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "duplicate transaction_id",
+            ):
+                reverify_ablation_provider_economic_cut_provenance(
+                    owner,
+                    cut,
+                    expected_visibility_journal_sequence=cut.visibility_journal_sequence,
+                    evidence=evidence,
+                )
+
     def test_candidate_cannot_select_later_visibility(self):
         with TemporaryDirectory() as directory:
             store, owner, cut = self._fixture(Path(directory))

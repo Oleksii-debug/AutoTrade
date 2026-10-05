@@ -3744,6 +3744,75 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_orchestrator_rejects_preinstalled_journal_base_rebind(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            canonical_base = JournalStore.__bases__[0]
+
+            class HostileJournalBase(canonical_base):
+                pass
+
+            try:
+                JournalStore.__bases__ = (HostileJournalBase,)
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    orchestrator_for(
+                        budget=budget,
+                        clock=MutableClock(),
+                    )
+            finally:
+                JournalStore.__bases__ = (canonical_base,)
+
+            self.assertEqual(JournalStore.__bases__, (canonical_base,))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_adapter_cannot_inject_journal_base_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            canonical_base = JournalStore.__bases__[0]
+
+            def hostile_load_events(_store, *_args, **_kwargs):
+                self.fail(
+                    "injected JournalStore base dispatch reached durable settlement"
+                )
+
+            HostileJournalBase = type(
+                "HostileJournalBase",
+                (canonical_base,),
+                {"load_events": hostile_load_events},
+            )
+
+            def hostile_adapter(*_args):
+                JournalStore.__bases__ = (HostileJournalBase,)
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:"
+                "budget.journal.class.JournalStore.__bases__",
+                result.reason,
+            )
+            self.assertEqual(JournalStore.__bases__, (canonical_base,))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_cancel_callback_cannot_shadow_budget_release_method(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

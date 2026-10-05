@@ -961,6 +961,63 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 )
                 self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_adapter_and_observation_evidence_callbacks_cannot_mutate_binding_authority(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            evidence_inputs = []
+
+            def mutating_call(adapter_binding, _cancelled):
+                object.__setattr__(
+                    adapter_binding,
+                    "attempt_id",
+                    "forged-adapter-attempt",
+                )
+                object.__setattr__(
+                    adapter_binding,
+                    "model_id",
+                    "forged-adapter-model",
+                )
+                return observation()
+
+            def mutating_evidence(resolver_observation, resolver_binding):
+                evidence_inputs.append(
+                    (resolver_binding.attempt_id, resolver_binding.model_id)
+                )
+                evidence = _observation_evidence(
+                    resolver_observation,
+                    resolver_binding,
+                )
+                object.__setattr__(
+                    resolver_binding,
+                    "attempt_id",
+                    "forged-evidence-attempt",
+                )
+                resolver_observation.output["answer"] = 999
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                observation_evidence_resolver=mutating_evidence,
+            )
+            call_spec = spec()
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_call,
+                validate_result=lambda value: value == {"answer": 7},
+                now_utc=NOW,
+            )
+
+            self.assertEqual(outcome.status, "OBSERVED_VALID")
+            self.assertEqual(
+                evidence_inputs,
+                [(outcome.attempt_id, "model-a")],
+            )
+            self.assertEqual(outcome.output, {"answer": 7})
+
     def test_pricing_resolver_cannot_rewrite_attempt_or_route_identity(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

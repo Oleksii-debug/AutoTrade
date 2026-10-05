@@ -5,6 +5,7 @@ import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
 from mvp.autotrade_mvp.instruments import InstrumentVersion
+from mvp.autotrade_mvp.settlement_convention import SettlementConvention
 from mvp.autotrade_mvp.futures import (
     FuturesContract,
     FuturesSettlementEvidence,
@@ -74,6 +75,16 @@ class FuturesLifecycleTests(unittest.TestCase):
             delivery_cutoff=utc(29, 12) if payoff == "LINEAR" else utc(30, 20),
             settlement_method=settlement_method,
             margin_model_id="TEST_FUTURES_MARGIN_V1",
+            settlement_convention=(SettlementConvention(
+                provider_id=provider_id, instrument_id="22222222-2222-4222-8222-222222222222",
+                instrument_version=1, settlement_currency="BTC", quantum="0.00000001",
+                rounding="HALF_EVEN", evidence_artifact_id="00000000-0000-0000-0000-000000000303",
+                evidence_sha256="sha256:" + "3" * 64,
+            ) if payoff == "INVERSE" else None),
+            metadata_evidence=({"artifact_id":"00000000-0000-0000-0000-000000000303",
+                "sha256":"sha256:" + "3" * 64, "observed_at":"2026-09-01T00:00:00Z"},)
+                if payoff == "INVERSE" else (),
+
         )
 
     def _linear_contract(self, settlement_method="CASH"):
@@ -267,7 +278,6 @@ class FuturesLifecycleTests(unittest.TestCase):
             settlement=settlement,
             contract=contract,
             exact_amount=exact,
-            settlement_quantum=Decimal("0.00000001"),
         )
         self.assertEqual(settled, Decimal("0.00090909"))
         self.assertIsNotNone(transaction)
@@ -285,7 +295,6 @@ class FuturesLifecycleTests(unittest.TestCase):
             settlement=settlement,
             contract=contract,
             exact_amount=Fraction(1, 1_000_000_000),
-            settlement_quantum=Decimal("0.00000001"),
         )
         self.assertEqual(settled, Decimal("0.00000000"))
         self.assertIsNone(transaction)

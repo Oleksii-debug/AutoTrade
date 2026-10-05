@@ -12,20 +12,23 @@ from mvp.autotrade_mvp.confirmed_pending_admission import (
 from mvp.autotrade_mvp.durable_financial_request_binding import (
     DurableFinancialRequestBindingError,
     DurableFinancialRequestBindingRegistry,
+    _admission_journal_sequence,
+    _reservation_scope_digest,
+    _simulation_account_cut,
+    _simulation_qualification_identity,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.financial_request_binding import (
     FinancialRequestBindingMaterial,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_domain import ProviderFinancialScope
 from mvp.tests.test_confirmed_pending_admission import (
     ConfirmedPendingAdmissionTests,
     NOW,
 )
 
 
-D1 = "sha256:" + "1" * 64
-D2 = "sha256:" + "2" * 64
 D3 = "sha256:" + "3" * 64
 D4 = "sha256:" + "4" * 64
 D5 = "sha256:" + "5" * 64
@@ -35,9 +38,9 @@ D8 = "sha256:" + "8" * 64
 D9 = "sha256:" + "9" * 64
 DA = "sha256:" + "a" * 64
 DB = "sha256:" + "b" * 64
-ACCOUNT_CUT = "provider-account-cut:sha256:" + "c" * 64
-PROVIDER_SCOPE = "provider-financial-scope:sha256:" + "d" * 64
-QUALIFICATION = "provider-qualification:sha256:" + "e" * 64
+DC = "sha256:" + "c" * 64
+DD = "sha256:" + "d" * 64
+DE = "provider-qualification:sha256:" + "e" * 64
 
 
 class DurableFinancialRequestBindingTests(unittest.TestCase):
@@ -68,6 +71,7 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
         risk_payload = events[0]["payload"]
         snapshot = risk_payload["authoritative_risk_snapshot"]
         risk_intent = risk_payload["risk_intent"]
+        availability = risk_payload["reservation_availability_evidence"]
         book = DurableReservationBook(
             store,
             environment=admitted.environment,
@@ -79,18 +83,34 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
         entity_policy_id = snapshot.get("entity_policy_id")
         if type(entity_policy_id) is not str:
             entity_policy_id = "test-entity-policy"
+        provider_scope = ProviderFinancialScope(
+            provider_id=snapshot["provider_id"],
+            runtime_environment=admitted.environment,
+            provider_environment=provider_environment,
+            entity_policy_id=entity_policy_id,
+        )
+        account_cut_id, account_cut_digest, account_head_sequence = (
+            _simulation_account_cut(availability)
+        )
         return FinancialRequestBindingMaterial(
             risk_snapshot_id=snapshot["snapshot_id"],
             risk_decision_id=admitted.risk_decision_id,
-            admitted_journal_sequence_cut=store.current_journal_sequence(),
-            account_cut_id=ACCOUNT_CUT,
-            account_cut_digest=D1,
-            account_head_journal_sequence=0,
+            admitted_journal_sequence_cut=_admission_journal_sequence(
+                store,
+                admitted.admission_id,
+            ),
+            account_cut_id=account_cut_id,
+            account_cut_digest=account_cut_digest,
+            account_head_journal_sequence=account_head_sequence,
             reservation_id=admitted.reservation_id,
-            reservation_scope_digest=D2,
+            reservation_scope_digest=_reservation_scope_digest(
+                environment=admitted.environment,
+                account_id=admitted.account_id,
+                scope_id=book.scope_id,
+            ),
             reservation_version=book.version,
-            reservation_state_digest=book.state_digest,
-            provider_scope_digest=PROVIDER_SCOPE,
+            reservation_state_digest="sha256:" + book.state_digest,
+            provider_scope_digest=provider_scope.content_digest,
             provider_id=snapshot["provider_id"],
             account_id=admitted.account_id,
             runtime_environment=admitted.environment,
@@ -101,7 +121,10 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             quantity_unit="BASE",
             equivalent_exposure_digest=D3,
             capability_snapshot_id=admitted.capability_snapshot_id,
-            qualification_identity_digest=QUALIFICATION,
+            qualification_identity_digest=_simulation_qualification_identity(
+                provider_scope,
+                admitted.capability_snapshot_id,
+            ),
             client_order_id="confirmed-client-order-1",
             side=risk_intent["side"],
             quantity=risk_intent["quantity"],
@@ -118,6 +141,15 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             submission_scope_digest=D9,
         )
 
+    def _bind(self, registry, *, admission_id, material, seconds=2):
+        return registry.bind(
+            admission_id=admission_id,
+            material=material,
+            bound_at=(NOW + timedelta(seconds=seconds)).isoformat().replace(
+                "+00:00", "Z"
+            ),
+        )
+
     def test_restart_recovers_exact_admitted_provider_request_identity(self) -> None:
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
@@ -125,7 +157,8 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             _source, admitted = self._admitted_case(store)
             material = self._material(store, admitted)
 
-            bound = DurableFinancialRequestBindingRegistry(store).bind(
+            bound = self._bind(
+                DurableFinancialRequestBindingRegistry(store),
                 admission_id=admitted.admission_id,
                 material=material,
             )
@@ -134,23 +167,50 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             restarted = DurableFinancialRequestBindingRegistry(JournalStore(path))
             self.assertEqual(restarted.resolve(admitted.admission_id), material)
 
-    def test_exact_duplicate_bind_is_idempotent(self) -> None:
+    def test_exact_duplicate_bind_is_idempotent_across_later_observation_time(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             _source, admitted = self._admitted_case(store)
             material = self._material(store, admitted)
             registry = DurableFinancialRequestBindingRegistry(store)
 
-            first = registry.bind(
+            first = self._bind(
+                registry,
                 admission_id=admitted.admission_id,
                 material=material,
+                seconds=2,
             )
-            second = registry.bind(
+            first_sequence = store.current_journal_sequence()
+            second = self._bind(
+                registry,
                 admission_id=admitted.admission_id,
                 material=material,
+                seconds=30,
             )
             self.assertEqual(first, second)
             self.assertEqual(first.binding_id, material.binding_id)
+            self.assertEqual(store.current_journal_sequence(), first_sequence)
+
+    def test_binding_event_uses_binding_time_not_historical_admission_time(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            _source, admitted = self._admitted_case(store)
+            material = self._material(store, admitted)
+            bound_at = (NOW + timedelta(seconds=7)).isoformat().replace(
+                "+00:00", "Z"
+            )
+            DurableFinancialRequestBindingRegistry(store).bind(
+                admission_id=admitted.admission_id,
+                material=material,
+                bound_at=bound_at,
+            )
+            events = store.load_events(
+                "admitted_financial_request_binding",
+                admitted.admission_id,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["committed_at"], bound_at)
+            self.assertNotEqual(events[0]["committed_at"], admitted.admitted_at)
 
     def test_one_admission_cannot_collapse_distinct_execution_semantics(self) -> None:
         with TemporaryDirectory() as directory:
@@ -158,7 +218,8 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             _source, admitted = self._admitted_case(store)
             original = self._material(store, admitted)
             registry = DurableFinancialRequestBindingRegistry(store)
-            registry.bind(
+            self._bind(
+                registry,
                 admission_id=admitted.admission_id,
                 material=original,
             )
@@ -176,7 +237,8 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
                 DurableFinancialRequestBindingError,
                 "conflicts with durable state",
             ):
-                registry.bind(
+                self._bind(
+                    registry,
                     admission_id=admitted.admission_id,
                     material=alternative,
                 )
@@ -193,7 +255,8 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
                 DurableFinancialRequestBindingError,
                 "only an ADMITTED financial record",
             ):
-                DurableFinancialRequestBindingRegistry(store).bind(
+                self._bind(
+                    DurableFinancialRequestBindingRegistry(store),
                     admission_id=source.admission_id,
                     material=material,
                 )
@@ -205,8 +268,20 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
             material = self._material(store, admitted)
             registry = DurableFinancialRequestBindingRegistry(store)
             cases = (
+                ("admitted_journal_sequence_cut", material.admitted_journal_sequence_cut - 1),
+                ("account_cut_id", "provider-account-cut:sha256:" + "0" * 64),
+                ("account_cut_digest", DC),
+                ("account_head_journal_sequence", 0),
                 ("reservation_id", "other-reservation"),
+                ("reservation_scope_digest", DD),
+                ("reservation_version", material.reservation_version + 1),
+                ("reservation_state_digest", DC),
+                (
+                    "provider_scope_digest",
+                    "provider-financial-scope:sha256:" + "0" * 64,
+                ),
                 ("capability_snapshot_id", "other-capability"),
+                ("qualification_identity_digest", DE),
                 ("account_id", "other-account"),
                 (
                     "instrument_id",
@@ -221,7 +296,8 @@ class DurableFinancialRequestBindingTests(unittest.TestCase):
                         DurableFinancialRequestBindingError,
                         "differs from durable admitted authority",
                     ):
-                        registry.bind(
+                        self._bind(
+                            registry,
                             admission_id=admitted.admission_id,
                             material=replace(
                                 material,

@@ -7,7 +7,9 @@ from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
 import sqlite3
 import unittest
+from unittest.mock import patch
 
+from mvp.autotrade_mvp import futures_journal as futures_journal_module
 from mvp.autotrade_mvp.futures import (
     FuturesSettlementEvidence,
     FuturesSettlementScope,
@@ -28,7 +30,7 @@ from mvp.autotrade_mvp.futures_journal import (
     variation_margin_aggregate_id,
 )
 from mvp.autotrade_mvp.instruments import InstrumentVersion
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
@@ -179,6 +181,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 opening,
                 settlement,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertTrue(inserted)
             self.assertEqual(delta, Decimal("100"))
@@ -195,6 +198,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 reopened,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(rebuilt, state)
 
@@ -204,6 +208,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     settlement,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             )
             self.assertFalse(retry_inserted)
@@ -236,6 +241,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     correction,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             )
             self.assertTrue(correction_inserted)
@@ -251,6 +257,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     final_store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 corrected,
             )
@@ -258,6 +265,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 final_store,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(rebuilt_book.cash("USD"), Decimal("120"))
             self.assertEqual(
@@ -300,6 +308,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 opening,
                 first,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             aggregate_id = variation_margin_aggregate_id(opening)
             with self.assertRaisesRegex(FuturesError, "conflicts"):
@@ -308,6 +317,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     conflicting,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
             self.assertEqual(
                 len(store.load_events("FUTURES_VARIATION_MARGIN", aggregate_id)),
@@ -318,6 +328,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ).last_settlement_price,
                 Decimal("105"),
             )
@@ -343,6 +354,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     first,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -355,6 +367,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     JournalStore(path),
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 state,
             )
@@ -365,6 +378,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     first,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -390,6 +404,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     correction,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                     settlement_quantum=Decimal("0.00000001"),
                 )
             )
@@ -419,6 +434,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     final_store,
                     opening,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 ),
                 corrected,
             )
@@ -426,6 +442,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 final_store,
                 opening,
                 evidence_artifact_store=artifacts,
+                evidence_artifact_root=Path(directory) / "artifacts",
             )
             self.assertEqual(
                 rebuilt_book.cash("BTC"),
@@ -468,6 +485,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     altered,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
 
             self.assertEqual(
@@ -522,6 +540,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                     opening,
                     settlement,
                     evidence_artifact_store=artifacts,
+                    evidence_artifact_root=Path(directory) / "artifacts",
                 )
 
             aggregate_id = variation_margin_aggregate_id(opening)
@@ -538,6 +557,233 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             finally:
                 connection.close()
             self.assertEqual(command_count, 0)
+
+
+    def test_linear_commit_fails_closed_if_global_journal_cut_moves(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "cut-race-linear", "105", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original_commit = JournalStore.commit_command
+
+            def raced_commit(instance, **kwargs):
+                payload = {"source": "unrelated-writer"}
+                JournalStore.append_event(
+                    instance,
+                    {
+                        "event_id": "unrelated-linear-cut-race",
+                        "event_type": "UnrelatedCommitted",
+                        "aggregate_type": "UNRELATED_TEST",
+                        "aggregate_id": "linear",
+                        "aggregate_version": "1",
+                        "committed_at": utc(1).isoformat(),
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                    },
+                )
+                return original_commit(instance, **kwargs)
+
+            with patch.object(JournalStore, "commit_command", new=raced_commit):
+                with self.assertRaisesRegex(
+                    FuturesError,
+                    "journal cut changed before commit",
+                ):
+                    commit_linear_variation_margin(
+                        store,
+                        opening,
+                        settlement,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                    )
+
+            self.assertEqual(
+                store.load_events(
+                    "FUTURES_VARIATION_MARGIN",
+                    variation_margin_aggregate_id(opening),
+                ),
+                [],
+            )
+            self.assertEqual(store.current_journal_sequence(), 1)
+
+    def test_inverse_commit_fails_closed_if_global_journal_cut_moves(self):
+        contract = self._contract(payoff="INVERSE")
+        opening = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(
+            contract,
+            "cut-race-inverse",
+            "11000",
+            sequence=1,
+        )
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original_commit = JournalStore.commit_command
+
+            def raced_commit(instance, **kwargs):
+                payload = {"source": "unrelated-writer"}
+                JournalStore.append_event(
+                    instance,
+                    {
+                        "event_id": "unrelated-inverse-cut-race",
+                        "event_type": "UnrelatedCommitted",
+                        "aggregate_type": "UNRELATED_TEST",
+                        "aggregate_id": "inverse",
+                        "aggregate_version": "1",
+                        "committed_at": utc(1).isoformat(),
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                    },
+                )
+                return original_commit(instance, **kwargs)
+
+            with patch.object(JournalStore, "commit_command", new=raced_commit):
+                with self.assertRaisesRegex(
+                    FuturesError,
+                    "journal cut changed before commit",
+                ):
+                    commit_inverse_variation_margin(
+                        store,
+                        opening,
+                        settlement,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                        settlement_quantum=Decimal("0.00000001"),
+                    )
+
+            self.assertEqual(
+                store.load_events(
+                    "FUTURES_VARIATION_MARGIN",
+                    variation_margin_aggregate_id(opening),
+                ),
+                [],
+            )
+            self.assertEqual(store.current_journal_sequence(), 1)
+
+
+    def test_rebuild_projects_the_single_verified_event_tuple(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "single-rebuild-cut", "105", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            commit_linear_variation_margin(
+                store,
+                opening,
+                settlement,
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+
+            original_load = JournalStore.load_events
+            calls = []
+
+            def counted_load(instance, aggregate_type, aggregate_id):
+                calls.append((aggregate_type, aggregate_id))
+                return original_load(instance, aggregate_type, aggregate_id)
+
+            with patch.object(JournalStore, "load_events", new=counted_load):
+                book = rebuild_variation_margin_book(
+                    store,
+                    opening,
+                    evidence_artifact_root=artifact_root,
+                    evidence_artifact_store=artifacts,
+                )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(book.cash("USD"), Decimal("50"))
+
+    def test_correction_retains_one_reader_generation_for_history_and_new_evidence(self):
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        first = self._settlement(contract, "reader-generation", "105", sequence=1)
+        correction = self._settlement(
+            contract,
+            "reader-generation",
+            "106",
+            sequence=1,
+            revision=1,
+        )
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            first = self._bind_provider_evidence(artifacts, first)
+            correction = self._bind_provider_evidence(artifacts, correction)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            commit_linear_variation_margin(
+                store,
+                opening,
+                first,
+                evidence_artifact_root=artifact_root,
+                evidence_artifact_store=artifacts,
+            )
+
+            original_factory = futures_journal_module.trusted_authenticated_reader
+            factory_calls = []
+            read_calls = []
+
+            def counted_factory(*args, **kwargs):
+                factory_calls.append((args, kwargs))
+                reader = original_factory(*args, **kwargs)
+
+                def counted_reader(artifact_id):
+                    read_calls.append(artifact_id)
+                    return reader(artifact_id)
+
+                return counted_reader
+
+            with patch.object(
+                futures_journal_module,
+                "trusted_authenticated_reader",
+                new=counted_factory,
+            ):
+                corrected, delta, _transaction, inserted = (
+                    commit_linear_variation_margin(
+                        store,
+                        opening,
+                        correction,
+                        evidence_artifact_root=artifact_root,
+                        evidence_artifact_store=artifacts,
+                    )
+                )
+
+            self.assertTrue(inserted)
+            self.assertEqual(delta, Decimal("10"))
+            self.assertEqual(corrected.last_settlement_price, Decimal("106"))
+            self.assertEqual(len(factory_calls), 1)
+            self.assertEqual(len(read_calls), 2)
 
 
 if __name__ == "__main__":

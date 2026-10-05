@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -19,6 +19,7 @@ from research.autotrade_research.artifacts import (
 
 from .exact_decimal import (
     ExactDecimalError,
+    MAX_DECIMAL_TEXT_LENGTH,
     as_fraction,
     bounded_fraction,
     canonical_decimal_text as _shared_canonical_decimal_text,
@@ -98,19 +99,23 @@ def _decimal(value, *, name: str) -> Decimal:
     try:
         return parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:
-        # Keep the established public resource-envelope diagnostic for exact
-        # finite values while preserving a distinct malformed/non-finite path.
-        finite_presentation = True
-        if type(value) is Decimal:
-            finite_presentation = Decimal.is_finite(value)
-        elif type(value) is str:
-            try:
-                parsed = Decimal(value)
-            except InvalidOperation:
-                finite_presentation = False
-            else:
-                finite_presentation = Decimal.is_finite(parsed)
-        if finite_presentation:
+        # Keep the established resource-envelope diagnostic without conflating
+        # malformed/non-finite presentations with a genuine bounded-resource
+        # rejection.  ExactDecimalError messages are issued by the canonical
+        # shared numeric authority and are not caller-controlled.
+        detail = str(error)
+        resource_failure = (
+            "resource envelope" in detail
+            or "maximum significant digits" in detail
+            or "maximum scale" in detail
+            or "maximum integer digits" in detail
+            or (
+                detail == "invalid or oversized decimal presentation"
+                and type(value) is str
+                and len(value) > MAX_DECIMAL_TEXT_LENGTH
+            )
+        )
+        if resource_failure:
             raise ValueError(
                 f"{name} exceeds the exact Decimal resource envelope"
             ) from error

@@ -335,6 +335,39 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 ["decision-before-failure"],
             )
 
+    def test_reader_rejects_symlink_alias_instead_of_following_trace(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            target = root / "decision-traces-target.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-before-symlink"))
+            path.replace(target)
+            try:
+                os.symlink(target.name, path)
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                store.records()
+
+    def test_reader_rejects_hardlink_alias_instead_of_trusting_shared_inode(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            alias = root / "decision-traces-alias.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-before-hardlink"))
+            try:
+                os.link(path, alias)
+            except OSError as error:
+                self.skipTest(f"hard links unavailable: {error}")
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                store.records()
+
     def test_hardlink_alias_cannot_split_decision_trace_lock_identity(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

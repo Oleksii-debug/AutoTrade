@@ -163,16 +163,15 @@ class ResolvedAblationProviderEconomicCutProvenance:
         _digest(self.resulting_book_digest, name="resulting_book_digest")
         if type(self.transaction_digests) is not tuple:
             raise AccountingConflict("transaction_digests must be an exact tuple")
+        transaction_ids: list[str] = []
         for item in self.transaction_digests:
-            if (
-                type(item) is not tuple
-                or len(item) != 2
-                or type(item[0]) is not str
-                or not item[0]
-                or type(item[1]) is not str
-                or not item[1]
-            ):
+            if type(item) is not tuple or len(item) != 2:
                 raise AccountingConflict("transaction_digests entry is not canonical")
+            transaction_id = _text(item[0], name="transaction_id")
+            _digest(item[1], name="transaction_digest")
+            transaction_ids.append(transaction_id)
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise AccountingConflict("transaction_digests contain duplicate transaction_id")
         _store_identity_material(self.store_identity)
         _digest(self.provenance_digest, name="provenance_digest")
         ResolvedAblationProviderEconomicCutProvenance.verify_integrity(self)

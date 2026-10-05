@@ -16,12 +16,17 @@ public partial class MainWindow : Window
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
     private WebView2? _productWebView;
-    private WebExperienceSecurityPolicy? _webPolicy;
-    private Uri? _webOrigin;
     private bool _trustedWebDocumentActive;
 
     public MainWindow()
-        : this(DesktopHostClientFactory.Create())
+        : this(DesktopHostClientFactory.CreateConnection())
+    {
+    }
+
+    private MainWindow(DesktopHostConnection connection)
+        : this(
+            (connection ?? throw new ArgumentNullException(nameof(connection))).Client,
+            connection.SessionProvider)
     {
     }
 
@@ -51,8 +56,13 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        await ConnectWebExperienceAsync();
+        // Native host truth is safety-critical and must not wait for optional
+        // WebView2 runtime/profile initialization.
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        if (!_lifetime.IsCancellationRequested)
+        {
+            await ConnectWebExperienceAsync();
+        }
     }
 
     private async Task ConnectWebExperienceAsync()
@@ -93,8 +103,6 @@ public partial class MainWindow : Window
                 "AutoTrade application web interface");
             ProductWebViewHost.Child = webView;
             _productWebView = webView;
-            _webPolicy = policy;
-            _webOrigin = origin;
 
             await webView.EnsureCoreWebView2Async(environment);
             if (_lifetime.IsCancellationRequested || !IsLoaded)
@@ -178,8 +186,8 @@ public partial class MainWindow : Window
                     e.Request.Headers.RemoveHeader("X-AutoTrade-Actor");
                 }
 
-                // Strip first. Native authority is then attached only to a
-                // scripted request from the admitted top-level document.
+                // Strip caller/browser authority first. Native authority is then
+                // attached only to a scripted request from the admitted top-level document.
                 StripAuthority();
                 try
                 {
@@ -259,10 +267,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Do not recreate/dispose from inside ProcessFailed. WebView2 documents
-        // that browser-process failure requires a new WebView and warns against
-        // reentrant recovery in the event handler. Revoke trust immediately and
-        // let the keyboard-reachable reload action recreate the control afterward.
+        // Revoke browser trust immediately. Recovery is user-triggered after the
+        // event returns so BrowserProcessExited can be repaired with a fresh
+        // WebView2 instance without re-entering the failing callback.
         _trustedWebDocumentActive = false;
         FocusWebButton.IsEnabled = false;
         ReloadWebButton.IsEnabled = true;
@@ -275,8 +282,6 @@ public partial class MainWindow : Window
     private void DisposeWebExperience()
     {
         _trustedWebDocumentActive = false;
-        _webPolicy = null;
-        _webOrigin = null;
         WebView2? webView = _productWebView;
         _productWebView = null;
         ProductWebViewHost.Child = null;

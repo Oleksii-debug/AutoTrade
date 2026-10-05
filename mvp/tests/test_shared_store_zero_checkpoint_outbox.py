@@ -4,6 +4,7 @@ The provider-free worker and Host intentionally share one JournalStore. Host
 control traffic is not ZERO runtime state and ZERO is not a UI publisher.
 """
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
@@ -112,6 +113,47 @@ class SharedStoreZeroCheckpointOutboxTests(unittest.TestCase):
             self.assertEqual(resumed["completed_episodes"], 2)
             self.assertTrue(checkpoint_path(root).is_file())
             self._assert_host_publication_still_pending(store, host_row)
+
+
+    def test_completion_checkpoint_repair_fails_closed_when_terminal_outbox_missing(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_id = "shared-store-missing-terminal-publication"
+            first = run_autonomous_simulation(
+                _PRICES,
+                root,
+                run_id=run_id,
+                now=_NOW,
+                stop_after_episodes=1,
+            )
+            self.assertEqual(first["completed_episodes"], 1)
+            checkpoint_path(root).unlink()
+
+            store = JournalStore(root / "journal.sqlite3")
+            terminal = store.load_events(
+                "canonical_autonomous_simulation",
+                run_id,
+            )[-1]
+            self.assertEqual(terminal["event_type"], "AutonomousEpisodeCompleted")
+
+            with sqlite3.connect(root / "journal.sqlite3") as connection:
+                deleted = connection.execute(
+                    "DELETE FROM outbox WHERE event_id = ? AND topic = ?",
+                    (terminal["event_id"], "autotrade.simulation.events"),
+                ).rowcount
+            self.assertEqual(deleted, 1)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "completion checkpoint terminal publication is missing",
+            ):
+                run_autonomous_simulation(
+                    _PRICES,
+                    root,
+                    run_id=run_id,
+                    now=_NOW,
+                    stop_after_episodes=2,
+                )
 
 
 if __name__ == "__main__":

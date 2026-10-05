@@ -72,29 +72,49 @@ def _exact_utf8_text(value: object, *, name: str) -> str:
 
 
 def _exact_json_value(value: object, *, name: str) -> object:
-    """Detach exact JSON-domain values without caller-polymorphic execution."""
+    """Detach one exact, acyclic JSON-domain value without caller execution."""
 
-    if value is None or type(value) in {int, bool}:
-        return value
-    if type(value) is str:
-        return _exact_utf8_text(value, name=name)
-    if type(value) is list:
-        return [
-            _exact_json_value(item, name=f"{name}[{index}]")
-            for index, item in enumerate(list.copy(value))
-        ]
-    if type(value) is dict:
-        if any(type(key) is not str for key in value):
-            raise TypeError(f"{name} keys must be exact strings")
-        detached = dict.copy(value)
-        for key in detached:
-            _exact_utf8_text(key, name=f"{name} key")
-        return {
-            key: _exact_json_value(item, name=f"{name}.{key}")
-            for key, item in detached.items()
-        }
-    raise TypeError(f"{name} must contain exact JSON-domain values")
+    def detach(current: object, current_name: str, ancestors: set[int]) -> object:
+        if current is None or type(current) in {int, bool}:
+            return current
+        if type(current) is str:
+            return _exact_utf8_text(current, name=current_name)
+        if type(current) is list:
+            marker = id(current)
+            if marker in ancestors:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"{current_name} must be an acyclic JSON value"
+                )
+            ancestors.add(marker)
+            try:
+                return [
+                    detach(item, f"{current_name}[{index}]", ancestors)
+                    for index, item in enumerate(list.copy(current))
+                ]
+            finally:
+                ancestors.remove(marker)
+        if type(current) is dict:
+            if any(type(key) is not str for key in current):
+                raise TypeError(f"{current_name} keys must be exact strings")
+            marker = id(current)
+            if marker in ancestors:
+                raise AdmittedFinancialRequestAuthorityError(
+                    f"{current_name} must be an acyclic JSON value"
+                )
+            detached = dict.copy(current)
+            for key in detached:
+                _exact_utf8_text(key, name=f"{current_name} key")
+            ancestors.add(marker)
+            try:
+                return {
+                    key: detach(item, f"{current_name}.{key}", ancestors)
+                    for key, item in detached.items()
+                }
+            finally:
+                ancestors.remove(marker)
+        raise TypeError(f"{current_name} must contain exact JSON-domain values")
 
+    return detach(value, name, set())
 
 def _detached_object(value: object, *, name: str) -> dict[str, Any]:
     """Snapshot an exact built-in JSON object before financial comparison."""
@@ -110,7 +130,13 @@ def _detached_object(value: object, *, name: str) -> dict[str, Any]:
 def _json_digest(value: dict[str, Any]) -> str:
     if type(value) is not dict:
         raise TypeError("digest value must be an exact dict")
-    return "sha256:" + sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    try:
+        encoded = canonical_json(value).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as error:
+        raise AdmittedFinancialRequestAuthorityError(
+            "financial authority JSON material cannot be canonically digested"
+        ) from error
+    return "sha256:" + sha256(encoded).hexdigest()
 
 
 def _identity(

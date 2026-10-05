@@ -333,6 +333,53 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
                 label='Host',
             )
 
+    def test_bind_publish_evidence_atomic_replace_does_not_write_through_raced_alias(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            publish = root / 'publish'
+            publish.mkdir()
+            source_sha = 'a' * 40
+            evidence_path = publish / 'host-build-evidence.json'
+            external = root / 'outside-authority.json'
+            external_bytes = b'outside authority must remain untouched'
+            external.write_bytes(external_bytes)
+            (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-host')
+            evidence_path.write_text(
+                json.dumps(publish_evidence(source_sha)),
+                encoding='utf-8',
+            )
+
+            original_replace = os.replace
+            raced = []
+
+            def race_with_hardlink(source, destination):
+                if Path(destination) == evidence_path and not raced:
+                    evidence_path.unlink()
+                    os.link(external, evidence_path)
+                    raced.append(True)
+                return original_replace(source, destination)
+
+            with patch.object(candidate.os, 'replace', side_effect=race_with_hardlink):
+                candidate.bind_publish_evidence(
+                    publish,
+                    executable='AutoTrade.Host.exe',
+                    evidence_name='host-build-evidence.json',
+                )
+
+            self.assertEqual(raced, [True])
+            self.assertEqual(external.read_bytes(), external_bytes)
+            self.assertFalse(os.path.samefile(evidence_path, external))
+            self.assertFalse(
+                any(path.name.endswith('.binding.tmp') for path in publish.iterdir())
+            )
+            candidate._require_publish_evidence(
+                publish,
+                executable='AutoTrade.Host.exe',
+                evidence_name='host-build-evidence.json',
+                source_sha=source_sha,
+                label='Host',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

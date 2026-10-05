@@ -789,6 +789,19 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 _require_bybit_prepared_request_origin(material, prepared)
         self.assertEqual(calls, [])
 
+    def test_price_origin_completeness_does_not_resolve_module_any(self):
+        material, prepared = canonical_case()
+        calls = []
+
+        def forged(*_args, **_kwargs):
+            calls.append("forged")
+            raise AssertionError("module any callback executed")
+
+        with patch.object(binding_module, "any", forged, create=True):
+            receipt = _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(receipt, _production_request_origin_receipt(material))
+        self.assertEqual(calls, [])
+
 
     def test_provenance_verifier_rebinding_fails_before_forged_verifier_executes(self):
         material, prepared = canonical_case()

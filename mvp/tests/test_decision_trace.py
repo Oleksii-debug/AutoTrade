@@ -321,6 +321,18 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 )
             self.assertEqual(touched, [])
 
+    def test_exact_provenance_does_not_mint_verified_accessible_status(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(exact_trace("trace-accessible-exact"))
+
+            rendered = store.accessible_export("trace-accessible-exact")
+            self.assertIn("Evidence status: UNVERIFIED", rendered)
+            self.assertNotIn("Evidence status: VERIFIED", rendered)
+            self.assertIn("Source SHA: " + ("1" * 40), rendered)
+            self.assertIn("Build: autotrade-test-build-1", rendered)
+            self.assertIn("- evidence-1 sha256 " + ("a" * 64), rendered)
+
     def test_source_and_build_identity_validation_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

@@ -4,7 +4,7 @@ This module deliberately performs no networking, stores no credentials and
 cannot grant trading authority. It translates already-authorized canonical
 values and recorded Bybit responses into AutoTrade provider/reconciliation
 contracts. Live, demo and test environments remain unqualified until exact
-adapter evidence satisfies provider_core.QualificationEvidence.
+adapter evidence satisfies the canonical provider qualification authority.
 """
 
 from __future__ import annotations
@@ -910,11 +910,13 @@ def coverage_evidence(
     consistency_horizon_satisfied: bool,
     qualified_exclusion_semantics: bool = False,
 ) -> CoverageSurfaceEvidence:
-    """Create one provider-surface fact without overclaiming proven absence.
+    """Create diagnostic Bybit coverage without minting absence authority.
 
-    The default deliberately does not claim that missing rows exclude execution.
-    That stronger fact must come from recorded qualification evidence for the
-    exact endpoint/product/environment before reconciliation may use it.
+    ``qualified_exclusion_semantics`` remains only as a compatibility trap for
+    older callers. A scalar supplied by a caller is never provider qualification
+    authority. Until an exact-current, immutable provider-Q absence-semantics
+    issuer is wired to reconciliation, this adapter must stay fail-closed and
+    emit ``provider_semantics_exclude_execution=False``.
     """
 
     normalized = _text(surface, name="surface").upper()
@@ -932,6 +934,11 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise ProviderCoreError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise ProviderCoreError(
+            "Bybit exclusion semantics require canonical provider qualification "
+            "authority; a caller boolean cannot grant absence authority"
+        )
     return CoverageSurfaceEvidence(
         provider_id="BYBIT",
         account_id=account_id,
@@ -941,5 +948,5 @@ def coverage_evidence(
         coverage_end=coverage_end,
         pagination_complete=pagination_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
-        provider_semantics_exclude_execution=qualified_exclusion_semantics,
+        provider_semantics_exclude_execution=False,
     )

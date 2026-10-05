@@ -723,7 +723,7 @@ class DurableModelCallOrchestrator:
         )
         if as_of > now:
             raise ModelCallError("pricing evidence is from the future")
-        if now > valid_until:
+        if now >= valid_until:
             raise ModelCallError("pricing evidence has expired")
         expected_keys = {
             (item.provider_id, item.model_id, item.revision) for item in descriptors

@@ -1077,6 +1077,7 @@ class DurableModelBudget:
         payload: dict[str, Any],
         event_id: str,
     ) -> dict[str, Any]:
+        _require_model_budget_bound_journal(self)
         return {
             "event_id": event_id,
             "event_type": event_type,
@@ -1145,9 +1146,11 @@ class DurableModelBudget:
         return ledger
 
     def snapshot(self) -> BudgetSnapshot:
+        _require_model_budget_bound_journal(self)
         return self._replay().snapshot()
 
     def active_reservation(self, request_id: str) -> Decimal | None:
+        _require_model_budget_bound_journal(self)
         request = _text(request_id, name="request_id")
         active: Decimal | None = None
         for event in self._events():
@@ -1182,6 +1185,7 @@ class DurableModelBudget:
         result: dict[str, Any],
         validate: Callable[[BudgetLedger], None],
     ) -> bool:
+        journal = _require_model_budget_bound_journal(self)
         identity = _text(identity, name="identity")
         idempotency_key = _idempotency_key(
             budget_id=self.budget_id,
@@ -1364,6 +1368,7 @@ class DurableModelBudget:
         now_utc: datetime | None = None,
         reservation_context: Mapping[str, str] | None = None,
     ) -> RouteDecision:
+        _require_model_budget_bound_journal(self)
         if type(policy) is not RoutingPolicy:
             raise TypeError("policy must be exact RoutingPolicy")
         if type(request) is not ModelRequest:
@@ -1526,6 +1531,7 @@ class DurableModelBudget:
         )
 
     def reserve(self, request_id: str, amount) -> bool:
+        _require_model_budget_bound_journal(self)
         request_id = _text(request_id, name="request_id")
         probe = BudgetLedger(self._ceiling)
         probe.reserve("probe", amount)
@@ -1546,6 +1552,7 @@ class DurableModelBudget:
         )
 
     def release(self, request_id: str) -> bool:
+        _require_model_budget_bound_journal(self)
         request_id = _text(request_id, name="request_id")
         request = {"request_id": request_id}
         idempotency_key = _idempotency_key(
@@ -1617,6 +1624,7 @@ class DurableModelBudget:
         )
 
     def settle(self, request_id: str, *, incurred, estimated_unbilled="0") -> bool:
+        _require_model_budget_bound_journal(self)
         request_id = _text(request_id, name="request_id")
         normalized_incurred = BudgetLedger(incurred).snapshot().ceiling
         normalized_unbilled = BudgetLedger(estimated_unbilled).snapshot().ceiling
@@ -1650,6 +1658,7 @@ class DurableModelBudget:
         request_id: str,
         billed,
     ) -> bool:
+        _require_model_budget_bound_journal(self)
         billing_id = _text(billing_id, name="billing_id")
         request_id = _text(request_id, name="request_id")
         normalized = BudgetLedger(billed).snapshot().ceiling

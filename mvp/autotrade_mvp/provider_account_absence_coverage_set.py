@@ -1,7 +1,10 @@
 """Canonical all-surface provider-account absence coverage bundle.
 
 This WP-20/#697 layer composes the four independently issued
-ProviderAccountSurfaceCoverage authorities for one historical possible send.
+ProviderAccountSurfaceCoverage authorities for one historical possible send and
+cross-binds each coverage to its exact ProviderAccountPageChain.  The four
+chains must come from one serialized provider-account acquisition generation.
+
 It deliberately does not prove that the qualified consistency horizon elapsed,
 does not inspect provider rows, and cannot issue PROVEN_ABSENT or release an
 UNKNOWN reservation.  Those remain later account-cut/negative-proof work.
@@ -19,6 +22,11 @@ from .provider_account_absence_coverage import (
     ProviderAccountSurfaceCoverage,
     require_provider_account_surface_coverage_authority,
 )
+from .provider_account_page_chain import (
+    ProviderAccountPageChain,
+    ProviderAccountPageChainError,
+    require_provider_account_page_chain_authority,
+)
 
 _SCHEMA_VERSION = "1.0.0"
 _REQUIRED_SURFACES = (
@@ -27,7 +35,7 @@ _REQUIRED_SURFACES = (
     "OPEN_ORDERS",
     "ORDER_HISTORY",
 )
-_SHARED_FIELDS = (
+_COVERAGE_SHARED_FIELDS = (
     "provider_scope_digest",
     "account_id",
     "qualification_id",
@@ -36,6 +44,14 @@ _SHARED_FIELDS = (
     "query_scope_rule_id",
     "pagination_rule_id",
     "consistency_horizon_rule_id",
+)
+_CHAIN_SHARED_WITH_COVERAGE = (
+    "provider_scope_digest",
+    "account_id",
+    "qualification_id",
+    "absence_semantics_digest",
+    "query_scope_rule_id",
+    "pagination_rule_id",
 )
 
 
@@ -49,6 +65,8 @@ class ProviderAccountAbsenceCoverageSet:
 
     provider_scope_digest: str
     account_id: str
+    acquisition_id: str
+    acquisition_generation: int
     qualification_id: str
     absence_semantics_digest: str
     historical_submission_digest: str
@@ -87,6 +105,8 @@ class ProviderAccountAbsenceCoverageSet:
             "schema_version": _SCHEMA_VERSION,
             "provider_scope_digest": self.provider_scope_digest,
             "account_id": self.account_id,
+            "acquisition_id": self.acquisition_id,
+            "acquisition_generation": self.acquisition_generation,
             "qualification_id": self.qualification_id,
             "absence_semantics_digest": self.absence_semantics_digest,
             "historical_submission_digest": self.historical_submission_digest,
@@ -110,11 +130,14 @@ def _install_coverage_set_authority():
             weakref.ReferenceType,
             tuple[object, ...],
             tuple[weakref.ReferenceType, ...],
+            tuple[weakref.ReferenceType, ...],
         ],
     ] = {}
     fields = (
         "provider_scope_digest",
         "account_id",
+        "acquisition_id",
+        "acquisition_generation",
         "qualification_id",
         "absence_semantics_digest",
         "historical_submission_digest",
@@ -139,12 +162,14 @@ def _install_coverage_set_authority():
     def register(
         value: ProviderAccountAbsenceCoverageSet,
         coverages: tuple[ProviderAccountSurfaceCoverage, ...],
+        page_chains: tuple[ProviderAccountPageChain, ...],
     ) -> None:
         prune()
         states[id(value)] = (
             weakref.ref(value),
             material(value),
             tuple(weakref.ref(item) for item in coverages),
+            tuple(weakref.ref(item) for item in page_chains),
         )
 
     def require(
@@ -161,22 +186,37 @@ def _install_coverage_set_authority():
             raise ProviderAccountAbsenceCoverageSetError(
                 "coverage set changed after issuance"
             )
-        source_refs = state[2]
-        if len(source_refs) != len(_REQUIRED_SURFACES):
+        coverage_refs, chain_refs = state[2], state[3]
+        if (
+            len(coverage_refs) != len(_REQUIRED_SURFACES)
+            or len(chain_refs) != len(_REQUIRED_SURFACES)
+        ):
             raise ProviderAccountAbsenceCoverageSetError(
                 "coverage set source authority is incomplete"
             )
-        for source_ref in source_refs:
+        for source_ref in coverage_refs:
             source = source_ref()
             if source is None:
                 raise ProviderAccountAbsenceCoverageSetError(
-                    "coverage set source authority is unavailable"
+                    "coverage set source coverage authority is unavailable"
                 )
             try:
                 require_provider_account_surface_coverage_authority(source)
             except ProviderAccountAbsenceCoverageError as error:
                 raise ProviderAccountAbsenceCoverageSetError(
-                    "coverage set source authority changed"
+                    "coverage set source coverage authority changed"
+                ) from error
+        for source_ref in chain_refs:
+            source = source_ref()
+            if source is None:
+                raise ProviderAccountAbsenceCoverageSetError(
+                    "coverage set source page-chain authority is unavailable"
+                )
+            try:
+                require_provider_account_page_chain_authority(source)
+            except ProviderAccountPageChainError as error:
+                raise ProviderAccountAbsenceCoverageSetError(
+                    "coverage set source page-chain authority changed"
                 ) from error
         return value
 
@@ -193,14 +233,18 @@ del _install_coverage_set_authority
 def issue_provider_account_absence_coverage_set(
     *,
     coverages: tuple[ProviderAccountSurfaceCoverage, ...],
+    page_chains: tuple[ProviderAccountPageChain, ...],
 ) -> ProviderAccountAbsenceCoverageSet:
-    """Compose exactly four issuer-protected surface coverages, never a verdict."""
+    """Compose exactly four source-bound surface coverages, never a verdict."""
 
-    if type(coverages) is not tuple:
+    if type(coverages) is not tuple or type(page_chains) is not tuple:
         raise ProviderAccountAbsenceCoverageSetError(
-            "coverages must be an exact tuple"
+            "coverages and page_chains must be exact tuples"
         )
-    if len(coverages) != len(_REQUIRED_SURFACES):
+    if (
+        len(coverages) != len(_REQUIRED_SURFACES)
+        or len(page_chains) != len(_REQUIRED_SURFACES)
+    ):
         raise ProviderAccountAbsenceCoverageSetError(
             "coverage set requires exactly four provider surfaces"
         )
@@ -224,18 +268,37 @@ def issue_provider_account_absence_coverage_set(
             )
         by_surface[surface] = accepted
 
+    chains_by_surface: dict[str, ProviderAccountPageChain] = {}
+    for page_chain in page_chains:
+        if type(page_chain) is not ProviderAccountPageChain:
+            raise ProviderAccountAbsenceCoverageSetError(
+                "coverage set requires exact ProviderAccountPageChain values"
+            )
+        try:
+            accepted_chain = require_provider_account_page_chain_authority(page_chain)
+        except ProviderAccountPageChainError as error:
+            raise ProviderAccountAbsenceCoverageSetError(
+                "page-chain authority is unavailable"
+            ) from error
+        surface = accepted_chain.surface
+        if surface in chains_by_surface:
+            raise ProviderAccountAbsenceCoverageSetError(
+                f"duplicate provider surface page chain: {surface}"
+            )
+        chains_by_surface[surface] = accepted_chain
+
     actual_surfaces = tuple(sorted(by_surface))
-    if actual_surfaces != _REQUIRED_SURFACES:
-        missing = sorted(set(_REQUIRED_SURFACES) - set(actual_surfaces))
-        extra = sorted(set(actual_surfaces) - set(_REQUIRED_SURFACES))
+    actual_chain_surfaces = tuple(sorted(chains_by_surface))
+    if (
+        actual_surfaces != _REQUIRED_SURFACES
+        or actual_chain_surfaces != _REQUIRED_SURFACES
+    ):
         raise ProviderAccountAbsenceCoverageSetError(
             "coverage set surface universe mismatch"
-            f"; missing={','.join(missing) or '-'}"
-            f"; extra={','.join(extra) or '-'}"
         )
 
     reference = by_surface[_REQUIRED_SURFACES[0]]
-    for field in _SHARED_FIELDS:
+    for field in _COVERAGE_SHARED_FIELDS:
         expected = getattr(reference, field)
         for surface in _REQUIRED_SURFACES[1:]:
             if getattr(by_surface[surface], field) != expected:
@@ -243,16 +306,50 @@ def issue_provider_account_absence_coverage_set(
                     f"coverage set {field} differs across provider surfaces"
                 )
 
-    entries: list[dict[str, object]] = []
-    ordered_sources: list[ProviderAccountSurfaceCoverage] = []
+    reference_chain = chains_by_surface[_REQUIRED_SURFACES[0]]
+    acquisition_id = reference_chain.acquisition_id
+    acquisition_generation = reference_chain.acquisition_generation
     for surface in _REQUIRED_SURFACES:
         coverage = by_surface[surface]
-        ordered_sources.append(coverage)
+        page_chain = chains_by_surface[surface]
+        if coverage.page_chain_digest != page_chain.content_digest:
+            raise ProviderAccountAbsenceCoverageSetError(
+                f"coverage set page-chain binding mismatch for {surface}"
+            )
+        for field in _CHAIN_SHARED_WITH_COVERAGE:
+            if getattr(coverage, field) != getattr(page_chain, field):
+                raise ProviderAccountAbsenceCoverageSetError(
+                    f"coverage/page-chain {field} mismatch for {surface}"
+                )
+        if (
+            coverage.endpoint != page_chain.endpoint
+            or coverage.data_entitlement != page_chain.data_entitlement
+        ):
+            raise ProviderAccountAbsenceCoverageSetError(
+                f"coverage/page-chain endpoint scope mismatch for {surface}"
+            )
+        if (
+            page_chain.acquisition_id != acquisition_id
+            or page_chain.acquisition_generation != acquisition_generation
+        ):
+            raise ProviderAccountAbsenceCoverageSetError(
+                "coverage set acquisition generation differs across provider surfaces"
+            )
+
+    entries: list[dict[str, object]] = []
+    ordered_coverages: list[ProviderAccountSurfaceCoverage] = []
+    ordered_chains: list[ProviderAccountPageChain] = []
+    for surface in _REQUIRED_SURFACES:
+        coverage = by_surface[surface]
+        page_chain = chains_by_surface[surface]
+        ordered_coverages.append(coverage)
+        ordered_chains.append(page_chain)
         entries.append(
             {
                 "surface": surface,
                 "coverage_digest": coverage.content_digest,
-                "page_chain_digest": coverage.page_chain_digest,
+                "page_chain_digest": page_chain.content_digest,
+                "origin_set_digest": page_chain.origin_set_digest,
                 "endpoint": coverage.endpoint,
                 "data_entitlement": coverage.data_entitlement,
                 "retention_rule_id": coverage.retention_rule_id,
@@ -266,11 +363,14 @@ def issue_provider_account_absence_coverage_set(
     coverages_json = canonical_json(entries)
 
     value = object.__new__(ProviderAccountAbsenceCoverageSet)
-    for field in _SHARED_FIELDS:
+    for field in _COVERAGE_SHARED_FIELDS:
         object.__setattr__(value, field, getattr(reference, field))
+    object.__setattr__(value, "acquisition_id", acquisition_id)
+    object.__setattr__(value, "acquisition_generation", acquisition_generation)
     object.__setattr__(value, "coverages_json", coverages_json)
     _register_provider_account_absence_coverage_set_authority(
         value,
-        tuple(ordered_sources),
+        tuple(ordered_coverages),
+        tuple(ordered_chains),
     )
     return value

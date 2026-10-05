@@ -168,5 +168,57 @@ class ModelCallRestoreDispatchAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_cancel_callback_cannot_redirect_journal_class_helper_through_module_alias(self):
+        original_helper = model_call_module._model_journal_class_authority_changes
+        hostile_helper_calls = []
+
+        def hostile_helper(*, restore):
+            hostile_helper_calls.append(restore)
+            raise AssertionError("callback redirected journal-class recovery helper")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = _orchestrator(budget)
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            inference_calls = []
+
+            def hostile_cancel():
+                model_call_module._model_journal_class_authority_changes = hostile_helper
+                return False
+
+            try:
+                with self.assertRaises(ModelCallError):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: inference_calls.append("inference"),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                        cancel_requested=hostile_cancel,
+                    )
+            finally:
+                model_call_module._model_journal_class_authority_changes = (
+                    original_helper
+                )
+
+            self.assertEqual(hostile_helper_calls, [])
+            self.assertIs(
+                model_call_module._model_journal_class_authority_changes,
+                original_helper,
+            )
+            self.assertEqual(inference_calls, [])
+            self.assertEqual(
+                budget.active_reservation(attempt_id),
+                Decimal("1.2"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -653,7 +653,12 @@ del _make_economic_book_audit_digest
 del _cached_transaction_digest
 
 
-def _scoped_economic_owner_operations(scoped_type, book_type):
+def _scoped_economic_owner_operations(
+    scoped_type,
+    book_type,
+    *,
+    _weakref_ref=weakref.ref,
+):
     """Create one closure-owned scoped-book owner registry and verifier."""
 
     owners = {}
@@ -671,7 +676,7 @@ def _scoped_economic_owner_operations(scoped_type, book_type):
             current = owners.get(id(value))
             if current is not None and current[0]() is value:
                 raise AccountingConflict("immutable scoped-book owner is already initialized")
-            owners[id(value)] = (weakref.ref(value), environment, account_id, book)
+            owners[id(value)] = (_weakref_ref(value), environment, account_id, book)
 
     def require(value):
         if type(value) is not scoped_type:

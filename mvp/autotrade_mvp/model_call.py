@@ -1704,41 +1704,18 @@ class DurableModelCallOrchestrator:
                 setattr(self, name, expected)
 
         if cancel_changes:
-            payload = {
-                "attempt_id": attempt_id,
-                "reason": "cancel_callback_mutated_orchestrator_authority:"
-                + ",".join(sorted(cancel_changes)),
-                "released": str(decision.reserved_cost),
-            }
-            self._append(
-                attempt_id=attempt_id,
-                event_type="ModelCallNotSent",
-                version=2,
-                payload=payload,
+            error = ModelCallError(
+                "cancel callback mutated orchestrator authority:"
+                + ",".join(sorted(cancel_changes))
             )
-            self.budget.release(attempt_id)
-            return self._outcome_from_terminal(
-                self._events(attempt_id)[-1],
-                route=decision,
-            )
+            if cancel_error is not None:
+                raise error from cancel_error
+            raise error
         if cancel_error is not None:
             raise cancel_error
         if type(cancelled_before_start) is not bool:
-            payload = {
-                "attempt_id": attempt_id,
-                "reason": "cancel_callback_returned_non_boolean",
-                "released": str(decision.reserved_cost),
-            }
-            self._append(
-                attempt_id=attempt_id,
-                event_type="ModelCallNotSent",
-                version=2,
-                payload=payload,
-            )
-            self.budget.release(attempt_id)
-            return self._outcome_from_terminal(
-                self._events(attempt_id)[-1],
-                route=decision,
+            raise ModelCallError(
+                "cancel callback must return an exact boolean"
             )
 
         # The cancellation callback may consume time; check time afterwards.

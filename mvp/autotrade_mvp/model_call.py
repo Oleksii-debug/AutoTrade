@@ -40,6 +40,7 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
+from .store_identity import require_exact_journal_store_identity
 from .exact_decimal import exact_add, parse_bounded_exact_decimal
 
 
@@ -557,7 +558,7 @@ class DurableModelCallOrchestrator:
 
         journal = state["journal"]
         try:
-            require_exact_journal_store_authority(
+            journal_identity = require_exact_journal_store_authority(
                 journal,
                 subject="model budget journal",
             )
@@ -570,7 +571,12 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 "durable model budget journal authority state is invalid"
             )
-        return budget, dict.copy(state), journal, dict.copy(journal_state)
+        journal_snapshot = dict.copy(journal_state)
+        # Keep an independently rehydrated value: JournalStoreIdentity is frozen
+        # but caller code retaining the store can still mutate that object with
+        # object.__setattr__.
+        journal_snapshot["_store_identity"] = journal_identity
+        return budget, dict.copy(state), journal, journal_snapshot
 
     @staticmethod
     def _restore_nested_budget_authority(
@@ -603,6 +609,18 @@ class DurableModelCallOrchestrator:
                 continue
             current = current_journal_state[name]
             expected = expected_journal_state[name]
+            if name == "_store_identity":
+                try:
+                    current_identity = require_exact_journal_store_identity(
+                        current,
+                        subject="model budget journal identity",
+                    )
+                except (TypeError, ValueError):
+                    changes.append("budget.journal._store_identity")
+                else:
+                    if current_identity != expected:
+                        changes.append("budget.journal._store_identity")
+                continue
             if type(current) is not type(expected) or current != expected:
                 changes.append("budget.journal." + name)
 

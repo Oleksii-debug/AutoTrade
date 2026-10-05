@@ -506,6 +506,11 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                 ("getattr", forged, True),
                 ("any", forged, True),
                 ("isinstance", forged, True),
+                ("InvalidOperation", RuntimeError, False),
+                ("ValueError", RuntimeError, True),
+                ("TypeError", RuntimeError, True),
+                ("bool", forged, True),
+                ("float", forged, True),
             )
             for name, replacement, create in replacements:
                 with self.subTest(name=name):

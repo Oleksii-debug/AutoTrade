@@ -62,10 +62,8 @@ class BoundReconciledAblationOutcome:
             )
         if type(self.effective_outcome_available_utc) is not datetime:
             raise TypeError("effective_outcome_available_utc must be exact datetime")
-        if self.effective_outcome_available_utc.tzinfo is None:
-            raise ValueError("effective_outcome_available_utc must be timezone-aware")
-        if self.effective_outcome_available_utc.utcoffset() != timezone.utc.utcoffset(None):
-            raise ValueError("effective_outcome_available_utc must be UTC")
+        if self.effective_outcome_available_utc.tzinfo is not timezone.utc:
+            raise ValueError("effective_outcome_available_utc must use exact UTC timezone")
 
 
 def bind_ablation_outcome_to_reconciled_fact(
@@ -90,7 +88,9 @@ def bind_ablation_outcome_to_reconciled_fact(
         raise TypeError("outcome must be exact CanonicalAblationOutcomeEvidence")
     if type(causal_cutoff) is not datetime:
         raise TypeError("causal_cutoff must be exact datetime")
-    cutoff = causal_cutoff.astimezone(timezone.utc)
+    if causal_cutoff.tzinfo is not timezone.utc:
+        raise ValueError("causal_cutoff must use exact UTC timezone")
+    cutoff = causal_cutoff
     if outcome.superseded_at_utc is not None and outcome.superseded_at_utc <= cutoff:
         raise MemoryIntegrityError(
             "superseded ablation outcome cannot bind at the selected causal cut"

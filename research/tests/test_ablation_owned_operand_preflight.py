@@ -126,6 +126,31 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
 
             self.assertEqual(replayed, evidence)
 
+    def test_instance_shadowed_verify_integrity_cannot_retarget_reverification(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            _registration, pair, refs, authority = self._build_fixture(Path(directory))
+            evidence = resolve_ablation_owned_operand_preflight(
+                authority,
+                [pair],
+                outcome_refs=list(refs),
+            )
+            object.__setattr__(
+                evidence,
+                "verify_integrity",
+                lambda: calls.append("hostile"),
+            )
+
+            replayed = reverify_ablation_owned_operand_preflight(
+                authority,
+                [pair],
+                outcome_refs=list(refs),
+                evidence=evidence,
+            )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(replayed.bundle_digest, evidence.bundle_digest)
+
     def test_bundle_digest_tamper_fails_before_reverification(self):
         with TemporaryDirectory() as directory:
             _registration, pair, refs, authority = self._build_fixture(Path(directory))

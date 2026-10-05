@@ -3569,6 +3569,71 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_orchestrator_rejects_preinstalled_journal_class_dispatch_rebind(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            canonical_connect = JournalStore._connect
+            try:
+                JournalStore._connect = lambda *_args, **_kwargs: self.fail(
+                    "preinstalled rebound JournalStore._connect must not be trusted"
+                )
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    orchestrator_for(
+                        budget=budget,
+                        clock=MutableClock(),
+                    )
+            finally:
+                JournalStore._connect = canonical_connect
+
+            self.assertIs(JournalStore._connect, canonical_connect)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_cancel_callback_cannot_rebind_journal_class_commit_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            canonical_commit = JournalStore.commit_command
+            calls = []
+
+            def hostile_cancel():
+                JournalStore.commit_command = lambda *_args, **_kwargs: self.fail(
+                    "rebound class commit reached cancellation recovery"
+                )
+                return False
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"cancel callback mutated orchestrator authority:"
+                r"budget\.journal\.class\.JournalStore\.commit_command",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_: calls.append("called") or observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertIs(JournalStore.commit_command, canonical_commit)
+            self.assertNotIn("commit_command", JournalStore.__dict__)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
     def test_adapter_cannot_rebind_nested_journal_class_commit_dispatch(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

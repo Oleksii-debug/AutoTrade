@@ -30,7 +30,6 @@ jobs:
 
           import ast
           from pathlib import Path
-          import textwrap
 
           target_path = Path('mvp/autotrade_mvp/production_host.py')
           current = target_path.read_text(encoding='utf-8')
@@ -45,8 +44,6 @@ jobs:
                   )
               current = current.replace(old, new, 1)
 
-          # Current product already has the stricter config snapshot/lifecycle work.
-          # Add only imports needed by the reviewed occurrence authority.
           replace_once(
               'from dataclasses import dataclass\nfrom math import isfinite\n',
               'from dataclasses import dataclass\nfrom datetime import datetime, timezone\nfrom math import isfinite\n',
@@ -65,7 +62,6 @@ jobs:
               ')\n',
           )
 
-          # Pull the exact hardened #1248 constant/closure authority block, not ancestry.
           donor_constants_start = donor.index(
               '_RUNTIME_OCCURRENCE_SCHEMA_VERSION = "1.0.0"'
           )
@@ -75,12 +71,8 @@ jobs:
           )
           occurrence_constants = donor[donor_constants_start:donor_constants_end].rstrip()
           constants_anchor = '_STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})\n'
-          replace_once(
-              constants_anchor,
-              constants_anchor + occurrence_constants + '\n',
-          )
+          replace_once(constants_anchor, constants_anchor + occurrence_constants + '\n')
 
-          # Pull only the reviewed occurrence value/reader/issuer block through #1248.
           donor_authority_start = donor.index(
               '@dataclass(frozen=True, slots=True)\nclass ProductionHostRuntimeOccurrence:'
           )
@@ -96,7 +88,6 @@ jobs:
               '\n\n' + occurrence_authority + '\n\nclass _InstanceFence:',
           )
 
-          # Pull the two closure-bound runtime methods from the hardened donor.
           donor_tree = ast.parse(donor)
           donor_runtime = next(
               node
@@ -124,41 +115,40 @@ jobs:
               runtime_methods + '    @property\n    def closed(self) -> bool:\n',
           )
 
-          # Preserve current issuance-token, store gate, cleanup, and terminal lifecycle.
-          # Publish an occurrence only after listener + runtime composition succeeded.
-          old_build = '''        server.daemon_threads = False
-        server.block_on_close = True
-        return ProductionHostRuntime(
-            config=config,
-            journal=journal,
-            application=application,
-            server=server,
-            instance_fence=instance_fence,
-            admission_gate=admission_gate,
-            issuance_token=_RUNTIME_ISSUANCE_TOKEN,
-        )
-'''
-          new_build = '''        server.daemon_threads = False
-        server.block_on_close = True
-        runtime = ProductionHostRuntime(
-            config=config,
-            journal=journal,
-            application=application,
-            server=server,
-            instance_fence=instance_fence,
-            admission_gate=admission_gate,
-            issuance_token=_RUNTIME_ISSUANCE_TOKEN,
-        )
-        runtime_occurrence = _issue_production_host_runtime_occurrence(
-            journal,
-            config,
-        )
-        runtime._bind_runtime_occurrence(runtime_occurrence)
-        return runtime
-'''
+          old_build = (
+              '        server.daemon_threads = False\n'
+              '        server.block_on_close = True\n'
+              '        return ProductionHostRuntime(\n'
+              '            config=config,\n'
+              '            journal=journal,\n'
+              '            application=application,\n'
+              '            server=server,\n'
+              '            instance_fence=instance_fence,\n'
+              '            admission_gate=admission_gate,\n'
+              '            issuance_token=_RUNTIME_ISSUANCE_TOKEN,\n'
+              '        )\n'
+          )
+          new_build = (
+              '        server.daemon_threads = False\n'
+              '        server.block_on_close = True\n'
+              '        runtime = ProductionHostRuntime(\n'
+              '            config=config,\n'
+              '            journal=journal,\n'
+              '            application=application,\n'
+              '            server=server,\n'
+              '            instance_fence=instance_fence,\n'
+              '            admission_gate=admission_gate,\n'
+              '            issuance_token=_RUNTIME_ISSUANCE_TOKEN,\n'
+              '        )\n'
+              '        runtime_occurrence = _issue_production_host_runtime_occurrence(\n'
+              '            journal,\n'
+              '            config,\n'
+              '        )\n'
+              '        runtime._bind_runtime_occurrence(runtime_occurrence)\n'
+              '        return runtime\n'
+          )
           replace_once(old_build, new_build)
 
-          # Refuse accidental duplicate/partial materialization.
           for expected in (
               'class ProductionHostRuntimeOccurrence:',
               'def require_current_production_host_runtime_occurrence(',

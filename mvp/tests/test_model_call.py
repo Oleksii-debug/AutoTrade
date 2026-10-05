@@ -2804,32 +2804,33 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             trusted_journal = orchestrator.journal
             trusted_clock = orchestrator.clock
             call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
 
-            result = orchestrator.execute(
-                spec=call_spec,
-                policy=fixed_policy(),
-                request=request_for(orchestrator, call_spec),
-                descriptors=[descriptor()],
-                call=lambda *_args: inference_calls.append("called") or observation(),
-                validate_result=lambda _value: True,
-                now_utc=NOW,
-                cancel_requested=hostile_cancel,
-            )
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cancel callback mutated orchestrator authority",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: inference_calls.append("called") or observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
 
-            self.assertEqual(result.status, "NOT_SENT")
-            self.assertIn(
-                "cancel_callback_mutated_orchestrator_authority",
-                result.reason,
-            )
             self.assertIs(orchestrator.budget, trusted_budget)
             self.assertIs(orchestrator.journal, trusted_journal)
             self.assertIs(orchestrator.journal, journal)
             self.assertIs(orchestrator.clock, trusted_clock)
             self.assertEqual(inference_calls, [])
-            snapshot = budget.snapshot()
-            self.assertEqual(snapshot.reserved, Decimal("0"))
-            self.assertEqual(snapshot.incurred, Decimal("0"))
-            self.assertEqual(snapshot.estimated_unbilled, Decimal("0"))
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
 
     def test_cancel_callback_selection_does_not_execute_truthiness(self):
         class HostileCancel:
@@ -2883,24 +2884,31 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 clock=MutableClock(),
             )
             call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
             inference_calls = []
 
-            result = orchestrator.execute(
-                spec=call_spec,
-                policy=fixed_policy(),
-                request=request_for(orchestrator, call_spec),
-                descriptors=[descriptor()],
-                call=lambda *_args: inference_calls.append("called") or observation(),
-                validate_result=lambda _value: True,
-                now_utc=NOW,
-                cancel_requested=lambda: HostileTruthiness(),
-            )
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cancel callback must return an exact boolean",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: inference_calls.append("called") or observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=lambda: HostileTruthiness(),
+                )
 
-            self.assertEqual(result.status, "NOT_SENT")
-            self.assertEqual(result.reason, "cancel_callback_returned_non_boolean")
             self.assertEqual(HostileTruthiness.bool_calls, 0)
             self.assertEqual(inference_calls, [])
-            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
 
     def test_result_validator_cannot_redirect_observed_settlement_authority(self):
         with TemporaryDirectory() as directory:

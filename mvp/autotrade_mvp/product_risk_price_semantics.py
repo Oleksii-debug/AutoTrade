@@ -526,6 +526,19 @@ def _install_product_risk_price_semantics_binding_authority(
     canonical_int = int
     canonical_bool = bool
     object_getattribute = object.__getattribute__
+    error_type = ProductRiskPriceSemanticsError
+    request_type = _REQUEST_TYPE
+    snapshot_type = _SNAPSHOT_TYPE
+    prepared_type = _PREPARED_TYPE
+    registry_type = _REGISTRY_TYPE
+    artifact_store_type = _ARTIFACT_STORE_TYPE
+    factory_token = _FACTORY_TOKEN
+    bybit_module = _bybit_module
+    instruments_module = _instruments_module
+    canonical_datetime = datetime
+    canonical_timezone = timezone
+    canonical_decimal = Decimal
+    canonical_invalid_operation = InvalidOperation
     fields = (
         "provider_id",
         "account_id",
@@ -551,9 +564,7 @@ def _install_product_risk_price_semantics_binding_authority(
     ] = {}
 
     def authority_changed() -> None:
-        raise ProductRiskPriceSemanticsError(
-            "price-semantics binding authority changed"
-        )
+        raise error_type("price-semantics binding authority changed")
 
     def implementation_changed() -> None:
         if (
@@ -568,6 +579,19 @@ def _install_product_risk_price_semantics_binding_authority(
             or binding_type.__post_init__ is not binding_post_init
             or binding_post_init.__code__ is not binding_post_init_code
             or binding_type.__getattribute__ is not binding_getattribute
+            or ProductRiskPriceSemanticsError is not error_type
+            or _REQUEST_TYPE is not request_type
+            or _SNAPSHOT_TYPE is not snapshot_type
+            or _PREPARED_TYPE is not prepared_type
+            or _REGISTRY_TYPE is not registry_type
+            or _ARTIFACT_STORE_TYPE is not artifact_store_type
+            or _FACTORY_TOKEN is not factory_token
+            or _bybit_module is not bybit_module
+            or _instruments_module is not instruments_module
+            or datetime is not canonical_datetime
+            or timezone is not canonical_timezone
+            or Decimal is not canonical_decimal
+            or InvalidOperation is not canonical_invalid_operation
             or _require_module_authority is not module_guard
             or module_guard.__code__ is not module_guard_code
             or _instant is not canonical_instant

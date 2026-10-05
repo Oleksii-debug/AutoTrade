@@ -42,7 +42,6 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
-    commit_economic_batch_with_reservation_consumption,
     commit_order_fill_with_reservation_consumption,
     commit_provider_fill_with_reservation_consumption,
 )

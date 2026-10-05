@@ -332,6 +332,16 @@ _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER = JournalStore.outbox_backlog_high_water_sin
 _RESOURCE_JOURNAL_BACKLOG_DEPENDENCIES = (
     ("JournalStore connection", "_connect", JournalStore._connect),
     (
+        "JournalStore Windows connection",
+        "_connect_windows",
+        JournalStore._connect_windows,
+    ),
+    (
+        "JournalStore backlog transition writer",
+        "_append_outbox_backlog_transition",
+        JournalStore._append_outbox_backlog_transition,
+    ),
+    (
         "JournalStore outbox transition sequence",
         "_outbox_transition_sequence_value",
         JournalStore._outbox_transition_sequence_value,

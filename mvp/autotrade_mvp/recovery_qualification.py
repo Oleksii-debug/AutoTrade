@@ -26,9 +26,9 @@ from autotrade_runtime.artifacts import (
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
-    QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -40,9 +40,6 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
-_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
-
-
 class RecoveryScenario(StrEnum):
     POWER_LOSS = "POWER_LOSS"
     NETWORK_LOSS = "NETWORK_LOSS"
@@ -117,7 +114,7 @@ def _text_tuple(
     allow_empty: bool = False,
 ) -> tuple[str, ...]:
     if type(value) is not tuple:
-        raise TypeError(f"{name} must be a tuple")
+        raise TypeError(f"{name} must be an exact tuple")
     normalized = tuple(_text(item, name=name) for item in value)
     if not allow_empty and not normalized:
         raise ValueError(f"{name} must be non-empty")
@@ -126,9 +123,14 @@ def _text_tuple(
     return normalized
 
 
-def _exact_mapping(value: object, *, name: str) -> Mapping:
-    if type(value) not in {dict, _MAPPING_PROXY_TYPE}:
-        raise TypeError(f"{name} must be a mapping")
+def _exact_mapping(value: object, *, name: str) -> dict:
+    # Public qualification constructors must not trust an arbitrary mappingproxy:
+    # MappingProxyType(hostile_mapping) is still an exact built-in proxy but
+    # delegates iteration/lookups to the wrapped caller-controlled mapping.
+    # Accept only an exact detached dict here; the dataclasses freeze their
+    # validated module-owned copies to MappingProxyType on output.
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
     return value
 
 
@@ -586,16 +588,13 @@ def qualify_recovery_release(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
     if type(policy) is not RecoveryQualificationPolicy:
         raise TypeError("policy must be RecoveryQualificationPolicy")
     if type(evidence) not in {list, tuple}:
-        raise TypeError("evidence must be a sequence")
+        raise TypeError("evidence must be an exact list or tuple")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -607,11 +606,6 @@ def qualify_recovery_release(
         raise TypeError(
             "qualification_receipt must be SignedQualificationAttestation"
         )
-    if (
-        qualification_policy is not None
-        and type(qualification_policy) is not QualificationTrustPolicy
-    ):
-        raise TypeError("qualification_policy must be QualificationTrustPolicy")
 
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
@@ -670,15 +664,8 @@ def qualify_recovery_release(
         inconclusive = True
 
     accepted: AcceptedQualificationAttestation | None = None
-    trust_inputs = (
-        evidence_store,
-        evidence_root,
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs[1:]):
+    trust_inputs = (evidence_store, evidence_root, qualification_receipt)
+    if all(value is None for value in trust_inputs):
         blockers.append("independent_evidence_trust_unavailable")
         inconclusive = True
     elif any(value is None for value in trust_inputs):
@@ -686,13 +673,10 @@ def qualify_recovery_release(
         inconclusive = True
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=policy.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
@@ -703,6 +687,9 @@ def qualify_recovery_release(
                 expected_release_artifact_id=policy.release_artifact_id,
                 expected_release_artifact_sha256=policy.release_artifact_sha256,
             )
+        except QualificationTrustUnavailable:
+            blockers.append("independent_evidence_trust_unavailable")
+            inconclusive = True
         except (QualificationTrustError, TypeError, ValueError):
             blockers.append("independent_evidence_trust_invalid")
             inconclusive = True
@@ -832,15 +819,13 @@ def qualify_recovery_release(
     else:
         status = RecoveryEvidenceStatus.PASS
 
-    measured = MappingProxyType(
-        {
-            scenario: item.downtime_ms
-            for scenario, item in sorted(
-                by_scenario.items(),
-                key=lambda pair: pair[0].value,
-            )
-        }
-    )
+    measured = {
+        scenario: item.downtime_ms
+        for scenario, item in sorted(
+            by_scenario.items(),
+            key=lambda pair: pair[0].value,
+        )
+    }
     return RecoveryQualificationDecision(
         status=status,
         source_sha=policy.source_sha,

@@ -49,6 +49,13 @@ PROTECTED_SENTINELS = frozenset(
     }
 )
 
+SELF_PROTECTING_TRUST_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Change:
@@ -119,6 +126,8 @@ def assess_reconvergence(
     protected_damage: set[str] = set(protected)
     for change in changes:
         kind = change.status[:1]
+        if kind == "M" and change.path in SELF_PROTECTING_TRUST_ROOTS:
+            protected_damage.add(f"{change.path} (content modification)")
         if (
             kind == "R"
             and change.previous_path in protected_sentinels

@@ -240,6 +240,52 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["price"], "3456.7")
         self.assertEqual(payload["timeInForce"], "PostOnly")
 
+    def test_canonical_preparation_rejects_cross_provider_environment_capability(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="domain-mismatch-rejected",
+                time_in_force="GTC",
+            )
+
+    def test_derivative_payload_rejects_cross_provider_environment_capability(self):
+        capability = write_capability(provider_environment="TESTNET")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment does not match target",
+        ):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="0.01",
+                price="100",
+                client_order_id="derivative-domain-mismatch",
+                time_in_force="GTC",
+                position_side="LONG",
+                capability=capability,
+                capability_at=READ_AT,
+                account_id=capability.account_id,
+                instrument_version=capability.instrument_version,
+                provider_environment="DEMO",
+            )
+
     def test_canonical_preparation_rejects_executable_tzinfo_before_callback(self):
         capability = submission_write_capability(
             environment="PAPER",

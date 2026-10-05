@@ -3,12 +3,14 @@ from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import financial_send_authority as financial_send_authority_module
 from mvp.autotrade_mvp.financial_request_binding import FinancialRequestBindingMaterial
 from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthority,
     FinancialSendAuthorityError,
     FinancialSendAuthorityIssuer,
     FinanciallyBoundBybitOrderSender,
+    _require_binding_matches_durable_admission,
     require_exact_bybit_financial_request,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
@@ -213,7 +215,8 @@ class _IssuerStub:
         self.runtime = runtime
         self.before_guard = before_guard
 
-    def _dispatch_material_for(self, _authority):
+    def _dispatch_material_for(self, _authority, *, attempt_id=None):
+        del attempt_id
         if self.before_guard is not None:
             self.before_guard()
         return (
@@ -276,6 +279,16 @@ def _bound_sender_harness(*, before_guard=None):
         "_FinanciallyBoundBybitOrderSender__provider_environment",
         "TESTNET",
     )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__request_validator",
+        require_exact_bybit_financial_request,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__request_validator_code",
+        require_exact_bybit_financial_request.__code__,
+    )
     return bound, lower
 
 
@@ -303,6 +316,16 @@ def _executable_authority_shell():
         bound,
         "_FinanciallyBoundBybitOrderSender__sender_dispatch_code",
         function.__code__,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__request_validator",
+        require_exact_bybit_financial_request,
+    )
+    object.__setattr__(
+        bound,
+        "_FinanciallyBoundBybitOrderSender__request_validator_code",
+        require_exact_bybit_financial_request.__code__,
     )
     return bound
 
@@ -345,6 +368,10 @@ def _forged_capability_getter(_self):
     raise AssertionError("forged capability getter executable ran")
 
 
+def _forged_request_validator(*_args, **_kwargs):
+    raise AssertionError("forged request validator executable ran")
+
+
 class ExactBybitFinancialRequestTests(unittest.TestCase):
     def test_exact_prepared_projection_and_scope_are_admitted(self):
         request, _ = exact_request()
@@ -354,6 +381,53 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
             exact_scope(),
             provider_environment="TESTNET",
         )
+
+    def test_post_only_binding_matches_canonical_bybit_wire_spelling(self):
+        request, _ = exact_request()
+        changed_body = dict(request["body"])
+        changed_body["timeInForce"] = "PostOnly"
+        changed_request = dict(request)
+        changed_request["body"] = changed_body
+        body_sha = payload_digest(changed_body)
+        changed_request["body_sha256"] = body_sha
+        rebound = replace(
+            binding(),
+            time_in_force="POST_ONLY",
+            body_sha256=body_sha,
+            request_sha256=payload_digest(changed_request),
+        )
+        require_exact_bybit_financial_request(
+            rebound,
+            changed_request,
+            exact_scope(),
+            provider_environment="TESTNET",
+        )
+
+    def test_unsupported_order_type_fails_closed_before_provider_equality(self):
+        request, _ = exact_request()
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "order type is unsupported by canonical Bybit preparation",
+        ):
+            require_exact_bybit_financial_request(
+                replace(binding(), order_type="STOP"),
+                request,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
+
+    def test_unsupported_tif_fails_closed_before_provider_equality(self):
+        request, _ = exact_request()
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "TIF is unsupported by canonical Bybit preparation",
+        ):
+            require_exact_bybit_financial_request(
+                replace(binding(), time_in_force="DAY"),
+                request,
+                exact_scope(),
+                provider_environment="TESTNET",
+            )
 
     def test_request_retarget_fails_even_when_body_shape_stays_valid(self):
         request, _ = exact_request()
@@ -582,6 +656,88 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
             )
 
 
+class DurableRiskIntentFinalFenceTests(unittest.TestCase):
+    @staticmethod
+    def _admission():
+        return {
+            "outcome": "ADMITTED",
+            "intent_hash": "intent-hash-1",
+            "account_id": "account-1",
+            "environment": "PAPER",
+            "instrument": {
+                "instrument_id": "00000000-0000-0000-0000-000000000101",
+                "version": 7,
+            },
+            "action": "TRADE",
+            "risk_decision_id": RD,
+            "reservation_id": "reservation-1",
+            "capability_snapshot_id": "capability-1",
+        }
+
+    def _require(self, material, risk_intent):
+        admission = self._admission()
+        return _require_binding_matches_durable_admission(
+            service=object(),
+            journal=object(),
+            historical_admission=lambda _service, _admission_id: admission,
+            load_events=lambda *_args, **_kwargs: [],
+            risk_payload_function=lambda *_args, **_kwargs: {
+                "journal_sequence_cut": 41,
+                "authoritative_risk_snapshot": {"snapshot_id": RS},
+                "risk_intent": dict(risk_intent),
+            },
+            admission_id="admission-1",
+            intent_hash="intent-hash-1",
+            action="TRADE",
+            binding=material,
+        )
+
+    def test_exact_evaluated_risk_axes_reach_final_financial_send_fence(self):
+        admitted = self._require(
+            binding(),
+            {
+                "side": "BUY",
+                "quantity": "2",
+                "price": "30000",
+                "reduce_only": False,
+                "action": "TRADE",
+            },
+        )
+        self.assertEqual(admitted["outcome"], "ADMITTED")
+
+    def test_reduce_only_substitution_is_rejected_at_final_financial_send_fence(self):
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "reduce-only differs from admitted risk",
+        ):
+            self._require(
+                replace(binding(), reduce_only=True),
+                {
+                    "side": "BUY",
+                    "quantity": "2",
+                    "price": "30000",
+                    "reduce_only": False,
+                    "action": "TRADE",
+                },
+            )
+
+    def test_action_substitution_is_rejected_at_final_financial_send_fence(self):
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "action differs from evaluated admitted risk",
+        ):
+            self._require(
+                binding(),
+                {
+                    "side": "BUY",
+                    "quantity": "2",
+                    "price": "30000",
+                    "reduce_only": False,
+                    "action": "REDUCE",
+                },
+            )
+
+
 class CapabilityExecutableAuthorityTests(unittest.TestCase):
     def test_issuer_method_rebinding_fails_before_forged_executable(self):
         issuer = _capability_executable_authority_shell()
@@ -633,6 +789,35 @@ class CapabilityExecutableAuthorityTests(unittest.TestCase):
 
 
 class BoundBybitExecutableAuthorityTests(unittest.TestCase):
+    def test_request_validator_rebinding_fails_before_forged_executable(self):
+        bound = _executable_authority_shell()
+        original = financial_send_authority_module.require_exact_bybit_financial_request
+        try:
+            financial_send_authority_module.require_exact_bybit_financial_request = (
+                _forged_request_validator
+            )
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "request validator authority changed",
+            ):
+                bound._require_request_validator_authority()
+        finally:
+            financial_send_authority_module.require_exact_bybit_financial_request = original
+
+    def test_request_validator_same_function_code_mutation_fails_closed(self):
+        bound = _executable_authority_shell()
+        validator = require_exact_bybit_financial_request
+        original_code = validator.__code__
+        try:
+            validator.__code__ = _forged_request_validator.__code__
+            with self.assertRaisesRegex(
+                FinancialSendAuthorityError,
+                "request validator authority code changed",
+            ):
+                bound._require_request_validator_authority()
+        finally:
+            validator.__code__ = original_code
+
     def test_sender_dispatch_rebinding_fails_before_forged_executable(self):
         bound = _executable_authority_shell()
         calls = []

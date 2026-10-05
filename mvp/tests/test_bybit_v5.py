@@ -1086,6 +1086,123 @@ class BybitV5AdapterTests(unittest.TestCase):
                     observation=invalid,
                 )
 
+    def test_submission_parser_rejects_forged_observation_before_virtual_callback(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-forged",
+                    "orderLinkId": "__CLIENT__",
+                },
+            }
+        )
+        callbacks = []
+
+        class ForgedObservation(ProviderSubmissionObservation):
+            def require_scope(self, **_kwargs):
+                callbacks.append(True)
+
+        forged = object.__new__(ForgedObservation)
+        for name in (
+            "response_binding",
+            "endpoint",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "evidence_ref",
+            "payload",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(observation, name),
+            )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_submission_parser_never_dispatches_observation_getattribute(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "result": {
+                    "orderId": "provider-safe-projection",
+                    "orderLinkId": "__CLIENT__",
+                },
+                "time": 1790280000123,
+            }
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError("observation virtual access executed")
+
+        with patch.object(
+            ProviderSubmissionObservation,
+            "__getattribute__",
+            forged,
+        ):
+            result = parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "provider-safe-projection")
+
+    def test_submission_parser_rejects_response_authority_alias_rebinding(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 10001,
+                "result": {},
+            }
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return {}
+
+        for name in (
+            "guarded_order_projection",
+            "provider_submission_observation_projection",
+            "ProviderSubmissionObservation",
+            "ProviderCoreError",
+            "type",
+            "MappingProxyType",
+            "UUID",
+            "uuid5",
+            "datetime",
+            "timezone",
+            "timedelta",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "response parser authority changed",
+                    ):
+                        bybit_module.parse_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            observation=observation,
+                        )
+                self.assertEqual(callbacks, [])
+
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):
             with self.subTest(code=code):

@@ -1,5 +1,7 @@
 from tempfile import TemporaryDirectory
 import unittest
+
+import mvp.autotrade_mvp.dispatch as dispatch_module
 from unittest.mock import patch
 from uuid import UUID
 
@@ -9,6 +11,8 @@ from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
     SubmissionResponseBinding,
     load_submission_response_binding,
+    require_canonical_submission_response_binding,
+    submission_response_binding_projection,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -744,6 +748,11 @@ class DispatchTests(unittest.TestCase):
             )
             self.assertEqual(binding.payload["provider_order_id"], "p-1")
             self.assertEqual(binding.submission_scope["endpoint"], "/orders")
+            projected = submission_response_binding_projection(binding)
+            self.assertEqual(projected["attempt_id"], "exact-response-a1")
+            self.assertIs(projected["submission_scope"], binding.submission_scope)
+            self.assertIs(projected["response_bytes"], binding.response_bytes)
+            require_canonical_submission_response_binding(binding)
 
             reopened = JournalStore(f"{directory}/journal.sqlite3")
             after_restart = load_submission_response_binding(
@@ -758,6 +767,108 @@ class DispatchTests(unittest.TestCase):
                 after_restart.submission_scope_hash,
                 binding.submission_scope_hash,
             )
+            require_canonical_submission_response_binding(after_restart)
+            self.assertEqual(
+                submission_response_binding_projection(after_restart)["response_sha256"],
+                binding.response_sha256,
+            )
+
+            clone = object.__new__(SubmissionResponseBinding)
+            for name in (
+                "attempt_id",
+                "aggregate_id",
+                "provider",
+                "request_hash",
+                "client_order_id",
+                "environment",
+                "account_id",
+                "prepared_at",
+                "sent_at",
+                "submission_scope",
+                "submission_scope_hash",
+                "response_bytes",
+                "response_sha256",
+                "http_status",
+                "_factory_token",
+            ):
+                object.__setattr__(
+                    clone,
+                    name,
+                    object.__getattribute__(binding, name),
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "binding authority is unavailable",
+            ):
+                require_canonical_submission_response_binding(clone)
+
+    def test_submission_response_binding_verifier_rejects_shadowing_before_callback(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            dispatcher.dispatch(
+                attempt_id="binding-shadow-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(b'{"ok":true}'),
+                )[1],
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="binding-shadow-a1",
+            )
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "type",
+                "id",
+                "tuple",
+                "range",
+                "enumerate",
+                "isinstance",
+                "object",
+                "getattr",
+                "MappingProxyType",
+                "weakref_ref",
+                "SubmissionResponseBinding",
+                "JournalStore",
+                "ValueError",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(
+                        dispatch_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "binding authority is unavailable",
+                        ):
+                            require_canonical_submission_response_binding(binding)
+                    self.assertEqual(callbacks, [])
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

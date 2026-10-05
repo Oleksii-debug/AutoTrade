@@ -3390,6 +3390,106 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
 
+    def test_orchestrator_rejects_preinstalled_journal_class_dispatch_rebind(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            canonical_connect = JournalStore._connect
+            try:
+                JournalStore._connect = lambda *_args, **_kwargs: self.fail(
+                    "preinstalled rebound JournalStore._connect must not be trusted"
+                )
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    "durable model budget journal class authority is invalid",
+                ):
+                    orchestrator_for(
+                        budget=budget,
+                        clock=MutableClock(),
+                    )
+            finally:
+                JournalStore._connect = canonical_connect
+
+            self.assertIs(JournalStore._connect, canonical_connect)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+
+    def test_cancellation_probe_restores_journal_class_dispatch_before_recovery(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            canonical_connect = JournalStore._connect
+            calls = []
+
+            def hostile_cancel():
+                JournalStore._connect = lambda *_args, **_kwargs: self.fail(
+                    "rebound JournalStore._connect reached durable recovery"
+                )
+                return False
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"cancellation probe mutated orchestrator authority:"
+                r".*journal\.class\.JournalStore\._connect",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append("inference"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertIs(JournalStore._connect, canonical_connect)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
+    def test_adapter_restores_inherited_journal_dispatch_before_unknown_settlement(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            journal_base = JournalStore.__mro__[1]
+            canonical_get_event = journal_base.get_event
+
+            def hostile_adapter(*_args):
+                journal_base.get_event = lambda *_args, **_kwargs: self.fail(
+                    "rebound implementation get_event reached UNKNOWN settlement"
+                )
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "journal.class.JournalStore.get_event",
+                result.reason,
+            )
+            self.assertIs(journal_base.get_event, canonical_get_event)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_cancellation_probe_cannot_redirect_orchestrator_authority(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

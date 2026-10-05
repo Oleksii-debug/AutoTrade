@@ -3,8 +3,9 @@
 This composes the already independent utility-fact owner, preregistered utility
 projection rule and preregistered complete-cost rule into one re-verifiable
 research-side bundle.  It intentionally stops before numeric terminal evaluation:
-the complete canonical cost-composite owner (and, when configured, FX valuation
-owner) must still be composed at the frozen cut.
+a task-specific canonical numeric utility projection, the complete canonical
+cost-composite owner and, when configured, FX valuation evidence must still be
+composed at the frozen cut.
 """
 
 from __future__ import annotations
@@ -36,7 +37,11 @@ from autotrade_research.memory.episodes import MemoryIntegrityError
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-_BLOCKING_REASON = "canonical_complete_cost_composite_evidence_unavailable"
+_BLOCKING_REASON = "canonical_terminal_numeric_operand_evidence_unavailable"
+_BASE_MISSING_TERMINAL_EVIDENCE = (
+    "utility_numeric_projection",
+    "complete_cost_composite",
+)
 
 
 def _digest(value: object, *, name: str) -> str:
@@ -59,6 +64,13 @@ def _exact_utc(value: object, *, name: str) -> datetime:
     return value
 
 
+def _missing_terminal_evidence(fx_valuation_ref: str | None) -> tuple[str, ...]:
+    missing = list(_BASE_MISSING_TERMINAL_EVIDENCE)
+    if fx_valuation_ref is not None:
+        missing.append("fx_valuation")
+    return tuple(missing)
+
+
 def _material(
     *,
     protocol_digest: str,
@@ -73,6 +85,7 @@ def _material(
     cost_rule_binding_digest: str,
     cost_components: tuple[str, ...],
     terminal_numeric_operands: bool,
+    missing_terminal_evidence: tuple[str, ...],
     blocking_reason: str,
 ) -> dict[str, object]:
     return {
@@ -89,6 +102,7 @@ def _material(
         "cost_rule_binding_digest": cost_rule_binding_digest,
         "cost_components": list(cost_components),
         "terminal_numeric_operands": terminal_numeric_operands,
+        "missing_terminal_evidence": list(missing_terminal_evidence),
         "blocking_reason": blocking_reason,
     }
 
@@ -120,6 +134,7 @@ class ResolvedAblationOwnedOperandPreflight:
     cost_rule_binding_digest: str
     cost_components: tuple[str, ...]
     terminal_numeric_operands: bool
+    missing_terminal_evidence: tuple[str, ...]
     blocking_reason: str
     bundle_digest: str
 
@@ -161,6 +176,15 @@ class ResolvedAblationOwnedOperandPreflight:
             raise MemoryIntegrityError(
                 "owned operand preflight cannot claim terminal numeric operands"
             )
+        if type(self.missing_terminal_evidence) is not tuple:
+            raise MemoryIntegrityError(
+                "missing_terminal_evidence must be an exact tuple"
+            )
+        expected_missing = _missing_terminal_evidence(self.fx_valuation_ref)
+        if self.missing_terminal_evidence != expected_missing:
+            raise MemoryIntegrityError(
+                "owned operand preflight missing-evidence set is not canonical"
+            )
         if self.blocking_reason != _BLOCKING_REASON:
             raise MemoryIntegrityError("owned operand preflight blocker is not canonical")
         ResolvedAblationOwnedOperandPreflight.verify_integrity(self)
@@ -179,6 +203,7 @@ class ResolvedAblationOwnedOperandPreflight:
             cost_rule_binding_digest=self.cost_rule_binding_digest,
             cost_components=self.cost_components,
             terminal_numeric_operands=self.terminal_numeric_operands,
+            missing_terminal_evidence=self.missing_terminal_evidence,
             blocking_reason=self.blocking_reason,
         )
         if self.bundle_digest != _bundle_digest(material):
@@ -221,6 +246,7 @@ def _compose(
         raise MemoryIntegrityError(
             "utility and cost rules do not share one FX dependency"
         )
+    missing = _missing_terminal_evidence(utility_rule.fx_valuation_ref)
     material = _material(
         protocol_digest=facts.protocol_digest,
         population_digest=facts.population_digest,
@@ -234,6 +260,7 @@ def _compose(
         cost_rule_binding_digest=cost_rule.binding_digest,
         cost_components=cost_rule.cost_components,
         terminal_numeric_operands=False,
+        missing_terminal_evidence=missing,
         blocking_reason=_BLOCKING_REASON,
     )
     return ResolvedAblationOwnedOperandPreflight(
@@ -249,6 +276,7 @@ def _compose(
         cost_rule_binding_digest=cost_rule.binding_digest,
         cost_components=cost_rule.cost_components,
         terminal_numeric_operands=False,
+        missing_terminal_evidence=missing,
         blocking_reason=_BLOCKING_REASON,
         bundle_digest=_bundle_digest(material),
     )

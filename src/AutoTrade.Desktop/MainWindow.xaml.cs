@@ -255,14 +255,17 @@ public partial class MainWindow : Window
         }
     }
 
+    private static bool RequiresFreshWebViewAfterFailure(
+        CoreWebView2ProcessFailedKind kind) =>
+        kind is CoreWebView2ProcessFailedKind.BrowserProcessExited
+            or CoreWebView2ProcessFailedKind.RenderProcessExited
+            or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive;
+
     private void WebView_ProcessFailed(
         object? sender,
         CoreWebView2ProcessFailedEventArgs e)
     {
-        if (e.ProcessFailedKind is not (
-            CoreWebView2ProcessFailedKind.BrowserProcessExited
-            or CoreWebView2ProcessFailedKind.RenderProcessExited
-            or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive))
+        if (!RequiresFreshWebViewAfterFailure(e.ProcessFailedKind))
         {
             return;
         }

@@ -257,11 +257,7 @@ def _require_bybit_prepared_request_origin(
     if (
         require_canonical_bybit_prepared_submission
         is not _CANONICAL_BYBIT_REQUIRE_PREPARED
-        or getattr(
-            _CANONICAL_BYBIT_REQUIRE_PREPARED,
-            "__code__",
-            None,
-        )
+        or _CANONICAL_BYBIT_REQUIRE_PREPARED.__code__
         is not _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE
     ):
         raise DurableFinancialRequestBindingError(
@@ -276,11 +272,7 @@ def _require_bybit_prepared_request_origin(
     if (
         _bybit_prepared_price_authority
         is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY
-        or getattr(
-            _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY,
-            "__code__",
-            None,
-        )
+        or _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY.__code__
         is not _CANONICAL_BYBIT_PREPARED_PRICE_AUTHORITY_CODE
     ):
         raise DurableFinancialRequestBindingError(
@@ -312,11 +304,7 @@ def _require_bybit_prepared_request_origin(
         )
     if (
         guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
-        or getattr(
-            _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION,
-            "__code__",
-            None,
-        )
+        or _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION.__code__
         is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE
     ):
         raise DurableFinancialRequestBindingError(

@@ -2605,6 +2605,27 @@ class BinanceSpotTemporalIngressTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                callbacks.append("is_finite")
+                raise AssertionError("hostile Decimal callback executed")
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "bounded exact decimal"):
+            BinanceSpotOrderIntent.create(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                price="100.00",
+                time_in_force="GTC",
+
+                quantity=HostileDecimal("0.100"),
+            )
+        self.assertEqual(callbacks, [])
+
     def test_text_ingress_rejects_str_subclass_before_strip_callback(self):
         callbacks = []
 

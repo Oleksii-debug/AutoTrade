@@ -514,17 +514,21 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
             binding = composer.compose(request, prepared)
 
-            other_capability = submission_write_capability(
-                account_id="bybit-account",
-                environment="PAPER",
-                instrument_version=f"{A}@1",
-                provider_environment="DEMO",
-            )
-            _, other_prepared = self._prepared(capability=other_capability)
+            _, other_prepared = self._prepared(capability=capability)
+            self.assertIsNot(prepared, other_prepared)
             self.assertEqual(prepared.body_sha256, other_prepared.body_sha256)
-            self.assertNotEqual(
+            self.assertEqual(
                 prepared.capability_snapshot_id,
                 other_prepared.capability_snapshot_id,
+            )
+            self.assertEqual(prepared.account_id, other_prepared.account_id)
+            self.assertEqual(
+                prepared.provider_environment,
+                other_prepared.provider_environment,
+            )
+            self.assertEqual(
+                prepared.instrument_version,
+                other_prepared.instrument_version,
             )
 
             with self.assertRaisesRegex(
@@ -554,6 +558,26 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             del artifacts
             gc.collect()
 
+            self.assertIsNone(registry_ref())
+            self.assertIsNone(artifacts_ref())
+
+    def test_prepared_collection_releases_composer_authorities_without_followup_call(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            registry_ref = weakref_ref(registry)
+            artifacts_ref = weakref_ref(artifacts)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+
+            del prepared
+            del composer
+            del registry
+            del artifacts
+            gc.collect()
+
+            self.assertIsNotNone(binding)
             self.assertIsNone(registry_ref())
             self.assertIsNone(artifacts_ref())
 

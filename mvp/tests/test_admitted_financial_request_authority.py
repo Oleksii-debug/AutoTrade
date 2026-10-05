@@ -438,6 +438,17 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     submission_scope={**scope, "extra": cyclic_list},
                 )
 
+    def test_admission_id_requires_canonical_utf8_before_registry_lookup(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            issuer = AdmittedFinancialRequestAuthorityIssuer(store)
+
+            with self.assertRaisesRegex(
+                AdmittedFinancialRequestAuthorityError,
+                "valid canonical UTF-8",
+            ):
+                issuer.issue("\ud800")
+
     def test_issue_surface_accepts_no_material_or_financial_authority_overrides(self) -> None:
         parameters = inspect.signature(
             AdmittedFinancialRequestAuthorityIssuer.issue

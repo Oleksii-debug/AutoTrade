@@ -160,12 +160,13 @@ class ConfirmedPendingAdmissionTests(unittest.TestCase):
                 confirmed.confirmation_id,
             )
             self.assertEqual(admitted.intent_hash, pending.intent_hash)
+            self.assertEqual(admitted.intent_id, source.intent_id)
             self.assertEqual(admitted.notional, pending.notional)
             self.assertEqual(admitted.policy_version, source.policy_version)
             self.assertEqual(admitted.risk_reducing, source.risk_reducing)
             self.assertIsNotNone(admitted.reservation_id)
 
-    def test_restart_returns_durable_consumption_instead_of_reusing_confirmation(self) -> None:
+    def test_restart_after_pending_expiry_returns_durable_consumption_without_current_risk(self) -> None:
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
@@ -179,15 +180,16 @@ class ConfirmedPendingAdmissionTests(unittest.TestCase):
             self.assertEqual(first.outcome, "ADMITTED")
 
             restarted_store = JournalStore(path)
+            before = restarted_store.current_journal_sequence()
             retry = admit_confirmed_pending_intent(
-                self._fresh_service(restarted_store, scope),
+                AuthorityService(restarted_store),
                 pending_intent_id=pending.pending_intent_id,
-                at=NOW + timedelta(seconds=2),
-                **self._runtime(restarted_store),
+                at=NOW + timedelta(hours=1),
             )
             self.assertEqual(retry, first)
+            self.assertEqual(restarted_store.current_journal_sequence(), before)
 
-    def test_fresh_risk_rejection_does_not_promote_confirmation_to_trade_authority(self) -> None:
+    def test_same_fresh_risk_rejection_is_idempotent_but_changed_risk_can_retry(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             _source, pending, confirmed, scope = self._confirmed_source(store)
@@ -195,17 +197,18 @@ class ConfirmedPendingAdmissionTests(unittest.TestCase):
                 public_risk_context(),
                 daily_pnl=Decimal("-600"),
             )
-            authority = self._fresh_service(
+            runtime = self._runtime(store)
+            rejecting_authority = self._fresh_service(
                 store,
                 scope,
                 risk_context=rejecting_context,
             )
 
             rejected = admit_confirmed_pending_intent(
-                authority,
+                rejecting_authority,
                 pending_intent_id=pending.pending_intent_id,
                 at=NOW + timedelta(seconds=1),
-                **self._runtime(store),
+                **runtime,
             )
             self.assertEqual(rejected.outcome, "REJECTED")
             self.assertEqual(rejected.reason, "risk_rejected")
@@ -215,6 +218,26 @@ class ConfirmedPendingAdmissionTests(unittest.TestCase):
                 confirmed.confirmation_id,
             )
             self.assertIsNone(rejected.reservation_id)
+
+            after_first = store.current_journal_sequence()
+            exact_retry = admit_confirmed_pending_intent(
+                rejecting_authority,
+                pending_intent_id=pending.pending_intent_id,
+                at=NOW + timedelta(seconds=2),
+                **runtime,
+            )
+            self.assertEqual(exact_retry, rejected)
+            self.assertEqual(store.current_journal_sequence(), after_first)
+
+            admitted = admit_confirmed_pending_intent(
+                self._fresh_service(store, scope),
+                pending_intent_id=pending.pending_intent_id,
+                at=NOW + timedelta(seconds=3),
+                **runtime,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(admitted.confirmation_id, confirmed.confirmation_id)
+            self.assertNotEqual(admitted.admission_id, rejected.admission_id)
 
     def test_source_risk_reducing_semantics_are_preserved(self) -> None:
         with TemporaryDirectory() as directory:

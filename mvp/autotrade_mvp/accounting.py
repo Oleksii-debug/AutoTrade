@@ -444,6 +444,32 @@ def validate_transaction(transaction: JournalTransaction) -> None:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
 
+def _make_economic_book_audit_digest(digest_transaction):
+    """Bind the memoizer into the method function, outside module rebinding."""
+
+    def audit_digest(self) -> str:
+        if type(self._transactions) is not list:
+            raise TypeError("economic transactions must use an exact list")
+        transactions = tuple(self._transactions)
+        return payload_digest(
+            {
+                "schema_version": "1.0.0",
+                "transactions": [
+                    {
+                        "transaction_id": _name(
+                            transaction.transaction_id,
+                            field="transaction_id",
+                        ),
+                        "digest": digest_transaction(transaction),
+                    }
+                    for transaction in transactions
+                ],
+            }
+        )
+
+    return audit_digest
+
+
 class EconomicBook:
     """Append-only immutable economic journal with exact projections."""
 
@@ -597,25 +623,16 @@ class EconomicBook:
         value = _name(currency, field="currency")
         return self.balance(f"FEE_EXPENSE:{value}", value)
 
-    def audit_digest(self) -> str:
-        if type(self._transactions) is not list:
-            raise TypeError("economic transactions must use an exact list")
-        transactions = tuple(self._transactions)
-        return payload_digest(
-            {
-                "schema_version": "1.0.0",
-                "transactions": [
-                    {
-                        "transaction_id": _name(
-                            transaction.transaction_id,
-                            field="transaction_id",
-                        ),
-                        "digest": _cached_transaction_digest(transaction),
-                    }
-                    for transaction in transactions
-                ],
-            }
-        )
+    audit_digest = _make_economic_book_audit_digest(
+        _cached_transaction_digest
+    )
+
+
+# EconomicBook.audit_digest owns the selected memoizer through its function
+# closure. Same-named module bindings created after import are not audit
+# authority.
+del _make_economic_book_audit_digest
+del _cached_transaction_digest
 
 
 def _scoped_economic_owner_operations():

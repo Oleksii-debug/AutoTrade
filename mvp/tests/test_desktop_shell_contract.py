@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -9,6 +10,8 @@ CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
+COMMON_SCHEMA = ROOT / "contracts" / "jsonschema" / "common.schema.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
@@ -20,6 +23,49 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("<UseWPF>true</UseWPF>", text)
         self.assertNotIn("<PackageReference", text)
         self.assertEqual(project.tag, "Project")
+
+    def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
+        text = WEB_POLICY.read_text(encoding="utf-8")
+        self.assertIn("AuthenticatedEmergencyHostClient.ValidateBaseUri", text)
+        self.assertIn("using AutoTrade.Contracts;", text)
+        self.assertIn('StatePath = "/" + HostApiRoutes.GetState', text)
+        self.assertIn('CommandPath = "/" + HostApiRoutes.SubmitCommand', text)
+        self.assertIn('EventPath = "/" + HostApiRoutes.StreamEvents', text)
+        self.assertIn("IsSameHostOrigin(target)", text)
+        self.assertIn("Guid.TryParseExact(operationId, \"D\"", text)
+        self.assertIn('parsedOperationId.ToString("D")', text)
+        self.assertIn("HostApiRoutes.GetOperation(RouteProbeOperationId)", text)
+        self.assertIn("BuildCanonicalOperationPrefix()", text)
+        self.assertNotIn('"/api/v1/operations/"', text)
+        self.assertIn("HasCanonicalEventQuery(target.Query)", text)
+        self.assertIn('const string prefix = "?after=";', text)
+        self.assertIn("value.Contains('&')", text)
+        self.assertIn('string.Equals(method, "GET", StringComparison.Ordinal)', text)
+        self.assertIn('string.Equals(method, "POST", StringComparison.Ordinal)', text)
+        self.assertNotIn("CanonicalApiRoot", text)
+        self.assertIn("AllowsWebMessageCommandAuthority => false", text)
+        self.assertIn("AllowsDeveloperTools => false", text)
+        self.assertIn("AllowsServiceWorkers => false", text)
+        self.assertIn("AllowsDownloads => false", text)
+        self.assertIn("AllowsNewWindow(Uri target) => false", text)
+        self.assertNotIn("Authorization", text)
+        self.assertNotIn("AutoTrade-Session", text)
+
+    def test_event_credential_query_grammar_matches_canonical_sequence_contract(self):
+        policy = WEB_POLICY.read_text(encoding="utf-8")
+        common = json.loads(COMMON_SCHEMA.read_text(encoding="utf-8"))
+        sequence = common["$defs"]["Sequence"]
+
+        self.assertEqual(sequence["type"], "string")
+        self.assertEqual(
+            sequence["pattern"],
+            r"^(0|[1-9][0-9]*)$(?![\s\S])",
+        )
+        self.assertIn('const string prefix = "?after=";', policy)
+        self.assertIn('if (value == "0")', policy)
+        self.assertIn("value[0] is < '1' or > '9'", policy)
+        self.assertIn("character is < '0' or > '9'", policy)
+        self.assertIn("value.Contains('&')", policy)
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")

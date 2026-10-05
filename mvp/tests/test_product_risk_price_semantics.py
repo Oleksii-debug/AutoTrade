@@ -557,6 +557,43 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             self.assertIsNone(registry_ref())
             self.assertIsNone(artifacts_ref())
 
+    def test_wrapper_builtin_shadowing_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "dict",
+                "zip",
+                "tuple",
+                "type",
+                "id",
+                "getattr",
+                "str",
+                "int",
+                "bool",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(
+                        price_semantics_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ProductRiskPriceSemanticsError,
+                            "binding authority changed",
+                        ):
+                            composer.compose(request, prepared)
+                    self.assertEqual(callbacks, [])
+
     def test_product_helper_rebinding_fails_before_forged_execution(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)

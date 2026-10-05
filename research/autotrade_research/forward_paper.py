@@ -250,7 +250,7 @@ def _plain_records(values: object, *, name: str) -> tuple[object, ...]:
 
 
 def _is_plain_mapping(value: object) -> bool:
-    return type(value) in (dict, _MAPPING_PROXY_TYPE)
+    return type(value) is dict
 
 
 @dataclass(frozen=True)
@@ -963,7 +963,7 @@ class ForwardPaperEvidence:
                 operational_observations,
                 name="operational_observations",
             ),
-            costs_by_currency=MappingProxyType(costs),
+            costs_by_currency=costs,
             costs_complete=costs_complete,
             account_reconciliation_complete=account_reconciliation_complete,
             paper_economics=_plain_records(

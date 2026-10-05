@@ -106,6 +106,14 @@ _CANONICAL_VAULT_HANDLE = ProtectedCredentialVault._handle
 _CANONICAL_TRANSITION_AUTHORITY_KEY = transition._CANONICAL_AUTHORITY_KEY
 _CANONICAL_TRANSITION_AUTHORITY_SECTION = transition._authority_section
 _CANONICAL_TRANSITION_PARSE_RECEIPT = transition._parse_receipt
+_CANONICAL_RECOVERY_LATEST_DURABLE_OWNER = RecoveryController._latest_durable_owner
+_CANONICAL_RECOVERY_APPEND_DURABLE_OWNER = RecoveryController._append_durable_owner
+_CANONICAL_RECOVERY_RECOVER_SCOPED_SUBMISSION_UNCERTAINTY = (
+    RecoveryController._recover_scoped_submission_uncertainty_from_owner_scope
+)
+_CANONICAL_RECOVERY_RECORD_RECONCILIATION_CHECKPOINT = (
+    RecoveryController.record_reconciliation_checkpoint
+)
 
 
 @dataclass(frozen=True)
@@ -566,9 +574,16 @@ def _require_reconciliation(
     provider_id: str,
     account_id: str,
     environment: str,
+    _recover_scoped_submission_uncertainty=(
+        _CANONICAL_RECOVERY_RECOVER_SCOPED_SUBMISSION_UNCERTAINTY
+    ),
+    _record_reconciliation_checkpoint=(
+        _CANONICAL_RECOVERY_RECORD_RECONCILIATION_CHECKPOINT
+    ),
 ) -> dict[str, object]:
-    controller._recover_scoped_submission_uncertainty_from_owner_scope()
-    checkpoint = controller.record_reconciliation_checkpoint(
+    _recover_scoped_submission_uncertainty(controller)
+    checkpoint = _record_reconciliation_checkpoint(
+        controller,
         reconciliation_id=reconciliation_id,
         provider_id=provider_id,
         account_id=account_id,
@@ -813,6 +828,23 @@ def _execute_durable_takeover_impl(
         journal_current_sequence,
         revoke_trade_credential,
         verify_trade_credential_receipt,
+        common_inputs,
+        pending_for_scope,
+        require_reconciliation,
+        latest_effectful_submission_sequence,
+        takeover_id_for_owners,
+        append_takeover_event,
+        parse_started,
+        bind_controller_owner,
+        require_checkpoint_event,
+        vault_snapshot,
+        require_receipt_for_started,
+        seal_evidence,
+        verify_evidence_seal,
+        owner_event,
+        controller_latest_durable_owner,
+        controller_append_durable_owner,
+        controller_recover_scoped_submission_uncertainty,
     ) = _installed_authority
 
     (
@@ -822,7 +854,7 @@ def _execute_durable_takeover_impl(
         execution_identity,
         reconciliation_id,
         provider,
-    ) = _common_inputs(
+    ) = common_inputs(
         controller,
         new_owner_id=new_owner_id,
         vault=vault,
@@ -836,7 +868,7 @@ def _execute_durable_takeover_impl(
     with takeover_window(
         store, owner_scope=owner_scope
     ) as lease:
-        pending = _pending_for_scope(
+        pending = pending_for_scope(
             store, owner_scope=owner_scope
         )
         if pending is None:
@@ -845,7 +877,7 @@ def _execute_durable_takeover_impl(
                     "no active source owner to take over"
                 )
             source = controller.owner
-            if controller._latest_durable_owner() != source:
+            if controller_latest_durable_owner(controller) != source:
                 raise DurableTakeoverError(
                     "source owner is not current durable owner"
                 )
@@ -854,7 +886,7 @@ def _execute_durable_takeover_impl(
             target = OwnerFence(
                 target_owner_id, source.epoch + 1
             )
-            checkpoint = _require_reconciliation(
+            checkpoint = require_reconciliation(
                 controller,
                 reconciliation_id=reconciliation_id,
                 provider_id=provider,
@@ -862,7 +894,7 @@ def _execute_durable_takeover_impl(
                 environment=handle.environment,
             )
             latest_effectful = (
-                _latest_effectful_submission_sequence(
+                latest_effectful_submission_sequence(
                     store,
                     environment=handle.environment,
                     account_id=handle.account_id,
@@ -878,7 +910,7 @@ def _execute_durable_takeover_impl(
                 raise DurableTakeoverError(
                     "provider reconciliation predates latest durable send state"
                 )
-            takeover_id = _takeover_id(
+            takeover_id = takeover_id_for_owners(
                 owner_scope=owner_scope,
                 source=source,
                 target=target,
@@ -912,7 +944,7 @@ def _execute_durable_takeover_impl(
                 "journal_path": lease.journal_path,
                 "gate_path": lease.gate_path,
             }
-            started_event = _append_takeover_event(
+            started_event = append_takeover_event(
                 store,
                 takeover_id=takeover_id,
                 version=1,
@@ -925,7 +957,7 @@ def _execute_durable_takeover_impl(
         else:
             takeover_id, events = pending
             started_payload = events[0]["payload"]
-            source, target = _parse_started(
+            source, target = parse_started(
                 started_payload,
                 takeover_id=takeover_id,
                 owner_scope=owner_scope,
@@ -936,13 +968,13 @@ def _execute_durable_takeover_impl(
                 lease=lease,
             )
 
-        durable_owner = controller._latest_durable_owner()
+        durable_owner = controller_latest_durable_owner(controller)
         if durable_owner == source:
-            _bind_controller_owner(
+            bind_controller_owner(
                 controller, source, recovering=False
             )
         elif durable_owner == target:
-            _bind_controller_owner(
+            bind_controller_owner(
                 controller, target, recovering=True
             )
         else:
@@ -952,7 +984,7 @@ def _execute_durable_takeover_impl(
 
     # Phase 2: STARTED is durable and freezes ordinary sends, so now it is safe
     # to wait for the vault lock without holding the sender gate.
-    pending = _pending_for_scope(
+    pending = pending_for_scope(
         store, owner_scope=owner_scope
     )
     if pending is None:
@@ -961,7 +993,7 @@ def _execute_durable_takeover_impl(
         )
     takeover_id, events = pending
     started_payload = events[0]["payload"]
-    source, target = _parse_started(
+    source, target = parse_started(
         started_payload,
         takeover_id=takeover_id,
         owner_scope=owner_scope,
@@ -970,15 +1002,15 @@ def _execute_durable_takeover_impl(
         reconciliation_id=reconciliation_id,
         provider_id=provider,
     )
-    _require_checkpoint_event(store, started_payload)
+    require_checkpoint_event(store, started_payload)
 
     if len(events) < 2:
-        if controller._latest_durable_owner() != source:
+        if controller_latest_durable_owner(controller) != source:
             raise DurableTakeoverError(
                 "takeover owner committed before credential evidence issuance"
             )
         current_handle, active, current_receipt = (
-            _vault_snapshot(
+            vault_snapshot(
                 vault,
                 handle_id=handle.handle_id,
             )
@@ -1002,7 +1034,7 @@ def _execute_durable_takeover_impl(
                     "inactive credential lacks resumable transition receipt"
                 )
             receipt = current_receipt
-        receipt = _require_receipt_for_started(
+        receipt = require_receipt_for_started(
             receipt,
             started=started_payload,
         )
@@ -1052,11 +1084,11 @@ def _execute_durable_takeover_impl(
             ),
         }
         evidence_payload = dict(evidence_subject)
-        evidence_payload["issuer_seal_b64"] = _seal_evidence(
+        evidence_payload["issuer_seal_b64"] = seal_evidence(
             vault,
             evidence_subject,
         )
-        evidence_event = _append_takeover_event(
+        evidence_event = append_takeover_event(
             store,
             takeover_id=takeover_id,
             version=2,
@@ -1066,8 +1098,8 @@ def _execute_durable_takeover_impl(
         events = (events[0], evidence_event)
     else:
         evidence_payload = events[1]["payload"]
-        _verify_evidence_seal(vault, evidence_payload)
-        _, active, current_receipt = _vault_snapshot(
+        verify_evidence_seal(vault, evidence_payload)
+        _, active, current_receipt = vault_snapshot(
             vault,
             handle_id=handle.handle_id,
         )
@@ -1075,7 +1107,7 @@ def _execute_durable_takeover_impl(
             raise DurableTakeoverError(
                 "credential revocation no longer matches issued takeover evidence"
             )
-        receipt = _require_receipt_for_started(
+        receipt = require_receipt_for_started(
             current_receipt,
             started=started_payload,
         )
@@ -1114,7 +1146,7 @@ def _execute_durable_takeover_impl(
         owner_validation_journal_sequence = journal_current_sequence(
             store
         )
-        pending = _pending_for_scope(
+        pending = pending_for_scope(
             store, owner_scope=owner_scope
         )
         if pending is None:
@@ -1127,7 +1159,7 @@ def _execute_durable_takeover_impl(
                 "takeover evidence is unavailable at owner commit"
             )
         started_payload = events[0]["payload"]
-        source, target = _parse_started(
+        source, target = parse_started(
             started_payload,
             takeover_id=takeover_id,
             owner_scope=owner_scope,
@@ -1137,8 +1169,8 @@ def _execute_durable_takeover_impl(
             provider_id=provider,
             lease=lease,
         )
-        _require_checkpoint_event(store, started_payload)
-        controller._recover_scoped_submission_uncertainty_from_owner_scope()
+        require_checkpoint_event(store, started_payload)
+        controller_recover_scoped_submission_uncertainty(controller)
         if controller.unresolved_attempts:
             raise DurableTakeoverError(
                 "takeover commit is blocked by durable submission uncertainty"
@@ -1146,7 +1178,7 @@ def _execute_durable_takeover_impl(
         started_effectful_sequence = started_payload.get(
             "latest_effectful_submission_sequence"
         )
-        current_effectful_sequence = _latest_effectful_submission_sequence(
+        current_effectful_sequence = latest_effectful_submission_sequence(
             store,
             environment=handle.environment,
             account_id=handle.account_id,
@@ -1161,8 +1193,8 @@ def _execute_durable_takeover_impl(
             )
 
         evidence_payload = events[1]["payload"]
-        _verify_evidence_seal(vault, evidence_payload)
-        _, active, current_receipt = _vault_snapshot(
+        verify_evidence_seal(vault, evidence_payload)
+        _, active, current_receipt = vault_snapshot(
             vault,
             handle_id=handle.handle_id,
         )
@@ -1170,7 +1202,7 @@ def _execute_durable_takeover_impl(
             raise DurableTakeoverError(
                 "credential revocation changed before owner commit"
             )
-        receipt = _require_receipt_for_started(
+        receipt = require_receipt_for_started(
             current_receipt,
             started=started_payload,
         )
@@ -1200,10 +1232,11 @@ def _execute_durable_takeover_impl(
                 "credential transition anchor changed before owner commit"
             )
 
-        durable_owner = controller._latest_durable_owner()
+        durable_owner = controller_latest_durable_owner(controller)
         if durable_owner == source:
             try:
-                controller._append_durable_owner(
+                controller_append_durable_owner(
+                    controller,
                     target,
                     expected_journal_sequence=(
                         owner_validation_journal_sequence
@@ -1213,12 +1246,12 @@ def _execute_durable_takeover_impl(
                 raise DurableTakeoverError(
                     "journal changed during takeover owner validation"
                 ) from error
-            durable_owner = controller._latest_durable_owner()
+            durable_owner = controller_latest_durable_owner(controller)
         if durable_owner != target:
             raise DurableTakeoverError(
                 "target recovery owner was not durably committed"
             )
-        recovery_owner_event = _owner_event(
+        recovery_owner_event = owner_event(
             store,
             owner_scope=owner_scope,
             owner=target,
@@ -1248,7 +1281,7 @@ def _execute_durable_takeover_impl(
                     recovery_owner_event["journal_sequence"]
                 ),
             }
-            completion_event = _append_takeover_event(
+            completion_event = append_takeover_event(
                 store,
                 takeover_id=takeover_id,
                 version=3,
@@ -1261,7 +1294,7 @@ def _execute_durable_takeover_impl(
                 completion_event,
             )
 
-        _bind_controller_owner(
+        bind_controller_owner(
             controller, target, recovering=True
         )
         return DurableTakeoverResult(
@@ -1324,5 +1357,22 @@ execute_durable_takeover = _bind_execute_durable_takeover(
         _CANONICAL_JOURNAL_CURRENT_SEQUENCE,
         _CANONICAL_REVOKE_TRADE_CREDENTIAL_WITH_RECEIPT,
         _CANONICAL_VERIFY_TRADE_CREDENTIAL_TRANSITION_RECEIPT,
+        _common_inputs,
+        _pending_for_scope,
+        _require_reconciliation,
+        _latest_effectful_submission_sequence,
+        _takeover_id,
+        _append_takeover_event,
+        _parse_started,
+        _bind_controller_owner,
+        _require_checkpoint_event,
+        _vault_snapshot,
+        _require_receipt_for_started,
+        _seal_evidence,
+        _verify_evidence_seal,
+        _owner_event,
+        _CANONICAL_RECOVERY_LATEST_DURABLE_OWNER,
+        _CANONICAL_RECOVERY_APPEND_DURABLE_OWNER,
+        _CANONICAL_RECOVERY_RECOVER_SCOPED_SUBMISSION_UNCERTAINTY,
     ),
 )

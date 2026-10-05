@@ -613,14 +613,46 @@ def verify_replay(state_dir: str | Path) -> bool:
             return False
         records = checkpoint["evidence_records"]
         ids = checkpoint["evidence_ids"]
+        evidence_fields = frozenset(
+            {
+                "schema_version",
+                "evidence_id",
+                "input_hash",
+                "decision",
+                "decision_reason",
+                "risk_outcome",
+                "order_id",
+                "fill_id",
+                "cash",
+                "position",
+                "equity",
+                "reconciled",
+                "financial_configuration_hash",
+                "recorded_at",
+            }
+        )
         rows = [
             json.loads(line)
             for line in evidence_path.read_text(encoding="utf-8").splitlines()
         ]
         if any(
             type(row) is not dict
-            or type(row.get("evidence_id")) is not str
-            or row.get("financial_configuration_hash") != configuration_hash
+            or set(row) != evidence_fields
+            or row["schema_version"] != 1
+            or type(row["evidence_id"]) is not str
+            or not row["evidence_id"]
+            or type(row["input_hash"]) is not str
+            or len(row["input_hash"]) != 64
+            or row["decision"] not in {"BUY", "SELL", "HOLD"}
+            or type(row["decision_reason"]) is not str
+            or type(row["risk_outcome"]) is not str
+            or row["order_id"] is not None and type(row["order_id"]) is not str
+            or row["fill_id"] is not None and type(row["fill_id"]) is not str
+            or type(row["cash"]) is not str
+            or type(row["position"]) is not str
+            or type(row["equity"]) is not str
+            or type(row["reconciled"]) is not bool
+            or row["financial_configuration_hash"] != configuration_hash
             for row in rows
         ):
             return False
@@ -635,7 +667,8 @@ def verify_replay(state_dir: str | Path) -> bool:
             return False
         if any(
             type(records[key]) is not dict
-            or records[key].get("financial_configuration_hash") != configuration_hash
+            or set(records[key]) != evidence_fields
+            or records[key]["financial_configuration_hash"] != configuration_hash
             or observed[key] != records[key]
             for key in ids
         ):
@@ -669,16 +702,16 @@ def verify_replay(state_dir: str | Path) -> bool:
                 return False
             expected_payload = {
                 "evidence_id": evidence_id,
-                "input_hash": record.get("input_hash"),
-                "decision": record.get("decision"),
-                "decision_reason": record.get("decision_reason"),
-                "risk_outcome": record.get("risk_outcome"),
-                "order_id": record.get("order_id"),
-                "fill_id": record.get("fill_id"),
-                "cash": record.get("cash"),
-                "position": record.get("position"),
-                "equity": record.get("equity"),
-                "reconciled": record.get("reconciled"),
+                "input_hash": record["input_hash"],
+                "decision": record["decision"],
+                "decision_reason": record["decision_reason"],
+                "risk_outcome": record["risk_outcome"],
+                "order_id": record["order_id"],
+                "fill_id": record["fill_id"],
+                "cash": record["cash"],
+                "position": record["position"],
+                "equity": record["equity"],
+                "reconciled": record["reconciled"],
                 "financial_configuration_hash": configuration_hash,
             }
             if payload != expected_payload:

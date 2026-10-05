@@ -2661,6 +2661,9 @@ def allocate_evidence_bound_objective_targets(
     builtin_tuple = tuple
     builtin_type = type
     builtin_str = str
+    builtin_isinstance = isinstance
+    builtin_type_error = TypeError
+    builtin_value_error = ValueError
     mapping_type = Mapping
 
     trust_callables = (
@@ -2753,13 +2756,15 @@ def allocate_evidence_bound_objective_targets(
         _dict_type=builtin_dict,
         _type=builtin_type,
         _str_type=builtin_str,
+        _isinstance=builtin_isinstance,
+        _type_error=builtin_type_error,
     ):
-        if not isinstance(value, _mapping_type):
-            raise TypeError(f"{name} must be a mapping")
+        if not _isinstance(value, _mapping_type):
+            raise _type_error(f"{name} must be a mapping")
         snapshot = _dict_type(value)
         for key in _dict_type.keys(snapshot):
             if _type(key) is not _str_type:
-                raise TypeError(f"{name} keys must be exact built-in strings")
+                raise _type_error(f"{name} keys must be exact built-in strings")
         return snapshot
 
     # Materialize every caller-owned container before validating any evidence.
@@ -2787,18 +2792,42 @@ def allocate_evidence_bound_objective_targets(
     # Snapshotting caller-owned mappings/sequences is intentionally allowed to
     # execute their protocol callbacks. Those callbacks must not be able to
     # retarget the financial/provenance helpers that run after the snapshot.
+    # Built-ins used below are resolved through Python's module/builtins lookup.
+    # A snapshot callback must not be able to create a module shadow that gains
+    # execution after this trust checkpoint.
+    for builtin_name in (
+        "any",
+        "dict",
+        "isinstance",
+        "iter",
+        "len",
+        "next",
+        "set",
+        "sorted",
+        "str",
+        "tuple",
+        "type",
+        "TypeError",
+        "ValueError",
+    ):
+        if builtin_name in module_namespace:
+            raise builtin_value_error(
+                "allocation proposal builtin authority changed during input snapshot: "
+                + builtin_name
+            )
+
     for binding_name, authority, authority_code in trust_callables:
         if (
             raw_dict_getitem(module_namespace, binding_name) is not authority
             or raw_getattribute(authority, "__code__") is not authority_code
         ):
-            raise ValueError(
+            raise builtin_value_error(
                 "allocation proposal trust helper changed during input snapshot: "
                 + binding_name
             )
     for binding_name, authority in trust_types:
         if raw_dict_getitem(module_namespace, binding_name) is not authority:
-            raise ValueError(
+            raise builtin_value_error(
                 "allocation proposal trust type changed during input snapshot: "
                 + binding_name
             )
@@ -2825,10 +2854,6 @@ def allocate_evidence_bound_objective_targets(
         decision_time,
         name="allocation decision_time",
     ).isoformat().replace("+00:00", "Z")
-    if not isinstance(resolved_evidence, Mapping):
-        raise TypeError("resolved_evidence must be a mapping")
-
-    materialized = tuple(candidates)
     symbols = tuple(item.candidate.symbol for item in materialized)
     if len(symbols) != len(set(symbols)):
         raise ValueError("objective candidate symbols must be unique")

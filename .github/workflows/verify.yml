@@ -13,6 +13,45 @@ permissions:
   contents: read
 
 jobs:
+  apply-shared-store-zero-fix:
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 1710 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12.10'
+          cache: pip
+      - name: Apply production authority fix
+        run: python .github/scripts/shared_store_zero_patch.py
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Prove shared-store authority regression
+        run: python -m unittest mvp.tests.test_shared_store_zero_checkpoint_outbox -v
+      - name: Prove checkpoint regressions
+        run: python -m unittest discover -s mvp/tests -p 'test_*checkpoint*.py' -v
+      - name: Prove simulation-session regressions
+        run: python -m unittest discover -s mvp/tests -p 'test_*simulation_session*.py' -v
+      - name: Commit production fix and retire temporary workers
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout HEAD^ -- .github/workflows/verify.yml
+          git rm -f .github/scripts/shared_store_zero_patch.py
+          git rm -f .github/workflows/shared-store-zero-implementation-v4.yml
+          git rm -f .github/workflows/shared-store-zero-worker-correction.yml
+          git add -A
+          git commit -m 'Fix: scope ZERO checkpoint and outbox ownership'
+          git pull --rebase origin fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+          git push origin HEAD:fix/shared-store-zero-checkpoint-outbox-20261005-sol56
+
   verify:
     strategy:
       fail-fast: false

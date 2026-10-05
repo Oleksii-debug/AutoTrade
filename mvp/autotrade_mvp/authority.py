@@ -1574,6 +1574,7 @@ class AuthoritativeRiskSnapshot:
     provider_environment: str | None = None
     entity_policy_id: str | None = None
     instrument_family: str | None = None
+    price_semantics_digest: str | None = None
 
     def __post_init__(self) -> None:
         normalized_context = _canonical_risk_context(self.context)
@@ -1584,6 +1585,20 @@ class AuthoritativeRiskSnapshot:
         ).upper()
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("authoritative risk environment is unsupported")
+        price_semantics_digest = self.price_semantics_digest
+        if price_semantics_digest is not None:
+            if (
+                type(price_semantics_digest) is not str
+                or not price_semantics_digest.startswith("sha256:")
+                or len(price_semantics_digest) != 71
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in price_semantics_digest[7:]
+                )
+            ):
+                raise ValueError(
+                    "authoritative risk price_semantics_digest must be sha256:<64-lower-hex>"
+                )
         provider = _text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
@@ -1659,6 +1674,8 @@ class AuthoritativeRiskSnapshot:
             "RECONCILIATION",
             "CAPABILITY",
         }
+        if price_semantics_digest is not None:
+            required.add("INSTRUMENT")
         if normalized_context.fx_required:
             required.add("FX")
         if normalized_context.borrow_available is not None:
@@ -1742,6 +1759,11 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "valid_until", valid_until)
         object.__setattr__(
             self,
+            "price_semantics_digest",
+            price_semantics_digest,
+        )
+        object.__setattr__(
+            self,
             "evidence_refs",
             _CanonicalEvidenceRefs(tuple(sorted(refs.items()))),
         )
@@ -1759,6 +1781,8 @@ class AuthoritativeRiskSnapshot:
                 "entity_policy_id": self.entity_policy_id,
                 "instrument_family": self.instrument_family}
                if resolved_risk_policy is not None else {}),
+            **({"price_semantics_digest": self.price_semantics_digest}
+               if self.price_semantics_digest is not None else {}),
             "context_fingerprint": _risk_context_fingerprint(self.context),
             "context_state_version": self.context.state_version,
             "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),

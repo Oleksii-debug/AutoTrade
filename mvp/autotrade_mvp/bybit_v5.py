@@ -21,7 +21,11 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
-from .instruments import InstrumentRegistryError, InstrumentVersion
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    authenticated_price_semantics_digest,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -617,7 +621,10 @@ def prepare_order_submission(
     client_order_id: str,
     time_in_force: str,
     price: object | None = None,
-    price_instrument_version: InstrumentVersion | None = None,
+    price_semantics_registry: InstrumentRegistry | None = None,
+    price_semantics_artifact_store: object | None = None,
+    price_semantics_instrument_version: str | None = None,
+    entity_policy_id: str | None = None,
     reduce_only: bool = False,
     position_side: str | None = None,
     position_idx: int | None = None,
@@ -651,37 +658,66 @@ def prepare_order_submission(
     price_rule_instrument_id = None
     price_rule_instrument_version = None
     price_semantics_digest = None
-    if price_instrument_version is not None:
-        if type(price_instrument_version) is not InstrumentVersion:
+    price_authority_inputs = (
+        price_semantics_registry,
+        price_semantics_artifact_store,
+        price_semantics_instrument_version,
+        entity_policy_id,
+    )
+    if any(value is not None for value in price_authority_inputs):
+        if any(value is None for value in price_authority_inputs):
+            raise ProviderCoreError(
+                "Bybit authenticated price semantics authority must be complete"
+            )
+        if type(price_semantics_registry) is not InstrumentRegistry:
             raise TypeError(
-                "price_instrument_version must be exact InstrumentVersion"
+                "price_semantics_registry must be exact InstrumentRegistry"
             )
-        if price_instrument_version.provider_id.upper() != "BYBIT":
+        raw_instrument_version = _text(
+            price_semantics_instrument_version,
+            name="price_semantics_instrument_version",
+        )
+        parts = raw_instrument_version.split("@")
+        if len(parts) != 2:
             raise ProviderCoreError(
-                "price InstrumentVersion belongs to another provider"
+                "price_semantics_instrument_version must be canonical instrument_id@version"
             )
-        provider_symbol = _text(symbol, name="symbol")
-        if price_instrument_version.provider_symbol != provider_symbol:
+        try:
+            canonical_instrument_id = str(UUID(parts[0]))
+            canonical_version = int(parts[1])
+        except (ValueError, TypeError, AttributeError) as error:
             raise ProviderCoreError(
-                "price InstrumentVersion symbol differs from Bybit order"
-            )
+                "price_semantics_instrument_version must be canonical instrument_id@version"
+            ) from error
         if (
-            price_instrument_version.status != "ACTIVE"
-            or not price_instrument_version.contains(point)
+            canonical_version < 1
+            or parts[1] != str(canonical_version)
+            or raw_instrument_version
+            != f"{canonical_instrument_id}@{canonical_version}"
         ):
             raise ProviderCoreError(
-                "price InstrumentVersion is not effective and active at preparation time"
+                "price_semantics_instrument_version must be canonical instrument_id@version"
             )
-        if normalized_type == "LIMIT" and price is not None:
-            try:
-                price_instrument_version.validate_price(price)
-            except (InstrumentRegistryError, TypeError, ValueError) as error:
-                raise ProviderCoreError(
-                    "limit price violates canonical InstrumentVersion price semantics"
-                ) from error
-        price_rule_instrument_id = price_instrument_version.instrument_id
-        price_rule_instrument_version = price_instrument_version.version
-        price_semantics_digest = price_instrument_version.metadata_evidence_binding()
+        provider_symbol = _text(symbol, name="symbol")
+        try:
+            price_semantics_digest = authenticated_price_semantics_digest(
+                price_semantics_registry,
+                price_semantics_artifact_store,
+                instrument_version=raw_instrument_version,
+                evaluated_at=point,
+                provider_id="BYBIT",
+                provider_symbol=provider_symbol,
+                entity_policy_id=entity_policy_id,
+                side=side,
+                order_type=normalized_type,
+                price=price,
+            )
+        except (InstrumentRegistryError, TypeError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit order violates authenticated instrument price semantics"
+            ) from error
+        price_rule_instrument_id = canonical_instrument_id
+        price_rule_instrument_version = canonical_version
     if not capability.admits(
         at=point,
         order_type=normalized_type,
@@ -732,13 +768,9 @@ def _install_bybit_prepared_submission_authority(
 
     prepared_type = BybitPreparedSubmission
     capability_type = CapabilitySnapshot
-    instrument_type = InstrumentVersion
-    instrument_contains = instrument_type.contains
-    instrument_contains_code = instrument_contains.__code__
-    instrument_validate_price = instrument_type.validate_price
-    instrument_validate_price_code = instrument_validate_price.__code__
-    instrument_metadata_binding = instrument_type.metadata_evidence_binding
-    instrument_metadata_binding_code = instrument_metadata_binding.__code__
+    instrument_registry_type = InstrumentRegistry
+    price_semantics_authority = authenticated_price_semantics_digest
+    price_semantics_authority_code = price_semantics_authority.__code__
     prepared_ref = weakref_ref
     prepared_init = prepared_type.__init__
     prepared_init_code = prepared_init.__code__
@@ -811,7 +843,10 @@ def _install_bybit_prepared_submission_authority(
         client_order_id: str,
         time_in_force: str,
         price: object | None = None,
-        price_instrument_version: InstrumentVersion | None = None,
+        price_semantics_registry: InstrumentRegistry | None = None,
+        price_semantics_artifact_store: object | None = None,
+        price_semantics_instrument_version: str | None = None,
+        entity_policy_id: str | None = None,
         reduce_only: bool = False,
         position_side: str | None = None,
         position_idx: int | None = None,
@@ -833,24 +868,14 @@ def _install_bybit_prepared_submission_authority(
             authority_changed()
         if getattr(builder, "__code__", None) is not builder_code:
             authority_changed()
-        if InstrumentVersion is not instrument_type:
+        if InstrumentRegistry is not instrument_registry_type:
             authority_changed()
-        instrument_authorities = (
-            (instrument_type.contains, instrument_contains, instrument_contains_code),
-            (
-                instrument_type.validate_price,
-                instrument_validate_price,
-                instrument_validate_price_code,
-            ),
-            (
-                instrument_type.metadata_evidence_binding,
-                instrument_metadata_binding,
-                instrument_metadata_binding_code,
-            ),
-        )
-        for current, expected, code in instrument_authorities:
-            if current is not expected or getattr(expected, "__code__", None) is not code:
-                authority_changed()
+        if (
+            authenticated_price_semantics_digest is not price_semantics_authority
+            or getattr(price_semantics_authority, "__code__", None)
+            is not price_semantics_authority_code
+        ):
+            authority_changed()
         function_authorities = (
             (build_order_payload, canonical_build_order_payload, canonical_build_order_payload_code),
             (_text, canonical_text, canonical_text_code),
@@ -883,7 +908,10 @@ def _install_bybit_prepared_submission_authority(
             client_order_id=client_order_id,
             time_in_force=time_in_force,
             price=price,
-            price_instrument_version=price_instrument_version,
+            price_semantics_registry=price_semantics_registry,
+            price_semantics_artifact_store=price_semantics_artifact_store,
+            price_semantics_instrument_version=price_semantics_instrument_version,
+            entity_policy_id=entity_policy_id,
             reduce_only=reduce_only,
             position_side=position_side,
             position_idx=position_idx,

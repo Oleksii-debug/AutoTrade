@@ -112,6 +112,14 @@ def _explosive_material_from_payload(_value):
     raise AssertionError("rebound registry helper executed")
 
 
+def _explosive_price_semantics(*_args, **_kwargs):
+    raise AssertionError("rebound price-semantics helper executed")
+
+
+def _explosive_origin_receipt(_material):
+    raise AssertionError("rebound origin-receipt helper executed")
+
+
 def _explosive_submission_scope(*, admission_id, material):
     del admission_id, material
     raise AssertionError("rebound submission scope executed")
@@ -625,6 +633,28 @@ class AdmittedFinancialRequestAuthorityTests(unittest.TestCase):
                     issuer.identity(authority)
             finally:
                 durable_binding_module._material_from_payload = original_helper
+
+            original_price_semantics = durable_binding_module._require_admitted_price_semantics
+            durable_binding_module._require_admitted_price_semantics = _explosive_price_semantics
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "durable binding _require_admitted_price_semantics executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                durable_binding_module._require_admitted_price_semantics = original_price_semantics
+
+            original_origin_receipt = durable_binding_module._production_request_origin_receipt
+            durable_binding_module._production_request_origin_receipt = _explosive_origin_receipt
+            try:
+                with self.assertRaisesRegex(
+                    AdmittedFinancialRequestAuthorityError,
+                    "durable binding _production_request_origin_receipt executable authority changed",
+                ):
+                    issuer.identity(authority)
+            finally:
+                durable_binding_module._production_request_origin_receipt = original_origin_receipt
 
     def test_submission_scope_rebinding_fails_before_forged_scope_execution(self) -> None:
         with TemporaryDirectory() as directory:

@@ -939,6 +939,19 @@ class DispatchTests(unittest.TestCase):
                     )
             self.assertEqual(callbacks, [])
 
+            with patch.object(JournalStore, "SCHEMA_VERSION", 4):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "binding authority is unavailable",
+                ):
+                    load_submission_response_binding(
+                        store,
+                        environment="SIMULATION",
+                        account_id="acct",
+                        attempt_id="binding-loader-shadow-a1",
+                    )
+            self.assertEqual(callbacks, [])
+
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
         with TemporaryDirectory() as directory:

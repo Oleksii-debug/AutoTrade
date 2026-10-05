@@ -608,6 +608,7 @@ def _install_submission_response_binding_authority(loader):
     canonical_journal_require_text = JournalStore._require_text
     journal_require_text_code = canonical_journal_require_text.__code__
     canonical_journal_store_identity = JournalStore.store_identity
+    canonical_journal_schema_version = JournalStore.SCHEMA_VERSION
 
     states: dict[int, tuple[object, tuple[object, ...]]] = {}
     field_names = (
@@ -664,6 +665,7 @@ def _install_submission_response_binding_authority(loader):
             or JournalStore._require_text is not canonical_journal_require_text
             or canonical_journal_require_text.__code__ is not journal_require_text_code
             or JournalStore.store_identity is not canonical_journal_store_identity
+            or JournalStore.SCHEMA_VERSION != canonical_journal_schema_version
             or json is not canonical_json_module
             or re is not canonical_re_module
             or sha256 is not canonical_sha256

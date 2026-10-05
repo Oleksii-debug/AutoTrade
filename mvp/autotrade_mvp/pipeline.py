@@ -679,7 +679,18 @@ def verify_replay(state_dir: str | Path) -> bool:
         return False
     try:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        if type(checkpoint) is not dict:
+        checkpoint_fields = {
+            "schema_version",
+            "symbol",
+            "financial_configuration",
+            "financial_configuration_hash",
+            "initial_cash",
+            "postings",
+            "fills",
+            "evidence_ids",
+            "evidence_records",
+        }
+        if type(checkpoint) is not dict or set(checkpoint) != checkpoint_fields:
             return False
         if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
             return False
@@ -690,13 +701,62 @@ def verify_replay(state_dir: str | Path) -> bool:
         if configuration_hash != _stable_hash(configuration):
             return False
         symbol = configuration.get("symbol")
-        if type(symbol) is not str or not symbol:
+        if type(symbol) is not str or not symbol or symbol != symbol.strip():
+            return False
+        try:
+            initial_cash = _money(
+                _checkpoint_decimal(
+                    configuration.get("initial_cash"),
+                    name="financial configuration initial cash",
+                )
+            )
+            order_quantity = _money(
+                _checkpoint_decimal(
+                    configuration.get("order_quantity"),
+                    name="financial configuration order quantity",
+                )
+            )
+            max_abs_position = _money(
+                _checkpoint_decimal(
+                    configuration.get("max_abs_position"),
+                    name="financial configuration max position",
+                )
+            )
+            max_notional = _money(
+                _checkpoint_decimal(
+                    configuration.get("max_notional"),
+                    name="financial configuration max notional",
+                )
+            )
+            fee_rate = _checkpoint_decimal(
+                configuration.get("fee_rate"),
+                name="financial configuration fee rate",
+            )
+        except (ValueError, TypeError, ArithmeticError):
+            return False
+        if (
+            initial_cash <= 0
+            or order_quantity <= 0
+            or max_abs_position <= 0
+            or max_notional <= 0
+            or not fee_rate.is_finite()
+            or fee_rate < 0
+            or fee_rate >= 1
+        ):
+            return False
+        expected_configuration = _financial_configuration(
+            symbol=symbol,
+            initial_cash=initial_cash,
+            order_quantity=order_quantity,
+            max_abs_position=max_abs_position,
+            max_notional=max_notional,
+            fee_rate=fee_rate,
+        )
+        if configuration != expected_configuration:
             return False
         if checkpoint.get("symbol") != symbol:
             return False
         if checkpoint.get("initial_cash") != configuration.get("initial_cash"):
-            return False
-        if configuration.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
             return False
         records = checkpoint["evidence_records"]
         ids = checkpoint["evidence_ids"]
@@ -760,12 +820,48 @@ def verify_replay(state_dir: str | Path) -> bool:
             for key in ids
         ):
             return False
+        for row in rows:
+            if any(char not in "0123456789abcdef" for char in row["input_hash"]):
+                return False
+            if not row["reconciled"]:
+                return False
+            if (row["order_id"] is None) != (row["fill_id"] is None):
+                return False
+            for field in ("cash", "position", "equity"):
+                value = _checkpoint_decimal(row[field], name=f"evidence {field}")
+                if str(value) != row[field]:
+                    return False
+
+        checkpoint_ledger = EconomicLedger(initial_cash, list(checkpoint["postings"]))
+        restored_fills = _restore_simulated_fills(
+            checkpoint,
+            root,
+            symbol=symbol,
+            fee_rate=fee_rate,
+        )
+        checkpoint_provider = SimulatedProvider(restored_fills)
+        _reconcile(checkpoint_provider, checkpoint_ledger)
 
         store = JournalStore(journal_path)
+        counts = store.whole_store_state_counts()
+        expected_counts = {
+            "events": len(ids),
+            "outbox": len(ids),
+            "command_dedupe": 0,
+            "projection_checkpoints": 0,
+            "global_projection_checkpoints": 0,
+        }
+        if counts != expected_counts:
+            return False
+        if store.current_journal_sequence() != len(ids):
+            return False
         events = store.load_events("simulation_portfolio", symbol)
         if not events:
             return False
         journal_evidence_ids = set()
+        replayed_order_ids = set()
+        replayed_fill_ids = set()
+        replay_ledger = EconomicLedger(initial_cash)
         if len(events) != len(ids):
             return False
         for expected_aggregate_version, event in enumerate(events, start=1):
@@ -773,11 +869,16 @@ def verify_replay(state_dir: str | Path) -> bool:
                 return False
             if (
                 event.get("aggregate_version") != expected_aggregate_version
+                or event.get("journal_sequence") != expected_aggregate_version
                 or event.get("event_type") != "SimulationEpisodeRecorded"
                 or event.get("aggregate_type") != "simulation_portfolio"
                 or event.get("aggregate_id") != symbol
+                or event.get("host_id") != "local-mvp"
+                or event.get("owner_epoch") != "1"
                 or event.get("environment") != "SIMULATION"
                 or event.get("schema_version") != "1.0.0"
+                or event.get("causation_id") is not None
+                or event.get("evidence_refs") != []
             ):
                 return False
             payload = event.get("payload")
@@ -806,6 +907,25 @@ def verify_replay(state_dir: str | Path) -> bool:
             }
             if payload != expected_payload:
                 return False
+            order_id = record["order_id"]
+            fill_id = record["fill_id"]
+            if order_id is not None:
+                fill = restored_fills.get(order_id)
+                if (
+                    fill is None
+                    or fill.fill_id != fill_id
+                    or order_id in replayed_order_ids
+                    or fill_id in replayed_fill_ids
+                    or not replay_ledger.apply_fill(fill)
+                ):
+                    return False
+                replayed_order_ids.add(order_id)
+                replayed_fill_ids.add(fill_id)
+            if (
+                record["cash"] != str(replay_ledger.cash)
+                or record["position"] != str(replay_ledger.position)
+            ):
+                return False
             if event.get("event_id") != _event_uuid("simulation-episode", evidence_id):
                 return False
             expected_timestamp = _utc_z(record["recorded_at"])
@@ -818,6 +938,15 @@ def verify_replay(state_dir: str | Path) -> bool:
             ):
                 return False
         if journal_evidence_ids != set(ids):
+            return False
+        if replayed_order_ids != set(restored_fills):
+            return False
+        if replay_ledger.postings != checkpoint_ledger.postings:
+            return False
+        if (
+            replay_ledger.cash != checkpoint_ledger.cash
+            or replay_ledger.position != checkpoint_ledger.position
+        ):
             return False
         return True
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):

@@ -8,6 +8,13 @@ from mvp.autotrade_mvp.persistence import JournalStore
 
 
 NOW_TEXT = "2026-09-25T10:00:00+00:00"
+PREPOISONED_GET_EVENT_CALLS = 0
+
+
+def _poisoned_get_event(*_args, **_kwargs):
+    global PREPOISONED_GET_EVENT_CALLS
+    PREPOISONED_GET_EVENT_CALLS += 1
+    raise AssertionError("pre-poisoned JournalStore.get_event code executed")
 
 
 class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
@@ -48,6 +55,40 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 self.assertEqual(budget.snapshot().reserved, 0)
             finally:
                 JournalStore.__bases__ = (canonical_base,)
+
+    def test_prepoisoned_journal_method_code_is_restored_before_dispatch(self):
+        global PREPOISONED_GET_EVENT_CALLS
+        PREPOISONED_GET_EVENT_CALLS = 0
+        canonical_get_event = JournalStore.get_event
+        original_code = canonical_get_event.__code__
+        original_defaults = canonical_get_event.__defaults__
+        original_kwdefaults = canonical_get_event.__kwdefaults__
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="trusted-topology-method-code-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            try:
+                canonical_get_event.__code__ = _poisoned_get_event.__code__
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget journal class authority is invalid:.*"
+                    r"journal\.function\..*get_event\.__code__",
+                ):
+                    budget.reserve("trusted-topology-method-code-request", "0.2")
+            finally:
+                canonical_get_event.__code__ = original_code
+                canonical_get_event.__defaults__ = original_defaults
+                canonical_get_event.__kwdefaults__ = original_kwdefaults
+
+            self.assertEqual(PREPOISONED_GET_EVENT_CALLS, 0)
+            self.assertIs(canonical_get_event.__code__, original_code)
+            self.assertEqual(budget.snapshot().reserved, 0)
 
     def test_prepoisoned_journal_method_shadow_is_removed_before_dispatch(self):
         canonical_get_event = JournalStore.get_event

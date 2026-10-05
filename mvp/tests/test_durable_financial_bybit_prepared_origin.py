@@ -1,22 +1,39 @@
 from dataclasses import replace
 import inspect
+from pathlib import Path
 import unittest
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp import bybit_v5 as bybit_module
 from mvp.autotrade_mvp import durable_financial_request_binding as binding_module
 from mvp.autotrade_mvp.bybit_v5 import (
+    BybitPreparedSubmission,
     guarded_order_projection,
     prepare_order_submission,
+    require_canonical_bybit_prepared_submission,
 )
 from mvp.autotrade_mvp.durable_financial_request_binding import (
     DurableFinancialRequestBindingError,
     DurableFinancialRequestBindingRegistry,
+    _BINDING_PAYLOAD_BASE_FIELDS,
+    _BINDING_PAYLOAD_PRODUCTION_FIELDS,
     _binding_payload,
     _production_request_origin_receipt,
+    _require_admitted_price_semantics,
     _require_bybit_prepared_request_origin,
 )
-from mvp.autotrade_mvp.persistence import payload_digest
+from mvp.autotrade_mvp.instruments import InstrumentRegistry
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
+from mvp.tests.test_instruments import (
+    publish_metadata_evidence,
+    spot,
+    when,
+)
 from mvp.tests.test_financial_send_authority import (
     D8,
     binding as financial_binding,
@@ -26,35 +43,72 @@ from mvp.tests.test_financial_send_authority import (
 BOUND_AT = "2026-10-05T08:00:00Z"
 
 
+def _bybit_price_registry(material, directory):
+    artifact_store = ArtifactStore(Path(directory) / "artifacts")
+    versions = []
+    for version_number in range(1, material.instrument_version + 1):
+        candidate = replace(
+            spot(
+                instrument_id=material.instrument_id,
+                version=version_number,
+                symbol="BTCUSDT",
+                effective_from=when(version_number),
+            ),
+            provider_id="BYBIT",
+            venue_id="BYBIT",
+        )
+        versions.append(candidate)
+    evidence = publish_metadata_evidence(
+        artifact_store,
+        when(7),
+        version=versions[-1],
+    )
+    versions[-1] = replace(
+        versions[-1],
+        metadata_evidence=(evidence,),
+    )
+    return InstrumentRegistry(versions=versions), artifact_store
+
+
 def canonical_case():
+    material = financial_binding()
     capability = submission_write_capability(
         account_id="account-1",
         environment="PAPER",
         instrument_version="BTCUSDT@v1",
         provider_environment="TESTNET",
     )
-    prepared = prepare_order_submission(
-        capability=capability,
-        at=READ_AT,
-        provider_environment="TESTNET",
-        product_family="LINEAR_DERIVATIVES",
-        symbol="BTCUSDT",
-        side="BUY",
-        order_type="LIMIT",
-        quantity="2",
-        client_order_id="client-order-1",
-        time_in_force="GTC",
-        price="30000",
-        reduce_only=False,
-    )
+    with TemporaryDirectory() as directory:
+        registry, artifact_store = _bybit_price_registry(material, directory)
+        prepared = prepare_order_submission(
+            capability=capability,
+            at=READ_AT,
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="2",
+            client_order_id="client-order-1",
+            time_in_force="GTC",
+            price="30000",
+            price_semantics_registry=registry,
+            price_semantics_artifact_store=artifact_store,
+            price_semantics_instrument_version=(
+                f"{material.instrument_id}@{material.instrument_version}"
+            ),
+            entity_policy_id=material.entity_policy_id,
+            reduce_only=False,
+        )
     request = dict(guarded_order_projection(prepared))
     material = replace(
-        financial_binding(),
+        material,
         capability_snapshot_id=capability.snapshot_id,
         query_sha256=payload_digest({}),
         body_sha256=prepared.body_sha256,
         request_sha256=payload_digest(request),
         trigger_protection_digest=payload_digest({}),
+        price_semantics_digest=prepared.price_semantics_digest,
     )
     return material, prepared
 
@@ -64,8 +118,227 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         material, prepared = canonical_case()
         receipt = _require_bybit_prepared_request_origin(material, prepared)
         self.assertEqual(receipt, _production_request_origin_receipt(material))
-        self.assertEqual(receipt["schema_version"], "bybit-prepared-origin.v1")
+        self.assertEqual(receipt["schema_version"], "bybit-prepared-origin.v2")
+        self.assertEqual(receipt["instrument_id"], material.instrument_id)
+        self.assertEqual(receipt["instrument_version"], material.instrument_version)
+        self.assertEqual(
+            receipt["price_semantics_digest"],
+            material.price_semantics_digest,
+        )
         self.assertEqual(receipt["request_sha256"], material.request_sha256)
+
+    def test_prepared_origin_requires_authenticated_price_semantics(self):
+        material = financial_binding()
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        prepared = prepare_order_submission(
+            capability=capability,
+            at=READ_AT,
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="2",
+            client_order_id="client-order-1",
+            time_in_force="GTC",
+            price="30000",
+            reduce_only=False,
+        )
+        material = replace(
+            material,
+            capability_snapshot_id=capability.snapshot_id,
+            body_sha256=prepared.body_sha256,
+            request_sha256=payload_digest(dict(guarded_order_projection(prepared))),
+            query_sha256=payload_digest({}),
+            trigger_protection_digest=payload_digest({}),
+        )
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks authenticated price semantics authority",
+        ):
+            _require_bybit_prepared_request_origin(material, prepared)
+
+    def test_prepared_authenticated_digest_drift_is_rejected(self):
+        material, prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price semantics differ",
+        ):
+            _require_bybit_prepared_request_origin(
+                replace(material, price_semantics_digest=D8),
+                prepared,
+            )
+
+    def test_prepared_instrument_identity_drift_is_rejected(self):
+        material, prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price-rule instrument differs",
+        ):
+            _require_bybit_prepared_request_origin(
+                replace(material, instrument_version=material.instrument_version - 1),
+                prepared,
+            )
+
+    def test_bybit_wire_symbol_must_match_authenticated_instrument(self):
+        material = financial_binding()
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = _bybit_price_registry(material, directory)
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "violates authenticated instrument price semantics",
+            ):
+                prepare_order_submission(
+                    capability=capability,
+                    at=READ_AT,
+                    provider_environment="TESTNET",
+                    product_family="LINEAR_DERIVATIVES",
+                    symbol="ETHUSDT",
+                    side="BUY",
+                    order_type="LIMIT",
+                    quantity="2",
+                    client_order_id="client-order-1",
+                    time_in_force="GTC",
+                    price="30000",
+                    price_semantics_registry=registry,
+                    price_semantics_artifact_store=artifact_store,
+                    price_semantics_instrument_version=(
+                        f"{material.instrument_id}@{material.instrument_version}"
+                    ),
+                    entity_policy_id=material.entity_policy_id,
+                    reduce_only=False,
+                )
+
+    def test_bybit_off_grid_limit_fails_before_prepared_authority(self):
+        material = financial_binding()
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = _bybit_price_registry(material, directory)
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "violates authenticated instrument price semantics",
+            ):
+                prepare_order_submission(
+                    capability=capability,
+                    at=READ_AT,
+                    provider_environment="TESTNET",
+                    product_family="LINEAR_DERIVATIVES",
+                    symbol="BTCUSDT",
+                    side="BUY",
+                    order_type="LIMIT",
+                    quantity="2",
+                    client_order_id="client-order-1",
+                    time_in_force="GTC",
+                    price="30000.005",
+                    price_semantics_registry=registry,
+                    price_semantics_artifact_store=artifact_store,
+                    price_semantics_instrument_version=(
+                        f"{material.instrument_id}@{material.instrument_version}"
+                    ),
+                    entity_policy_id=material.entity_policy_id,
+                    reduce_only=False,
+                )
+
+    def test_paper_live_price_semantics_must_be_admitted_not_caller_carried(self):
+        material, _prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "requires authoritative price-semantics identity",
+        ):
+            _require_admitted_price_semantics({}, material)
+
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price semantics differ from admitted authority",
+        ):
+            _require_admitted_price_semantics(
+                {"price_semantics_digest": D8},
+                material,
+            )
+
+        self.assertEqual(
+            _require_admitted_price_semantics(
+                {"price_semantics_digest": material.price_semantics_digest},
+                material,
+            ),
+            material.price_semantics_digest,
+        )
+
+    def test_simulation_price_semantics_remains_diagnostic_only(self):
+        material = replace(
+            financial_binding(),
+            runtime_environment="SIMULATION",
+            provider_environment="SIMULATION",
+        )
+        self.assertEqual(
+            _require_admitted_price_semantics({}, material),
+            material.price_semantics_digest,
+        )
+
+    def test_resolve_pins_durable_admission_validator_before_execution(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._load_payload = lambda _admission_id: payload
+
+        def forged_validator(*_args, **_kwargs):
+            raise AssertionError("forged validator executed")
+
+        with patch.object(
+            binding_module,
+            "_validate_material_against_admission",
+            forged_validator,
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "admitted financial validator executable changed",
+            ):
+                registry.resolve("admission-1")
+
+    def test_bind_pins_durable_admission_validator_before_execution(self):
+        material, prepared = canonical_case()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            registry = DurableFinancialRequestBindingRegistry(store)
+
+            def forged_validator(*_args, **_kwargs):
+                raise AssertionError("forged validator executed")
+
+            with patch.object(
+                binding_module,
+                "_validate_material_against_admission",
+                forged_validator,
+            ):
+                with self.assertRaisesRegex(
+                    DurableFinancialRequestBindingError,
+                    "admitted financial validator executable changed",
+                ):
+                    registry.bind(
+                        admission_id="admission-1",
+                        material=material,
+                        bound_at=BOUND_AT,
+                        prepared_request=prepared,
+                    )
 
     def test_paper_live_bind_cannot_bypass_prepared_origin(self):
         registry = object.__new__(DurableFinancialRequestBindingRegistry)
@@ -104,6 +377,10 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             store_identity_digest=D8,
         )
         self.assertNotIn("provider_request_origin", payload)
+        self.assertEqual(
+            frozenset(payload),
+            _BINDING_PAYLOAD_BASE_FIELDS,
+        )
 
     def test_production_payload_requires_durable_origin_receipt(self):
         material, _prepared = canonical_case()
@@ -116,6 +393,10 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             payload["provider_request_origin"],
             _production_request_origin_receipt(material),
         )
+        self.assertEqual(
+            frozenset(payload),
+            _BINDING_PAYLOAD_PRODUCTION_FIELDS,
+        )
         legacy = dict(payload)
         legacy.pop("provider_request_origin")
         self.assertNotEqual(
@@ -126,6 +407,67 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 store_identity_digest=D8,
             ),
         )
+
+    def test_production_origin_receipt_replays_through_durable_payload_reader(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        event = {
+            "event_id": "admitted-financial-request:admission-1",
+            "event_type": binding_module._EVENT_TYPE,
+            "aggregate_type": binding_module._AGGREGATE_TYPE,
+            "aggregate_id": "admission-1",
+            "aggregate_version": 1,
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+        }
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._store_identity_digest = D8
+        registry._require_store = lambda: object()
+        with patch.object(
+            binding_module,
+            "_CANONICAL_LOAD_EVENTS",
+            return_value=[event],
+        ):
+            self.assertEqual(
+                registry._load_payload("admission-1"),
+                payload,
+            )
+
+    def test_legacy_production_payload_without_origin_receipt_fails_reader(self):
+        material, _prepared = canonical_case()
+        payload = _binding_payload(
+            admission_id="admission-1",
+            material=material,
+            store_identity_digest=D8,
+        )
+        legacy = dict(payload)
+        legacy.pop("provider_request_origin")
+        event = {
+            "event_id": "admitted-financial-request:admission-1",
+            "event_type": binding_module._EVENT_TYPE,
+            "aggregate_type": binding_module._AGGREGATE_TYPE,
+            "aggregate_id": "admission-1",
+            "aggregate_version": 1,
+            "payload": legacy,
+            "payload_hash": payload_digest(legacy),
+        }
+        registry = object.__new__(DurableFinancialRequestBindingRegistry)
+        registry._store_identity_digest = D8
+        registry._require_store = lambda: object()
+        with patch.object(
+            binding_module,
+            "_CANONICAL_LOAD_EVENTS",
+            return_value=[event],
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "payload is invalid",
+            ):
+                registry._load_payload("admission-1")
 
     def test_factory_product_must_be_exact_prepared_type(self):
         material, _prepared = canonical_case()
@@ -199,6 +541,163 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 drifted = replace(material, **{field: value})
                 with self.assertRaises(DurableFinancialRequestBindingError):
                     _require_bybit_prepared_request_origin(drifted, prepared)
+
+
+    def test_preparation_class_rebinding_fails_before_forged_constructor(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        calls = []
+
+        class ForgedPreparedSubmission:
+            def __init__(self, *_args, **_kwargs):
+                calls.append("forged-constructor")
+
+        with patch.object(
+            bybit_module,
+            "BybitPreparedSubmission",
+            ForgedPreparedSubmission,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared submission authority changed",
+            ):
+                prepare_order_submission(
+                    capability=capability,
+                    at=READ_AT,
+                    provider_environment="TESTNET",
+                    product_family="LINEAR_DERIVATIVES",
+                    symbol="BTCUSDT",
+                    side="BUY",
+                    order_type="LIMIT",
+                    quantity="2",
+                    client_order_id="client-order-1",
+                    time_in_force="GTC",
+                    price="30000",
+                    reduce_only=False,
+                )
+        self.assertEqual(calls, [])
+
+    def test_preparation_class_methods_are_pinned_before_constructor(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+
+        for attribute in ("__init__", "__post_init__"):
+            with self.subTest(attribute=attribute):
+                calls = []
+
+                def forged(*_args, **_kwargs):
+                    calls.append(attribute)
+
+                with patch.object(BybitPreparedSubmission, attribute, forged):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="TESTNET",
+                            product_family="LINEAR_DERIVATIVES",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="LIMIT",
+                            quantity="2",
+                            client_order_id="client-order-1",
+                            time_in_force="GTC",
+                            price="30000",
+                            reduce_only=False,
+                        )
+                self.assertEqual(calls, [])
+
+    def test_exact_type_clone_without_canonical_issuance_is_rejected(self):
+        material, prepared = canonical_case()
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "price_rule_instrument_id",
+            "price_rule_instrument_version",
+            "price_semantics_digest",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(prepared, name),
+            )
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks canonical issuance provenance",
+        ):
+            _require_bybit_prepared_request_origin(material, forged)
+        with self.assertRaisesRegex(
+            Exception,
+            "prepared submission authority changed",
+        ):
+            guarded_order_projection(forged)
+
+    def test_post_issue_prepared_object_mutation_is_rejected(self):
+        material, prepared = canonical_case()
+        object.__setattr__(prepared, "endpoint", "/v5/order/amend")
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks canonical issuance provenance",
+        ):
+            _require_bybit_prepared_request_origin(material, prepared)
+
+    def test_provenance_verifier_rebinding_fails_before_forged_verifier_executes(self):
+        material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return _prepared
+
+        with patch.object(
+            binding_module,
+            "require_canonical_bybit_prepared_submission",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                DurableFinancialRequestBindingError,
+                "provenance authority changed",
+            ):
+                _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(calls, [])
+
+    def test_shared_projection_pins_provenance_verifier(self):
+        _material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return _prepared
+
+        with patch.object(
+            bybit_module,
+            "require_canonical_bybit_prepared_submission",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "verifier authority changed",
+            ):
+                guarded_order_projection(prepared)
+        self.assertEqual(calls, [])
 
     def test_projection_rebinding_fails_before_forged_projection_executes(self):
         material, prepared = canonical_case()

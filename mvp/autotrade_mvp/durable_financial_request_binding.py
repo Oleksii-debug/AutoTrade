@@ -24,13 +24,18 @@ from hashlib import sha256
 from typing import Mapping
 
 from .authority import AdmissionRecord, AuthorityConflict, AuthorityService
-from .bybit_v5 import BybitPreparedSubmission, guarded_order_projection
+from .bybit_v5 import (
+    BybitPreparedSubmission,
+    guarded_order_projection,
+    require_canonical_bybit_prepared_submission,
+)
 from .durable_reservations import DurableReservationBook
 from .financial_request_binding import (
     FinancialRequestBindingError,
     FinancialRequestBindingMaterial,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError
 from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .risk_policy_authority import journal_store_identity_digest
 
@@ -54,7 +59,21 @@ _MATERIAL_TYPE = FinancialRequestBindingMaterial
 _BYBIT_PREPARED_TYPE = BybitPreparedSubmission
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION = guarded_order_projection
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code__
-_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
+_CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
+_BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v2"
+_BINDING_PAYLOAD_BASE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "admission_id",
+        "binding_id",
+        "journal_store_identity_digest",
+        "material",
+    }
+)
+_BINDING_PAYLOAD_PRODUCTION_FIELDS = (
+    _BINDING_PAYLOAD_BASE_FIELDS | {"provider_request_origin"}
+)
 _BYBIT_TRIGGER_PROTECTION_KEYS = (
     "triggerDirection",
     "triggerPrice",
@@ -138,6 +157,10 @@ def _material_from_payload(value: object) -> FinancialRequestBindingMaterial:
     return material
 
 
+_CANONICAL_MATERIAL_FROM_PAYLOAD = _material_from_payload
+_CANONICAL_MATERIAL_FROM_PAYLOAD_CODE = _material_from_payload.__code__
+
+
 def _production_request_origin_receipt(
     material: FinancialRequestBindingMaterial,
 ) -> dict[str, object] | None:
@@ -164,6 +187,9 @@ def _production_request_origin_receipt(
         "body_sha256": material.body_sha256,
         "query_sha256": material.query_sha256,
         "trigger_protection_digest": material.trigger_protection_digest,
+        "instrument_id": material.instrument_id,
+        "instrument_version": material.instrument_version,
+        "price_semantics_digest": material.price_semantics_digest,
     }
 
 
@@ -182,6 +208,45 @@ def _require_bybit_prepared_request_origin(
     if BybitPreparedSubmission is not _BYBIT_PREPARED_TYPE:
         raise DurableFinancialRequestBindingError(
             "Bybit prepared-request type authority changed"
+        )
+    if (
+        require_canonical_bybit_prepared_submission
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED
+        or getattr(
+            _CANONICAL_BYBIT_REQUIRE_PREPARED,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared-request provenance authority changed"
+        )
+    try:
+        _CANONICAL_BYBIT_REQUIRE_PREPARED(prepared_request)
+    except (ProviderCoreError, TypeError, ValueError) as error:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared request lacks canonical issuance provenance"
+        ) from error
+    price_authority = (
+        prepared_request.price_rule_instrument_id,
+        prepared_request.price_rule_instrument_version,
+        prepared_request.price_semantics_digest,
+    )
+    if any(value is None for value in price_authority):
+        raise DurableFinancialRequestBindingError(
+            "Bybit PAPER/LIVE prepared request lacks authenticated price semantics authority"
+        )
+    if (
+        prepared_request.price_rule_instrument_id != material.instrument_id
+        or prepared_request.price_rule_instrument_version != material.instrument_version
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price-rule instrument differs from financial binding"
+        )
+    if prepared_request.price_semantics_digest != material.price_semantics_digest:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared price semantics differ from financial binding"
         )
     if (
         guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
@@ -299,12 +364,18 @@ def _require_bybit_prepared_request_origin(
                 f"Bybit prepared {name} differs from financial binding"
             )
 
-    receipt = _production_request_origin_receipt(material)
+    receipt = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
     if receipt is None:
         raise DurableFinancialRequestBindingError(
             "Bybit prepared request origin receipt is unavailable"
         )
     return receipt
+
+
+_CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT = _production_request_origin_receipt
+_CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT_CODE = (
+    _production_request_origin_receipt.__code__
+)
 
 
 def _require_prepared_request_origin(
@@ -343,10 +414,14 @@ def _binding_payload(
         "journal_store_identity_digest": store_identity_digest,
         "material": material.payload(),
     }
-    origin = _production_request_origin_receipt(material)
+    origin = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
     if origin is not None:
         payload["provider_request_origin"] = origin
     return payload
+
+
+_CANONICAL_BINDING_PAYLOAD = _binding_payload
+_CANONICAL_BINDING_PAYLOAD_CODE = _binding_payload.__code__
 
 
 def _risk_intent_axis(
@@ -551,6 +626,44 @@ def _simulation_qualification_identity(
     return "provider-qualification:sha256:" + digest
 
 
+def _require_admitted_price_semantics(
+    snapshot: Mapping[str, object],
+    material: FinancialRequestBindingMaterial,
+) -> str:
+    """Require production price semantics to come from admitted durable authority.
+
+    PAPER/LIVE material may carry the digest only as an equality target.  The
+    authoritative value must already exist in the accepted risk snapshot,
+    where the product-owned risk/instrument composition can cross-bind the
+    canonical InstrumentVersion/provider price-rule owner.  This module does
+    not mint a fallback digest from provider wire fields.
+
+    SIMULATION keeps the material-carried value as diagnostic identity only.
+    """
+
+    if type(material) is not _MATERIAL_TYPE:
+        raise TypeError("material must be exact FinancialRequestBindingMaterial")
+    if material.runtime_environment not in {"PAPER", "LIVE"}:
+        return material.price_semantics_digest
+
+    admitted = snapshot.get("price_semantics_digest")
+    if type(admitted) is not str:
+        raise DurableFinancialRequestBindingError(
+            "PAPER/LIVE request binding requires authoritative price-semantics identity"
+        )
+    if admitted != material.price_semantics_digest:
+        raise DurableFinancialRequestBindingError(
+            "financial request price semantics differ from admitted authority"
+        )
+    return admitted
+
+
+_CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS = _require_admitted_price_semantics
+_CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS_CODE = (
+    _require_admitted_price_semantics.__code__
+)
+
+
 def _validate_material_against_admission(
     store: JournalStore,
     authority: AuthorityService,
@@ -609,6 +722,20 @@ def _validate_material_against_admission(
         raise DurableFinancialRequestBindingError(
             "admitted authoritative risk snapshot is unavailable"
         )
+    if (
+        _require_admitted_price_semantics
+        is not _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS
+        or getattr(
+            _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "price-semantics authority executable changed"
+        )
+    _CANONICAL_REQUIRE_ADMITTED_PRICE_SEMANTICS(snapshot, material)
     provider_id = snapshot.get("provider_id")
     provider_environment = snapshot.get("provider_environment")
     entity_policy_id = snapshot.get("entity_policy_id")
@@ -769,6 +896,12 @@ def _validate_material_against_admission(
     return record
 
 
+_CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION = _validate_material_against_admission
+_CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE = (
+    _validate_material_against_admission.__code__
+)
+
+
 class DurableFinancialRequestBindingRegistry:
     """One immutable prepared-request content identity per ADMITTED admission."""
 
@@ -841,19 +974,23 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        expected_fields = {
-            "schema_version",
-            "admission_id",
-            "binding_id",
-            "journal_store_identity_digest",
-            "material",
-        }
+        material = _CANONICAL_MATERIAL_FROM_PAYLOAD(payload.get("material"))
+        expected_origin = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
+        expected_fields = (
+            _BINDING_PAYLOAD_PRODUCTION_FIELDS
+            if expected_origin is not None
+            else _BINDING_PAYLOAD_BASE_FIELDS
+        )
         if (
-            set(payload) != expected_fields
+            frozenset(payload) != expected_fields
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")
             != self._store_identity_digest
+            or (
+                expected_origin is not None
+                and payload.get("provider_request_origin") != expected_origin
+            )
         ):
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload is invalid"
@@ -863,19 +1000,32 @@ class DurableFinancialRequestBindingRegistry:
     def resolve(self, admission_id: str) -> FinancialRequestBindingMaterial:
         aid = _text(admission_id, name="admission_id")
         payload = self._load_payload(aid)
-        material = _material_from_payload(payload.get("material"))
+        material = _CANONICAL_MATERIAL_FROM_PAYLOAD(payload.get("material"))
         if payload.get("binding_id") != material.binding_id:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding id does not match material"
             )
-        _validate_material_against_admission(
+        current_validator = _validate_material_against_admission
+        if (
+            current_validator is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION
+            or getattr(
+                _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE
+        ):
+            raise DurableFinancialRequestBindingError(
+                "admitted financial validator executable changed"
+            )
+        _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION(
             self._require_store(),
             self._authority(),
             admission_id=aid,
             material=material,
             current_journal_sequence=self._current_sequence(),
         )
-        if _binding_payload(
+        if _CANONICAL_BINDING_PAYLOAD(
             admission_id=aid,
             material=material,
             store_identity_digest=self._store_identity_digest,
@@ -915,14 +1065,27 @@ class DurableFinancialRequestBindingRegistry:
             prepared_request,
         )
         store = self._require_store()
-        record = _validate_material_against_admission(
+        current_validator = _validate_material_against_admission
+        if (
+            current_validator is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION
+            or getattr(
+                _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION_CODE
+        ):
+            raise DurableFinancialRequestBindingError(
+                "admitted financial validator executable changed"
+            )
+        record = _CANONICAL_VALIDATE_MATERIAL_AGAINST_ADMISSION(
             store,
             self._authority(),
             admission_id=aid,
             material=material,
             current_journal_sequence=self._current_sequence(),
         )
-        payload = _binding_payload(
+        payload = _CANONICAL_BINDING_PAYLOAD(
             admission_id=aid,
             material=material,
             store_identity_digest=self._store_identity_digest,

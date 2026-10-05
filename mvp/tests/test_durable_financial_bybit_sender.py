@@ -1,7 +1,7 @@
 import unittest
 
 from mvp.autotrade_mvp import durable_financial_bybit_sender as module
-from mvp.autotrade_mvp.bybit_v5 import BybitPreparedSubmission
+from mvp.autotrade_mvp.bybit_v5 import BybitPreparedSubmission, prepare_order_submission
 from mvp.autotrade_mvp.durable_financial_bybit_sender import (
     DurableFinancialBybitSenderError,
     DurableFinanciallyBoundBybitOrderSender,
@@ -17,6 +17,8 @@ from mvp.autotrade_mvp.financial_send_authority import (
     FinanciallyBoundBybitOrderSender,
 )
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
+from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 
 
 _FORGED_CALLS = []
@@ -40,32 +42,26 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
 
     @staticmethod
     def _prepared_shell():
-        prepared = object.__new__(BybitPreparedSubmission)
-        values = {
-            "endpoint": "/v5/order/create",
-            "body": {
-                "category": "linear",
-                "symbol": "BTCUSDT",
-                "side": "Buy",
-                "orderType": "Limit",
-                "qty": "2",
-                "timeInForce": "GTC",
-                "orderLinkId": "client-order-1",
-                "price": "30000",
-                "reduceOnly": False,
-                "positionIdx": 0,
-            },
-            "account_id": "account-1",
-            "environment": "PAPER",
-            "provider_environment": "TESTNET",
-            "capability_snapshot_id": "capability-1",
-            "entity_id": "entity-1",
-            "instrument_version": "7",
-            "body_sha256": "sha256:" + "1" * 64,
-        }
-        for name, value in values.items():
-            object.__setattr__(prepared, name, value)
-        return prepared
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        return prepare_order_submission(
+            capability=capability,
+            at=READ_AT,
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="2",
+            client_order_id="client-order-1",
+            time_in_force="GTC",
+            price="30000",
+            reduce_only=False,
+        )
 
     @staticmethod
     def _dispatch_shell():
@@ -208,6 +204,40 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
                 intent_id="intent-1",
                 intent_hash="intent-hash-1",
                 prepared_request=object(),
+                now="2026-10-05T08:00:00Z",
+            )
+
+    def test_product_dispatch_rejects_exact_type_unissued_prepared_object(self):
+        product = self._dispatch_shell()
+        issued = self._prepared_shell()
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(issued, name),
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            product.dispatch(
+                admission_id="admission-1",
+                action="TRADE",
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                prepared_request=forged,
                 now="2026-10-05T08:00:00Z",
             )
 

@@ -178,6 +178,9 @@ def _install_origin_set_authority():
             SerializedProviderAccountAcquisition,
             JournalStore,
             object,
+            object,
+            object,
+            tuple[str, ...],
         ],
     ] = {}
 
@@ -231,6 +234,9 @@ def _install_origin_set_authority():
                 "origin-set currentness authorities must share one exact JournalStore"
             )
         store_identity = store.store_identity
+        evidence_store = qualification_registry.evidence_store
+        evidence_root = qualification_registry.evidence_root
+        registry_state_names = tuple(sorted(vars(qualification_registry)))
         prune()
         object_id = id(value)
         state = snapshot(value)
@@ -251,6 +257,9 @@ def _install_origin_set_authority():
             account_acquisition,
             store,
             store_identity,
+            evidence_store,
+            evidence_root,
+            registry_state_names,
         )
 
     def require(
@@ -283,14 +292,28 @@ def _install_origin_set_authority():
         account_acquisition = state[4]
         store = state[5]
         store_identity = state[6]
+        evidence_store = state[7]
+        evidence_root = state[8]
+        registry_state_names = state[9]
         if (
-            type(store) is not JournalStore
+            type(qualification_registry) is not DurableProviderQualificationRegistry
+            or type(account_acquisition_authority)
+            is not DurableProviderAccountAcquisitionAuthority
+            or type(store) is not JournalStore
             or qualification_registry.store is not store
             or account_acquisition_authority.store is not store
             or store.store_identity != store_identity
         ):
             raise ProviderAccountOriginSetError(
                 "origin-set currentness JournalStore generation changed"
+            )
+        if (
+            tuple(sorted(vars(qualification_registry))) != registry_state_names
+            or qualification_registry.evidence_store is not evidence_store
+            or qualification_registry.evidence_root is not evidence_root
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin-set provider qualification registry authority changed"
             )
 
         try:

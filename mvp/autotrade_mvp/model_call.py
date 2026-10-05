@@ -620,6 +620,7 @@ class DurableModelCallOrchestrator:
         object | None,
         type | None,
         dict[str, object] | None,
+        tuple[tuple[type, str, Mapping[str, object]], ...],
     ]:
         """Freeze exact class and instance authority around caller callbacks."""
         orchestrator_class = object.__getattribute__(self, "__class__")
@@ -668,6 +669,37 @@ class DurableModelCallOrchestrator:
             if identity is not None
             else None
         )
+
+        # Freeze executable class dictionaries as well as each object's
+        # __class__ pointer. A callback can otherwise leave every instance
+        # dictionary unchanged while rebinding budget, journal, or restore
+        # methods that execute before the next durable effect.
+        authority_classes: list[type] = []
+        seen_class_ids: set[int] = set()
+        for selected_class in (
+            orchestrator_class,
+            budget_class,
+            journal_class,
+            identity_class,
+        ):
+            if selected_class is None:
+                continue
+            for candidate_class in selected_class.__mro__:
+                if candidate_class is object:
+                    continue
+                candidate_id = id(candidate_class)
+                if candidate_id in seen_class_ids:
+                    continue
+                seen_class_ids.add(candidate_id)
+                authority_classes.append(candidate_class)
+        class_authority = tuple(
+            (
+                authority_class,
+                authority_class.__module__ + "." + authority_class.__qualname__,
+                MappingProxyType(dict(vars(authority_class))),
+            )
+            for authority_class in authority_classes
+        )
         return (
             orchestrator_class,
             self_state,
@@ -680,6 +712,7 @@ class DurableModelCallOrchestrator:
             identity,
             identity_class,
             identity_state,
+            class_authority,
         )
 
     @staticmethod
@@ -697,6 +730,7 @@ class DurableModelCallOrchestrator:
             object | None,
             type | None,
             dict[str, object] | None,
+            tuple[tuple[type, str, Mapping[str, object]], ...],
         ],
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
@@ -712,8 +746,48 @@ class DurableModelCallOrchestrator:
             identity,
             identity_class,
             identity_state,
+            class_authority,
         ) = snapshot
         changes: list[str] = []
+
+        # Restore raw class dictionaries first. Descriptor identity comparison
+        # avoids invoking attacker-defined equality during recovery.
+        for authority_class, class_label, expected_class_state in class_authority:
+            current_class_state = vars(authority_class)
+            current_names = set(current_class_state)
+            expected_names = set(expected_class_state)
+            for name in sorted(current_names | expected_names):
+                label = "class." + class_label + "." + name
+                if name not in expected_class_state:
+                    changes.append(label)
+                    try:
+                        type.__delattr__(authority_class, name)
+                    except (AttributeError, TypeError) as error:
+                        raise ModelCallError(
+                            label + " could not be removed after callback"
+                        ) from error
+                    continue
+                expected = expected_class_state[name]
+                if (
+                    name not in current_class_state
+                    or current_class_state[name] is not expected
+                ):
+                    changes.append(label)
+                    try:
+                        type.__setattr__(authority_class, name, expected)
+                    except TypeError as error:
+                        raise ModelCallError(
+                            label + " could not be restored after callback"
+                        ) from error
+
+            restored_class_state = vars(authority_class)
+            if set(restored_class_state) != expected_names or any(
+                restored_class_state[name] is not expected_class_state[name]
+                for name in expected_names
+            ):
+                raise ModelCallError(
+                    "class authority restore is incomplete for " + class_label
+                )
 
         def restore_class(
             value: object,
@@ -973,6 +1047,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
@@ -995,7 +1070,7 @@ class DurableModelCallOrchestrator:
                 callback_error = error
         finally:
             callback_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, callback_shape
                 )
             )
@@ -1406,6 +1481,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
@@ -1428,7 +1504,7 @@ class DurableModelCallOrchestrator:
                 callback_error = error
         finally:
             callback_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, callback_shape
                 )
             )
@@ -1759,6 +1835,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         descriptor_shape = self._callback_shape_snapshot()
         descriptor_budget_refs = {
             "journal": self.budget.journal,
@@ -1779,7 +1856,7 @@ class DurableModelCallOrchestrator:
                 descriptor_error = error
         finally:
             descriptor_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, descriptor_shape
                 )
             )
@@ -1945,6 +2022,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         cancellation_shape = self._callback_shape_snapshot()
         cancellation_budget_refs = {
             "journal": self.budget.journal,
@@ -1965,7 +2043,7 @@ class DurableModelCallOrchestrator:
                 cancellation_error = error
         finally:
             cancellation_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, cancellation_shape
                 )
             )
@@ -2089,6 +2167,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         adapter_shape = self._callback_shape_snapshot()
         adapter_budget_refs = {
             "journal": self.budget.journal,
@@ -2109,7 +2188,7 @@ class DurableModelCallOrchestrator:
                 adapter_error = error
         finally:
             authority_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, adapter_shape
                 )
             )
@@ -2368,6 +2447,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         validation_shape = self._callback_shape_snapshot()
         validation_budget_refs = {
             "journal": self.budget.journal,
@@ -2386,7 +2466,7 @@ class DurableModelCallOrchestrator:
                 schema_valid = False
         finally:
             validation_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, validation_shape
                 )
             )
@@ -2466,6 +2546,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         recovery_shape = self._callback_shape_snapshot()
         recovery_budget_refs = {
             "journal": self.budget.journal,
@@ -2485,7 +2566,7 @@ class DurableModelCallOrchestrator:
                 recovery_error = error
         finally:
             authority_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, recovery_shape
                 )
             )
@@ -2779,6 +2860,7 @@ class DurableModelCallOrchestrator:
             "started_lease_seconds": self.started_lease_seconds,
             "owner_token": self.owner_token,
         }
+        restore_callback_shape = DurableModelCallOrchestrator._restore_callback_shape
         callback_shape = self._callback_shape_snapshot()
         budget_callback_refs = {
             "journal": self.budget.journal,
@@ -2802,7 +2884,7 @@ class DurableModelCallOrchestrator:
                 callback_error = error
         finally:
             callback_changes.extend(
-                DurableModelCallOrchestrator._restore_callback_shape(
+                restore_callback_shape(
                     self, callback_shape
                 )
             )

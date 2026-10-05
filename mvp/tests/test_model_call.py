@@ -3667,6 +3667,162 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_adapter_cannot_rebind_restore_or_budget_class_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            restore_descriptor = vars(DurableModelCallOrchestrator)[
+                "_restore_callback_shape"
+            ]
+            canonical_restore = DurableModelCallOrchestrator._restore_callback_shape
+            canonical_settle = DurableModelBudget.settle
+            try:
+                def hostile_adapter(*_args):
+                    DurableModelCallOrchestrator._restore_callback_shape = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound callback restore intercepted authority recovery"
+                        )
+                    )
+                    DurableModelBudget.settle = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound budget settle reached durable authority"
+                        )
+                    )
+                    return observation()
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn(
+                    "DurableModelCallOrchestrator._restore_callback_shape",
+                    result.reason,
+                )
+                self.assertIn("DurableModelBudget.settle", result.reason)
+                self.assertIs(
+                    DurableModelCallOrchestrator._restore_callback_shape,
+                    canonical_restore,
+                )
+                self.assertIs(DurableModelBudget.settle, canonical_settle)
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                type.__setattr__(
+                    DurableModelCallOrchestrator,
+                    "_restore_callback_shape",
+                    restore_descriptor,
+                )
+                type.__setattr__(DurableModelBudget, "settle", canonical_settle)
+
+    def test_adapter_cannot_rebind_journal_class_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            canonical_commit = JournalStore.commit_command
+            self.assertNotIn("commit_command", JournalStore.__dict__)
+            try:
+                def hostile_adapter(*_args):
+                    JournalStore.commit_command = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound journal commit reached durable settlement"
+                        )
+                    )
+                    return observation()
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn("JournalStore.commit_command", result.reason)
+                self.assertIs(JournalStore.commit_command, canonical_commit)
+                self.assertNotIn("commit_command", JournalStore.__dict__)
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                if "commit_command" in JournalStore.__dict__:
+                    type.__delattr__(JournalStore, "commit_command")
+
+    def test_cancel_callback_cannot_rebind_budget_release_class_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            canonical_release = DurableModelBudget.release
+            calls = []
+            try:
+                def hostile_cancel():
+                    DurableModelBudget.release = (
+                        lambda *_args, **_kwargs: self.fail(
+                            "rebound budget release reached cancellation recovery"
+                        )
+                    )
+                    return False
+
+                with self.assertRaises(ModelCallError) as caught:
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=fixed_policy(),
+                        request=request_for(orchestrator, call_spec),
+                        descriptors=[descriptor()],
+                        call=lambda *_: calls.append("called") or observation(),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                        cancel_requested=hostile_cancel,
+                    )
+
+                self.assertIn(
+                    "DurableModelBudget.release",
+                    str(caught.exception),
+                )
+                self.assertEqual(calls, [])
+                self.assertIs(DurableModelBudget.release, canonical_release)
+                self.assertEqual(
+                    budget.active_reservation(attempt_id),
+                    Decimal("1.2"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in orchestrator._events(attempt_id)],
+                    ["ModelCallPrepared"],
+                )
+            finally:
+                type.__setattr__(
+                    DurableModelBudget,
+                    "release",
+                    canonical_release,
+                )
+
     def test_adapter_restore_does_not_execute_hostile_state_key_callbacks(self):
         class HostileStateKey:
             hash_calls = 0

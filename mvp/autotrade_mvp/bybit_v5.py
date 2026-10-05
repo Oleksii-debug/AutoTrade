@@ -803,6 +803,9 @@ def _install_bybit_prepared_submission_authority(
     value_error_type = ValueError
     price_semantics_authority = authenticated_price_semantics_digest
     price_semantics_authority_code = price_semantics_authority.__code__
+    regex_module = re
+    regex_fullmatch = re.fullmatch
+    regex_fullmatch_code = regex_fullmatch.__code__
     prepared_ref = weakref_ref
     prepared_init = prepared_type.__init__
     prepared_init_code = prepared_init.__code__
@@ -860,6 +863,10 @@ def _install_bybit_prepared_submission_authority(
             or any is not canonical_any
             or TypeError is not type_error_type
             or ValueError is not value_error_type
+            or re is not regex_module
+            or regex_module.fullmatch is not regex_fullmatch
+            or canonical_getattr(regex_fullmatch, "__code__", None)
+            is not regex_fullmatch_code
             or authenticated_price_semantics_digest is not price_semantics_authority
             or canonical_getattr(price_semantics_authority, "__code__", None)
             is not price_semantics_authority_code

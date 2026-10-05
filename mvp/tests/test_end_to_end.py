@@ -524,6 +524,26 @@ class VerticalSliceTests(unittest.TestCase):
             )
             self.assertFalse(verify_replay(directory))
 
+    def test_replay_rejects_valid_event_shape_with_wrong_evidence_identity(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint = json.loads(
+                (Path(directory) / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            original = store.load_events("simulation_portfolio", checkpoint["symbol"])[0]
+            forged = dict(original)
+            forged["event_id"] = "simulation-forged-evidence-identity"
+            forged["aggregate_version"] = str(
+                store.next_aggregate_version("simulation_portfolio", checkpoint["symbol"])
+            )
+            forged_payload = dict(original["payload"])
+            forged_payload["cash"] = "1"
+            forged["payload"] = forged_payload
+            forged["payload_hash"] = payload_digest(forged_payload)
+            store.append_event(forged)
+            self.assertFalse(verify_replay(directory))
+
     def test_replay_verification_detects_tampered_evidence(self):
         with TemporaryDirectory() as directory:
             run_multi_episode([[100, 101, 102, 103], [103, 102, 101, 100]], directory)

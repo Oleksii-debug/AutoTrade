@@ -1738,7 +1738,9 @@ class DurableModelCallOrchestrator:
                 payload=prepared_payload,
             )
 
-        cancelled = cancel_requested or (lambda: False)
+        cancelled = (
+            cancel_requested if cancel_requested is not None else (lambda: False)
+        )
         # The cancellation probe is caller-owned code that runs before the
         # inference boundary. Freeze the exact durable authorities around it so
         # it cannot redirect the NOT_SENT proof, release, chronology, or a later
@@ -1796,18 +1798,24 @@ class DurableModelCallOrchestrator:
                 self._restore_callback_shape(cancellation_shape)
             )
 
-        temporal_reason = self._temporal_reason(prepared_payload, request)
-        cancellation_reason: str | None = None
         if cancellation_changes:
-            cancellation_reason = (
-                "cancellation_probe_mutated_orchestrator_authority:"
+            error = ModelCallError(
+                "cancellation probe mutated orchestrator authority:"
                 + ",".join(sorted(set(cancellation_changes)))
             )
-        elif cancellation_error is not None:
-            cancellation_reason = "cancellation_probe_failed"
-        elif type(cancelled_before_start) is not bool:
-            cancellation_reason = "cancellation_probe_returned_invalid_state"
-        elif cancelled_before_start:
+            if cancellation_error is not None:
+                raise error from cancellation_error
+            raise error
+        if cancellation_error is not None:
+            raise cancellation_error
+        if type(cancelled_before_start) is not bool:
+            raise ModelCallError(
+                "cancellation probe must return an exact boolean"
+            )
+
+        temporal_reason = self._temporal_reason(prepared_payload, request)
+        cancellation_reason: str | None = None
+        if cancelled_before_start:
             cancellation_reason = "cancelled_before_call_boundary"
         elif temporal_reason is not None:
             cancellation_reason = temporal_reason

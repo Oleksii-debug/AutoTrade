@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone, tzinfo
 import unittest
 
+from mvp.autotrade_mvp import provider_account_absence_coverage as absence_coverage
 from mvp.autotrade_mvp import provider_account_accepted_cut as accepted_cut
 from mvp.autotrade_mvp import provider_account_coverage_set as coverage_set
 from mvp.autotrade_mvp import provider_account_currentness as currentness
@@ -37,6 +38,10 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
                 reconciliation_semantics._at,
                 reconciliation_semantics.ProviderAccountReconciliationSemanticsError,
             ),
+            (
+                absence_coverage._at_point,
+                absence_coverage.ProviderAccountAbsenceCoverageError,
+            ),
         )
         for validator, error_type in boundaries:
             with self.subTest(boundary=validator.__module__):
@@ -67,6 +72,29 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             )
         self.assertEqual(hostile.calls, 0)
 
+    def test_public_absence_coverage_issuer_rejects_hostile_time_before_authority_reads(self):
+        hostile = _ExecutableTimezone()
+        value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)
+        absence_semantics = object.__new__(
+            absence_coverage.QualifiedProviderAccountAbsenceSemantics
+        )
+        page_chain = object.__new__(absence_coverage.ProviderAccountPageChain)
+        historical_submission = object.__new__(
+            absence_coverage.HistoricalUnknownSubmissionBinding
+        )
+        qualification_registry = object.__new__(
+            absence_coverage.DurableProviderQualificationRegistry
+        )
+        with self.assertRaises(absence_coverage.ProviderAccountAbsenceCoverageError):
+            absence_coverage.issue_provider_account_surface_coverage(
+                absence_semantics=absence_semantics,
+                page_chain=page_chain,
+                historical_submission=historical_submission,
+                qualification_registry=qualification_registry,
+                at=value,
+            )
+        self.assertEqual(hostile.calls, 0)
+
     def test_exact_stdlib_fixed_offset_timezones_remain_accepted(self):
         values = (
             datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc),
@@ -86,6 +114,10 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             self.assertIs(accepted_cut._at(value), value)
             self.assertIs(reconciliation_semantics._at(value), value)
             self.assertIs(origin_set._utc(value, name="at"), value)
+            self.assertEqual(
+                absence_coverage._at_point(value),
+                value.astimezone(timezone.utc),
+            )
 
 
 if __name__ == "__main__":

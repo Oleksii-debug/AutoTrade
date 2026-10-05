@@ -309,6 +309,7 @@ class VerticalSliceTests(unittest.TestCase):
                 ).encode("utf-8")
             ).hexdigest()
             checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            self.assertFalse(verify_replay(directory))
 
             with self.assertRaisesRegex(
                 ValueError,

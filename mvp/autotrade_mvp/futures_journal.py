@@ -39,6 +39,7 @@ from .futures import (
     apply_variation_margin,
     book_variation_margin,
     settle_and_book_inverse_variation_margin,
+    inverse_settlement_convention,
     settlement_identity_digest,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
@@ -498,6 +499,7 @@ def _inverse_event_payload(
         "cumulative_variation_margin_exact": _fraction_payload(
             state.cumulative_variation_margin
         ),
+        "settlement_convention_id": inverse_settlement_convention(state.contract).convention_id,
         "settlement_quantum": _decimal_text(settlement_quantum),
         "rounding": rounding,
         "settled_cash_delta": _decimal_text(settled_cash),
@@ -677,6 +679,27 @@ def commit_linear_variation_margin(
 
 
 
+def _verify_inverse_convention_evidence(contract: FuturesContract, authenticated_reader) -> None:
+    """Authenticate the versioned terminal economics on the same trusted evidence root."""
+    convention = inverse_settlement_convention(contract)
+    from .instruments import InstrumentVersion, _detached_instrument_version
+    version = _detached_instrument_version(contract.canonical_instrument)
+    try:
+        manifest, raw = authenticated_reader(convention.evidence_artifact_id)
+        if type(manifest) is not dict or type(raw) is not bytes:
+            raise ArtifactIntegrityError("terminal convention snapshot must use exact types")
+        metadata = manifest.get("metadata")
+        if (manifest.get("sha256") != convention.evidence_sha256
+            or manifest.get("media_type") != "application/vnd.autotrade.instrument-metadata+json"
+            or type(metadata) is not dict or metadata.get("kind") != "instrument-metadata"
+            or metadata.get("instrument_version_binding") != InstrumentVersion.metadata_evidence_binding(version)
+            or type(manifest.get("rights")) is not dict
+            or manifest["rights"].get("storage") is not True):
+            raise ArtifactIntegrityError("terminal convention evidence scope or economics mismatch")
+    except (ArtifactIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as error:
+        raise FuturesError("inverse settlement convention evidence cannot be authenticated") from error
+
+
 def _replay_inverse_events(
     opening_state: InverseVariationMarginState,
     events: tuple[dict[str, Any], ...],
@@ -687,6 +710,7 @@ def _replay_inverse_events(
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
 
+    _verify_inverse_convention_evidence(opening_state.contract, authenticated_reader)
     state = opening_state
     for expected_version, event in enumerate(events, start=1):
         if (
@@ -699,8 +723,9 @@ def _replay_inverse_events(
             raise FuturesError("durable futures settlement kind mismatch")
         settlement = _evidence_from_payload(payload.get("settlement"))
         _verify_provider_settlement_evidence(settlement, authenticated_reader)
-        quantum = Decimal(str(payload.get("settlement_quantum")))
-        rounding = payload.get("rounding")
+        convention = inverse_settlement_convention(state.contract)
+        quantum = Decimal(convention.quantum)
+        rounding = convention.rounding
         prior_price = state.last_settlement_price
         next_state, exact_delta = apply_inverse_variation_margin(state, settlement)
         if next_state is state:
@@ -709,8 +734,6 @@ def _replay_inverse_events(
             settlement=settlement,
             contract=state.contract,
             exact_amount=exact_delta,
-            settlement_quantum=quantum,
-            rounding=rounding,
         )
         expected_payload = _inverse_event_payload(
             prior_price=prior_price,
@@ -754,8 +777,6 @@ def commit_inverse_variation_margin(
     *,
     evidence_artifact_root: str | Path,
     evidence_artifact_store: ArtifactStore | None = None,
-    settlement_quantum: Decimal | str,
-    rounding: str = "HALF_EVEN",
 ) -> tuple[
     InverseVariationMarginState,
     Fraction,
@@ -765,15 +786,9 @@ def commit_inverse_variation_margin(
 ]:
     """Atomically accept inverse VM against one evidence and global-journal cut."""
 
-    quantum = (
-        settlement_quantum
-        if isinstance(settlement_quantum, Decimal)
-        else Decimal(str(settlement_quantum))
-    )
-    if not quantum.is_finite() or quantum <= 0:
-        raise FuturesError("settlement_quantum must be positive")
-    if rounding not in {"HALF_EVEN", "DOWN"}:
-        raise FuturesError("unsupported rounding policy")
+    convention = inverse_settlement_convention(opening_state.contract)
+    quantum = Decimal(convention.quantum)
+    rounding = convention.rounding
 
     aggregate_id, environment = _durable_scope(opening_state)
     reader = _trusted_settlement_evidence_reader(
@@ -792,8 +807,6 @@ def commit_inverse_variation_margin(
         settlement=settlement,
         contract=current.contract,
         exact_amount=exact_delta,
-        settlement_quantum=quantum,
-        rounding=rounding,
     )
     payload = _inverse_event_payload(
         prior_price=prior_price,
@@ -821,6 +834,7 @@ def commit_inverse_variation_margin(
         "kind": "INVERSE",
         "aggregate_id": aggregate_id,
         "settlement": _evidence_payload(settlement),
+        "settlement_convention_id": convention.convention_id,
         "settlement_quantum": _decimal_text(quantum),
         "rounding": rounding,
     }

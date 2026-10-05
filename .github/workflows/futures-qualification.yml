@@ -6,8 +6,12 @@ on:
     paths:
       - "mvp/autotrade_mvp/futures.py"
       - "mvp/autotrade_mvp/futures_journal.py"
+      - "mvp/autotrade_mvp/instruments.py"
+      - "mvp/autotrade_mvp/settlement_convention.py"
       - "mvp/tests/test_futures.py"
+      - "mvp/tests/test_futures_exact_arithmetic.py"
       - "mvp/tests/test_futures_journal.py"
+      - "mvp/tests/test_futures_settlement_convention_authority.py"
       - "mvp/tests/test_futures_settlement_snapshot_authority.py"
       - ".github/workflows/futures-qualification.yml"
   push:
@@ -15,8 +19,12 @@ on:
     paths:
       - "mvp/autotrade_mvp/futures.py"
       - "mvp/autotrade_mvp/futures_journal.py"
+      - "mvp/autotrade_mvp/instruments.py"
+      - "mvp/autotrade_mvp/settlement_convention.py"
       - "mvp/tests/test_futures.py"
+      - "mvp/tests/test_futures_exact_arithmetic.py"
       - "mvp/tests/test_futures_journal.py"
+      - "mvp/tests/test_futures_settlement_convention_authority.py"
       - "mvp/tests/test_futures_settlement_snapshot_authority.py"
       - ".github/workflows/futures-qualification.yml"
 
@@ -46,12 +54,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Run futures settlement and durable journal qualification
-        run: python -m unittest mvp.tests.test_futures mvp.tests.test_futures_journal mvp.tests.test_futures_settlement_snapshot_authority -v
+        run: python -m unittest mvp.tests.test_futures mvp.tests.test_futures_exact_arithmetic mvp.tests.test_futures_journal mvp.tests.test_futures_settlement_convention_authority mvp.tests.test_futures_settlement_snapshot_authority -v
       - name: Write exact-head futures qualification evidence
         run: >-
           python tools/write_ci_evidence.py
           --suite futures-qualification
-          --command "python -m unittest mvp.tests.test_futures mvp.tests.test_futures_journal mvp.tests.test_futures_settlement_snapshot_authority -v"
+          --command "python -m unittest mvp.tests.test_futures mvp.tests.test_futures_exact_arithmetic mvp.tests.test_futures_journal mvp.tests.test_futures_settlement_convention_authority mvp.tests.test_futures_settlement_snapshot_authority -v"
           --output "artifacts/futures-qualification-${{ runner.os }}.json"
       - name: Upload exact-head futures qualification evidence
         uses: actions/upload-artifact@v4

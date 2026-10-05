@@ -991,6 +991,36 @@ def _mutable_source_inventory_identity(
     return tuple((relative.as_posix(), kind) for _, relative, kind in sources)
 
 
+def _snapshot_mutable_source_digests(
+    sources: Sequence[tuple[Path, Path, str]],
+) -> tuple[tuple[Path, str], ...]:
+    """Bind mutable source bytes before the SQLite snapshot begins."""
+
+    snapshots: list[tuple[Path, str]] = []
+    for source, _, _ in sources:
+        try:
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source is not a regular file: {source.name}"
+                )
+            before = _sha256_file(source)
+            if source.is_symlink() or not source.is_file():
+                raise BackupError(
+                    f"Backup source changed before journal snapshot: {source.name}"
+                )
+            after = _sha256_file(source)
+        except OSError as error:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            ) from error
+        if before != after:
+            raise BackupError(
+                f"Backup source changed before journal snapshot: {source.name}"
+            )
+        snapshots.append((source, after))
+    return tuple(snapshots)
+
+
 def _assert_mutable_sources_unchanged(
     state: Path,
     artifacts: Path,
@@ -1000,11 +1030,15 @@ def _assert_mutable_sources_unchanged(
     """Fail closed if the frozen mutable source cut no longer matches."""
 
     for source, expected_digest in source_rechecks:
-        if (
-            source.is_symlink()
-            or not source.is_file()
-            or _sha256_file(source) != expected_digest
-        ):
+        try:
+            unchanged = (
+                not source.is_symlink()
+                and source.is_file()
+                and _sha256_file(source) == expected_digest
+            )
+        except OSError as error:
+            raise BackupError("Source changed before backup commit") from error
+        if not unchanged:
             raise BackupError("Source changed before backup commit")
 
     current_sources = _mutable_backup_sources(state, artifacts)
@@ -1121,11 +1155,14 @@ def create_backup(
 
     mutable_sources = _mutable_backup_sources(state, artifacts)
     source_inventory = _mutable_source_inventory_identity(mutable_sources)
+    # Freeze side-file bytes before SQLite establishes its backup cut. The
+    # copied files below must remain that exact generation.
+    source_rechecks = _snapshot_mutable_source_digests(mutable_sources)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-backup-", dir=target.parent))
     entries: list[dict[str, Any]] = []
-    source_rechecks: list[tuple[Path, str]] = []
+    published = False
     try:
         journal_source = state / "journal.sqlite3"
         journal_target = stage / "state" / "journal.sqlite3"
@@ -1141,10 +1178,12 @@ def create_backup(
             )
         )
 
+        frozen_source_digests = dict(source_rechecks)
         for source, relative, kind in mutable_sources:
             digest, size = _copy_stable_file(source, stage / relative)
+            if digest != frozen_source_digests[source]:
+                raise BackupError("Source changed across journal snapshot")
             entries.append(_entry(relative.as_posix(), digest, size, kind))
-            source_rechecks.append((source, digest))
 
         _assert_mutable_sources_unchanged(
             state,
@@ -1194,10 +1233,19 @@ def create_backup(
             source_rechecks,
         )
         os.replace(stage, target)
+        published = True
         _fsync_directory(target.parent)
         return target
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = target if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(target.parent)
+            except Exception:
+                # Preserve the original durability failure. The best-effort
+                # cleanup sync can fail for the same underlying reason.
+                pass
         raise
 
 
@@ -1357,6 +1405,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         raise BackupError("Restore destination must be outside the backup bundle")
     destination.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".autotrade-restore-", dir=destination.parent))
+    published = False
     try:
         for item in manifest["files"]:
             relative = _safe_relative_path(item["path"])
@@ -1398,10 +1447,17 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)
+        published = True
         _fsync_directory(destination.parent)
         return destination
-    except Exception:
-        shutil.rmtree(stage, ignore_errors=True)
+    except BaseException:
+        cleanup = destination if published else stage
+        shutil.rmtree(cleanup, ignore_errors=True)
+        if published:
+            try:
+                _fsync_directory(destination.parent)
+            except Exception:
+                pass
         raise
 
 

@@ -212,6 +212,66 @@ async function exercisePortfolioPagingAndSort(page) {
     !document.querySelector("#portfolio-body").textContent.includes("paging-fixture-"));
 }
 
+async function exerciseScopeSpeechIsolation(page) {
+  stage = "display-scope speech isolation";
+  await page.waitForTimeout(850);
+  const current = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/state", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: {"Accept": "application/json"},
+    });
+    if (!response.ok) throw new Error("scope speech fixture snapshot failed");
+    return response.json();
+  });
+  const shiftedHost = current.host_id + "-speech-probe";
+  const shifted = {...current, host_id: shiftedHost};
+  const routePattern = "**/api/v1/state";
+  await page.route(routePattern, async route => {
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+      body: JSON.stringify(shifted),
+    });
+  });
+  try {
+    await page.evaluate(() => {
+      const filter = document.querySelector("#portfolio-filter");
+      filter.value = "old-context-speech-probe-no-match";
+      filter.dispatchEvent(new Event("input", {bubbles: true}));
+      document.querySelector("#refresh-state").click();
+    });
+    await page.waitForFunction(expectedHost => {
+      const host = document.querySelector("#active-host")?.textContent || "";
+      const refresh = document.querySelector("#refresh-state");
+      return host === expectedHost && refresh && !refresh.disabled;
+    }, shiftedHost);
+    await page.waitForTimeout(850);
+
+    const polite = await page.locator("#polite-status").innerText();
+    assert.doesNotMatch(
+      polite,
+      /0 of [0-9]+ rows match the current filter/,
+      "queued old-context table speech must not cross a host display-scope reset");
+    assert.match(
+      polite,
+      /reset for new account\/environment scope|Host display context changed/,
+      "new display-scope feedback remains available after stale speech is discarded");
+  } finally {
+    await page.unroute(routePattern).catch(() => {});
+    await page.evaluate(() => document.querySelector("#refresh-state").click());
+    await page.waitForFunction(expectedHost => {
+      const host = document.querySelector("#active-host")?.textContent || "";
+      const refresh = document.querySelector("#refresh-state");
+      return host === expectedHost && refresh && !refresh.disabled;
+    }, current.host_id);
+    await page.waitForTimeout(850);
+  }
+}
+
 async function exerciseSnapshotSelectionPreservation(page) {
   stage = "same-scope snapshot text selection";
   const selected = await page.evaluate(() => {
@@ -405,6 +465,7 @@ s.run_autonomous_simulation(p['prices'],root,run_id=p['run_id'],now=p['start_tim
   await exercisePortfolioTableTools(page);
   await exercisePortfolioPagingAndSort(page);
   await exerciseSnapshotSelectionPreservation(page);
+  await exerciseScopeSpeechIsolation(page);
   assert.match(await page.locator("#strategy-body").innerText(), /deterministic-trend/);
   await command(page, "START_SIMULATION", 2);
   await command(page, "BACKUP_SIMULATION", 4);

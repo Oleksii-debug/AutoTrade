@@ -1340,6 +1340,21 @@ _PRICE_SEMANTICS_UTC_CODE = _utc.__code__
 _PRICE_SEMANTICS_JSON_DUMPS = json.dumps
 _PRICE_SEMANTICS_JSON_DUMPS_CODE = json.dumps.__code__
 _PRICE_SEMANTICS_SHA256 = sha256
+_PRICE_SEMANTICS_DECIMAL_TEXT = _decimal_text
+_PRICE_SEMANTICS_DECIMAL_TEXT_CODE = _decimal_text.__code__
+_PRICE_SEMANTICS_UTC_TEXT = _utc_text
+_PRICE_SEMANTICS_UTC_TEXT_CODE = _utc_text.__code__
+_PRICE_SEMANTICS_THAW_JSONISH = _thaw_jsonish
+_PRICE_SEMANTICS_THAW_JSONISH_CODE = _thaw_jsonish.__code__
+_PRICE_SEMANTICS_FIELDS = fields
+_PRICE_SEMANTICS_FIELDS_CODE = fields.__code__
+_PRICE_SEMANTICS_TO_CONTRACT = InstrumentVersion.to_contract_dict
+_PRICE_SEMANTICS_TO_CONTRACT_CODE = InstrumentVersion.to_contract_dict.__code__
+_PRICE_SEMANTICS_VERSION_INIT = InstrumentVersion.__init__
+_PRICE_SEMANTICS_VERSION_INIT_CODE = InstrumentVersion.__init__.__code__
+_PRICE_SEMANTICS_SETTLEMENT_TYPE = SettlementConvention
+_PRICE_SEMANTICS_SETTLEMENT_PAYLOAD = SettlementConvention.payload
+_PRICE_SEMANTICS_SETTLEMENT_PAYLOAD_CODE = SettlementConvention.payload.__code__
 
 
 def authenticated_price_semantics_digest(
@@ -1409,6 +1424,22 @@ def authenticated_price_semantics_digest(
         or json.dumps is not _PRICE_SEMANTICS_JSON_DUMPS
         or json.dumps.__code__ is not _PRICE_SEMANTICS_JSON_DUMPS_CODE
         or sha256 is not _PRICE_SEMANTICS_SHA256
+        or InstrumentVersion is not _PRICE_SEMANTICS_VERSION_TYPE
+        or _decimal_text is not _PRICE_SEMANTICS_DECIMAL_TEXT
+        or _decimal_text.__code__ is not _PRICE_SEMANTICS_DECIMAL_TEXT_CODE
+        or _utc_text is not _PRICE_SEMANTICS_UTC_TEXT
+        or _utc_text.__code__ is not _PRICE_SEMANTICS_UTC_TEXT_CODE
+        or _thaw_jsonish is not _PRICE_SEMANTICS_THAW_JSONISH
+        or _thaw_jsonish.__code__ is not _PRICE_SEMANTICS_THAW_JSONISH_CODE
+        or fields is not _PRICE_SEMANTICS_FIELDS
+        or fields.__code__ is not _PRICE_SEMANTICS_FIELDS_CODE
+        or InstrumentVersion.to_contract_dict is not _PRICE_SEMANTICS_TO_CONTRACT
+        or InstrumentVersion.to_contract_dict.__code__ is not _PRICE_SEMANTICS_TO_CONTRACT_CODE
+        or InstrumentVersion.__init__ is not _PRICE_SEMANTICS_VERSION_INIT
+        or InstrumentVersion.__init__.__code__ is not _PRICE_SEMANTICS_VERSION_INIT_CODE
+        or SettlementConvention is not _PRICE_SEMANTICS_SETTLEMENT_TYPE
+        or SettlementConvention.payload is not _PRICE_SEMANTICS_SETTLEMENT_PAYLOAD
+        or SettlementConvention.payload.__code__ is not _PRICE_SEMANTICS_SETTLEMENT_PAYLOAD_CODE
     ):
         raise InstrumentRegistryError(
             "instrument price-semantics executable authority changed"

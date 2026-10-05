@@ -93,6 +93,14 @@ class DurableOrderProjectionTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.db")
             artifacts = ArtifactStore(f"{directory}/artifacts")
+            store_callback_refs_before = sum(
+                ref.__callback__ is not None
+                for ref in weakref.getweakrefs(store)
+            )
+            artifact_callback_refs_before = sum(
+                ref.__callback__ is not None
+                for ref in weakref.getweakrefs(artifacts)
+            )
             oms = durable(
                 store,
                 environment="PAPER",
@@ -101,16 +109,26 @@ class DurableOrderProjectionTests(unittest.TestCase):
             oms_ref = weakref.ref(oms)
             store_ref = weakref.ref(store)
             artifacts_ref = weakref.ref(artifacts)
-            # Binding weakrefs must remain callback-free: a caller can
-            # enumerate weakrefs and invoke exposed callbacks manually.
+            # The WP-19 binding itself must add no callback-bearing weakref.
+            # ArtifactStore may already have callback-bearing weakrefs owned by
+            # an independent authority, so compare before/after instead of
+            # claiming that every weakref on that object belongs to this OMS.
             self.assertTrue(
                 all(ref.__callback__ is None for ref in weakref.getweakrefs(oms))
             )
-            self.assertTrue(
-                all(ref.__callback__ is None for ref in weakref.getweakrefs(store))
+            self.assertEqual(
+                sum(
+                    ref.__callback__ is not None
+                    for ref in weakref.getweakrefs(store)
+                ),
+                store_callback_refs_before,
             )
-            self.assertTrue(
-                all(ref.__callback__ is None for ref in weakref.getweakrefs(artifacts))
+            self.assertEqual(
+                sum(
+                    ref.__callback__ is not None
+                    for ref in weakref.getweakrefs(artifacts)
+                ),
+                artifact_callback_refs_before,
             )
 
             del oms

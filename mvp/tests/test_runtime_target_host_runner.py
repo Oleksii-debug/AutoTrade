@@ -351,6 +351,52 @@ class RuntimeTargetHostRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(list(evidence_store.manifests.iterdir()), [])
 
+    def test_artifact_store_path_subclass_is_rejected_before_resolve_or_callbacks(self):
+        class HostilePath(type(Path())):
+            resolve_calls = 0
+
+            def resolve(self, *args, **kwargs):
+                type(self).resolve_calls += 1
+                raise AssertionError("hostile ArtifactStore path resolve must not execute")
+
+        with tempfile.TemporaryDirectory() as root:
+            store = self._store(root)
+            evidence_store = ArtifactStore(Path(root) / "evidence")
+            expected, financial, research = self._plans(store)
+            authority = self._authority(store, financial)
+            callback_calls = []
+
+            evidence_store.root = HostilePath(evidence_store.root)
+
+            def financial_operation() -> None:
+                callback_calls.append("financial")
+                _append_financial(store, expected)
+
+            def research_operation() -> None:
+                callback_calls.append("research")
+
+            with self.assertRaisesRegex(
+                RuntimeTargetHostRunnerError,
+                "ArtifactStore root must remain an exact pathlib path",
+            ):
+                run_declared_target_host_campaign(
+                    journal=store,
+                    evidence_store=evidence_store,
+                    spec=_spec(),
+                    authority_id=authority.authority_id,
+                    research_plan_id=research.plan_id,
+                    financial_operations={expected.event_id: financial_operation},
+                    research_operations={research.expected_sample_ids[0]: research_operation},
+                    inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                    measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                    run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                )
+
+            self.assertEqual(HostilePath.resolve_calls, 0)
+            self.assertEqual(callback_calls, [])
+            self.assertEqual(list(evidence_store.manifests.iterdir()), [])
+
+
     def test_later_callback_code_mutation_is_rejected_before_financial_operation(self):
         with tempfile.TemporaryDirectory() as root:
             store = self._store(root)

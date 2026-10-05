@@ -67,7 +67,11 @@ class ModelCallNotSent(ModelCallError):
 # default argument retains this tuple even if callback code later rebinds the
 # module-level name.
 _MODEL_JOURNAL_CLASS_AUTHORITY = tuple(
-    (cls, MappingProxyType(dict(vars(cls))))
+    (
+        cls,
+        tuple(cls.__bases__),
+        MappingProxyType(dict(vars(cls))),
+    )
     for cls in JournalStore.__mro__
     if cls is not object
 )
@@ -81,7 +85,25 @@ def _model_journal_class_authority_changes(
     """Detect and optionally restore callback mutation of journal class dispatch."""
 
     changes: list[str] = []
-    for cls, expected_state in authority:
+    for cls, expected_bases, expected_state in authority:
+        current_bases = tuple(cls.__bases__)
+        bases_changed = (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        )
+        if bases_changed:
+            changes.append(f"budget.journal.class.{cls.__name__}.__bases__")
+            if restore:
+                try:
+                    type.__setattr__(cls, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        "journal class base authority could not be restored"
+                    ) from error
+
         current_state = vars(cls)
         current_keys = tuple(current_state)
         if any(type(name) is not str for name in current_keys):
@@ -111,6 +133,17 @@ def _model_journal_class_authority_changes(
                         ) from error
 
         if restore:
+            restored_bases = tuple(cls.__bases__)
+            if (
+                len(restored_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                )
+            ):
+                raise ModelCallError(
+                    "journal class base authority restore is incomplete"
+                )
             restored = vars(cls)
             if set(restored) != set(expected_state):
                 raise ModelCallError("journal class authority restore is incomplete")

@@ -13,6 +13,7 @@ on:
       - "tools/build_provider_free_candidate.py"
       - "packaging/windows/**"
       - "tests/Product/**"
+      - "tests/Host.Process/**"
       - ".github/workflows/provider-free-product.yml"
 
 permissions:
@@ -71,14 +72,18 @@ jobs:
           node-version: '24'
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
       - run: dotnet publish src/AutoTrade.Desktop/AutoTrade.Desktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/desktop
-      - run: python tools/write_ci_evidence.py --suite provider-free-desktop-publish --command "locked self-contained win-x64 publish" --output artifacts/desktop/desktop-build-evidence.json
+      - run: python tools/write_ci_evidence.py --suite provider-free-desktop-publish --command "locked self-contained win-x64 Desktop publish" --output artifacts/desktop/desktop-build-evidence.json
+      - run: dotnet restore src/AutoTrade.Host/AutoTrade.Host.csproj
+      - run: dotnet publish src/AutoTrade.Host/AutoTrade.Host.csproj -c Release -r win-x64 --self-contained true --no-restore -p:SourceRevisionId=${{ env.AUTOTRADE_SOURCE_SHA }} -p:ContinuousIntegrationBuild=true -o artifacts/host
+      - run: python tools/write_ci_evidence.py --suite provider-free-host-publish --command "self-contained win-x64 Host publish; default authority fail-closed" --output artifacts/host/host-build-evidence.json
+      - run: dotnet run --project tests/Host.Process/Host.Process.csproj -c Release
       - name: Download exact candidate runtime inputs
         shell: pwsh
         run: |
           Invoke-WebRequest https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip -OutFile artifacts/python.zip
           Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4191.47/microsoft.web.webview2.1.0.4191.47.nupkg -OutFile artifacts/webview.nupkg
       - name: Compose through canonical source staging and bundle builder
-        run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
+        run: python -m tools.build_provider_free_candidate --source-sha ${{ env.AUTOTRADE_SOURCE_SHA }} --desktop-publish artifacts/desktop --host-publish artifacts/host --python-archive artifacts/python.zip --webview-archive artifacts/webview.nupkg --work artifacts/candidate-work --output artifacts/AutoTrade-ZERO-win-x64.zip
       - run: npm ci --ignore-scripts
         working-directory: tests/Product
       - run: npx playwright install chromium
@@ -89,6 +94,14 @@ jobs:
           Expand-Archive -LiteralPath artifacts/AutoTrade-ZERO-win-x64.zip -DestinationPath 'artifacts/installed candidate with spaces'
           dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload' --exercise
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove packaged Host fails closed before listener bind
+        shell: pwsh
+        run: |
+          $hostExe = (Resolve-Path 'artifacts/installed candidate with spaces/payload/host/AutoTrade.Host.exe').Path
+          $stderr = 'artifacts/host-startup-blocked.txt'
+          & $hostExe 2> $stderr
+          if ($LASTEXITCODE -ne 78) { throw "Packaged Host did not return authority-unavailable exit 78: $LASTEXITCODE" }
+          if (-not (Select-String -LiteralPath $stderr -Pattern 'AUTOTRADE_HOST_STARTUP_BLOCKED' -Quiet)) { throw 'Packaged Host did not emit the fail-closed startup marker.' }
       - name: Test the extracted isolated Python and frozen product with keyboard
         shell: pwsh
         run: |
@@ -98,7 +111,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet run --project tests/Product/InventoryProbe/InventoryProbe.csproj -c Release -- 'artifacts/installed candidate with spaces/payload'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "embedded isolated Python + packaged source + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
+      - run: python tools/write_ci_evidence.py --suite provider-free-packaged-windows-browser --command "embedded isolated Python + packaged Desktop + packaged fail-closed Host + keyboard + crash + restart + backup + restore" --output artifacts/product-packaged-Windows.json
       - uses: actions/upload-artifact@v4
         with:
           name: AutoTrade-ZERO-UNQUALIFIED-${{ env.AUTOTRADE_SOURCE_SHA }}
@@ -106,5 +119,6 @@ jobs:
             artifacts/AutoTrade-ZERO-win-x64.zip
             artifacts/AutoTrade-ZERO-win-x64.zip.sha256
             artifacts/product-packaged-Windows.json
+            artifacts/host-startup-blocked.txt
             artifacts/candidate-work/candidate-result.json
           if-no-files-found: error

@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "baseline_date": "2026-09-22",
-  "evidence_as_of": "2026-10-05T12:22:00Z",
+  "evidence_as_of": "2026-10-05T12:27:00Z",
   "overall_status": "IMPLEMENTATION_IN_PROGRESS_PROVIDER_FREE_ZERO_RUNTIME_ACCEPTED_ON_MAIN",
   "gates": {
     "engineering_baseline": "CURRENT_MAIN_PROVIDER_FREE_ZERO_COMPOSITION_ACCEPTED_SECTION_CLOSURES_PENDING",
@@ -26,10 +26,10 @@
   },
   "evidence_notes": [
     "Live main at this audit cut is 60e7c95b3b572810dcfb6c4ab34e0b338b0ace02. Open integration descendants are not accepted main state until merged and post-merge read back.",
-    "The canonical product integration chain at this cut reaches #1747 at a671fa5109e983d901358d0fbe135b5d8113b5e7. It converges financial send/recovery, reconciliation, hard-risk, FX, reservation/OMS authority, provider ingress, Host, futures, decision explanations and specialist-DAG work, but remains draft/unmerged.",
-    "Canonical recovery-qualification/control-truth successor #1758 is c16355e1fc903e416ec471e9367c8db1393e45aa. It removes caller-selected recovery trust policy/pins, uses repository-controlled canonical attestation verification, adds an exact-head Ubuntu/Windows recovery qualification gate, preserves conservative qualification truth, and self-protects reconvergence trust roots.",
-    "The operator decision-trace durability successor is stacked separately as #1760 above #1758. It remains draft/unmerged; its source-level durability and ingress hardening are not physical Windows/NVDA acceptance.",
-    "Exact-head #1758 baseline, Verify AutoTrade, provider-free-product, control-plane and recovery-qualification workflows were queued at this audit cut. Exact-head #1760 baseline, Verify AutoTrade and provider-free-product workflows were also queued. Queued, pending, running, cancelled or absent is not PASS.",
+    "The canonical product integration chain below the current convergence successors reaches #1747 at a671fa5109e983d901358d0fbe135b5d8113b5e7. It remains draft/unmerged.",
+    "Current higher-value convergence candidate #1764 is 4b2df5e0be6aa97bce77f356e67eaf9a1f369eb5. Relative to #1747 it is ahead-only / behind 0 and combines durable decision-trace authority, canonical WP-59 recovery trust/qualification, and refreshed Binance Spot/USD-M provider-ingress/prepared-request authority.",
+    "This control-truth successor adds only the refreshed qualification ledger plus self-protecting reconvergence-integrity guard/test on top of #1764; it does not change Binance, recovery qualification, decision-trace, financial, risk or provider runtime logic.",
+    "Exact-head #1764 Verify AutoTrade, baseline, provider-free-product and recovery-qualification workflows were queued at this audit cut. Queued, pending, running, cancelled or absent is not PASS.",
     "Real provider campaigns remain unqualified. No caller boolean, local wrapper, source-only regression, simulated evidence or queued CI result grants provider/PAPER/LIVE or real-money send authority.",
     "Economic edge remains unproven and INCONCLUSIVE. Simulation, backtests, software CI and qualification infrastructure are not profitability or causal forward-edge evidence.",
     "Physical Windows 11 + NVDA delivered-artifact qualification, signed release, target-host acceptance, clean install/update/interrupted-update/rollback/uninstall evidence and final release authority remain open.",

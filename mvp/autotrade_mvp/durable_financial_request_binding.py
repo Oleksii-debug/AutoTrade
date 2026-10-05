@@ -341,7 +341,7 @@ def _require_bybit_prepared_request_origin(
                 f"Bybit prepared {name} differs from financial binding"
             )
 
-    receipt = _production_request_origin_receipt(material)
+    receipt = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
     if receipt is None:
         raise DurableFinancialRequestBindingError(
             "Bybit prepared request origin receipt is unavailable"
@@ -391,7 +391,7 @@ def _binding_payload(
         "journal_store_identity_digest": store_identity_digest,
         "material": material.payload(),
     }
-    origin = _production_request_origin_receipt(material)
+    origin = _CANONICAL_PRODUCTION_REQUEST_ORIGIN_RECEIPT(material)
     if origin is not None:
         payload["provider_request_origin"] = origin
     return payload

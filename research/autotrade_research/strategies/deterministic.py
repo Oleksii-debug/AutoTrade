@@ -1988,11 +1988,6 @@ def to_decision_proposal(
     """
 
     proposal = _readmit_deterministic_proposal(proposal)
-    economics_binding = _readmit_strategy_economics_binding(economics_binding)
-    if registered_run_receipt is not None:
-        registered_run_receipt = _readmit_registered_strategy_run_receipt(
-            registered_run_receipt
-        )
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -2002,6 +1997,11 @@ def to_decision_proposal(
         or proposal.strategy_configuration_fingerprint is None
     ):
         raise ValueError("proposal lacks registered strategy/horizon metadata")
+    economics_binding = _readmit_strategy_economics_binding(economics_binding)
+    if registered_run_receipt is not None:
+        registered_run_receipt = _readmit_registered_strategy_run_receipt(
+            registered_run_receipt
+        )
     try:
         normalized_proposal_id = str(UUID(_text(proposal_id, name="proposal_id")))
     except (ValueError, AttributeError) as error:

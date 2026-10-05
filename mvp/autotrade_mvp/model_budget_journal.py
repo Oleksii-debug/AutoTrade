@@ -493,11 +493,11 @@ class DurableModelBudget:
         clock_text = _clock_text
         module_globals = globals()
 
-        # The injected clock is caller-owned code. Freeze every trusted function
-        # that participates in this boundary or prepares the next one, plus the
-        # transitive module globals referenced by those functions. Class-state
-        # snapshots alone compare function identity and cannot see in-place
-        # __code__/default poisoning that survives into a later durable call.
+        # The injected clock is caller-owned code. Freeze executable state for
+        # the trusted boundary and every Python function reachable through the
+        # existing budget/journal/identity class-authority snapshot. Also freeze
+        # the actually referenced global bindings in each function's own module.
+        # Shallow class dictionaries alone cannot see in-place function poisoning.
         object_getattribute = object.__getattribute__
         object_setattr = object.__setattr__
         dict_get = dict.get
@@ -508,6 +508,10 @@ class DurableModelBudget:
         set_type = set
         sorted_fn = sorted
         missing_binding = object()
+        function_type = type(clock_now)
+        staticmethod_type = staticmethod
+        classmethod_type = classmethod
+        property_type = property
 
         clock_now_function_state = (
             ("__code__", object_getattribute(clock_now, "__code__")),
@@ -534,7 +538,19 @@ class DurableModelBudget:
             ("__defaults__", object_getattribute(clock_text, "__defaults__")),
             ("__kwdefaults__", object_getattribute(clock_text, "__kwdefaults__")),
         )
-        protected_function_states = (
+
+        code_type = type(clock_now_function_state[0][1])
+
+        def referenced_names(code) -> tuple[str, ...]:
+            names = list(code.co_names)
+            for constant in code.co_consts:
+                if type(constant) is code_type:
+                    names.extend(referenced_names(constant))
+            return tuple(names)
+
+        snapshot = snapshot_clock_authority(self)
+
+        protected_function_states_list = [
             (
                 "DurableModelBudget._clock_now",
                 clock_now,
@@ -556,40 +572,98 @@ class DurableModelBudget:
                 restore_function_state,
             ),
             ("_clock_text", clock_text, clock_text_function_state),
-        )
+        ]
+        seen_function_ids = {
+            id(function)
+            for _label, function, _state in protected_function_states_list
+        }
 
-        code_type = type(clock_now_function_state[0][1])
+        for (
+            _authority_class,
+            class_label,
+            _expected_bases,
+            expected_class_state,
+        ) in snapshot[8]:
+            for attribute_name, descriptor in expected_class_state.items():
+                descriptor_type = type(descriptor)
+                candidates: list[tuple[object, str]] = []
+                if descriptor_type is function_type:
+                    candidates.append((descriptor, ""))
+                elif descriptor_type in (staticmethod_type, classmethod_type):
+                    candidates.append(
+                        (object_getattribute(descriptor, "__func__"), ".__func__")
+                    )
+                elif descriptor_type is property_type:
+                    for property_attribute in ("fget", "fset", "fdel"):
+                        property_function = object_getattribute(
+                            descriptor,
+                            property_attribute,
+                        )
+                        if property_function is not None:
+                            candidates.append(
+                                (
+                                    property_function,
+                                    "." + property_attribute,
+                                )
+                            )
 
-        def referenced_names(code) -> tuple[str, ...]:
-            names = list(code.co_names)
-            for constant in code.co_consts:
-                if type(constant) is code_type:
-                    names.extend(referenced_names(constant))
-            return tuple(names)
+                for function, suffix in candidates:
+                    if type(function) is not function_type:
+                        continue
+                    function_id = id(function)
+                    if function_id in seen_function_ids:
+                        continue
+                    seen_function_ids.add(function_id)
+                    function_state = (
+                        ("__code__", object_getattribute(function, "__code__")),
+                        (
+                            "__defaults__",
+                            object_getattribute(function, "__defaults__"),
+                        ),
+                        (
+                            "__kwdefaults__",
+                            object_getattribute(function, "__kwdefaults__"),
+                        ),
+                    )
+                    protected_function_states_list.append(
+                        (
+                            class_label + "." + attribute_name + suffix,
+                            function,
+                            function_state,
+                        )
+                    )
 
-        runtime_names = tuple(
-            dict.fromkeys(
-                (
-                    "DurableModelBudget",
-                    "_clock_text",
-                    "Exception",
-                    "ValueError",
-                    "set",
-                    "sorted",
-                    *referenced_names(clock_now_function_state[0][1]),
-                    *referenced_names(snapshot_function_state[0][1]),
-                    *referenced_names(safe_state_function_state[0][1]),
-                    *referenced_names(restore_function_state[0][1]),
-                    *referenced_names(clock_text_function_state[0][1]),
-                )
+        protected_function_states = tuple(protected_function_states_list)
+
+        runtime_binding_states_list: list[
+            tuple[dict[str, object], str, object, str]
+        ] = []
+        seen_runtime_bindings: set[tuple[int, str]] = set()
+        for function_label, function, function_state in protected_function_states:
+            function_globals = object_getattribute(function, "__globals__")
+            if type(function_globals) is not dict:
+                continue
+            raw_module_label = dict_get(function_globals, "__name__", None)
+            module_label = (
+                raw_module_label
+                if type(raw_module_label) is str
+                else "<authority-module>"
             )
-        )
-        runtime_bindings = tuple(
-            (name, dict_get(module_globals, name, missing_binding))
-            for name in runtime_names
-        )
+            for name in referenced_names(function_state[0][1]):
+                binding_key = (id(function_globals), name)
+                if binding_key in seen_runtime_bindings:
+                    continue
+                seen_runtime_bindings.add(binding_key)
+                runtime_binding_states_list.append(
+                    (
+                        function_globals,
+                        name,
+                        dict_get(function_globals, name, missing_binding),
+                        "global." + module_label + "." + name,
+                    )
+                )
+        runtime_binding_states = tuple(runtime_binding_states_list)
 
-        snapshot = snapshot_clock_authority(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
             raise ValueError("model budget clock authority is invalid")
@@ -613,18 +687,23 @@ class DurableModelBudget:
                         )
                         object_setattr(function, attribute, expected)
 
-                for name, expected in runtime_bindings:
-                    current = dict_get(module_globals, name, missing_binding)
+                for (
+                    binding_globals,
+                    name,
+                    expected,
+                    binding_label,
+                ) in runtime_binding_states:
+                    current = dict_get(binding_globals, name, missing_binding)
                     if expected is missing_binding:
                         if current is missing_binding:
                             continue
-                        changes.append("module." + name)
-                        dict_delitem(module_globals, name)
+                        changes.append(binding_label)
+                        dict_delitem(binding_globals, name)
                         continue
                     if current is expected:
                         continue
-                    changes.append("module." + name)
-                    dict_setitem(module_globals, name, expected)
+                    changes.append(binding_label)
+                    dict_setitem(binding_globals, name, expected)
 
                 changes.extend(
                     restore_clock_authority(
@@ -634,9 +713,8 @@ class DurableModelBudget:
                     )
                 )
             finally:
-                # Reassert executable function state and helper runtime bindings
-                # after class/state recovery as well. This uses only primitives
-                # captured before yielding to the caller-owned clock.
+                # Reassert executable function state and referenced globals after
+                # class/state recovery as well, using only pre-callback primitives.
                 for function_label, function, function_state in protected_function_states:
                     for attribute, expected in function_state:
                         current = object_getattribute(function, attribute)
@@ -647,18 +725,23 @@ class DurableModelBudget:
                         )
                         object_setattr(function, attribute, expected)
 
-                for name, expected in runtime_bindings:
-                    current = dict_get(module_globals, name, missing_binding)
+                for (
+                    binding_globals,
+                    name,
+                    expected,
+                    binding_label,
+                ) in runtime_binding_states:
+                    current = dict_get(binding_globals, name, missing_binding)
                     if expected is missing_binding:
                         if current is missing_binding:
                             continue
-                        changes.append("module." + name)
-                        dict_delitem(module_globals, name)
+                        changes.append(binding_label)
+                        dict_delitem(binding_globals, name)
                         continue
                     if current is expected:
                         continue
-                    changes.append("module." + name)
-                    dict_setitem(module_globals, name, expected)
+                    changes.append(binding_label)
+                    dict_setitem(binding_globals, name, expected)
 
         if changes:
             error = value_error_type(

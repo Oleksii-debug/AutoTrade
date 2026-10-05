@@ -2,6 +2,7 @@ from datetime import timedelta
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
 
@@ -280,6 +281,80 @@ class ProviderAccountOriginSetTests(unittest.TestCase):
             )
             # Historical provenance remains inspectable, but it cannot be
             # consumed as current financial evidence after supersession.
+            self.assertIs(
+                require_provider_account_origin_set_authority(issued),
+                issued,
+            )
+            with self.assertRaisesRegex(
+                ProviderAccountOriginSetError,
+                "no longer exact current authority",
+            ):
+                require_current_provider_account_origin_set_authority(
+                    issued,
+                    at=NOW,
+                )
+
+    def test_current_origin_set_fails_closed_if_store_changes_during_validation(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            (
+                _tests,
+                _journal,
+                _origin,
+                qualifications,
+                acquisition_authority,
+                acquisition,
+                _binding,
+            ) = fixture
+            response = self._direct_binding(
+                fixture,
+                directory,
+                marker="currentness-race",
+            )
+            issued = issue_provider_account_origin_set(
+                qualification_registry=qualifications,
+                account_acquisition_authority=acquisition_authority,
+                account_acquisition=acquisition,
+                response_bindings=(response,),
+                at=NOW,
+            )
+
+            registry_type = type(qualifications)
+            original_require_exact_current = registry_type.require_exact_current
+            injected = False
+
+            def require_then_supersede(registry, *args, **kwargs):
+                nonlocal injected
+                current = original_require_exact_current(
+                    registry,
+                    *args,
+                    **kwargs,
+                )
+                if not injected:
+                    acquisition_authority.issue_serialized(
+                        provider_scope=acquisition.provider_scope,
+                        account_id=acquisition.account_id,
+                        acquisition_request_id="origin-set-currentness-race-2",
+                        committed_at=NOW,
+                    )
+                    injected = True
+                return current
+
+            with patch.object(
+                registry_type,
+                "require_exact_current",
+                require_then_supersede,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderAccountOriginSetError,
+                    "journal changed during currentness validation",
+                ):
+                    require_current_provider_account_origin_set_authority(
+                        issued,
+                        at=NOW,
+                    )
+
+            self.assertTrue(injected)
             self.assertIs(
                 require_provider_account_origin_set_authority(issued),
                 issued,

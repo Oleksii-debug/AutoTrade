@@ -45,19 +45,19 @@ def owners(directory):
 class AutonomousPartialFillLoopTests(unittest.TestCase):
     def test_each_partial_atomically_consumes_only_its_cash_and_creates_its_settlement(self):
         with TemporaryDirectory() as directory, patch.object(session, "INITIAL_CASH", Decimal("500")):
-            original = session.commit_order_fill_with_reservation_consumption
+            original = session.commit_provider_fill_with_reservation_consumption
             intermediate = []
 
             def capture(*args, **kwargs):
                 result = original(*args, **kwargs)
                 store, economic, orders, reservations, settlements = owners(directory)
                 intermediate.append((economic.cash("USD"), economic.position(session.INSTRUMENT),
-                    orders.order(kwargs["client_order_id"]).state,
+                    orders.order(kwargs["projected_fill"].client_order_id).state,
                     reservations.get(kwargs["reservation_id"]).remaining["CASH:USD"],
                     len(settlements.obligations)))
                 return result
 
-            with patch.object(session, "commit_order_fill_with_reservation_consumption", capture):
+            with patch.object(session, "commit_provider_fill_with_reservation_consumption", capture):
                 run(directory, PRICES, stop_after_episodes=4, execution_profile=PROFILE)
             self.assertEqual(intermediate, [
                 (Decimal("396.897"), Decimal("1"), "PARTIALLY_FILLED", Decimal("103.103"), 1),
@@ -94,13 +94,13 @@ class AutonomousPartialFillLoopTests(unittest.TestCase):
                 program = '''
 import os, sys
 from mvp.autotrade_mvp import simulation_session as session
-original = session.commit_order_fill_with_reservation_consumption
+original = session.commit_provider_fill_with_reservation_consumption
 def crash(*args, **kwargs):
     result = original(*args, **kwargs)
     if kwargs["order_event_key"].endswith(":" + sys.argv[2] + ":part:1:fill"):
         os._exit(23)
     return result
-session.commit_order_fill_with_reservation_consumption = crash
+session.commit_provider_fill_with_reservation_consumption = crash
 session.run_autonomous_simulation(["100", "101", "103", "90", "110", "120", "121"], sys.argv[1],
     run_id="acceptance", now="2026-10-03T00:00:00Z", execution_profile="TWO_EQUAL_PARTIALS", target_quantity="2")
 '''

@@ -5,20 +5,13 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from research.autotrade_research.evaluation.ablation import (
-    CanonicalAblationOutcomeEvidence,
-)
-from research.autotrade_research.evaluation.ablation_outcome_binding import (
+from autotrade_research.evaluation.ablation import CanonicalAblationOutcomeEvidence
+from autotrade_research.evaluation.ablation_outcome_binding import (
     BoundReconciledAblationOutcome,
     bind_ablation_outcome_to_reconciled_fact,
 )
-from research.autotrade_research.memory.episodes import (
-    ExperienceMemory,
-    MemoryIntegrityError,
-)
-from research.autotrade_research.memory.reconciled_outcome import (
-    resolve_reconciled_outcome_fact,
-)
+from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
+from autotrade_research.memory.reconciled_outcome import resolve_reconciled_outcome_fact
 
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -40,7 +33,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
     def _memory(self, path: Path) -> ExperienceMemory:
         store = ExperienceMemory(path)
         with patch(
-            "research.autotrade_research.memory.episodes._utc_now",
+            "autotrade_research.memory.episodes._utc_now",
             return_value=BASE,
         ):
             store.append_episode(
@@ -273,6 +266,49 @@ class AblationOutcomeBindingTests(unittest.TestCase):
                     reconciled_fact=fact,
                     effective_outcome_available_utc=BASE + timedelta(days=2),
                 )
+
+    def test_memory_subclass_is_rejected_before_virtual_read(self):
+        calls: list[str] = []
+
+        class HostileMemory(ExperienceMemory):
+            def coverage_population_snapshot(self, *args, **kwargs):
+                calls.append("coverage")
+                raise AssertionError("hostile memory callback executed")
+
+        with TemporaryDirectory() as directory:
+            hostile = HostileMemory(Path(directory) / "memory.sqlite3")
+            outcome = self._outcome(DIGEST)
+            with self.assertRaisesRegex(TypeError, "exact ExperienceMemory"):
+                bind_ablation_outcome_to_reconciled_fact(
+                    hostile,
+                    outcome,
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                )
+        self.assertEqual(calls, [])
+
+    def test_instance_shadowed_population_reader_is_not_executed(self):
+        calls: list[str] = []
+        with TemporaryDirectory() as directory:
+            store = self._memory(Path(directory) / "memory.sqlite3")
+            fact = self._fact(store)
+            outcome = self._outcome(fact.evidence_digest)
+
+            def hostile(*args, **kwargs):
+                calls.append("coverage")
+                raise AssertionError("instance population reader executed")
+
+            store.coverage_population_snapshot = hostile
+            bound = bind_ablation_outcome_to_reconciled_fact(
+                store,
+                outcome,
+                causal_cutoff=BASE + timedelta(days=1),
+                granted_permissions={"research"},
+                task="wp63-ablation",
+                instrument_family="equity",
+            )
+            self.assertEqual(bound.population_unit_id, EPISODE_ID)
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

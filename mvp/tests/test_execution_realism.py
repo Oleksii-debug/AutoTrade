@@ -28,6 +28,8 @@ def model(**overrides):
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
         price_quantum="0.01",
+        price_projection_policy_id="ADVERSE_PRICE_GRID",
+        price_projection_policy_version=1,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -140,8 +142,13 @@ class ExecutionRealismTests(unittest.TestCase):
         self.assertEqual(baseline[0], Decimal("101.10"))
 
     def test_market_projection_requires_explicit_price_quantum(self):
-        with self.assertRaisesRegex(ExecutionRealismError, "price_quantum"):
+        with self.assertRaisesRegex(ExecutionRealismError, "complete price projection policy evidence"):
             simulate_execution(order(), top(), model(price_quantum=None))
+
+    def test_market_projection_policy_identity_changes_model_fingerprint(self):
+        one = model(price_projection_policy_version=1)
+        two = model(price_projection_policy_version=2)
+        self.assertNotEqual(one.fingerprint, two.fingerprint)
 
     def test_market_price_quantum_changes_model_identity(self):
         one = model(price_quantum="0.01")

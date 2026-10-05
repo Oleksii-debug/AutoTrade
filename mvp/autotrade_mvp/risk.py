@@ -1668,6 +1668,12 @@ def evaluate_bound_risk(
             "caller-selected evidence_store cannot bind financial risk"
         )
     sealed_context = _reseal_bound_risk_context(context)
+    sealed_reservation_requirements = {
+        resource: amount
+        for resource, amount in normalize_reservation_requirements(
+            reservation_requirements
+        )
+    }
     decision = evaluate_risk(
         intent,
         sealed_context,
@@ -1679,7 +1685,7 @@ def evaluate_bound_risk(
         state_version=sealed_context.state_version,
         policy_version=policy_version,
         reservation_version=reservation_version,
-        reservation_requirements=reservation_requirements,
+        reservation_requirements=sealed_reservation_requirements,
         capability_snapshot_id=capability_snapshot_id,
         evaluated_at=evaluated_at,
         valid_until=valid_until,

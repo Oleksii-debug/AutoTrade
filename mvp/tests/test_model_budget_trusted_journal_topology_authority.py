@@ -17,7 +17,85 @@ def _poisoned_get_event(*_args, **_kwargs):
     raise AssertionError("pre-poisoned JournalStore.get_event code executed")
 
 
+class HostileJournalStore(JournalStore):
+    def load_events(self, *_args, **_kwargs):
+        raise AssertionError("JournalStore subclass dispatch reached model budget")
+
+
 class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
+    def test_constructor_rejects_journal_store_subclass_before_dispatch(self):
+        with TemporaryDirectory() as directory:
+            journal = HostileJournalStore(Path(directory) / "journal.db")
+            with self.assertRaisesRegex(
+                TypeError,
+                r"model budget journal must be exact JournalStore",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="exact-journal-type-budget",
+                    ceiling="5",
+                    environment="PAPER",
+                    clock=lambda: NOW_TEXT,
+                )
+
+    def test_constructor_rejects_instance_method_shadow_before_dispatch(self):
+        forged_calls = []
+
+        def hostile_load_events(*_args, **_kwargs):
+            forged_calls.append("forged")
+            self.fail("instance-shadowed load_events reached model budget")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            journal.load_events = hostile_load_events
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    r"instance state is shadowed",
+                ):
+                    DurableModelBudget(
+                        journal=journal,
+                        budget_id="instance-shadow-budget",
+                        ceiling="5",
+                        environment="PAPER",
+                        clock=lambda: NOW_TEXT,
+                    )
+            finally:
+                del journal.load_events
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(
+                journal.load_events("model_budget", "instance-shadow-budget"),
+                [],
+            )
+
+    def test_budget_rejects_journal_retarget_after_construction(self):
+        with TemporaryDirectory() as directory:
+            first = JournalStore(Path(directory) / "first.db")
+            second = JournalStore(Path(directory) / "second.db")
+            budget = DurableModelBudget(
+                journal=first,
+                budget_id="retarget-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            object.__setattr__(budget, "journal", second)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"journal authority changed after construction",
+            ):
+                budget.reserve("retarget-request", "0.2")
+
+            self.assertEqual(
+                first.load_events("model_budget", "retarget-budget")[-1]["event_type"],
+                "ModelBudgetInitialized",
+            )
+            self.assertEqual(
+                second.load_events("model_budget", "retarget-budget"),
+                [],
+            )
+
     def test_prepoisoned_journal_base_is_restored_before_reserve_dispatch(self):
         canonical_base = JournalStore.__bases__[0]
         forged_get_event_calls = []

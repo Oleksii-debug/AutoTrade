@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
 from uuid import UUID
 
 import autotrade_research.evaluation.ablation as ablation_module
@@ -17,7 +16,9 @@ from autotrade_research.evaluation.ablation import (
     CausalInputEvidence,
 )
 from autotrade_research.evaluation.ablation_operand_provenance import (
+    ResolvedAblationUtilityFactProvenance,
     resolve_ablation_utility_fact_provenance,
+    reverify_ablation_utility_fact_provenance,
 )
 from autotrade_research.memory.episodes import ExperienceMemory, MemoryIntegrityError
 from autotrade_research.memory.reconciled_outcome import resolve_reconciled_outcome_fact
@@ -134,7 +135,8 @@ class AblationOperandProvenanceTests(unittest.TestCase):
             task="ablation-qualification",
             instrument_family="EQUITY",
         )
-        population = memory.coverage_population_snapshot(
+        population = ExperienceMemory.coverage_population_snapshot(
+            memory,
             causal_cutoff=evaluation_cutoff,
             granted_permissions={"RESEARCH"},
             task="ablation-qualification",
@@ -255,9 +257,17 @@ class AblationOperandProvenanceTests(unittest.TestCase):
             self.assertEqual(resolved.population_digest, population.root_hash)
             self.assertEqual(len(resolved.bound_outcomes), 2)
             self.assertEqual(
+                tuple(
+                    (item.case_id, item.variant)
+                    for item in resolved.bound_outcomes
+                ),
+                (("case-63", "ABLATED"), ("case-63", "FULL")),
+            )
+            self.assertEqual(
                 {item.reconciled_fact.evidence_digest for item in resolved.bound_outcomes},
                 {fact.evidence_digest},
             )
+            self.assertTrue(resolved.provenance_digest.startswith("sha256:"))
             self.assertTrue(all(not hasattr(item, "utility") for item in resolved.bound_outcomes))
             self.assertTrue(all(not hasattr(item, "cost") for item in resolved.bound_outcomes))
 
@@ -353,6 +363,40 @@ class AblationOperandProvenanceTests(unittest.TestCase):
                 tuple(item.reconciled_fact for item in first.bound_outcomes),
                 tuple(item.reconciled_fact for item in second.bound_outcomes),
             )
+            self.assertNotEqual(first.provenance_digest, second.provenance_digest)
+
+    def test_reordered_outcome_refs_have_identical_canonical_provenance(self):
+        with TemporaryDirectory() as directory:
+            (
+                _science,
+                _memory,
+                artifacts,
+                registration,
+                matched,
+                fact,
+                population,
+                authority,
+                _evaluation_cutoff,
+            ) = self._build_fixture(Path(directory))
+            refs = self._publish_refs(
+                artifacts,
+                registration,
+                matched,
+                population,
+                utility_digest=fact.evidence_digest,
+            )
+            forward = resolve_ablation_utility_fact_provenance(
+                authority,
+                [matched],
+                outcome_refs=list(refs),
+            )
+            reverse = resolve_ablation_utility_fact_provenance(
+                authority,
+                [matched],
+                outcome_refs=list(reversed(refs)),
+            )
+            self.assertEqual(reverse, forward)
+            self.assertEqual(reverse.provenance_digest, forward.provenance_digest)
 
     def test_instance_shadowed_authority_resolve_is_not_executed(self):
         calls: list[str] = []
@@ -381,6 +425,7 @@ class AblationOperandProvenanceTests(unittest.TestCase):
                 raise AssertionError("instance resolve shadow executed")
 
             authority.resolve = hostile
+            authority.resolve_population = hostile
             resolved = resolve_ablation_utility_fact_provenance(
                 authority,
                 [matched],
@@ -470,7 +515,44 @@ class AblationOperandProvenanceTests(unittest.TestCase):
                 )
             self.assertEqual(calls, [])
 
-    def test_restart_reproduces_same_population_and_reconciled_fact(self):
+    def test_provenance_digest_tamper_fails_before_reverification_reads(self):
+        with TemporaryDirectory() as directory:
+            (
+                _science,
+                _memory,
+                artifacts,
+                registration,
+                matched,
+                fact,
+                population,
+                authority,
+                _evaluation_cutoff,
+            ) = self._build_fixture(Path(directory))
+            refs = self._publish_refs(
+                artifacts,
+                registration,
+                matched,
+                population,
+                utility_digest=fact.evidence_digest,
+            )
+            evidence = resolve_ablation_utility_fact_provenance(
+                authority,
+                [matched],
+                outcome_refs=list(refs),
+            )
+            object.__setattr__(evidence, "provenance_digest", "sha256:" + "f" * 64)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "provenance digest does not match",
+            ):
+                reverify_ablation_utility_fact_provenance(
+                    authority,
+                    [matched],
+                    outcome_refs=list(refs),
+                    evidence=evidence,
+                )
+
+    def test_restart_reverifies_same_population_and_reconciled_fact(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             (
@@ -512,20 +594,24 @@ class AblationOperandProvenanceTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
-            after = resolve_ablation_utility_fact_provenance(
+            after = reverify_ablation_utility_fact_provenance(
                 after_authority,
                 [matched],
                 outcome_refs=list(refs),
+                evidence=before,
             )
 
+            self.assertEqual(after, before)
             self.assertEqual(after.population_digest, before.population_digest)
             self.assertEqual(after.coverage_digest, before.coverage_digest)
+            self.assertEqual(after.provenance_digest, before.provenance_digest)
             self.assertEqual(
                 tuple(item.reconciled_fact for item in after.bound_outcomes),
                 tuple(item.reconciled_fact for item in before.bound_outcomes),
             )
             self.assertIsNot(reopened_memory, memory)
             self.assertIsNot(reopened_science, science)
+            self.assertIsInstance(before, ResolvedAblationUtilityFactProvenance)
 
 
 if __name__ == "__main__":

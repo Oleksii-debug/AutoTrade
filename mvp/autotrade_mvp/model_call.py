@@ -515,6 +515,43 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         return _utc_text(self.clock(), name="clock")
 
+    def _capture_callback_authority(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Capture mutable orchestrator authority before caller-owned code runs."""
+        return (
+            {
+                "budget": self.budget,
+                "journal": self.journal,
+                "clock": self.clock,
+                "pricing_evidence_resolver": self.pricing_evidence_resolver,
+                "observation_evidence_resolver": self.observation_evidence_resolver,
+                "billing_evidence_resolver": self.billing_evidence_resolver,
+            },
+            {
+                "started_lease_seconds": self.started_lease_seconds,
+                "owner_token": self.owner_token,
+            },
+        )
+
+    def _restore_callback_authority(
+        self,
+        refs: Mapping[str, object],
+        values: Mapping[str, object],
+    ) -> list[str]:
+        """Restore exact captured authority and report attempted replacement."""
+        changes: list[str] = []
+        for name, expected in refs.items():
+            if getattr(self, name, None) is not expected:
+                changes.append(name)
+            setattr(self, name, expected)
+        for name, expected in values.items():
+            current = getattr(self, name, None)
+            if type(current) is not type(expected) or current != expected:
+                changes.append(name)
+            setattr(self, name, expected)
+        return changes
+
     @staticmethod
     def _sealed_spec(spec: ModelCallSpec) -> ModelCallSpec:
         if type(spec) is not ModelCallSpec:
@@ -692,15 +729,37 @@ class DurableModelCallOrchestrator:
         resolver_descriptors = tuple(ModelDescriptor(**{
             field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
         }) for item in descriptors)
+        authority_refs, authority_values = (
+            DurableModelCallOrchestrator._capture_callback_authority(self)
+        )
+        pricing_resolver = self.pricing_evidence_resolver
+        pricing_error: Exception | None = None
+        snapshot: PricingEvidenceSnapshot | object | None = None
         try:
-            snapshot = self.pricing_evidence_resolver(
-                resolver_spec,
-                resolver_descriptors,
+            try:
+                snapshot = pricing_resolver(
+                    resolver_spec,
+                    resolver_descriptors,
+                )
+            except Exception as error:
+                pricing_error = error
+        finally:
+            authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    authority_refs,
+                    authority_values,
+                )
             )
-        except Exception as error:
+        if authority_changes:
+            raise ModelCallError(
+                "pricing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(authority_changes))
+            ) from pricing_error
+        if pricing_error is not None:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
-            ) from error
+            ) from pricing_error
         if type(snapshot) is not PricingEvidenceSnapshot:
             raise ModelCallError(
                 "pricing evidence resolver did not return PricingEvidenceSnapshot"
@@ -1316,6 +1375,41 @@ class DurableModelCallOrchestrator:
         if cancel_requested is not None and not callable(cancel_requested):
             raise TypeError("cancel_requested must be callable or None")
 
+        cancel_probe = cancel_requested
+
+        def cancelled() -> bool:
+            if cancel_probe is None:
+                return False
+            authority_refs, authority_values = (
+                DurableModelCallOrchestrator._capture_callback_authority(self)
+            )
+            probe_result: object = False
+            probe_error: BaseException | None = None
+            try:
+                probe_result = cancel_probe()
+            except BaseException as error:
+                probe_error = error
+            finally:
+                authority_changes = (
+                    DurableModelCallOrchestrator._restore_callback_authority(
+                        self,
+                        authority_refs,
+                        authority_values,
+                    )
+                )
+            if probe_error is not None:
+                raise probe_error
+            if authority_changes:
+                raise ModelCallError(
+                    "cancellation probe mutated orchestrator authority:"
+                    + ",".join(sorted(authority_changes))
+                )
+            if type(probe_result) is not bool:
+                raise ModelCallError(
+                    "cancellation probe must return an exact boolean"
+                )
+            return probe_result
+
         attempt_id = self.attempt_id(spec)
         if request.request_id != attempt_id:
             raise ValueError(
@@ -1485,7 +1579,6 @@ class DurableModelCallOrchestrator:
                 payload=prepared_payload,
             )
 
-        cancelled = cancel_requested or (lambda: False)
         # The cancellation callback may consume time; check time afterwards.
         cancelled_before_start = cancelled()
         temporal_reason = self._temporal_reason(prepared_payload, request)
@@ -1556,18 +1649,9 @@ class DurableModelCallOrchestrator:
         # adapter may retain a reference to this orchestrator through its closure,
         # so restore these exact authorities before any post-call durable action
         # and classify any attempted replacement as UNKNOWN.
-        adapter_boundary_refs = {
-            "budget": self.budget,
-            "journal": self.journal,
-            "clock": self.clock,
-            "pricing_evidence_resolver": self.pricing_evidence_resolver,
-            "observation_evidence_resolver": self.observation_evidence_resolver,
-            "billing_evidence_resolver": self.billing_evidence_resolver,
-        }
-        adapter_boundary_values = {
-            "started_lease_seconds": self.started_lease_seconds,
-            "owner_token": self.owner_token,
-        }
+        post_start_authority_refs, post_start_authority_values = (
+            DurableModelCallOrchestrator._capture_callback_authority(self)
+        )
         observation_evidence_resolver = self.observation_evidence_resolver
         adapter_error: Exception | None = None
         authority_changes: list[str] = []
@@ -1577,15 +1661,13 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 adapter_error = error
         finally:
-            for name, expected in adapter_boundary_refs.items():
-                if getattr(self, name, None) is not expected:
-                    authority_changes.append(name)
-                setattr(self, name, expected)
-            for name, expected in adapter_boundary_values.items():
-                current = getattr(self, name, None)
-                if type(current) is not type(expected) or current != expected:
-                    authority_changes.append(name)
-                setattr(self, name, expected)
+            authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    post_start_authority_refs,
+                    post_start_authority_values,
+                )
+            )
 
         if authority_changes:
             payload = {
@@ -1722,16 +1804,31 @@ class DurableModelCallOrchestrator:
                 route=decision,
             )
 
+        observation_evidence: ModelObservationEvidence | None = None
+        observation_evidence_error: ModelCallError | None = None
+        resolver_authority_changes: list[str] = []
         try:
-            observation_evidence = self._verified_observation_evidence(
-                observation,
-                binding,
-                resolver=observation_evidence_resolver,
+            try:
+                observation_evidence = self._verified_observation_evidence(
+                    observation,
+                    binding,
+                    resolver=observation_evidence_resolver,
+                )
+            except ModelCallError as error:
+                observation_evidence_error = error
+        finally:
+            resolver_authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    post_start_authority_refs,
+                    post_start_authority_values,
+                )
             )
-        except ModelCallError as error:
+        if resolver_authority_changes:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "observation_evidence_invalid:" + str(error),
+                "reason": "observation_evidence_resolver_mutated_orchestrator_authority:"
+                + ",".join(sorted(resolver_authority_changes)),
                 "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
@@ -1748,6 +1845,33 @@ class DurableModelCallOrchestrator:
             return self._outcome_from_terminal(
                 self._events(attempt_id)[-1],
                 route=decision,
+            )
+        if observation_evidence_error is not None:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "observation_evidence_invalid:" + str(
+                    observation_evidence_error
+                ),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+        if observation_evidence is None:
+            raise ModelCallError(
+                "observation evidence resolver returned no accepted evidence"
             )
 
         try:
@@ -1811,10 +1935,41 @@ class DurableModelCallOrchestrator:
             "result_schema_id": spec.result_schema_id,
             "schema_valid": None,
         }
+        validator_authority_changes: list[str] = []
         try:
             schema_valid = validate_result(json.loads(result_json))
         except Exception:
             schema_valid = False
+        finally:
+            validator_authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    post_start_authority_refs,
+                    post_start_authority_values,
+                )
+            )
+        if validator_authority_changes:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "validator_mutated_orchestrator_authority:"
+                + ",".join(sorted(validator_authority_changes)),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
         if type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
@@ -1860,7 +2015,24 @@ class DurableModelCallOrchestrator:
         })
         if not callable(recovery_fence):
             raise TypeError("recovery_fence must be callable")
-        recovery_fence()
+        authority_refs, authority_values = (
+            DurableModelCallOrchestrator._capture_callback_authority(self)
+        )
+        try:
+            recovery_fence()
+        finally:
+            authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    authority_refs,
+                    authority_values,
+                )
+            )
+        if authority_changes:
+            raise ModelCallError(
+                "recovery fence mutated orchestrator authority:"
+                + ",".join(sorted(authority_changes))
+            )
         attempt_id = self.attempt_id(spec)
         events = self._events(attempt_id)
         if events:
@@ -2112,16 +2284,38 @@ class DurableModelCallOrchestrator:
                 "durable billing scope cannot be canonicalized"
             ) from error
 
+        authority_refs, authority_values = (
+            DurableModelCallOrchestrator._capture_callback_authority(self)
+        )
+        billing_resolver = self.billing_evidence_resolver
+        billing_error: Exception | None = None
+        evidence: BillingEvidence | object | None = None
         try:
-            evidence = self.billing_evidence_resolver(
-                attempt,
-                billing,
-                frozen_scope,
+            try:
+                evidence = billing_resolver(
+                    attempt,
+                    billing,
+                    frozen_scope,
+                )
+            except Exception as error:
+                billing_error = error
+        finally:
+            authority_changes = (
+                DurableModelCallOrchestrator._restore_callback_authority(
+                    self,
+                    authority_refs,
+                    authority_values,
+                )
             )
-        except Exception as error:
+        if authority_changes:
+            raise ModelCallError(
+                "billing evidence resolver mutated orchestrator authority:"
+                + ",".join(sorted(authority_changes))
+            ) from billing_error
+        if billing_error is not None:
             raise ModelCallError(
                 "billing evidence could not be authenticated"
-            ) from error
+            ) from billing_error
         if type(evidence) is not BillingEvidence:
             raise ModelCallError(
                 "billing evidence resolver did not return BillingEvidence"

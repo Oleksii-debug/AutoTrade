@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -8,6 +8,7 @@ import unittest
 from autotrade_runtime.artifacts import ArtifactStore
 
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp import provider_origin as provider_origin_module
 from mvp.autotrade_mvp.provider_origin import ProviderOriginError, ProviderOriginJournal
 from mvp.tests.test_provider_route_reads import ProviderRouteReadTests
 
@@ -40,6 +41,25 @@ class ProviderOriginTimezoneAuthorityTests(unittest.TestCase):
         )
         binding = fixture.prepare(route, capabilities, qualifications)
         return journal, binding
+
+    def test_utc_text_accepts_exact_stdlib_fixed_offsets(self) -> None:
+        values = (
+            datetime(2026, 10, 5, 20, 0, tzinfo=timezone.utc),
+            datetime(
+                2026,
+                10,
+                5,
+                22,
+                0,
+                tzinfo=timezone(timedelta(hours=2)),
+            ),
+        )
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    provider_origin_module._utc_text(value, name="at"),
+                    "2026-10-05T20:00:00Z",
+                )
 
     def test_prepare_rejects_custom_timezone_before_callback_or_journal_mutation(self) -> None:
         with TemporaryDirectory() as directory:

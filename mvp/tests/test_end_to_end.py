@@ -496,6 +496,27 @@ class VerticalSliceTests(unittest.TestCase):
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
+    def test_replay_requires_one_journal_event_per_evidence_record(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            checkpoint_path = root / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            evidence_path = root / "learning-evidence.jsonl"
+            original = json.loads(evidence_path.read_text(encoding="utf-8"))
+            missing_journal = dict(original)
+            missing_journal["evidence_id"] = "evidence-missing-journal"
+            checkpoint["evidence_ids"].append(missing_journal["evidence_id"])
+            checkpoint["evidence_ids"].sort()
+            checkpoint["evidence_records"][missing_journal["evidence_id"]] = missing_journal
+            checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            evidence_path.write_text(
+                json.dumps(original) + "\n" + json.dumps(missing_journal) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(verify_replay(directory))
+
     def test_replay_rejects_unrelated_simulation_aggregate_event(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

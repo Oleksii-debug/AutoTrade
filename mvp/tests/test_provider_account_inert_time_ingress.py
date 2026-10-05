@@ -72,6 +72,29 @@ class ProviderAccountInertTimeIngressTests(unittest.TestCase):
             )
         self.assertEqual(hostile.calls, 0)
 
+    def test_public_absence_coverage_issuer_rejects_hostile_time_before_authority_reads(self):
+        hostile = _ExecutableTimezone()
+        value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)
+        absence_semantics = object.__new__(
+            absence_coverage.QualifiedProviderAccountAbsenceSemantics
+        )
+        page_chain = object.__new__(absence_coverage.ProviderAccountPageChain)
+        historical_submission = object.__new__(
+            absence_coverage.HistoricalUnknownSubmissionBinding
+        )
+        qualification_registry = object.__new__(
+            absence_coverage.DurableProviderQualificationRegistry
+        )
+        with self.assertRaises(absence_coverage.ProviderAccountAbsenceCoverageError):
+            absence_coverage.issue_provider_account_surface_coverage(
+                absence_semantics=absence_semantics,
+                page_chain=page_chain,
+                historical_submission=historical_submission,
+                qualification_registry=qualification_registry,
+                at=value,
+            )
+        self.assertEqual(hostile.calls, 0)
+
     def test_exact_stdlib_fixed_offset_timezones_remain_accepted(self):
         values = (
             datetime(2026, 10, 5, 16, 0, tzinfo=timezone.utc),

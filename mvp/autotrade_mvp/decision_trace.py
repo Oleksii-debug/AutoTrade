@@ -9,6 +9,7 @@ from math import isfinite
 import json
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
@@ -332,6 +333,101 @@ def _semantic_payload(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _trace_entry_identity(info: os.stat_result) -> tuple[int, int]:
+    return (info.st_dev, info.st_ino)
+
+
+def _trace_generation_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
+
+
+def _read_trace_text_descriptor_bound(path: Path) -> str | None:
+    """Read one stable regular-file generation and reject path swaps."""
+
+    try:
+        initial = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ValueError("Corrupt decision trace store: cannot inspect path") from error
+
+    if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+        raise ValueError("Corrupt decision trace store: unsafe path alias")
+
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError) as error:
+        raise ValueError("Corrupt decision trace store: unsafe path alias") from error
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError(
+            "Corrupt decision trace store: path changed before descriptor read"
+        ) from error
+
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ValueError("Corrupt decision trace store: unsafe path alias")
+        if (
+            _trace_entry_identity(initial) != _trace_entry_identity(opened)
+            or _trace_generation_identity(initial)
+            != _trace_generation_identity(opened)
+        ):
+            raise ValueError(
+                "Corrupt decision trace store: path changed before descriptor read"
+            )
+
+        expected_bytes = opened.st_size
+        remaining = expected_bytes + 1
+        copied = 0
+        chunks: list[bytes] = []
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            copied += len(chunk)
+            remaining -= len(chunk)
+
+        after = os.fstat(descriptor)
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise ValueError(
+                "Corrupt decision trace store: path changed during descriptor read"
+            ) from error
+
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or _trace_entry_identity(opened) != _trace_entry_identity(after)
+            or _trace_generation_identity(opened)
+            != _trace_generation_identity(after)
+            or _trace_entry_identity(opened) != _trace_entry_identity(current)
+            or _trace_generation_identity(opened)
+            != _trace_generation_identity(current)
+            or copied != expected_bytes
+        ):
+            raise ValueError(
+                "Corrupt decision trace store: path changed during descriptor read"
+            )
+    finally:
+        os.close(descriptor)
+
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("Corrupt decision trace store") from error
+
+
 class DecisionTraceStore:
     """Durable JSONL trace store with idempotent append and hash-chain verification."""
 
@@ -353,16 +449,9 @@ class DecisionTraceStore:
     def _load(self) -> list[dict[str, Any]]:
         if not self.path.parent.exists():
             return []
-        try:
-            validate_publication_destination(self.path)
-        except (DurablePublishLockError, OSError) as error:
-            raise ValueError("Corrupt decision trace store: unsafe path alias") from error
-        if not self.path.exists():
+        raw = _read_trace_text_descriptor_bound(self.path)
+        if raw is None:
             return []
-        try:
-            raw = self.path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as error:
-            raise ValueError("Corrupt decision trace store") from error
         if raw == "":
             return []
         if not raw.endswith("\n"):
@@ -544,13 +633,14 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        try:
-            records = self._load()
-        except ValueError as error:
-            raise ValueError("Decision trace chain is corrupt") from error
-        if records and not self._records_are_valid(records):
-            raise ValueError("Decision trace chain is corrupt")
-        return records
+        with durable_path_lock(self.path):
+            try:
+                records = self._load()
+            except ValueError as error:
+                raise ValueError("Decision trace chain is corrupt") from error
+            if records and not self._records_are_valid(records):
+                raise ValueError("Decision trace chain is corrupt")
+            return records
 
     def reconstruct(
         self,

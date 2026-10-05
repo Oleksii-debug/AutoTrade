@@ -3552,6 +3552,41 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
 
+    def test_adapter_cannot_mutate_journal_identity_in_place(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            identity = journal._store_identity
+            original_path = identity.canonical_path
+
+            def hostile_adapter(*_args):
+                object.__setattr__(
+                    journal._store_identity,
+                    "canonical_path",
+                    original_path + ".forged",
+                )
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("journal._store_identity.canonical_path", result.reason)
+            self.assertEqual(journal._store_identity.canonical_path, original_path)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_billing_resolver_cannot_shadow_journal_append(self):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)

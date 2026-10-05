@@ -115,6 +115,39 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 [],
             )
 
+    def test_reinitialization_is_rejected_before_authority_state_mutation(self):
+        with TemporaryDirectory() as directory:
+            first = JournalStore(Path(directory) / "first.db")
+            second = JournalStore(Path(directory) / "second.db")
+            budget = DurableModelBudget(
+                journal=first,
+                budget_id="reinit-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            original_state = dict(vars(budget))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"authority is already established",
+            ):
+                budget.__init__(
+                    journal=second,
+                    budget_id="retargeted-budget",
+                    ceiling="500",
+                    environment="LIVE",
+                    clock=lambda: "2026-09-25T11:00:00+00:00",
+                )
+
+            self.assertEqual(vars(budget), original_state)
+            self.assertTrue(budget.reserve("reinit-request", "0.2"))
+            self.assertEqual(budget.snapshot().reserved, Decimal("0.2"))
+            self.assertEqual(
+                second.load_events("model_budget", "retargeted-budget"),
+                [],
+            )
+
     def test_budget_rejects_post_construction_journal_method_shadow(self):
         forged_calls = []
 

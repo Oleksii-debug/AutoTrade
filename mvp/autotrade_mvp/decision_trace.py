@@ -559,7 +559,7 @@ class DecisionTraceStore:
             self.reconstruct(
                 trace_id,
                 available_event_ids=available_event_ids,
-                available_evidence_ids=available_evidence_ids or (),
+                available_evidence_ids=available_evidence_ids,
             )
             evidence_status = "UNVERIFIED"
             evidence_note = (

@@ -100,7 +100,11 @@ class AblationOwnedOperandPreflightTests(unittest.TestCase):
             self.assertFalse(resolved.terminal_numeric_operands)
             self.assertEqual(
                 resolved.missing_terminal_evidence,
-                ("utility_numeric_projection", "complete_cost_composite"),
+                (
+                    "utility_numeric_projection",
+                    "registered_cost_component_attribution",
+                    "complete_cost_composite",
+                ),
             )
             self.assertEqual(
                 resolved.blocking_reason,

@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
+from autotrade_runtime.strict_json import strict_json_loads
 
 
 GENESIS_HASH = "0" * 64
@@ -343,8 +344,8 @@ class DecisionTraceStore:
         records: list[dict[str, Any]] = []
         for line in lines:
             try:
-                record = json.loads(line)
-            except json.JSONDecodeError as error:
+                record = strict_json_loads(line)
+            except ValueError as error:
                 raise ValueError("Corrupt decision trace store") from error
             if type(record) is not dict:
                 raise ValueError("Decision trace row must be an exact object")
@@ -458,7 +459,18 @@ class DecisionTraceStore:
     def append(self, trace: dict[str, Any]) -> bool:
         """Append one trace under the canonical cross-process writer lock."""
 
-        prepared = _redact(trace)
+        try:
+            prepared = _redact(trace)
+        except RecursionError as error:
+            raise ValueError(
+                "Decision trace exceeds strict JSON resource domain"
+            ) from error
+        try:
+            strict_json_loads(canonical_json(prepared))
+        except (ValueError, RecursionError) as error:
+            raise ValueError(
+                "Decision trace exceeds strict JSON resource domain"
+            ) from error
         store_owned = {"recorded_at", "previous_hash", "record_hash"} & set(prepared)
         if store_owned:
             raise ValueError(

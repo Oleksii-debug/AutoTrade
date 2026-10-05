@@ -804,13 +804,33 @@ _unissued_prepare_order_submission = prepare_order_submission
 del _unissued_prepare_order_submission
 del _install_bybit_prepared_submission_authority
 
+_CANONICAL_PREPARED_SUBMISSION_VERIFIER = (
+    require_canonical_bybit_prepared_submission
+)
+_CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE = (
+    require_canonical_bybit_prepared_submission.__code__
+)
+
 
 def guarded_order_projection(
     prepared_request: BybitPreparedSubmission,
 ) -> Mapping[str, object]:
     """Project canonical Bybit preparation into the shared guarded transport seam."""
 
-    require_canonical_bybit_prepared_submission(prepared_request)
+    if (
+        require_canonical_bybit_prepared_submission
+        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER
+        or getattr(
+            _CANONICAL_PREPARED_SUBMISSION_VERIFIER,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_PREPARED_SUBMISSION_VERIFIER_CODE
+    ):
+        raise ProviderCoreError(
+            "Bybit prepared submission verifier authority changed"
+        )
+    _CANONICAL_PREPARED_SUBMISSION_VERIFIER(prepared_request)
     return MappingProxyType(
         {
             "endpoint": prepared_request.endpoint,

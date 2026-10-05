@@ -14,6 +14,8 @@ from mvp.autotrade_mvp.bybit_v5 import (
 from mvp.autotrade_mvp.durable_financial_request_binding import (
     DurableFinancialRequestBindingError,
     DurableFinancialRequestBindingRegistry,
+    _BINDING_PAYLOAD_BASE_FIELDS,
+    _BINDING_PAYLOAD_PRODUCTION_FIELDS,
     _binding_payload,
     _production_request_origin_receipt,
     _require_bybit_prepared_request_origin,
@@ -108,6 +110,10 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             store_identity_digest=D8,
         )
         self.assertNotIn("provider_request_origin", payload)
+        self.assertEqual(
+            frozenset(payload),
+            _BINDING_PAYLOAD_BASE_FIELDS,
+        )
 
     def test_production_payload_requires_durable_origin_receipt(self):
         material, _prepared = canonical_case()
@@ -119,6 +125,10 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         self.assertEqual(
             payload["provider_request_origin"],
             _production_request_origin_receipt(material),
+        )
+        self.assertEqual(
+            frozenset(payload),
+            _BINDING_PAYLOAD_PRODUCTION_FIELDS,
         )
         legacy = dict(payload)
         legacy.pop("provider_request_origin")
@@ -304,7 +314,12 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         ):
             _require_bybit_prepared_request_origin(material, forged)
         with self.assertRaisesRegex(
-            Exception,
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            require_canonical_bybit_prepared_submission(forged)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
             "prepared submission authority changed",
         ):
             guarded_order_projection(forged)
@@ -336,6 +351,26 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 "provenance authority changed",
             ):
                 _require_bybit_prepared_request_origin(material, prepared)
+        self.assertEqual(calls, [])
+
+    def test_shared_projection_pins_provenance_verifier(self):
+        _material, prepared = canonical_case()
+        calls = []
+
+        def forged(_prepared):
+            calls.append("forged")
+            return _prepared
+
+        with patch.object(
+            bybit_module,
+            "require_canonical_bybit_prepared_submission",
+            forged,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "verifier authority changed",
+            ):
+                guarded_order_projection(prepared)
         self.assertEqual(calls, [])
 
     def test_projection_rebinding_fails_before_forged_projection_executes(self):

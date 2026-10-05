@@ -970,6 +970,38 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 ["ModelCallPrepared", "ModelCallNotSent"],
             )
 
+    def test_fresh_attempt_rejects_pricing_at_exact_expiry_before_reservation(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock(NOW + timedelta(hours=1))
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "pricing evidence has expired",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail(
+                        "expired pricing must not cross inference boundary"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
     def test_zero_cancelled_and_expired_new_attempts_never_touch_model_inventory(self):
         class ExplodingInventory:
             def __iter__(self):
@@ -1037,6 +1069,107 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     budget.active_reservation(outcome.attempt_id)
                 )
                 self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_adapter_and_observation_evidence_callbacks_cannot_mutate_binding_authority(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            evidence_inputs = []
+
+            def mutating_call(adapter_binding, _cancelled):
+                object.__setattr__(
+                    adapter_binding,
+                    "attempt_id",
+                    "forged-adapter-attempt",
+                )
+                object.__setattr__(
+                    adapter_binding,
+                    "model_id",
+                    "forged-adapter-model",
+                )
+                return observation()
+
+            def mutating_evidence(resolver_observation, resolver_binding):
+                evidence_inputs.append(
+                    (resolver_binding.attempt_id, resolver_binding.model_id)
+                )
+                evidence = _observation_evidence(
+                    resolver_observation,
+                    resolver_binding,
+                )
+                object.__setattr__(
+                    resolver_binding,
+                    "attempt_id",
+                    "forged-evidence-attempt",
+                )
+                resolver_observation.output["answer"] = 999
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                observation_evidence_resolver=mutating_evidence,
+            )
+            call_spec = spec()
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_call,
+                validate_result=lambda value: value == {"answer": 7},
+                now_utc=NOW,
+            )
+
+            self.assertEqual(outcome.status, "OBSERVED_VALID")
+            self.assertEqual(
+                evidence_inputs,
+                [(outcome.attempt_id, "model-a")],
+            )
+            self.assertEqual(outcome.output, {"answer": 7})
+
+    def test_pricing_resolver_cannot_rewrite_attempt_or_route_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            call_spec = spec()
+            route_descriptor = descriptor()
+
+            def hostile_pricing(resolver_spec, resolver_descriptors):
+                object.__setattr__(call_spec, "policy_id", "caller-mutated-policy")
+                object.__setattr__(
+                    resolver_spec,
+                    "pricing_evidence_id",
+                    "resolver-forged-pricing",
+                )
+                object.__setattr__(
+                    resolver_descriptors[0],
+                    "estimated_cost",
+                    Decimal("0.1"),
+                )
+                return _pricing_evidence(resolver_spec, resolver_descriptors)
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                pricing_evidence_resolver=hostile_pricing,
+            )
+            request = request_for(orchestrator, call_spec)
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "pricing evidence identity does not match call spec",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request,
+                    descriptors=[route_descriptor],
+                    call=lambda *_args: observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(route_descriptor.estimated_cost, Decimal("1.2"))
 
     def test_new_attempt_freezes_one_route_time_snapshot_for_all_admission(self):
         with TemporaryDirectory() as directory:
@@ -1461,6 +1594,50 @@ class ModelCallLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(repeated.status, "NOT_SENT")
             self.assertEqual(calls, [])
+
+    def test_recovery_fence_cannot_rewrite_reserved_attempt_identity(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+            request = request_for(orchestrator, call_spec)
+            original_attempt_id = orchestrator.attempt_id(call_spec)
+            budget.admit_route(
+                fixed_policy(),
+                request,
+                [descriptor()],
+                now_utc=NOW,
+                reservation_context=orchestrator._reservation_context(
+                    call_spec,
+                    _pricing_evidence(call_spec, (descriptor(),)),
+                ),
+            )
+
+            def mutating_fence():
+                object.__setattr__(
+                    call_spec,
+                    "policy_id",
+                    "fence-mutated-policy",
+                )
+
+            restarted = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            recovered = restarted.recover_reserved_not_started(
+                spec=call_spec,
+                recovery_fence=mutating_fence,
+            )
+
+            self.assertEqual(recovered.status, "NOT_SENT")
+            self.assertEqual(recovered.attempt_id, original_attempt_id)
+            self.assertIsNone(
+                budget.active_reservation(original_attempt_id)
+            )
 
     def test_pricing_evidence_change_cannot_rebind_existing_reservation(self):
         with TemporaryDirectory() as directory:

@@ -179,11 +179,12 @@ def _capture_artifact_store_authority(
     if type(store) is not ArtifactStore:
         raise TypeError("evidence_store must be exact ArtifactStore")
     paths: list[tuple[str, Path, Path]] = []
+    concrete_path_type = type(Path())
     for name in ("root", "objects", "manifests", "staging", "lock_path"):
         value = getattr(store, name, None)
-        if not isinstance(value, Path):
+        if type(value) is not concrete_path_type:
             raise RuntimeTargetHostRunnerError(
-                f"ArtifactStore {name} must remain a pathlib path"
+                f"ArtifactStore {name} must remain an exact pathlib path"
             )
         try:
             resolved = value.resolve(strict=False)

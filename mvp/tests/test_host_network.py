@@ -1058,6 +1058,74 @@ class HostNetworkTests(unittest.TestCase):
             self.assertNotIn("paper-account-1", json.dumps(payload))
 
 
+    def test_host_id_configuration_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("host_id strip callback must not run")
+
+        with self.assertRaisesRegex(ValueError, "host_id is required"):
+            AuthenticatedHostApplication(
+                JournalStore(str(Path(self.directory.name) / "hostile-host-id.sqlite3")),
+                security_boundary=self.boundary,
+                account_id="paper-account-1",
+                environment="PAPER",
+                host_id=HostileText("host-local-1"),
+                public_origin=self.origin,
+                principal_resolver=header_principal_resolver,
+                snapshot_provider=self._snapshot,
+                now=lambda: "2026-09-25T09:30:00Z",
+            )
+
+        self.assertEqual(callbacks, [])
+
+
+    def test_snapshot_scope_identity_rejects_str_subclasses_before_comparison(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("snapshot identity equality callback must not run")
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                raise AssertionError("snapshot identity inequality callback must not run")
+
+        for field in ("account_id", "host_id"):
+            with self.subTest(field=field):
+                callbacks.clear()
+
+                def hostile_snapshot(durable, principal, *, _field=field):
+                    payload = dict(self._snapshot(durable, principal))
+                    payload[_field] = HostileText(str(payload[_field]))
+                    return payload
+
+                app = self._application(
+                    origin=self.origin,
+                    boundary=self.boundary,
+                    session=self.owner,
+                    path=str(
+                        Path(self.directory.name)
+                        / f"snapshot-hostile-{field}.sqlite3"
+                    ),
+                    snapshot_provider=hostile_snapshot,
+                )
+                response = app.dispatch(
+                    method="GET",
+                    target="/api/v1/state",
+                    headers=self.headers(),
+                )
+                self.assertEqual(response.status, 400)
+                self.assertEqual(
+                    self.body(response),
+                    {"error": "INVALID_REQUEST"},
+                )
+                self.assertEqual(callbacks, [])
+
+
     def test_snapshot_sequence_identity_cannot_be_type_coerced(self):
         for field in ("state_version", "event_cursor"):
             with self.subTest(field=field):

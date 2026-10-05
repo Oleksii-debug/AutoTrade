@@ -3,9 +3,9 @@
 This composes the already independent utility-fact owner, preregistered utility
 projection rule and preregistered complete-cost rule into one re-verifiable
 research-side bundle.  It intentionally stops before numeric terminal evaluation:
-a task-specific canonical numeric utility projection, the complete canonical
-cost-composite owner and, when configured, FX valuation evidence must still be
-composed at the frozen cut.
+a task-specific canonical numeric utility projection, preregistered cost-component
+attribution, the complete canonical cost-composite owner and, when configured, FX
+valuation evidence must still be composed at the frozen cut.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _BLOCKING_REASON = "canonical_terminal_numeric_operand_evidence_unavailable"
 _BASE_MISSING_TERMINAL_EVIDENCE = (
     "utility_numeric_projection",
+    "registered_cost_component_attribution",
     "complete_cost_composite",
 )
 

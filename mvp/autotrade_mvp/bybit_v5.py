@@ -291,6 +291,10 @@ def _position_idx_from_capability(
         raise ProviderCoreError(
             "capability environment does not match target Bybit environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
+        )
 
     family = _text(product_family, name="product_family").upper()
     try:
@@ -592,6 +596,10 @@ def prepare_order_submission(
     if capability.environment.upper() != runtime_env:
         raise ProviderCoreError(
             "capability environment does not match Bybit provider environment"
+        )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
         )
     point = (
         at.astimezone(timezone.utc)

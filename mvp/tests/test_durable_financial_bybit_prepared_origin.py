@@ -1,4 +1,6 @@
 from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
 import inspect
 import unittest
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from mvp.autotrade_mvp.durable_financial_request_binding import (
     _production_request_origin_receipt,
     _require_bybit_prepared_request_origin,
 )
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.persistence import payload_digest
 from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
@@ -32,6 +35,29 @@ from mvp.tests.test_financial_send_authority import (
 BOUND_AT = "2026-10-05T08:00:00Z"
 
 
+def canonical_price_instrument() -> InstrumentVersion:
+    return InstrumentVersion(
+        instrument_id="00000000-0000-0000-0000-000000000101",
+        version=7,
+        provider_id="BYBIT",
+        venue_id="BYBIT",
+        provider_symbol="BTCUSDT",
+        asset_class="PERPETUAL",
+        base_currency="BTC",
+        quote_currency="USDT",
+        settlement_currency="USDT",
+        quantity_unit="CONTRACT",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.5"),
+        quantity_step=Decimal("1"),
+        minimum_quantity=Decimal("1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        status="ACTIVE",
+    )
+
+
 def canonical_case():
     capability = submission_write_capability(
         account_id="account-1",
@@ -39,6 +65,7 @@ def canonical_case():
         instrument_version="BTCUSDT@v1",
         provider_environment="TESTNET",
     )
+    price_instrument = canonical_price_instrument()
     prepared = prepare_order_submission(
         capability=capability,
         at=READ_AT,
@@ -51,6 +78,7 @@ def canonical_case():
         client_order_id="client-order-1",
         time_in_force="GTC",
         price="30000",
+        price_instrument_version=price_instrument,
         reduce_only=False,
     )
     request = dict(guarded_order_projection(prepared))
@@ -61,6 +89,7 @@ def canonical_case():
         body_sha256=prepared.body_sha256,
         request_sha256=payload_digest(request),
         trigger_protection_digest=payload_digest({}),
+        price_semantics_digest=price_instrument.metadata_evidence_binding(),
     )
     return material, prepared
 
@@ -70,8 +99,129 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
         material, prepared = canonical_case()
         receipt = _require_bybit_prepared_request_origin(material, prepared)
         self.assertEqual(receipt, _production_request_origin_receipt(material))
-        self.assertEqual(receipt["schema_version"], "bybit-prepared-origin.v1")
+        self.assertEqual(receipt["schema_version"], "bybit-prepared-origin.v2")
+        self.assertEqual(receipt["instrument_id"], material.instrument_id)
+        self.assertEqual(receipt["instrument_version"], material.instrument_version)
+        self.assertEqual(
+            receipt["price_semantics_digest"],
+            material.price_semantics_digest,
+        )
         self.assertEqual(receipt["request_sha256"], material.request_sha256)
+
+    def test_paper_live_origin_requires_canonical_instrument_price_semantics(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        prepared = prepare_order_submission(
+            capability=capability,
+            at=READ_AT,
+            provider_environment="TESTNET",
+            product_family="LINEAR_DERIVATIVES",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="2",
+            client_order_id="client-order-1",
+            time_in_force="GTC",
+            price="30000",
+            reduce_only=False,
+        )
+        material = replace(
+            financial_binding(),
+            capability_snapshot_id=capability.snapshot_id,
+            body_sha256=prepared.body_sha256,
+            request_sha256=payload_digest(dict(guarded_order_projection(prepared))),
+            query_sha256=payload_digest({}),
+            trigger_protection_digest=payload_digest({}),
+        )
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "lacks canonical InstrumentVersion price semantics authority",
+        ):
+            _require_bybit_prepared_request_origin(material, prepared)
+
+    def test_price_semantics_digest_drift_is_rejected(self):
+        material, prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price semantics differ",
+        ):
+            _require_bybit_prepared_request_origin(
+                replace(material, price_semantics_digest=D8),
+                prepared,
+            )
+
+    def test_price_rule_instrument_identity_drift_is_rejected(self):
+        material, prepared = canonical_case()
+        with self.assertRaisesRegex(
+            DurableFinancialRequestBindingError,
+            "price-rule instrument differs",
+        ):
+            _require_bybit_prepared_request_origin(
+                replace(material, instrument_version=8),
+                prepared,
+            )
+
+    def test_off_grid_limit_price_is_rejected_before_prepared_authority_issuance(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "violates canonical InstrumentVersion price semantics",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="2",
+                client_order_id="client-order-1",
+                time_in_force="GTC",
+                price="30000.25",
+                price_instrument_version=canonical_price_instrument(),
+                reduce_only=False,
+            )
+
+    def test_price_rule_symbol_mismatch_is_rejected_before_prepared_authority_issuance(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        different = replace(
+            canonical_price_instrument(),
+            provider_symbol="ETHUSDT",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "symbol differs",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="TESTNET",
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="2",
+                client_order_id="client-order-1",
+                time_in_force="GTC",
+                price="30000",
+                price_instrument_version=different,
+                reduce_only=False,
+            )
 
     def test_paper_live_bind_cannot_bypass_prepared_origin(self):
         registry = object.__new__(DurableFinancialRequestBindingRegistry)
@@ -362,6 +512,9 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
             "capability_snapshot_id",
             "entity_id",
             "instrument_version",
+            "price_rule_instrument_id",
+            "price_rule_instrument_version",
+            "price_semantics_digest",
             "body_sha256",
         ):
             object.__setattr__(

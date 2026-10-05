@@ -8,13 +8,14 @@ came from independent canonical owners.
 This qualification composition creates a separate issued assessment. The
 current WP-33 composition can replay one exact registered strategy-run receipt,
 re-run the structural economics join, resolve an exact caller-selected product
-instrument version, and optionally reverify a durable provider-economic cut
-from a caller-selected sealed book. Registered-run replay proves deterministic
-computation provenance only. Structural replay of caller-selected external
-sources is not proof that product composition selected those economic owner
-authorities. The assessment deliberately remains INCONCLUSIVE until the
-remaining WP-33 owner graph is independently available. No green software test
-from this module is economic-edge evidence.
+instrument version at the proposal information cutoff, and optionally reverify
+a durable provider-economic cut from a caller-selected sealed book.
+Registered-run replay proves deterministic computation provenance only.
+Structural replay of caller-selected external sources is not proof that product
+composition selected those economic owner authorities. The assessment
+intentionally remains INCONCLUSIVE until the remaining WP-33 owner graph is
+independently available. No green software test from this module is
+profitability or economic-edge evidence.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ class StrategyEconomicsAuthorityError(ValueError):
 _BIND_STRATEGY_ECONOMICS = bind_strategy_economics
 _VERIFY_REGISTERED_STRATEGY_RUN = verify_registered_strategy_run
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
+_INSTRUMENT_REGISTRY_AT = InstrumentRegistry.at
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
 _BASE_REQUIRED_OWNERS = (
@@ -289,10 +291,11 @@ def assess_strategy_economics_authority(
 ) -> StrategyEconomicsAuthorityAssessment:
     """Reverify deterministic provenance/durable facts and preserve owner gaps.
 
-    No caller-supplied verifier/callback is accepted. Exposure-bearing proposals
-    require the canonical replay-verifiable registered-run receipt and the exact
-    economics binding must name that receipt digest. This proves registered
-    deterministic computation provenance, not economic edge.
+    No caller-supplied verifier/callback is accepted. When supplied, the exact
+    registered-run receipt is replayed through the retained installed verifier;
+    only an exact replay whose digest is named by the economics binding can
+    satisfy ``registered_strategy_run_receipt``. A missing receipt remains an
+    explicit unresolved owner on this diagnostic INCONCLUSIVE path.
 
     Provider economics replay can verify that a supplied exact cut is reproduced
     by a supplied sealed book at one visibility sequence. Because this API does
@@ -328,7 +331,10 @@ def assess_strategy_economics_authority(
             raise StrategyEconomicsAuthorityError(
                 "registered strategy-run receipt failed deterministic replay"
             ) from error
-        if registered_run_receipt.instrument_version != economics_binding.instrument_version:
+        if (
+            registered_run_receipt.instrument_version
+            != economics_binding.instrument_version
+        ):
             raise StrategyEconomicsAuthorityError(
                 "registered strategy-run receipt instrument does not match economics"
             )
@@ -338,10 +344,6 @@ def assess_strategy_economics_authority(
             )
         verified.add("registered_strategy_run_receipt")
         unresolved.remove("registered_strategy_run_receipt")
-    elif proposal.action != "HOLD":
-        raise StrategyEconomicsAuthorityError(
-            "exposure-bearing strategy economics requires registered-run replay authority"
-        )
 
     try:
         bound = _BIND_STRATEGY_ECONOMICS(
@@ -359,6 +361,20 @@ def assess_strategy_economics_authority(
         instrument_registry,
         economics_binding.instrument_version,
     )
+    effective_instrument = _INSTRUMENT_REGISTRY_AT(
+        instrument_registry,
+        instrument.instrument_id,
+        economics_binding.information_cutoff,
+    )
+    if effective_instrument != instrument:
+        raise StrategyEconomicsAuthorityError(
+            "instrument_version is not the registry version effective at information_cutoff"
+        )
+    if proposal.symbol != instrument.provider_symbol:
+        raise StrategyEconomicsAuthorityError(
+            "proposal symbol does not match instrument provider_symbol"
+        )
+
     unresolved.update(
         _ASSET_REQUIRED_OWNERS.get(instrument.asset_class, ())
     )

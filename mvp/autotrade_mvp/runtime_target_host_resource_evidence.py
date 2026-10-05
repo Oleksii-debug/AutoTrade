@@ -267,6 +267,80 @@ def _process_io_bytes() -> tuple[int, int]:
     )
 
 
+_RESOURCE_PLATFORM_AUTHORITY = tuple(
+    (
+        dependency_name,
+        binding_name,
+        dependency,
+        _capture_callable_authority(dependency),
+    )
+    for dependency_name, binding_name, dependency in (
+        ("disk usage", "_disk_usage", _disk_usage),
+        ("process I/O", "_process_io_bytes", _process_io_bytes),
+        ("peak RSS", "_peak_rss_bytes", _peak_rss_bytes),
+        ("process identity", "_getpid", _getpid),
+        ("monotonic clock", "perf_counter_ns", perf_counter_ns),
+        ("process CPU clock", "process_time_ns", process_time_ns),
+        ("thread count", "active_count", active_count),
+    )
+)
+
+
+_RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY = ()
+if type(_disk_usage) is FunctionType:
+    _disk_usage_globals = _disk_usage.__globals__
+    _disk_usage_os_module = _disk_usage_globals.get("os")
+    if (
+        "statvfs" in _disk_usage.__code__.co_names
+        and _disk_usage_os_module is not None
+    ):
+        _disk_usage_os_namespace = vars(_disk_usage_os_module)
+        if "statvfs" in _disk_usage_os_namespace:
+            _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY = (
+                (
+                    "disk usage os.statvfs",
+                    _disk_usage_os_namespace,
+                    "statvfs",
+                    dict.__getitem__(_disk_usage_os_namespace, "statvfs"),
+                ),
+            )
+
+
+_RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY = ()
+if type(_disk_usage) is FunctionType:
+    _disk_usage_result_type = _disk_usage.__globals__.get("_ntuple_diskusage")
+    if type(_disk_usage_result_type) is type:
+        _disk_usage_result_new = vars(_disk_usage_result_type).get("__new__")
+        if type(_disk_usage_result_new) is FunctionType:
+            _RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY = (
+                (
+                    "disk usage result constructor",
+                    _disk_usage_result_type,
+                    "__new__",
+                    _disk_usage_result_new,
+                    _capture_callable_authority(_disk_usage_result_new),
+                ),
+            )
+
+
+_RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY = ()
+if _os_name == "nt":
+    _RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY = tuple(
+        (
+            dependency_name,
+            dependency,
+            attribute_name,
+            object.__getattribute__(dependency, attribute_name),
+        )
+        for dependency_name, dependency in (
+            ("GetCurrentProcess", _get_current_process),
+            ("GetProcessMemoryInfo", _get_process_memory_info),
+            ("GetProcessIoCounters", _get_process_io_counters),
+        )
+        for attribute_name in ("argtypes", "restype", "errcheck")
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeTargetHostResourceSnapshot:
     process_id: int
@@ -935,6 +1009,14 @@ def run_declared_target_host_campaign_with_resources(
         raise TypeError("evidence_store must be exact ArtifactStore")
 
     store_authority = _capture_artifact_store_authority(evidence_store)
+    resource_platform_states = _RESOURCE_PLATFORM_AUTHORITY
+    resource_platform_attribute_states = _RESOURCE_PLATFORM_ATTRIBUTE_AUTHORITY
+    resource_platform_class_function_states = (
+        _RESOURCE_PLATFORM_CLASS_FUNCTION_AUTHORITY
+    )
+    resource_platform_mutable_attribute_states = (
+        _RESOURCE_PLATFORM_MUTABLE_ATTRIBUTE_AUTHORITY
+    )
     capture_snapshot = capture_runtime_target_host_resource_snapshot
     issue_evidence = issue_runtime_target_host_resource_evidence
     publish_evidence = publish_runtime_target_host_resource_evidence
@@ -965,6 +1047,96 @@ def run_declared_target_host_campaign_with_resources(
     descriptor_states = _RESOURCE_DESCRIPTOR_AUTHORITY
     class_function_states = _RESOURCE_CLASS_FUNCTION_AUTHORITY
 
+    def require_resource_platform_authority(*, phase: str) -> None:
+        for (
+            dependency_name,
+            binding_name,
+            dependency,
+            dependency_state,
+        ) in resource_platform_states:
+            if raw_dict_getitem(module_namespace, binding_name) is not dependency:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
+            try:
+                require_callable(
+                    dependency,
+                    dependency_state,
+                    name=f"resource platform dependency {dependency_name}",
+                )
+            except ValueError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                ) from error
+        for (
+            dependency_name,
+            namespace,
+            attribute_name,
+            expected,
+        ) in resource_platform_attribute_states:
+            try:
+                current = raw_dict_getitem(namespace, attribute_name)
+            except KeyError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                ) from error
+            if current is not expected:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
+
+
+        for (
+            dependency_name,
+            owner,
+            attribute_name,
+            function,
+            function_state,
+        ) in resource_platform_class_function_states:
+            namespace = raw_type_getattribute(owner, "__dict__")
+            current = raw_descriptor_getitem(namespace, attribute_name)
+            if current is not function:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
+            try:
+                require_callable(
+                    function,
+                    function_state,
+                    name=f"resource platform dependency {dependency_name}",
+                )
+            except ValueError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}"
+                ) from error
+
+
+        for (
+            dependency_name,
+            dependency,
+            attribute_name,
+            expected,
+        ) in resource_platform_mutable_attribute_states:
+            try:
+                current = raw_object_getattribute(dependency, attribute_name)
+            except AttributeError as error:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}.{attribute_name}"
+                ) from error
+            if current is not expected:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource platform dependency changed "
+                    f"{phase}: {dependency_name}.{attribute_name}"
+                )
+
+
     def require_resource_class_authority(*, phase: str) -> None:
         for owner, name, descriptor, function, code in descriptor_states:
             namespace = raw_type_getattribute(owner, "__dict__")
@@ -985,6 +1157,7 @@ def run_declared_target_host_campaign_with_resources(
         for name, function, state in class_function_states:
             require_callable(function, state, name=name)
 
+    require_resource_platform_authority(phase="before target-host run")
     require_resource_class_authority(phase="before target-host run")
     before = capture_snapshot(evidence_root=evidence_store.root)
     run = runner(
@@ -1028,6 +1201,7 @@ def run_declared_target_host_campaign_with_resources(
         require_store_state,
         name="resource ArtifactStore verifier",
     )
+    require_resource_platform_authority(phase="during target-host run")
     require_resource_class_authority(phase="during target-host run")
     if ArtifactStore.publish_bytes is not artifact_publish:
         raise RuntimeTargetHostResourceEvidenceError(

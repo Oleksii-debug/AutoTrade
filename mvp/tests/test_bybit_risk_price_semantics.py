@@ -266,8 +266,8 @@ class BybitRiskPriceSemanticsTests(unittest.TestCase):
 
     def test_already_risked_quantity_must_match_causal_instrument_grid(self):
         request, snapshot, prepared = self._case(
-            wire_quantity="0.0005",
-            risk_quantity="0.0005",
+            wire_quantity="1.0005",
+            risk_quantity="1.0005",
         )
         with self.assertRaisesRegex(
             BybitRiskPriceSemanticsError,

@@ -33,6 +33,26 @@ class HostileJsonModule:
         raise AssertionError("mutable json.dumps must not become vault authority")
 
 
+class HostileJsonEncoder:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("mutable json.JSONEncoder must not become vault authority")
+
+
+class HostileJsonDecoder:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("mutable json.JSONDecoder must not become vault authority")
+
+
+class HostileDefaultEncoder:
+    def encode(self, *args, **kwargs):
+        raise AssertionError("mutable json._default_encoder must not become vault authority")
+
+
+class HostileDefaultDecoder:
+    def decode(self, *args, **kwargs):
+        raise AssertionError("mutable json._default_decoder must not become vault authority")
+
+
 class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
     def _vault(self, path: Path) -> windows_secrets.ProtectedCredentialVault:
         return windows_secrets.ProtectedCredentialVault(
@@ -139,10 +159,18 @@ class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
             original_loads = imported_json.loads
             original_dumps = imported_json.dumps
             original_decode_error = imported_json.JSONDecodeError
+            original_encoder = imported_json.JSONEncoder
+            original_decoder = imported_json.JSONDecoder
+            original_default_encoder = imported_json._default_encoder
+            original_default_decoder = imported_json._default_decoder
             try:
                 imported_json.loads = HostileJsonModule.loads
                 imported_json.dumps = HostileJsonModule.dumps
                 imported_json.JSONDecodeError = HostileJsonModule.JSONDecodeError
+                imported_json.JSONEncoder = HostileJsonEncoder
+                imported_json.JSONDecoder = HostileJsonDecoder
+                imported_json._default_encoder = HostileDefaultEncoder()
+                imported_json._default_decoder = HostileDefaultDecoder()
 
                 restarted = self._vault(path)
                 self.assertEqual(self._resolve(restarted, handle), "original-secret")
@@ -178,6 +206,10 @@ class WindowsSecretsJsonAuthorityTests(unittest.TestCase):
                 imported_json.loads = original_loads
                 imported_json.dumps = original_dumps
                 imported_json.JSONDecodeError = original_decode_error
+                imported_json.JSONEncoder = original_encoder
+                imported_json.JSONDecoder = original_decoder
+                imported_json._default_encoder = original_default_encoder
+                imported_json._default_decoder = original_default_decoder
 
             restarted_after_restore = self._vault(path)
             self.assertEqual(

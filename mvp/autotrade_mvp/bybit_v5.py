@@ -697,32 +697,90 @@ def _install_bybit_prepared_submission_authority(
     canonical_position_idx_code = _position_idx_from_capability.__code__
     canonical_capability_admits = capability_type.admits
     canonical_capability_admits_code = capability_type.admits.__code__
+    error_type = ProviderCoreError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_isinstance = isinstance
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    attribute_error_type = AttributeError
+    mapping_proxy_type = MappingProxyType
 
     bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def authority_changed():
-        raise ProviderCoreError("Bybit prepared submission authority changed")
+        raise error_type("Bybit prepared submission authority changed")
+
+    def implementation_changed():
+        if (
+            ProviderCoreError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or getattr is not canonical_getattr
+            or isinstance is not canonical_isinstance
+            or object is not canonical_object
+            or AttributeError is not attribute_error_type
+            or MappingProxyType is not mapping_proxy_type
+            or datetime is not datetime_type
+            or timezone is not timezone_type
+            or CapabilitySnapshot is not capability_type
+            or BybitPreparedSubmission is not prepared_type
+            or prepared_type.__init__ is not prepared_init
+            or canonical_getattr(prepared_init, "__code__", None)
+            is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or canonical_getattr(prepared_post_init, "__code__", None)
+            is not prepared_post_init_code
+            or canonical_getattr(builder, "__code__", None) is not builder_code
+            or build_order_payload is not canonical_build_order_payload
+            or canonical_getattr(
+                canonical_build_order_payload,
+                "__code__",
+                None,
+            )
+            is not canonical_build_order_payload_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _decimal_text is not canonical_decimal_text
+            or canonical_getattr(canonical_decimal_text, "__code__", None)
+            is not canonical_decimal_text_code
+            or _client_order_id is not canonical_client_order_id
+            or canonical_getattr(canonical_client_order_id, "__code__", None)
+            is not canonical_client_order_id_code
+            or _position_idx_from_capability is not canonical_position_idx
+            or canonical_getattr(canonical_position_idx, "__code__", None)
+            is not canonical_position_idx_code
+            or capability_type.admits is not canonical_capability_admits
+            or canonical_getattr(canonical_capability_admits, "__code__", None)
+            is not canonical_capability_admits_code
+        ):
+            authority_changed()
 
     def snapshot(value):
         try:
             return (
-                object.__getattribute__(value, "endpoint"),
-                object.__getattribute__(value, "body"),
-                object.__getattribute__(value, "account_id"),
-                object.__getattribute__(value, "environment"),
-                object.__getattribute__(value, "provider_environment"),
-                object.__getattribute__(value, "capability_snapshot_id"),
-                object.__getattribute__(value, "entity_id"),
-                object.__getattribute__(value, "instrument_version"),
-                object.__getattribute__(value, "body_sha256"),
+                object_getattribute(value, "endpoint"),
+                object_getattribute(value, "body"),
+                object_getattribute(value, "account_id"),
+                object_getattribute(value, "environment"),
+                object_getattribute(value, "provider_environment"),
+                object_getattribute(value, "capability_snapshot_id"),
+                object_getattribute(value, "entity_id"),
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "body_sha256"),
             )
-        except AttributeError:
+        except attribute_error_type:
             authority_changed()
 
     def require_canonical_bybit_prepared_submission(value):
-        if type(value) is not prepared_type or BybitPreparedSubmission is not prepared_type:
+        implementation_changed()
+        if canonical_type(value) is not prepared_type:
             authority_changed()
-        binding = bindings.get(id(value))
+        binding = bindings.get(canonical_id(value))
         if binding is None:
             authority_changed()
         bound_ref, expected = binding
@@ -731,7 +789,7 @@ def _install_bybit_prepared_submission_authority(
         current = snapshot(value)
         if current[1] is not expected[1] or current[:1] + current[2:] != expected[:1] + expected[2:]:
             authority_changed()
-        if type(current[1]) is not MappingProxyType:
+        if canonical_type(current[1]) is not mapping_proxy_type:
             authority_changed()
         return value
 
@@ -752,46 +810,17 @@ def _install_bybit_prepared_submission_authority(
         position_side: str | None = None,
         position_idx: int | None = None,
     ) -> BybitPreparedSubmission:
-        if type(capability) is not capability_type or CapabilitySnapshot is not capability_type:
-            raise ProviderCoreError(
+        implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise error_type(
                 "Bybit preparation requires exact CapabilitySnapshot authority"
             )
-        if type(at) is not datetime_type:
-            raise ProviderCoreError("Bybit preparation time must be exact datetime")
-        if type(at.tzinfo) is not timezone_type:
-            raise ProviderCoreError(
+        if canonical_type(at) is not datetime_type:
+            raise error_type("Bybit preparation time must be exact datetime")
+        if canonical_type(at.tzinfo) is not timezone_type:
+            raise error_type(
                 "Bybit preparation time must use exact stdlib timezone"
             )
-        if BybitPreparedSubmission is not prepared_type:
-            authority_changed()
-        if (
-            prepared_type.__init__ is not prepared_init
-            or getattr(prepared_init, "__code__", None) is not prepared_init_code
-            or prepared_type.__post_init__ is not prepared_post_init
-            or getattr(prepared_post_init, "__code__", None) is not prepared_post_init_code
-        ):
-            authority_changed()
-        if getattr(builder, "__code__", None) is not builder_code:
-            authority_changed()
-        function_authorities = (
-            (build_order_payload, canonical_build_order_payload, canonical_build_order_payload_code),
-            (_text, canonical_text, canonical_text_code),
-            (_decimal_text, canonical_decimal_text, canonical_decimal_text_code),
-            (_client_order_id, canonical_client_order_id, canonical_client_order_id_code),
-            (
-                _position_idx_from_capability,
-                canonical_position_idx,
-                canonical_position_idx_code,
-            ),
-            (
-                capability_type.admits,
-                canonical_capability_admits,
-                canonical_capability_admits_code,
-            ),
-        )
-        for current, expected, code in function_authorities:
-            if current is not expected or getattr(expected, "__code__", None) is not code:
-                authority_changed()
 
         prepared = builder(
             capability=capability,
@@ -809,18 +838,19 @@ def _install_bybit_prepared_submission_authority(
             position_side=position_side,
             position_idx=position_idx,
         )
-        if type(prepared) is not prepared_type:
+        implementation_changed()
+        if canonical_type(prepared) is not prepared_type:
             authority_changed()
 
         dead = [
             key
-            for key, (existing_ref, _snapshot) in tuple(bindings.items())
+            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
             if existing_ref() is None
         ]
         for key in dead:
             bindings.pop(key, None)
 
-        bindings[id(prepared)] = (
+        bindings[canonical_id(prepared)] = (
             prepared_ref(prepared),
             snapshot(prepared),
         )

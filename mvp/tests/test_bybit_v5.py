@@ -3,8 +3,10 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+from mvp.autotrade_mvp import bybit_v5 as bybit_module
 from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
     build_order_payload,
@@ -838,6 +840,54 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
         self.assertEqual(result["reason_code"], "BYBIT_TRANSPORT_AMBIGUOUS")
         self.assertEqual(result["evidence"], [])
+
+    def test_prepared_issuer_runtime_shadowing_fails_before_callback(self):
+        capability = submission_write_capability()
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return None
+
+        for name in (
+            "type",
+            "id",
+            "tuple",
+            "getattr",
+            "isinstance",
+            "object",
+            "AttributeError",
+            "MappingProxyType",
+            "ProviderCoreError",
+            "datetime",
+            "timezone",
+            "CapabilitySnapshot",
+            "BybitPreparedSubmission",
+        ):
+            with self.subTest(name=name):
+                with patch.object(
+                    bybit_module,
+                    name,
+                    forged,
+                    create=True,
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        bybit_module.prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="MAINNET",
+                            product_family="SPOT",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="MARKET",
+                            quantity="0.01",
+                            client_order_id=f"shadow-{name.lower()}",
+                            time_in_force="IOC",
+                        )
+                self.assertEqual(callbacks, [])
 
     def test_submission_response_rejects_unissued_exact_prepared_clone(self):
         issued = prepare_order_submission(

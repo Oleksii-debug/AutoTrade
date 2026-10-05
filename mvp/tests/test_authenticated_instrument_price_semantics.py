@@ -343,6 +343,44 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                     finally:
                         target.__code__ = original_code
 
+    def test_price_semantics_builtin_and_error_alias_rebinding_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged builtin executed")
+
+            for name in ("type", "getattr", "str", "int", "bool"):
+                with self.subTest(name=name):
+                    with patch.object(
+                        instruments_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+                    self.assertEqual(callbacks, [])
+
+            for name in ("TypeError", "InstrumentRegistryError"):
+                with self.subTest(name=name):
+                    with patch.object(
+                        instruments_module,
+                        name,
+                        RuntimeError,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price-semantics executable authority changed",
+                        ):
+                            self._digest(registry, artifact_store)
+
     def test_transitive_serializer_helper_rebinding_fails_before_execution(self):
         with TemporaryDirectory() as directory:
             registry, artifact_store = self._registry_with_evidence(directory)

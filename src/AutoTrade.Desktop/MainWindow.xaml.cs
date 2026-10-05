@@ -45,8 +45,13 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        await ConnectWebExperienceAsync();
+        // Native host truth is safety-critical and must not wait for optional
+        // WebView2 runtime/profile initialization.
         await RefreshHostStatusAsync(announce: true, returnFocus: false);
+        if (!_lifetime.IsCancellationRequested)
+        {
+            await ConnectWebExperienceAsync();
+        }
     }
 
     private async Task ConnectWebExperienceAsync()

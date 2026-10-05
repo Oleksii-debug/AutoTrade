@@ -19,12 +19,18 @@ from functools import wraps as _wraps
 from . import _reconciliation_legacy_impl as _legacy
 
 # Re-export the existing public surface without duplicating 2k+ lines of
-# unrelated reconciliation code.  Underscore helpers are also retained for
-# repository-internal compatibility; double-underscore interpreter metadata is
-# deliberately not copied.
+# unrelated reconciliation code.  Restore the original public module identity
+# on values defined by the retained implementation so pickle/introspection
+# compatibility is preserved across this safety migration.
 for _name in dir(_legacy):
     if not _name.startswith("__"):
-        globals()[_name] = getattr(_legacy, _name)
+        _value = getattr(_legacy, _name)
+        globals()[_name] = _value
+        if getattr(_value, "__module__", None) == _legacy.__name__:
+            try:
+                _value.__module__ = __name__
+            except (AttributeError, TypeError):
+                pass
 
 _LEGACY_RECONCILE_ACCOUNT = _legacy.reconcile_account
 _ISSUER_REQUIRED_REASON = "issuer_protected_absence_authority_required"

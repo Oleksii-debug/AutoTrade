@@ -4,6 +4,7 @@ from fractions import Fraction
 from datetime import datetime, timezone
 from inspect import signature
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from mvp.autotrade_mvp import futures as futures_module
@@ -213,7 +214,7 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
             calls.append("tuple")
             raise AssertionError("module tuple callback executed")
 
-        with unittest.mock.patch.object(futures_module, "tuple", forged, create=True):
+        with patch.object(futures_module, "tuple", forged, create=True):
             policy = inverse_settlement_convention(contract)
         self.assertEqual(policy.quantum, "0.00000001")
         self.assertEqual(calls, [])

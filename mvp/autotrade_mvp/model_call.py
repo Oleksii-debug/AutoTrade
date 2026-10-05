@@ -1036,10 +1036,12 @@ class DurableModelCallOrchestrator:
         self,
         observation: ModelCallObservation,
         binding: ModelCallBinding,
+        *,
+        resolver: ObservationEvidenceResolver,
     ) -> ModelObservationEvidence:
         expected = self._observation_digest(observation, binding)
         try:
-            evidence = self.observation_evidence_resolver(observation, binding)
+            evidence = resolver(observation, binding)
         except Exception as error:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
@@ -1515,9 +1517,66 @@ class DurableModelCallOrchestrator:
         adapter_binding = ModelCallBinding(
             **{field.name: getattr(binding, field.name) for field in fields(ModelCallBinding)}
         )
+
+        # The injected adapter is advisory and must not become authority over the
+        # orchestrator's post-call evidence, chronology, persistence or budget
+        # settlement. Restore the exact pre-call authorities before any durable
+        # action and fail closed if the adapter attempted to replace them.
+        adapter_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        adapter_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        observation_evidence_resolver = self.observation_evidence_resolver
+        adapter_error: Exception | None = None
+        authority_changes: list[str] = []
         try:
-            observation = call(adapter_binding, cancelled)
-        except ModelCallNotSent:
+            try:
+                observation = call(adapter_binding, cancelled)
+            except Exception as error:
+                adapter_error = error
+        finally:
+            for name, expected in adapter_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in adapter_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    authority_changes.append(name)
+                setattr(self, name, expected)
+
+        if authority_changes:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": "adapter_mutated_orchestrator_authority:"
+                + ",".join(sorted(authority_changes)),
+                "estimated_unbilled": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallUnknown",
+                version=3,
+                payload=payload,
+            )
+            self.budget.settle(
+                attempt_id,
+                incurred="0",
+                estimated_unbilled=decision.reserved_cost,
+            )
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
+            )
+
+        if isinstance(adapter_error, ModelCallNotSent):
             # Once ModelCallStarted is durable, the injected adapter is inside
             # the possibly-billed boundary. Its own exception type is not an
             # independently authenticated proof that no external/local work
@@ -1543,11 +1602,11 @@ class DurableModelCallOrchestrator:
                 self._events(attempt_id)[-1],
                 route=decision,
             )
-        except Exception as error:
+        if adapter_error is not None:
             payload = {
                 "attempt_id": attempt_id,
                 "reason": "call_boundary_result_ambiguous:"
-                + type(error).__name__,
+                + type(adapter_error).__name__,
                 "estimated_unbilled": str(decision.reserved_cost),
             }
             self._append(
@@ -1633,6 +1692,7 @@ class DurableModelCallOrchestrator:
             observation_evidence = self._verified_observation_evidence(
                 observation,
                 binding,
+                resolver=observation_evidence_resolver,
             )
         except ModelCallError as error:
             payload = {

@@ -1317,7 +1317,9 @@ _PRICE_SEMANTICS_VALIDATE_PRICE_CODE = InstrumentVersion.validate_price.__code__
 _PRICE_SEMANTICS_METADATA_BINDING = InstrumentVersion.metadata_evidence_binding
 _PRICE_SEMANTICS_METADATA_BINDING_CODE = InstrumentVersion.metadata_evidence_binding.__code__
 _PRICE_SEMANTICS_VERSIONS_FOR = _registry_versions_for
+_PRICE_SEMANTICS_VERSIONS_FOR_CODE = _registry_versions_for.__code__
 _PRICE_SEMANTICS_TRUSTED_READER = trusted_authenticated_reader
+_PRICE_SEMANTICS_TRUSTED_READER_CODE = trusted_authenticated_reader.__code__
 _PRICE_SEMANTICS_DETACH = _detached_instrument_version
 _PRICE_SEMANTICS_DETACH_CODE = _detached_instrument_version.__code__
 _PRICE_SEMANTICS_REF = _instrument_version_ref
@@ -1372,7 +1374,10 @@ def authenticated_price_semantics_digest(
         or InstrumentVersion.metadata_evidence_binding.__code__
         is not _PRICE_SEMANTICS_METADATA_BINDING_CODE
         or _registry_versions_for is not _PRICE_SEMANTICS_VERSIONS_FOR
+        or _registry_versions_for.__code__ is not _PRICE_SEMANTICS_VERSIONS_FOR_CODE
         or trusted_authenticated_reader is not _PRICE_SEMANTICS_TRUSTED_READER
+        or trusted_authenticated_reader.__code__
+        is not _PRICE_SEMANTICS_TRUSTED_READER_CODE
         or _detached_instrument_version is not _PRICE_SEMANTICS_DETACH
         or _detached_instrument_version.__code__ is not _PRICE_SEMANTICS_DETACH_CODE
         or _instrument_version_ref is not _PRICE_SEMANTICS_REF

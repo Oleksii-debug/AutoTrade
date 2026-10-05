@@ -501,6 +501,75 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
 
+    def test_opening_cut_transient_backlog_fails_before_workload(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        capture_calls = 0
+
+        with tempfile.TemporaryDirectory() as root:
+            journal = JournalStore(Path(root) / "journal.sqlite")
+            store = ArtifactStore(Path(root) / "evidence")
+
+            def capture_with_opening_transient(*, evidence_root):
+                nonlocal capture_calls
+                capture_calls += 1
+                payload = {"kind": "opening-cut-transient"}
+                journal.append_event(
+                    {
+                        "event_id": "evt-opening-cut-transient",
+                        "event_type": "OpeningCutTransientObserved",
+                        "aggregate_type": "resource-cut-order-test",
+                        "aggregate_id": "opening-cut-transient",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-10-05T18:00:00+00:00",
+                    },
+                    outbox_topic="events",
+                )
+                pending = journal.pending_outbox()
+                self.assertEqual(len(pending), 1)
+                self.assertTrue(
+                    journal.mark_outbox_delivered(
+                        pending[0]["outbox_id"],
+                        expected_envelope_hash=pending[0]["envelope_hash"],
+                    )
+                )
+                return before
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                    side_effect=capture_with_opening_transient,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    return_value=run,
+                ) as runner,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeTargetHostResourceEvidenceError,
+                    "outbox backlog changed while opening the resource measurement cut",
+                ):
+                    run_declared_target_host_campaign_with_resources(
+                        journal=journal,
+                        evidence_store=store,
+                        spec=object(),
+                        authority_id="resource-authority",
+                        research_plan_id="resource-research-plan",
+                        financial_operations={},
+                        research_operations={},
+                        inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                        measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                        run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                        resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                    )
+
+            self.assertEqual(capture_calls, 1)
+            runner.assert_not_called()
+            with self.assertRaises(FileNotFoundError):
+                store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+
     def test_post_cut_transient_backlog_cannot_inflate_campaign_high_water(self):
         run = _run_result()
         before = _snapshot(monotonic_ns=100, process_cpu_ns=10)

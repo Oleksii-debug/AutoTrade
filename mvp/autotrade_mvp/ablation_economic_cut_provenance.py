@@ -129,6 +129,8 @@ class ResolvedAblationProviderEconomicCutProvenance:
     aggregate_version: int
     journal_sequence: int
     visibility_journal_sequence: int
+    event_id: str
+    payload_hash: str
     economic_cut_digest: str
     resulting_book_digest: str
     transaction_digests: tuple[tuple[str, str], ...]
@@ -142,7 +144,7 @@ class ResolvedAblationProviderEconomicCutProvenance:
             raise AccountingConflict(
                 "provider economic prefix cannot claim terminal cost-composite authority"
             )
-        for name in ("provider_id", "account_id", "environment", "book_id"):
+        for name in ("provider_id", "account_id", "environment", "book_id", "event_id"):
             _text(getattr(self, name), name=name)
         for name in (
             "aggregate_version",
@@ -156,6 +158,7 @@ class ResolvedAblationProviderEconomicCutProvenance:
             raise AccountingConflict(
                 "visibility_journal_sequence cannot precede terminal economic event"
             )
+        _digest(self.payload_hash, name="payload_hash")
         _digest(self.economic_cut_digest, name="economic_cut_digest")
         _digest(self.resulting_book_digest, name="resulting_book_digest")
         if type(self.transaction_digests) is not tuple:
@@ -186,6 +189,8 @@ class ResolvedAblationProviderEconomicCutProvenance:
             "aggregate_version": self.aggregate_version,
             "journal_sequence": self.journal_sequence,
             "visibility_journal_sequence": self.visibility_journal_sequence,
+            "event_id": self.event_id,
+            "payload_hash": self.payload_hash,
             "economic_cut_digest": self.economic_cut_digest,
             "resulting_book_digest": self.resulting_book_digest,
             "transaction_digests": [list(item) for item in self.transaction_digests],
@@ -232,6 +237,8 @@ def resolve_ablation_provider_economic_cut_provenance(
         aggregate_version=replayed.aggregate_version,
         journal_sequence=replayed.journal_sequence,
         visibility_journal_sequence=replayed.visibility_journal_sequence,
+        event_id=replayed.event_id,
+        payload_hash=replayed.payload_hash,
         economic_cut_digest=replayed.cut_digest,
         resulting_book_digest=replayed.resulting_book_digest,
         transaction_digests=replayed.transaction_digests,

@@ -1,8 +1,10 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.IO;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 
 namespace AutoTrade.Desktop;
 
@@ -13,6 +15,10 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _lifetime = new();
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
+    private WebView2? _productWebView;
+    private WebExperienceSecurityPolicy? _webPolicy;
+    private Uri? _webOrigin;
+    private bool _trustedWebDocumentActive;
 
     public MainWindow()
         : this(DesktopHostClientFactory.Create())
@@ -51,6 +57,11 @@ public partial class MainWindow : Window
 
     private async Task ConnectWebExperienceAsync()
     {
+        DisposeWebExperience();
+        FocusWebButton.IsEnabled = false;
+        ReloadWebButton.IsEnabled = false;
+        ProductWebViewHost.Visibility = Visibility.Collapsed;
+
         if (_sessionProvider is null)
         {
             SetLiveRegionText(
@@ -59,6 +70,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        WebView2? webView = null;
         try
         {
             EmergencyHostSession initialSession = _sessionProvider.GetSession().Validated();
@@ -70,17 +82,63 @@ public partial class MainWindow : Window
                 "WebView2");
             CoreWebView2Environment environment =
                 await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
-            await ProductWebView.EnsureCoreWebView2Async(environment);
-            CoreWebView2 core = ProductWebView.CoreWebView2;
 
+            webView = new WebView2
+            {
+                Height = 600,
+                Visibility = Visibility.Collapsed,
+            };
+            AutomationProperties.SetName(
+                webView,
+                "AutoTrade application web interface");
+            ProductWebViewHost.Child = webView;
+            _productWebView = webView;
+            _webPolicy = policy;
+            _webOrigin = origin;
+
+            await webView.EnsureCoreWebView2Async(environment);
+            if (_lifetime.IsCancellationRequested || !IsLoaded)
+            {
+                return;
+            }
+
+            CoreWebView2 core = webView.CoreWebView2;
             core.Settings.AreDevToolsEnabled = policy.AllowsDeveloperTools;
             core.Settings.AreDefaultContextMenusEnabled = false;
+            core.Settings.AreDefaultScriptDialogsEnabled = false;
             core.Settings.AreHostObjectsAllowed = false;
+            core.Settings.IsBuiltInErrorPageEnabled = false;
+            core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;
             core.NavigationStarting += (_, e) =>
             {
-                e.Cancel = !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
-                    || !policy.AllowsTopLevelNavigation(target);
+                bool admitted =
+                    Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
+                    && policy.AllowsTopLevelNavigation(target);
+                e.Cancel = !admitted;
+                _trustedWebDocumentActive = admitted;
+                if (!admitted)
+                {
+                    SetLiveRegionText(
+                        WebExperienceStatus,
+                        "Blocked an untrusted web navigation. Native host status and emergency controls remain available.");
+                }
+            };
+            core.NavigationCompleted += (_, e) =>
+            {
+                if (!e.IsSuccess)
+                {
+                    _trustedWebDocumentActive = false;
+                    ReloadWebButton.IsEnabled = true;
+                    SetLiveRegionText(
+                        WebExperienceStatus,
+                        "Web navigation failed. No browser content is trusted. Native host status and emergency controls remain available.");
+                    return;
+                }
+
+                SetLiveRegionText(
+                    WebExperienceStatus,
+                    "AutoTrade web interface connected to the paired host. Native host status and emergency controls remain independently available.");
             };
             core.FrameNavigationStarting += (_, e) => e.Cancel = true;
             core.NewWindowRequested += (_, e) => e.Handled = true;
@@ -88,13 +146,25 @@ public partial class MainWindow : Window
             core.PermissionRequested += (_, e) =>
                 e.State = CoreWebView2PermissionState.Deny;
             core.ServerCertificateErrorDetected += (_, e) =>
+            {
                 e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+                _trustedWebDocumentActive = false;
+                ReloadWebButton.IsEnabled = true;
+                SetLiveRegionText(
+                    WebExperienceStatus,
+                    "Blocked a certificate-invalid web request. No browser content is trusted until the web interface is reloaded.");
+            };
+            core.ProcessFailed += WebView_ProcessFailed;
 
             // Never persist the host credential in WebView state. Purge stale
             // cookies/service workers before first trusted navigation.
             core.CookieManager.DeleteAllCookies();
             await core.Profile.ClearBrowsingDataAsync(
                 CoreWebView2BrowsingDataKinds.ServiceWorkers);
+            if (_lifetime.IsCancellationRequested || !IsLoaded)
+            {
+                return;
+            }
 
             core.AddWebResourceRequestedFilter(
                 new Uri(origin, "api/v1/*").AbsoluteUri,
@@ -108,6 +178,9 @@ public partial class MainWindow : Window
                     e.Request.Headers.RemoveHeader("X-AutoTrade-Actor");
                 }
 
+                // Strip first. Native authority is then attached only to a
+                // scripted request from the admitted top-level document.
+                StripAuthority();
                 try
                 {
                     EmergencyHostSession currentSession =
@@ -119,8 +192,13 @@ public partial class MainWindow : Window
                             UriComponents.SchemeAndServer,
                             UriFormat.UriEscaped,
                             StringComparison.OrdinalIgnoreCase) == 0;
+                    bool scriptedApiRequest =
+                        e.ResourceContext is CoreWebView2WebResourceContext.Fetch
+                            or CoreWebView2WebResourceContext.XmlHttpRequest;
                     bool admitted =
-                        sameOrigin
+                        _trustedWebDocumentActive
+                        && sameOrigin
+                        && scriptedApiRequest
                         && e.RequestedSourceKind
                             == CoreWebView2WebResourceRequestSourceKinds.Document
                         && Uri.TryCreate(
@@ -133,7 +211,6 @@ public partial class MainWindow : Window
                             origin);
                     if (!admitted)
                     {
-                        StripAuthority();
                         return;
                     }
 
@@ -151,29 +228,78 @@ public partial class MainWindow : Window
             };
 
             core.Navigate(origin.AbsoluteUri);
-            ProductWebView.Visibility = Visibility.Visible;
+            webView.Visibility = Visibility.Visible;
+            ProductWebViewHost.Visibility = Visibility.Visible;
             FocusWebButton.IsEnabled = true;
+            ReloadWebButton.IsEnabled = true;
             SetLiveRegionText(
                 WebExperienceStatus,
-                "AutoTrade web interface connected to the paired host. Native host status and emergency controls remain independently available.");
+                "Loading the AutoTrade web interface from the paired host.");
         }
         catch (Exception)
         {
+            DisposeWebExperience();
             FocusWebButton.IsEnabled = false;
-            ProductWebView.Visibility = Visibility.Collapsed;
+            ReloadWebButton.IsEnabled = _sessionProvider is not null;
             SetLiveRegionText(
                 WebExperienceStatus,
                 "Web interface unavailable. Check the paired host session and installed WebView2 Runtime. Native host status and emergency controls remain available.");
         }
     }
 
+    private void WebView_ProcessFailed(
+        object? sender,
+        CoreWebView2ProcessFailedEventArgs e)
+    {
+        if (e.ProcessFailedKind is not (
+            CoreWebView2ProcessFailedKind.BrowserProcessExited
+            or CoreWebView2ProcessFailedKind.RenderProcessExited
+            or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive))
+        {
+            return;
+        }
+
+        // Do not recreate/dispose from inside ProcessFailed. WebView2 documents
+        // that browser-process failure requires a new WebView and warns against
+        // reentrant recovery in the event handler. Revoke trust immediately and
+        // let the keyboard-reachable reload action recreate the control afterward.
+        _trustedWebDocumentActive = false;
+        FocusWebButton.IsEnabled = false;
+        ReloadWebButton.IsEnabled = true;
+        SetLiveRegionText(
+            WebExperienceStatus,
+            "The WebView2 process failed (" + e.ProcessFailedKind
+            + "). No browser content is trusted. Native host status and emergency controls remain available. Use Reload application web interface to recreate the browser surface.");
+    }
+
+    private void DisposeWebExperience()
+    {
+        _trustedWebDocumentActive = false;
+        _webPolicy = null;
+        _webOrigin = null;
+        WebView2? webView = _productWebView;
+        _productWebView = null;
+        ProductWebViewHost.Child = null;
+        webView?.Dispose();
+    }
+
     private void FocusWeb_Click(object sender, RoutedEventArgs e) =>
-        ProductWebView.Focus();
+        _productWebView?.Focus();
+
+    private async void ReloadWeb_Click(object sender, RoutedEventArgs e)
+    {
+        ReloadWebButton.IsEnabled = false;
+        await ConnectWebExperienceAsync();
+        if (IsLoaded)
+        {
+            ReloadWebButton.Focus();
+        }
+    }
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _lifetime.Cancel();
-        ProductWebView.Dispose();
+        DisposeWebExperience();
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)

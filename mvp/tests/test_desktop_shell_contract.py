@@ -31,17 +31,15 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
     def test_primary_webview2_surface_is_real_and_native_safety_remains_independent(self):
         xaml = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")
-        self.assertIn(
-            'xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"',
-            xaml,
-        )
-        self.assertIn('<wv2:WebView2 x:Name="ProductWebView"', xaml)
-        self.assertIn('AutomationProperties.Name="AutoTrade application web interface"', xaml)
+        self.assertIn('x:Name="ProductWebViewHost"', xaml)
+        self.assertIn("new WebView2", code)
+        self.assertIn("AutomationProperties.SetName(", code)
+        self.assertIn('"AutoTrade application web interface"', code)
         self.assertIn('Content="_Focus application web interface"', xaml)
         self.assertIn('AutomationProperties.Name="Block new exposure"', xaml)
         self.assertIn('AutomationProperties.Name="Host connection status"', xaml)
         self.assertIn("await ConnectWebExperienceAsync();", code)
-        self.assertIn("ProductWebView.Visibility = Visibility.Visible;", code)
+        self.assertIn("ProductWebViewHost.Visibility = Visibility.Visible;", code)
         self.assertIn("FocusWebButton.IsEnabled = true;", code)
 
     def test_webview2_security_events_delegate_to_shared_policy_and_fail_closed(self):
@@ -60,6 +58,29 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("policy.AllowsTopLevelNavigation(target)", code)
         self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
         self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+        self.assertIn("CoreWebView2WebResourceContext.Fetch", code)
+        self.assertIn("CoreWebView2WebResourceContext.XmlHttpRequest", code)
+        self.assertIn("_trustedWebDocumentActive", code)
+
+    def test_webview2_process_failure_revokes_trust_and_recreates_control_outside_handler(self):
+        xaml = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn('Content="_Reload application web interface"', xaml)
+        self.assertIn('AutomationProperties.Name="Reload application web interface"', xaml)
+        self.assertIn("core.ProcessFailed += WebView_ProcessFailed", code)
+        self.assertIn("CoreWebView2ProcessFailedKind.BrowserProcessExited", code)
+        self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessExited", code)
+        self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessUnresponsive", code)
+        self.assertIn("_trustedWebDocumentActive = false", code)
+        self.assertIn("ReloadWeb_Click", code)
+        self.assertIn("DisposeWebExperience();", code)
+        self.assertIn("webView?.Dispose();", code)
+        self.assertIn("await ConnectWebExperienceAsync();", code)
+        handler = code.split("private void WebView_ProcessFailed", 1)[1].split(
+            "private void DisposeWebExperience", 1
+        )[0]
+        self.assertNotIn("DisposeWebExperience()", handler)
+        self.assertNotIn("ConnectWebExperienceAsync()", handler)
 
     def test_webview2_session_never_becomes_a_cookie_and_stale_browser_authority_is_purged(self):
         code = CODE.read_text(encoding="utf-8")

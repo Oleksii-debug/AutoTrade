@@ -24,13 +24,18 @@ from hashlib import sha256
 from typing import Mapping
 
 from .authority import AdmissionRecord, AuthorityConflict, AuthorityService
-from .bybit_v5 import BybitPreparedSubmission, guarded_order_projection
+from .bybit_v5 import (
+    BybitPreparedSubmission,
+    guarded_order_projection,
+    require_canonical_bybit_prepared_submission,
+)
 from .durable_reservations import DurableReservationBook
 from .financial_request_binding import (
     FinancialRequestBindingError,
     FinancialRequestBindingMaterial,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError
 from .provider_domain import ProviderDomainError, ProviderFinancialScope
 from .risk_policy_authority import journal_store_identity_digest
 
@@ -54,7 +59,21 @@ _MATERIAL_TYPE = FinancialRequestBindingMaterial
 _BYBIT_PREPARED_TYPE = BybitPreparedSubmission
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION = guarded_order_projection
 _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION_CODE = guarded_order_projection.__code__
+_CANONICAL_BYBIT_REQUIRE_PREPARED = require_canonical_bybit_prepared_submission
+_CANONICAL_BYBIT_REQUIRE_PREPARED_CODE = require_canonical_bybit_prepared_submission.__code__
 _BYBIT_PREPARED_ORIGIN_SCHEMA = "bybit-prepared-origin.v1"
+_BINDING_PAYLOAD_BASE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "admission_id",
+        "binding_id",
+        "journal_store_identity_digest",
+        "material",
+    }
+)
+_BINDING_PAYLOAD_PRODUCTION_FIELDS = (
+    _BINDING_PAYLOAD_BASE_FIELDS | {"provider_request_origin"}
+)
 _BYBIT_TRIGGER_PROTECTION_KEYS = (
     "triggerDirection",
     "triggerPrice",
@@ -183,6 +202,25 @@ def _require_bybit_prepared_request_origin(
         raise DurableFinancialRequestBindingError(
             "Bybit prepared-request type authority changed"
         )
+    if (
+        require_canonical_bybit_prepared_submission
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED
+        or getattr(
+            _CANONICAL_BYBIT_REQUIRE_PREPARED,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_BYBIT_REQUIRE_PREPARED_CODE
+    ):
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared-request provenance authority changed"
+        )
+    try:
+        _CANONICAL_BYBIT_REQUIRE_PREPARED(prepared_request)
+    except (ProviderCoreError, TypeError, ValueError) as error:
+        raise DurableFinancialRequestBindingError(
+            "Bybit prepared request lacks canonical issuance provenance"
+        ) from error
     if (
         guarded_order_projection is not _CANONICAL_BYBIT_GUARDED_ORDER_PROJECTION
         or getattr(
@@ -841,15 +879,13 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        expected_fields = {
-            "schema_version",
-            "admission_id",
-            "binding_id",
-            "journal_store_identity_digest",
-            "material",
-        }
+        payload_fields = frozenset(payload)
         if (
-            set(payload) != expected_fields
+            payload_fields
+            not in (
+                _BINDING_PAYLOAD_BASE_FIELDS,
+                _BINDING_PAYLOAD_PRODUCTION_FIELDS,
+            )
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")

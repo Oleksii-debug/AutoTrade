@@ -569,6 +569,10 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                 "JournalStore backlog transition writer",
             ),
             (
+                "_outbox_transition_tail_value",
+                "JournalStore backlog transition tail",
+            ),
+            (
                 "_outbox_transition_sequence_value",
                 "JournalStore outbox transition sequence",
             ),
@@ -635,6 +639,10 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             (
                 "_append_outbox_backlog_transition",
                 "JournalStore backlog transition writer",
+            ),
+            (
+                "_outbox_transition_tail_value",
+                "JournalStore backlog transition tail",
             ),
             (
                 "_outbox_transition_sequence_value",

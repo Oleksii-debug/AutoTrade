@@ -342,6 +342,11 @@ _RESOURCE_JOURNAL_BACKLOG_DEPENDENCIES = (
         JournalStore._append_outbox_backlog_transition,
     ),
     (
+        "JournalStore backlog transition tail",
+        "_outbox_transition_tail_value",
+        JournalStore._outbox_transition_tail_value,
+    ),
+    (
         "JournalStore outbox transition sequence",
         "_outbox_transition_sequence_value",
         JournalStore._outbox_transition_sequence_value,

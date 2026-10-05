@@ -141,6 +141,33 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         self.assertNotIn("observed_at", observed.payload)
         self.assertNotIn("timestamp", observed.payload)
 
+    def test_public_constructor_cannot_mint_resource_evidence(self):
+        before = _snapshot(monotonic_ns=1, process_cpu_ns=1)
+        after = _snapshot(monotonic_ns=2, process_cpu_ns=2)
+        with self.assertRaisesRegex(
+            RuntimeTargetHostResourceEvidenceError,
+            "canonical issuer",
+        ):
+            RuntimeTargetHostResourceEvidence(
+                authority_id="authority",
+                authority_digest=AUTHORITY_DIGEST,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=RELEASE_ARTIFACT_SHA,
+                scenario_id="scenario",
+                spec_digest=SPEC_DIGEST,
+                host_fingerprint=HOST,
+                inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                inventory_payload_sha256=INVENTORY_DIGEST,
+                measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                measurement_payload_sha256=MEASUREMENT_DIGEST,
+                run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                run_receipt_payload_sha256=RUN_RECEIPT_DIGEST,
+                reconnect_backlog_remaining=0,
+                before=before,
+                after=after,
+            )
+
     def test_issued_evidence_binds_exact_retained_run_chain_and_stays_nonterminal(self):
         before = _snapshot(monotonic_ns=10_000, process_cpu_ns=2_000)
         after = _snapshot(
@@ -181,32 +208,15 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         )
         self.assertNotIn("observed_at", payload)
 
-    def test_counter_rollback_fails_closed(self):
+    def test_counter_rollback_fails_closed_through_canonical_issuer(self):
         before = _snapshot(monotonic_ns=10_000, process_cpu_ns=2_000)
-        after = _snapshot(
-            monotonic_ns=9_999,
-            process_cpu_ns=2_000,
-        )
+        after = _snapshot(monotonic_ns=9_999, process_cpu_ns=2_000)
         with self.assertRaisesRegex(
             RuntimeTargetHostResourceEvidenceError,
             "monotonic cut moved backwards",
         ):
-            RuntimeTargetHostResourceEvidence(
-                authority_id="authority",
-                authority_digest=AUTHORITY_DIGEST,
-                source_sha=SOURCE_SHA,
-                release_artifact_id=RELEASE_ARTIFACT_ID,
-                release_artifact_sha256=RELEASE_ARTIFACT_SHA,
-                scenario_id="scenario",
-                spec_digest=SPEC_DIGEST,
-                host_fingerprint=HOST,
-                inventory_artifact_id=INVENTORY_ARTIFACT_ID,
-                inventory_payload_sha256=INVENTORY_DIGEST,
-                measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
-                measurement_payload_sha256=MEASUREMENT_DIGEST,
-                run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
-                run_receipt_payload_sha256=RUN_RECEIPT_DIGEST,
-                reconnect_backlog_remaining=0,
+            issue_runtime_target_host_resource_evidence(
+                _run_result(),
                 before=before,
                 after=after,
             )

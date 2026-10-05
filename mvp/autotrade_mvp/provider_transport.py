@@ -1234,6 +1234,59 @@ def _bybit_exact_trading_response(
     return exact
 
 
+def _kraken_spot_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Keep post-send Kraken Spot transport ambiguity reconciliation-first."""
+
+    exact = _exact_trading_response(value)
+    status = exact.http_status
+    if status is None:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
+        )
+    if spot_submission_requires_reconciliation(exact.payload):
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_deadline_elapsed",
+        )
+    return exact
+
+
+def _alpaca_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Keep post-send Alpaca transport ambiguity reconciliation-first."""
+
+    exact = _exact_trading_response(value)
+    status = exact.http_status
+    if status is None:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_http_status_unavailable_execution_unknown",
+        )
+    if 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_http_5xx_execution_unknown",
+        )
+    return exact
+
+
 def _binance_exact_trading_response(
     value: object,
 ) -> ExactJsonTransportResponse:
@@ -2840,15 +2893,7 @@ class KrakenSpotHttpTransport:
 
                     final_guard()
                     wire_response = self.wire_client.send(signed)
-                    exact = _exact_trading_response(wire_response)
-                    if spot_submission_requires_reconciliation(exact.payload):
-                        return ExactJsonTransportResponse(
-                            exact.response_bytes,
-                            http_status=exact.http_status,
-                            requires_reconciliation=True,
-                            ambiguity_reason="kraken_spot_deadline_elapsed",
-                        )
-                    return exact
+                    return _kraken_spot_exact_trading_response(wire_response)
             finally:
                 provider_api_key = None
                 credential_plaintext = None
@@ -3369,7 +3414,7 @@ class AlpacaTradingHttpTransport:
 
             final_guard()
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            return _alpaca_exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

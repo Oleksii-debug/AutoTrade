@@ -31,18 +31,36 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
     def test_primary_webview2_surface_is_real_and_native_safety_remains_independent(self):
         xaml = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")
-        self.assertIn(
-            'xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"',
-            xaml,
-        )
-        self.assertIn('<wv2:WebView2 x:Name="ProductWebView"', xaml)
-        self.assertIn('AutomationProperties.Name="AutoTrade application web interface"', xaml)
+        self.assertIn('x:Name="ProductWebViewHost"', xaml)
+        self.assertIn("new WebView2", code)
+        self.assertIn("AutomationProperties.SetName(", code)
+        self.assertIn('"AutoTrade application web interface"', code)
         self.assertIn('Content="_Focus application web interface"', xaml)
         self.assertIn('AutomationProperties.Name="Block new exposure"', xaml)
         self.assertIn('AutomationProperties.Name="Host connection status"', xaml)
         self.assertIn("await ConnectWebExperienceAsync();", code)
-        self.assertIn("ProductWebView.Visibility = Visibility.Visible;", code)
+        self.assertIn("ProductWebViewHost.Visibility = Visibility.Visible;", code)
         self.assertIn("FocusWebButton.IsEnabled = true;", code)
+
+    def test_window_access_keys_are_unique(self):
+        root = ET.parse(XAML).getroot()
+        access_keys = []
+        for element in root.iter():
+            content = element.attrib.get("Content")
+            if not content:
+                continue
+            marker = content.find("_")
+            if marker < 0 or marker + 1 >= len(content):
+                continue
+            access_keys.append((content[marker + 1].casefold(), content))
+
+        key_names = [key for key, _ in access_keys]
+        self.assertEqual(
+            len(key_names),
+            len(set(key_names)),
+            "Window access keys must be unique: " + repr(access_keys),
+        )
+        self.assertIn(("w", "Reload application _web interface"), access_keys)
 
     def test_default_window_construction_keeps_native_and_web_on_one_connection(self):
         code = CODE.read_text(encoding="utf-8")
@@ -82,6 +100,86 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("policy.AllowsTopLevelNavigation(target)", code)
         self.assertIn("policy.AllowsSessionHeaderForwarding(", code)
         self.assertIn("CoreWebView2WebResourceRequestSourceKinds.Document", code)
+        self.assertIn("CoreWebView2WebResourceContext.Fetch", code)
+        self.assertIn("CoreWebView2WebResourceContext.XmlHttpRequest", code)
+        self.assertIn("_trustedWebDocumentActive", code)
+
+    def test_webview2_old_generation_callbacks_cannot_mutate_new_browser_authority(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("private long _webGeneration;", code)
+        self.assertIn("long generation = ++_webGeneration;", code)
+        self.assertIn("generation == _webGeneration", code)
+        self.assertIn("ReferenceEquals(webView, _productWebView)", code)
+        self.assertIn("_webGeneration++;", code)
+        self.assertIn("if (!IsCurrentWebGeneration(webView, generation))", code)
+        self.assertIn(
+            "WebView_ProcessFailed(webView, generation, e)",
+            code,
+        )
+        resource = code.split("core.WebResourceRequested += (_, e) =>", 1)[1].split(
+            "core.Navigate(origin.AbsoluteUri)", 1
+        )[0]
+        self.assertLess(
+            resource.index('e.Request.Headers.RemoveHeader("Authorization")'),
+            resource.index("IsCurrentWebGeneration(webView, generation)"),
+        )
+        self.assertLess(
+            resource.index("IsCurrentWebGeneration(webView, generation)"),
+            resource.index('e.Request.Headers.SetHeader(\n                        "Authorization"'),
+        )
+
+    def test_webview2_async_startup_cannot_create_or_leak_browser_after_window_close(self):
+        code = CODE.read_text(encoding="utf-8")
+        connect = code.split("private async Task ConnectWebExperienceAsync", 1)[1].split(
+            "private static bool RequiresFreshWebViewAfterFailure", 1
+        )[0]
+        environment = connect.index("await CoreWebView2Environment.CreateAsync")
+        cancellation_after_environment = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            environment,
+        )
+        create_control = connect.index("webView = new WebView2", cancellation_after_environment)
+        self.assertLess(cancellation_after_environment, create_control)
+        ensure = connect.index("await webView.EnsureCoreWebView2Async", create_control)
+        cancellation_after_ensure = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            ensure,
+        )
+        cleanup_after_ensure = connect.index("DisposeWebExperience();", cancellation_after_ensure)
+        clear = connect.index("await core.Profile.ClearBrowsingDataAsync", cleanup_after_ensure)
+        cancellation_after_clear = connect.index(
+            "if (_lifetime.IsCancellationRequested || !IsLoaded)",
+            clear,
+        )
+        cleanup_after_clear = connect.index("DisposeWebExperience();", cancellation_after_clear)
+        self.assertLess(ensure, cancellation_after_ensure)
+        self.assertLess(cancellation_after_ensure, cleanup_after_ensure)
+        self.assertLess(clear, cancellation_after_clear)
+        self.assertLess(cancellation_after_clear, cleanup_after_clear)
+
+    def test_webview2_process_failure_revokes_trust_and_recreates_control_outside_handler(self):
+        xaml = XAML.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn('Content="_Reload application web interface"', xaml)
+        self.assertIn('AutomationProperties.Name="Reload application web interface"', xaml)
+        self.assertIn(
+            "core.ProcessFailed += (_, e) =>\n                WebView_ProcessFailed(webView, generation, e);",
+            code,
+        )
+        self.assertIn("CoreWebView2ProcessFailedKind.BrowserProcessExited", code)
+        self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessExited", code)
+        self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessUnresponsive", code)
+        self.assertIn("_trustedWebDocumentActive = false", code)
+        self.assertIn("ProductWebViewHost.Visibility = Visibility.Collapsed", code)
+        self.assertIn("ReloadWeb_Click", code)
+        self.assertIn("DisposeWebExperience();", code)
+        self.assertIn("webView?.Dispose();", code)
+        self.assertIn("await ConnectWebExperienceAsync();", code)
+        handler = code.split("private void WebView_ProcessFailed", 1)[1].split(
+            "private void DisposeWebExperience", 1
+        )[0]
+        self.assertNotIn("DisposeWebExperience()", handler)
+        self.assertNotIn("ConnectWebExperienceAsync()", handler)
 
     def test_webview2_session_never_becomes_a_cookie_and_stale_browser_authority_is_purged(self):
         code = CODE.read_text(encoding="utf-8")

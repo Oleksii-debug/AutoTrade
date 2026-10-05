@@ -248,6 +248,39 @@ internal static class Program
             "external popup was silently admitted as trusted content");
     }
 
+    static void WebViewProcessFailureRecoveryClassificationTest()
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.NonPublic;
+        var classifier = typeof(MainWindow).GetMethod(
+            "RequiresFreshWebViewAfterFailure",
+            flags)
+            ?? throw new InvalidOperationException(
+                "WebView process-failure classifier is missing");
+
+        bool Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind kind) =>
+            (bool)(classifier.Invoke(null, new object[] { kind })
+                ?? throw new InvalidOperationException(
+                    "WebView process-failure classifier returned null"));
+
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.BrowserProcessExited),
+            "browser-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessExited),
+            "render-process exit must require a fresh WebView");
+        Check.True(
+            Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.RenderProcessUnresponsive),
+            "unresponsive renderer must expose fresh-WebView recovery");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.GpuProcessExited),
+            "GPU-process exit must not discard the whole WebView authority surface");
+        Check.True(
+            !Requires(Microsoft.Web.WebView2.Core.CoreWebView2ProcessFailedKind.UtilityProcessExited),
+            "utility-process exit must not discard the whole WebView authority surface");
+    }
+
     static void CanonicalOperationIdentityVectorTest()
     {
         Check.True(
@@ -1905,6 +1938,7 @@ internal static class Program
         WebExperienceSecurityPolicyOriginAndNavigationTest();
         WebExperienceSecurityPolicyCredentialForwardingTest();
         WebExperienceSecurityPolicyDisablesPrivilegedBrowserSurfacesTest();
+        WebViewProcessFailureRecoveryClassificationTest();
         WindowRetainsCurrentEvidenceFloorTest();
         SnapshotBusyKeepsLastVerifiedHostEvidenceStaleTest();
         HostRefreshHeartbeatAndTransitionTest();

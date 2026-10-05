@@ -3399,6 +3399,7 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 clock=MutableClock(),
             )
             call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
             calls = []
 
             def hostile_cancel():
@@ -3406,33 +3407,31 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 orchestrator.budget.journal = forged_journal
                 return False
 
-            outcome = orchestrator.execute(
-                spec=call_spec,
-                policy=fixed_policy(),
-                request=request_for(orchestrator, call_spec),
-                descriptors=[descriptor()],
-                call=lambda *_args: calls.append(True),
-                validate_result=lambda _value: True,
-                now_utc=NOW,
-                cancel_requested=hostile_cancel,
-            )
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cancellation probe mutated orchestrator authority",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
 
-            self.assertEqual(outcome.status, "NOT_SENT")
-            self.assertIn(
-                "cancellation_probe_mutated_orchestrator_authority",
-                outcome.reason,
-            )
-            self.assertIn("budget.journal", outcome.reason)
             self.assertEqual(calls, [])
             self.assertIs(orchestrator.journal, journal)
             self.assertIs(budget.journal, journal)
-            self.assertIsNone(budget.active_reservation(outcome.attempt_id))
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
             self.assertEqual(
-                [event["event_type"] for event in orchestrator._events(outcome.attempt_id)],
-                ["ModelCallPrepared", "ModelCallNotSent"],
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
             )
 
-    def test_cancellation_probe_failure_is_durable_not_sent(self):
+    def test_cancellation_probe_failure_preserves_prepared_recovery(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             orchestrator = orchestrator_for(
@@ -3440,24 +3439,109 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 clock=MutableClock(),
             )
             call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
 
             def broken_cancel():
                 raise RuntimeError("probe failure must not cross call boundary")
 
-            outcome = orchestrator.execute(
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "probe failure must not cross call boundary",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail("failed cancellation probe crossed call boundary"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=broken_cancel,
+                )
+
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
+    def test_cancel_callback_selection_does_not_execute_truthiness(self):
+        class HostileCancel:
+            bool_calls = 0
+            call_calls = 0
+
+            def __bool__(self):
+                type(self).bool_calls += 1
+                raise AssertionError("cancel callback truthiness must not execute")
+
+            def __call__(self):
+                type(self).call_calls += 1
+                return False
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            callback = HostileCancel()
+
+            result = orchestrator.execute(
                 spec=call_spec,
                 policy=fixed_policy(),
                 request=request_for(orchestrator, call_spec),
                 descriptors=[descriptor()],
-                call=lambda *_args: self.fail("failed cancellation probe crossed call boundary"),
+                call=lambda *_args: observation(),
                 validate_result=lambda _value: True,
                 now_utc=NOW,
-                cancel_requested=broken_cancel,
+                cancel_requested=callback,
             )
 
-            self.assertEqual(outcome.status, "NOT_SENT")
-            self.assertEqual(outcome.reason, "cancellation_probe_failed")
-            self.assertIsNone(budget.active_reservation(outcome.attempt_id))
+            self.assertEqual(result.status, "OBSERVED_VALID")
+            self.assertEqual(HostileCancel.bool_calls, 0)
+            self.assertEqual(HostileCancel.call_calls, 1)
+
+    def test_cancellation_probe_rejects_executable_non_boolean_result(self):
+        class HostileTruthiness:
+            bool_calls = 0
+
+            def __bool__(self):
+                type(self).bool_calls += 1
+                raise AssertionError("cancel result truthiness must not execute")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            calls = []
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cancellation probe must return an exact boolean",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=lambda: HostileTruthiness(),
+                )
+
+            self.assertEqual(HostileTruthiness.bool_calls, 0)
+            self.assertEqual(calls, [])
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
 
     def test_validator_cannot_redirect_post_observation_settlement(self):
         with TemporaryDirectory() as directory:

@@ -381,12 +381,23 @@ def _autonomous_owned_pending_publications(
     pending: list[dict[str, object]] = []
     for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
         state = JournalStore.outbox_delivery_state(store, event_id)
-        if state is None or state["delivered"]:
+        if state is None:
             continue
         if not _autonomous_publication_owned(state, run_id=run_id):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )
+        envelope = state.get("payload")
+        if (
+            type(envelope) is dict
+            and envelope.get("aggregate_type") == "canonical_autonomous_simulation"
+            and state.get("topic") != "autotrade.simulation.events"
+        ):
+            raise AutonomousRuntimeCheckpointError(
+                "ZERO loop publication routing topic is not canonical"
+            )
+        if state["delivered"]:
+            continue
         pending.append(state)
     return tuple(pending)
 

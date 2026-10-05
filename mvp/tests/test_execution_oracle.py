@@ -31,6 +31,8 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
         price_quantum="0.01",
+        price_projection_policy_id="ADVERSE_PRICE_GRID",
+        price_projection_policy_version=1,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)

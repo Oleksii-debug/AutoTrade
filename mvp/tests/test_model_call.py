@@ -893,6 +893,38 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 ["ModelCallPrepared", "ModelCallNotSent"],
             )
 
+    def test_fresh_attempt_rejects_pricing_at_exact_expiry_before_reservation(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            clock = MutableClock(NOW + timedelta(hours=1))
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=clock,
+            )
+            call_spec = spec()
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "pricing evidence has expired",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail(
+                        "expired pricing must not cross inference boundary"
+                    ),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(
+                orchestrator._events(orchestrator.attempt_id(call_spec)),
+                [],
+            )
+
     def test_zero_cancelled_and_expired_new_attempts_never_touch_model_inventory(self):
         class ExplodingInventory:
             def __iter__(self):

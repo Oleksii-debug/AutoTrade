@@ -229,7 +229,7 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
             )
         with os.fdopen(descriptor, "a+b", closefd=False) as stream:
             if stream.tell() == 0:
-                stream.write(b"\0")
+                stream.write(b"\\0")
                 stream.flush()
                 os.fsync(stream.fileno())
             stream.seek(0)

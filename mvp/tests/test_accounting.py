@@ -596,6 +596,7 @@ class AccountingFoundationTests(unittest.TestCase):
         original_economic_book = accounting_module.EconomicBook
         original_scoped_book = accounting_module.ScopedEconomicBook
         original_name = accounting_module._name
+        original_weakref = accounting_module.weakref
         original_environments = ScopedEconomicBook._ENVIRONMENTS
 
         class ForgedBook:
@@ -611,6 +612,7 @@ class AccountingFoundationTests(unittest.TestCase):
         accounting_module.EconomicBook = ForgedBook
         accounting_module.ScopedEconomicBook = object
         accounting_module._name = lambda _value, *, field: "FORGED"
+        accounting_module.weakref = object()
         ScopedEconomicBook._ENVIRONMENTS = frozenset({"FORGED"})
         try:
             scoped = ScopedEconomicBook(
@@ -632,6 +634,7 @@ class AccountingFoundationTests(unittest.TestCase):
             accounting_module.EconomicBook = original_economic_book
             accounting_module.ScopedEconomicBook = original_scoped_book
             accounting_module._name = original_name
+            accounting_module.weakref = original_weakref
             ScopedEconomicBook._ENVIRONMENTS = original_environments
 
     def test_scoped_economic_book_owner_writer_is_not_public_authority(self):

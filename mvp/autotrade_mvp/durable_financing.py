@@ -19,7 +19,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+from threading import RLock
 from typing import Any, Mapping, Protocol
+import weakref
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import AccountingConflict, JournalTransaction
@@ -42,7 +44,12 @@ from .instruments import (
     InstrumentRegistry,
     InstrumentRegistryError,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .store_identity import same_journal_backing_object
 from .provider_core import ProviderResponseObservation, Surface
@@ -677,6 +684,160 @@ def _record_exact(
     )
 
 
+@dataclass(frozen=True)
+class _DurableFinancingAuthorityBinding:
+    store_ref: weakref.ReferenceType
+    economic_book_ref: weakref.ReferenceType
+    store_identity: object
+    provider_id: str
+    account_id: str
+    environment: str
+
+
+def _build_durable_financing_authority_accessors():
+    """Retain selected financing authority outside caller-mutable instance state."""
+
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, _DurableFinancingAuthorityBinding],
+    ] = {}
+    lock = RLock()
+
+    def prune_dead() -> None:
+        with lock:
+            dead = [
+                object_id
+                for object_id, (value_ref, _binding) in bindings.items()
+                if value_ref() is None
+            ]
+            for object_id in dead:
+                bindings.pop(object_id, None)
+
+    def registered_binding(
+        value: object,
+    ) -> _DurableFinancingAuthorityBinding | None:
+        object_id = id(value)
+        with lock:
+            entry = bindings.get(object_id)
+            if entry is None:
+                return None
+            value_ref, binding = entry
+            current = value_ref()
+            if current is value:
+                return binding
+            if current is None:
+                bindings.pop(object_id, None)
+                return None
+            raise FinancingConflict("durable financing binding identity collision")
+
+    def is_registered(value: object) -> bool:
+        try:
+            prune_dead()
+            return registered_binding(value) is not None
+        except TypeError:
+            return False
+
+    def initialize(value: object) -> None:
+        if type(value) is not DurableFinancingBook:
+            raise TypeError("financing book must be exact DurableFinancingBook")
+        prune_dead()
+        if registered_binding(value) is not None:
+            raise FinancingConflict("financing authority is already established")
+        state = object.__getattribute__(value, "__dict__")
+        store = state.get("store")
+        economic_book = state.get("economic_book")
+        if type(store) is not JournalStore:
+            raise TypeError("store must be the exact canonical JournalStore")
+        if type(economic_book) is not DurableProviderEconomicBook:
+            raise TypeError(
+                "economic_book must be the exact canonical DurableProviderEconomicBook"
+            )
+        try:
+            identity = require_exact_journal_store_authority(
+                store,
+                subject="durable financing JournalStore",
+            )
+            economic_store = economic_book.store
+            economic_identity = require_exact_journal_store_authority(
+                economic_store,
+                subject="durable financing economic JournalStore",
+            )
+        except (AccountingConflict, TypeError, RuntimeError) as error:
+            raise FinancingConflict(
+                "financing authority composition is invalid"
+            ) from error
+        if not same_journal_backing_object(identity, economic_identity):
+            raise FinancingConflict(
+                "financing and economic authorities must share JournalStore backing generation"
+            )
+        binding = _DurableFinancingAuthorityBinding(
+            store_ref=weakref.ref(store),
+            economic_book_ref=weakref.ref(economic_book),
+            store_identity=identity,
+            provider_id=state["provider_id"],
+            account_id=state["account_id"],
+            environment=state["environment"],
+        )
+        with lock:
+            if registered_binding(value) is not None:
+                raise FinancingConflict("financing authority is already established")
+            bindings[id(value)] = (weakref.ref(value), binding)
+
+    def require(value: object) -> _DurableFinancingAuthorityBinding:
+        if type(value) is not DurableFinancingBook:
+            raise TypeError("financing book must be exact DurableFinancingBook")
+        prune_dead()
+        binding = registered_binding(value)
+        if binding is None:
+            raise FinancingConflict("financing authority is not established")
+        state = object.__getattribute__(value, "__dict__")
+        store = binding.store_ref()
+        economic_book = binding.economic_book_ref()
+        if store is None or economic_book is None:
+            raise FinancingConflict(
+                "financing authority resource was released while book is live"
+            )
+        if (
+            state.get("store") is not store
+            or state.get("economic_book") is not economic_book
+            or state.get("provider_id") != binding.provider_id
+            or state.get("account_id") != binding.account_id
+            or state.get("environment") != binding.environment
+        ):
+            raise FinancingConflict(
+                "financing authority state changed after construction"
+            )
+        try:
+            current_identity = require_exact_journal_store_authority(
+                store,
+                subject="durable financing JournalStore",
+            )
+            economic_store = economic_book.store
+            economic_identity = require_exact_journal_store_authority(
+                economic_store,
+                subject="durable financing economic JournalStore",
+            )
+        except (AccountingConflict, TypeError, RuntimeError) as error:
+            raise FinancingConflict("financing authority generation changed") from error
+        if current_identity != binding.store_identity:
+            raise FinancingConflict("financing JournalStore generation changed")
+        if not same_journal_backing_object(current_identity, economic_identity):
+            raise FinancingConflict(
+                "financing and economic authorities no longer share one JournalStore generation"
+            )
+        if (
+            economic_book.provider_id != binding.provider_id
+            or economic_book.account_id != binding.account_id
+            or economic_book.environment != binding.environment
+        ):
+            raise FinancingConflict(
+                "financing and economic authority scope changed"
+            )
+        return binding
+
+    return is_registered, initialize, require
+
+
 class DurableFinancingBook:
     """Journal-backed provider/account financing revision authority."""
 
@@ -689,6 +850,8 @@ class DurableFinancingBook:
         account_id: str,
         environment: str,
     ):
+        if _durable_financing_authority_is_registered(self):
+            raise FinancingConflict("financing authority is already established")
         if type(store) is not JournalStore:
             raise TypeError("store must be the exact canonical JournalStore")
         if type(economic_book) is not DurableProviderEconomicBook:
@@ -719,8 +882,10 @@ class DurableFinancingBook:
             raise ValueError(
                 "financing and economic authorities must share provider/account/environment"
             )
+        _initialize_durable_financing_authority(self)
 
     def _aggregate_id(self, charge_id: str) -> str:
+        _require_durable_financing_authority(self)
         return _scoped_identity(
             "provider-financing",
             self.provider_id,
@@ -730,6 +895,7 @@ class DurableFinancingBook:
         )
 
     def _events(self, charge_id: str) -> list[dict[str, Any]]:
+        _require_durable_financing_authority(self)
         return self.store.load_events(
             _FINANCING_AGGREGATE_TYPE,
             self._aggregate_id(charge_id),
@@ -816,6 +982,7 @@ class DurableFinancingBook:
     ) -> tuple[int, list[dict[str, Any]], FinancingRevisionBook]:
         """Read financing + economics only from a bounded stable journal cut."""
 
+        _require_durable_financing_authority(self)
         for _attempt in range(max_attempts):
             cut_before = self.store.current_journal_sequence()
             durable_events = self._events(charge_id)
@@ -925,6 +1092,7 @@ class DurableFinancingBook:
         return expected
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
+        _require_durable_financing_authority(self)
         normalized = _text(charge_id, name="charge_id")
         return self._replay(normalized).latest(normalized)
 
@@ -935,6 +1103,7 @@ class DurableFinancingBook:
         artifact_id: str,
         committed_at: str | None = None,
     ) -> DurableFinancingResult:
+        _require_durable_financing_authority(self)
         (
             event,
             artifact_digest,
@@ -967,6 +1136,7 @@ class DurableFinancingBook:
         instrument_versions: Mapping[str, str],
         committed_at: str | None = None,
     ) -> DurableFinancingResult:
+        _require_durable_financing_authority(self)
         if type(observation) is not ProviderResponseObservation:
             raise TypeError(
                 "observation must be the exact canonical ProviderResponseObservation"
@@ -1058,6 +1228,7 @@ class DurableFinancingBook:
         charge_scope_id: str,
         committed_at: str | None,
     ) -> DurableFinancingResult:
+        _require_durable_financing_authority(self)
         aggregate_id = self._aggregate_id(event.charge_id)
         accepted_cut, durable_events, book = self._stable_replay_cut(event.charge_id)
         incoming_charge_scope = _charge_scope(
@@ -1271,3 +1442,10 @@ class DurableFinancingBook:
             update=update,
             economic_transaction=economic_transaction,
         )
+
+(
+    _durable_financing_authority_is_registered,
+    _initialize_durable_financing_authority,
+    _require_durable_financing_authority,
+) = _build_durable_financing_authority_accessors()
+del _build_durable_financing_authority_accessors

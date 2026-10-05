@@ -300,6 +300,67 @@ class DurableFinancingTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_store_retarget_fails_closed_before_financing_read(self):
+        other_store = JournalStore(Path(self.temp.name) / "other.sqlite3")
+        object.__setattr__(self.financing, "store", other_store)
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state changed after construction",
+        ):
+            self.financing.latest("borrow-btc-2026-09-28")
+
+    def test_economic_book_retarget_fails_before_artifact_callback(self):
+        alternate_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        object.__setattr__(self.financing, "economic_book", alternate_economic)
+
+        class HostileArtifacts:
+            calls = 0
+
+            def read_authenticated_snapshot(self, _artifact_id):
+                self.calls += 1
+                raise AssertionError("artifact callback executed before authority check")
+
+        hostile = HostileArtifacts()
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority state changed after construction",
+        ):
+            self.financing.record_authenticated_artifact(
+                hostile,
+                artifact_id="00000000-0000-0000-0000-000000000099",
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(hostile.calls, 0)
+
+    def test_reinitialization_cannot_replace_financing_authority(self):
+        other_store = JournalStore(Path(self.temp.name) / "reinit.sqlite3")
+        other_economic = DurableProviderEconomicBook(
+            other_store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+
+        with self.assertRaisesRegex(
+            FinancingConflict,
+            "authority is already established",
+        ):
+            self.financing.__init__(
+                other_store,
+                other_economic,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="SIMULATION",
+            )
+        self.assertIs(self.financing.store, self.store)
+        self.assertIs(self.financing.economic_book, self.economic)
+
     def test_final_revision_and_economics_commit_atomically_and_restart(self):
         self.artifacts.put("00000000-0000-0000-0000-000000000001", revision=1)
         result = self.financing.record_authenticated_artifact(

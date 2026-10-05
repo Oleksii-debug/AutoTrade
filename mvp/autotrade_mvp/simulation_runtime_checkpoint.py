@@ -256,6 +256,171 @@ def _aggregate_events(
     ]
 
 
+def _payload_scope_value(
+    payload: Mapping[str, object],
+    key: str,
+) -> object | None:
+    """Resolve common durable scope layouts without guessing from unrelated fields."""
+
+    if key in payload:
+        return payload.get(key)
+    scope = payload.get("scope")
+    if type(scope) is dict and key in scope:
+        return scope.get(key)
+    identity = payload.get("identity")
+    if type(identity) is dict:
+        identity_scope = identity.get("scope")
+        if type(identity_scope) is dict and key in identity_scope:
+            return identity_scope.get(key)
+    request = payload.get("request")
+    if type(request) is dict and key in request:
+        return request.get(key)
+    return None
+
+
+def _autonomous_run_financial_scope(
+    store: JournalStore,
+    *,
+    run_id: str,
+) -> dict[str, str] | None:
+    """Load the immutable ZERO financial scope from its durable start event.
+
+    Synthetic journal tests may contain an isolated loop publication without a
+    start event; in that case component publications have no positive ownership
+    proof and are intentionally not acknowledged.
+    """
+
+    events = JournalStore.load_events(
+        store,
+        "canonical_autonomous_simulation",
+        run_id,
+    )
+    if not events or events[0].get("event_type") != "AutonomousSimulationStarted":
+        return None
+    payload = events[0].get("payload")
+    protocol = payload.get("protocol") if type(payload) is dict else None
+    scope = protocol.get("financial_scope") if type(protocol) is dict else None
+    if type(scope) is not dict:
+        raise AutonomousRuntimeCheckpointError(
+            "autonomous simulation start lacks durable financial scope"
+        )
+    account_id = _text(scope.get("account_id"), field="financial_scope.account_id")
+    provider_id = _text(scope.get("provider_id"), field="financial_scope.provider_id")
+    environment = _text(scope.get("environment"), field="financial_scope.environment")
+    if environment != "SIMULATION":
+        raise AutonomousRuntimeCheckpointError(
+            "autonomous simulation financial scope must be SIMULATION"
+        )
+    return {
+        "account_id": account_id,
+        "provider_id": provider_id,
+        "environment": environment,
+    }
+
+
+def _component_event_definitively_foreign(
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str] | None = None,
+) -> bool:
+    """Exclude only component facts that prove they belong outside ZERO.
+
+    Durable component schemas predate a universal host_id field. Treating a
+    missing marker as foreign would hide real risk/economic authority from the
+    checkpoint. Unknown scope therefore remains included (fail closed), while
+    explicit environment/account/provider/host conflicts are foreign.
+    """
+
+    payload = event.get("payload")
+    payload = payload if type(payload) is dict else {}
+    environment = event.get("environment")
+    if environment is None:
+        environment = _payload_scope_value(payload, "environment")
+    if environment is not None and environment != "SIMULATION":
+        return True
+
+    if environment is None:
+        environments = payload.get("environments")
+        if type(environments) in {list, tuple} and "SIMULATION" not in environments:
+            return True
+
+    host_id = event.get("host_id")
+    if host_id is None:
+        host_id = _payload_scope_value(payload, "host_id")
+    if host_id is not None and host_id != "local-simulation":
+        return True
+
+    if financial_scope is not None:
+        account_id = _payload_scope_value(payload, "account_id")
+        if account_id is not None and account_id != financial_scope["account_id"]:
+            return True
+        provider_id = _payload_scope_value(payload, "provider_id")
+        if provider_id is not None and provider_id != financial_scope["provider_id"]:
+            return True
+    return False
+
+
+def _component_publication_matches_run_scope(
+    event: Mapping[str, object],
+    *,
+    financial_scope: Mapping[str, str] | None,
+) -> bool:
+    """Require positive financial-scope proof before ZERO acknowledges a component."""
+
+    if financial_scope is None or event.get("aggregate_type") not in _COMPONENT_AGGREGATE_TYPES:
+        return False
+    if _component_event_definitively_foreign(
+        event,
+        financial_scope=financial_scope,
+    ):
+        return False
+    payload = event.get("payload")
+    if type(payload) is not dict:
+        return False
+
+    environment = event.get("environment")
+    if environment is None:
+        environment = _payload_scope_value(payload, "environment")
+    if environment is None:
+        environments = payload.get("environments")
+        if (
+            type(environments) not in {list, tuple}
+            or financial_scope["environment"] not in environments
+        ):
+            return False
+    elif environment != financial_scope["environment"]:
+        return False
+
+    account_id = _payload_scope_value(payload, "account_id")
+    if account_id != financial_scope["account_id"]:
+        return False
+    provider_id = _payload_scope_value(payload, "provider_id")
+    if provider_id is not None and provider_id != financial_scope["provider_id"]:
+        return False
+    return True
+
+
+def _autonomous_event_owned(
+    event: Mapping[str, object],
+    *,
+    run_id: str,
+    financial_scope: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether one durable event can affect the ZERO runtime checkpoint."""
+
+    aggregate_type = event.get("aggregate_type")
+    aggregate_id = event.get("aggregate_id")
+    if aggregate_type == "canonical_autonomous_simulation":
+        return aggregate_id == run_id
+    return (
+        aggregate_type in _COMPONENT_AGGREGATE_TYPES
+        and not _component_event_definitively_foreign(
+            event,
+            financial_scope=financial_scope,
+        )
+    )
+
+
 def _runtime_scope_snapshot(
     store: JournalStore,
     *,
@@ -295,6 +460,7 @@ def _runtime_scope_snapshot(
             )
         loop_events = loop_events[:-1]
 
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
     authority_events = {
         aggregate_type: [
             _event_identity(event)
@@ -302,7 +468,11 @@ def _runtime_scope_snapshot(
                 store,
                 aggregate_type,
             )
-            if _autonomous_event_owned(event, run_id=run_id)
+            if _autonomous_event_owned(
+                event,
+                run_id=run_id,
+                financial_scope=financial_scope,
+            )
         ]
         for aggregate_type in _COMPONENT_AGGREGATE_TYPES
     }
@@ -324,88 +494,25 @@ def _runtime_scope_snapshot(
     return cut, loop_events, authority_events
 
 
-def _payload_scope_value(
-    payload: Mapping[str, object],
-    key: str,
-) -> object | None:
-    """Resolve common durable scope layouts without guessing from unrelated fields."""
-
-    if key in payload:
-        return payload.get(key)
-    scope = payload.get("scope")
-    if type(scope) is dict and key in scope:
-        return scope.get(key)
-    identity = payload.get("identity")
-    if type(identity) is dict:
-        identity_scope = identity.get("scope")
-        if type(identity_scope) is dict and key in identity_scope:
-            return identity_scope.get(key)
-    request = payload.get("request")
-    if type(request) is dict and key in request:
-        return request.get(key)
-    return None
-
-
-def _component_event_definitively_foreign(event: Mapping[str, object]) -> bool:
-    """Exclude only component facts that prove they belong outside ZERO.
-
-    Durable component schemas predate a universal host_id field. Treating a
-    missing host marker as foreign would hide real risk/economic authority from
-    the checkpoint. Unknown scope therefore remains included (fail closed),
-    while an explicit non-SIMULATION environment or non-local host is foreign.
-    """
-
-    payload = event.get("payload")
-    payload = payload if type(payload) is dict else {}
-    environment = event.get("environment")
-    if environment is None:
-        environment = _payload_scope_value(payload, "environment")
-    if environment is not None and environment != "SIMULATION":
-        return True
-
-    if environment is None:
-        environments = payload.get("environments")
-        if type(environments) in {list, tuple} and "SIMULATION" not in environments:
-            return True
-
-    host_id = event.get("host_id")
-    if host_id is None:
-        host_id = _payload_scope_value(payload, "host_id")
-    if host_id is not None and host_id != "local-simulation":
-        return True
-    return False
-
-
-def _autonomous_event_owned(
-    event: Mapping[str, object],
-    *,
-    run_id: str,
-) -> bool:
-    """Return whether one durable event belongs to ZERO runtime authority."""
-
-    aggregate_type = event.get("aggregate_type")
-    aggregate_id = event.get("aggregate_id")
-    if aggregate_type == "canonical_autonomous_simulation":
-        return aggregate_id == run_id
-    return (
-        aggregate_type in _COMPONENT_AGGREGATE_TYPES
-        and not _component_event_definitively_foreign(event)
-    )
-
-
 def _autonomous_publication_owned(
     item: Mapping[str, object],
     *,
     run_id: str,
+    financial_scope: Mapping[str, str] | None,
 ) -> bool:
-    """Return whether one publication belongs to ZERO runtime authority."""
+    """Return whether one publication is positively owned by this ZERO run."""
 
     envelope = item.get("payload")
     if type(envelope) is not dict:
         raise AutonomousRuntimeCheckpointError(
             "outbox payload is not a canonical event envelope"
         )
-    return _autonomous_event_owned(envelope, run_id=run_id)
+    if envelope.get("aggregate_type") == "canonical_autonomous_simulation":
+        return envelope.get("aggregate_id") == run_id
+    return _component_publication_matches_run_scope(
+        envelope,
+        financial_scope=financial_scope,
+    )
 
 
 def _canonical_publication_topic(envelope: Mapping[str, object]) -> str | None:
@@ -431,7 +538,7 @@ def _autonomous_owned_event_ids(
     *,
     run_id: str,
 ) -> tuple[str, ...]:
-    """Resolve exact ZERO event identities without scanning foreign outbox rows."""
+    """Resolve exact ZERO publication candidates without a bounded outbox scan."""
 
     events = list(
         JournalStore.load_events(
@@ -440,15 +547,20 @@ def _autonomous_owned_event_ids(
             run_id,
         )
     )
-    for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
-        events.extend(
-            event
-            for event in JournalStore.load_events_by_aggregate_type(
-                store,
-                aggregate_type,
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    if financial_scope is not None:
+        for aggregate_type in _COMPONENT_AGGREGATE_TYPES:
+            events.extend(
+                event
+                for event in JournalStore.load_events_by_aggregate_type(
+                    store,
+                    aggregate_type,
+                )
+                if _component_publication_matches_run_scope(
+                    event,
+                    financial_scope=financial_scope,
+                )
             )
-            if _autonomous_event_owned(event, run_id=run_id)
-        )
     event_ids = tuple(event["event_id"] for event in events)
     if len(set(event_ids)) != len(event_ids):
         raise AutonomousRuntimeCheckpointError(
@@ -463,11 +575,16 @@ def _autonomous_owned_pending_publications(
     run_id: str,
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
+    financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
     for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
         state = JournalStore.outbox_delivery_state(store, event_id)
         if state is None:
             continue
-        if not _autonomous_publication_owned(state, run_id=run_id):
+        if not _autonomous_publication_owned(
+            state,
+            run_id=run_id,
+            financial_scope=financial_scope,
+        ):
             raise AutonomousRuntimeCheckpointError(
                 "exact ZERO outbox state escaped runtime ownership"
             )

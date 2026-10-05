@@ -6,6 +6,7 @@ from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.decision_trace as decision_trace_module
 from autotrade_runtime.artifacts.durable_publish import (
     DurablePublishLockError,
     durable_path_lock,
@@ -298,6 +299,77 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(results, [True])
             self.assertTrue(store.verify())
+
+    def test_records_hold_writer_lock_for_one_stable_generation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-existing"))
+
+            reader_entered = Event()
+            release_reader = Event()
+            reader_completed = Event()
+            writer_completed = Event()
+            reader_results = []
+            writer_results = []
+            errors = []
+            real_read = decision_trace_module._read_trace_text_descriptor_bound
+
+            def blocked_read(candidate):
+                reader_entered.set()
+                if not release_reader.wait(timeout=5.0):
+                    raise AssertionError("reader release timed out")
+                return real_read(candidate)
+
+            def reader():
+                try:
+                    reader_results.append(store.records())
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    reader_completed.set()
+
+            def writer():
+                try:
+                    writer_results.append(
+                        store.append(evidence_trace("decision-concurrent"))
+                    )
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    writer_completed.set()
+
+            with patch(
+                "mvp.autotrade_mvp.decision_trace._read_trace_text_descriptor_bound",
+                side_effect=blocked_read,
+            ):
+                reader_thread = Thread(target=reader, daemon=True)
+                reader_thread.start()
+                self.assertTrue(reader_entered.wait(timeout=1.0))
+
+                writer_thread = Thread(target=writer, daemon=True)
+                writer_thread.start()
+                self.assertFalse(
+                    writer_completed.wait(timeout=0.20),
+                    "append crossed a retained trace read generation",
+                )
+
+                release_reader.set()
+                self.assertTrue(reader_completed.wait(timeout=5.0))
+                self.assertTrue(writer_completed.wait(timeout=5.0))
+                reader_thread.join(timeout=1.0)
+                writer_thread.join(timeout=1.0)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                [record["trace_id"] for record in reader_results[0]],
+                ["decision-existing"],
+            )
+            self.assertEqual(writer_results, [True])
+            self.assertEqual(
+                [record["trace_id"] for record in store.records()],
+                ["decision-existing", "decision-concurrent"],
+            )
 
     def test_records_validate_the_exact_loaded_snapshot_without_second_read(self):
         with TemporaryDirectory() as directory:

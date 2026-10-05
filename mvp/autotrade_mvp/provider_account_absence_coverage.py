@@ -632,7 +632,6 @@ def _install_surface_coverage_authority():
         try:
             require_current_provider_account_page_chain_authority(
                 page_chain,
-                qualification_registry=qualification_registry,
                 at=at,
             )
             require_historical_unknown_submission_authority(historical)
@@ -811,7 +810,6 @@ def issue_provider_account_surface_coverage(
     try:
         require_current_provider_account_page_chain_authority(
             page_chain,
-            qualification_registry=qualification_registry,
             at=point,
         )
         require_historical_unknown_submission_authority(historical_submission)

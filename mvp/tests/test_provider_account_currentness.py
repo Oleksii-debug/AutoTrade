@@ -25,9 +25,7 @@ from mvp.autotrade_mvp.provider_account_currentness import (
     require_current_provider_account_page_chain_consumption,
     require_current_provider_account_surface_coverage_consumption,
 )
-from mvp.autotrade_mvp.provider_account_origin_set import (
-    issue_provider_account_origin_set,
-)
+from mvp.autotrade_mvp.provider_account_origin_set import issue_provider_account_origin_set
 from mvp.autotrade_mvp.provider_account_page_chain import (
     issue_provider_account_page_chain,
     require_provider_account_page_chain_authority,
@@ -49,8 +47,12 @@ from mvp.tests.test_provider_account_absence_coverage import (
     _append_unknown,
     _milliseconds,
 )
-from mvp.tests.test_provider_account_origin_set import ProviderAccountOriginSetTests
-from mvp.tests.test_provider_account_page_chain import ENDPOINT, SURFACE, _absence_claims
+from mvp.tests.test_provider_account_page_chain import (
+    ENDPOINT,
+    SURFACE,
+    ProviderAccountPageChainTests,
+    _absence_claims,
+)
 from mvp.tests.test_provider_route_reads import verified_read_capability
 from mvp.tests.test_provider_selection import (
     NOW,
@@ -159,19 +161,21 @@ class ProviderAccountCurrentnessTests(unittest.TestCase):
             acquisition_request_id="currentness-acquisition-1",
             committed_at=NOW,
         )
-        origin_fixture = (
-            None,
+        page_fixture = (
             journal,
-            origin,
+            capabilities,
             qualifications,
+            route,
+            origin,
             acquisition_authority,
             acquisition,
-            binding,
+            None,
         )
-        response = ProviderAccountOriginSetTests._direct_binding(
+        response = ProviderAccountPageChainTests._direct_response(
             self,
-            origin_fixture,
-            directory,
+            page_fixture,
+            binding,
+            body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
             marker="currentness-root",
         )
         observation = observe_provider_origin_json_response(
@@ -226,17 +230,8 @@ class ProviderAccountCurrentnessTests(unittest.TestCase):
     def test_exact_current_sources_are_admitted_without_caller_flags(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)
-            (
-                _journal,
-                qualifications,
-                _acquisition_authority,
-                _acquisition,
-                origin_set,
-                absence,
-                page_chain,
-                historical,
-                coverage,
-            ) = fixture
+            qualifications = fixture[1]
+            origin_set, absence, page_chain, historical, coverage = fixture[4:9]
             self.assertIs(
                 require_current_provider_account_page_chain_consumption(
                     page_chain=page_chain,
@@ -263,17 +258,9 @@ class ProviderAccountCurrentnessTests(unittest.TestCase):
     def test_new_acquisition_revokes_current_consumption_but_not_history(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)
-            (
-                _journal,
-                qualifications,
-                acquisition_authority,
-                acquisition,
-                origin_set,
-                absence,
-                page_chain,
-                historical,
-                coverage,
-            ) = fixture
+            qualifications = fixture[1]
+            acquisition_authority, acquisition = fixture[2:4]
+            origin_set, absence, page_chain, historical, coverage = fixture[4:9]
             acquisition_authority.issue_serialized(
                 provider_scope=acquisition.provider_scope,
                 account_id=acquisition.account_id,
@@ -299,17 +286,8 @@ class ProviderAccountCurrentnessTests(unittest.TestCase):
     def test_q_expiry_revokes_current_consumption(self):
         with TemporaryDirectory() as directory:
             fixture = self._fixture(directory)
-            (
-                _journal,
-                qualifications,
-                _acquisition_authority,
-                _acquisition,
-                origin_set,
-                absence,
-                page_chain,
-                historical,
-                coverage,
-            ) = fixture
+            qualifications = fixture[1]
+            origin_set, absence, page_chain, historical, coverage = fixture[4:9]
             with self.assertRaises(ProviderAccountCurrentnessError):
                 require_current_provider_account_surface_coverage_consumption(
                     coverage=coverage,

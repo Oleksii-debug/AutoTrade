@@ -217,6 +217,192 @@ class DurableModelBudget:
     def _events(self) -> list[dict[str, Any]]:
         return self.journal.load_events(_AGGREGATE_TYPE, self.budget_id)
 
+    @staticmethod
+    def _safe_authority_state(
+        value: object,
+        *,
+        subject: str,
+    ) -> dict[str, object]:
+        try:
+            state = object.__getattribute__(value, "__dict__")
+        except (AttributeError, TypeError) as error:
+            raise ValueError(subject + " authority state is unavailable") from error
+        if type(state) is not dict:
+            raise ValueError(subject + " authority state is invalid")
+        names = tuple(state)
+        if any(type(name) is not str for name in names):
+            raise ValueError(subject + " authority state keys are invalid")
+        return dict.copy(state)
+
+    def _clock_authority_snapshot(
+        self,
+    ) -> tuple[
+        type,
+        dict[str, object],
+        object,
+        type,
+        dict[str, object],
+        object | None,
+        type | None,
+        dict[str, object] | None,
+    ]:
+        """Freeze budget/journal authority before executing the injected clock."""
+        budget_class = object.__getattribute__(self, "__class__")
+        budget_state = DurableModelBudget._safe_authority_state(
+            self,
+            subject="model budget",
+        )
+        journal = budget_state.get("journal")
+        if not isinstance(journal, JournalStore):
+            raise ValueError("model budget journal authority is invalid")
+        journal_class = object.__getattribute__(journal, "__class__")
+        journal_state = DurableModelBudget._safe_authority_state(
+            journal,
+            subject="model budget journal",
+        )
+        identity = journal_state.get("_store_identity")
+        identity_class = (
+            object.__getattribute__(identity, "__class__")
+            if identity is not None
+            else None
+        )
+        identity_state = (
+            DurableModelBudget._safe_authority_state(
+                identity,
+                subject="model budget journal identity",
+            )
+            if identity is not None
+            else None
+        )
+        return (
+            budget_class,
+            budget_state,
+            journal,
+            journal_class,
+            journal_state,
+            identity,
+            identity_class,
+            identity_state,
+        )
+
+    @staticmethod
+    def _restore_clock_authority(
+        self: "DurableModelBudget",
+        snapshot: tuple[
+            type,
+            dict[str, object],
+            object,
+            type,
+            dict[str, object],
+            object | None,
+            type | None,
+            dict[str, object] | None,
+        ],
+    ) -> list[str]:
+        """Restore budget/journal authority without rebound-class dispatch."""
+        (
+            budget_class,
+            budget_state,
+            journal,
+            journal_class,
+            journal_state,
+            identity,
+            identity_class,
+            identity_state,
+        ) = snapshot
+        changes: list[str] = []
+
+        def restore_class(value: object, expected: type, label: str) -> None:
+            current = object.__getattribute__(value, "__class__")
+            if current is expected:
+                return
+            changes.append(label)
+            try:
+                object.__setattr__(value, "__class__", expected)
+            except (AttributeError, TypeError) as error:
+                raise ValueError(label + " could not be restored") from error
+
+        def restore_state(
+            value: object,
+            expected: dict[str, object],
+            prefix: str,
+        ) -> None:
+            current = object.__getattribute__(value, "__dict__")
+            if type(current) is not dict:
+                raise ValueError(prefix + " authority state is invalid")
+            keys = tuple(current)
+            if any(type(name) is not str for name in keys):
+                changes.append(prefix + ".<invalid-state-key>")
+            current_names = {name for name in keys if type(name) is str}
+            expected_names = set(expected)
+            for name in sorted(current_names | expected_names):
+                label = prefix + "." + name
+                if name not in current or name not in expected:
+                    changes.append(label)
+                    continue
+                current_value = current[name]
+                expected_value = expected[name]
+                if type(expected_value) in (str, int, bool, Decimal, type(None)):
+                    changed = (
+                        type(current_value) is not type(expected_value)
+                        or current_value != expected_value
+                    )
+                else:
+                    changed = current_value is not expected_value
+                if changed:
+                    changes.append(label)
+            dict.clear(current)
+            dict.update(current, expected)
+
+        restore_class(self, budget_class, "budget.__class__")
+        restore_class(journal, journal_class, "journal.__class__")
+        if identity is not None and identity_class is not None:
+            restore_class(
+                identity,
+                identity_class,
+                "journal._store_identity.__class__",
+            )
+
+        if identity is not None and identity_state is not None:
+            restore_state(
+                identity,
+                identity_state,
+                "journal._store_identity",
+            )
+        restore_state(journal, journal_state, "journal")
+        restore_state(self, budget_state, "budget")
+        return changes
+
+    def _clock_now(self) -> str:
+        snapshot = DurableModelBudget._clock_authority_snapshot(self)
+        clock = snapshot[1].get("_clock")
+        if not callable(clock):
+            raise ValueError("model budget clock authority is invalid")
+
+        clock_error: Exception | None = None
+        clock_value: object = None
+        try:
+            clock_value = clock()
+        except Exception as error:
+            clock_error = error
+        finally:
+            changes = DurableModelBudget._restore_clock_authority(
+                self,
+                snapshot,
+            )
+
+        if changes:
+            error = ValueError(
+                "model budget clock mutated authority:"
+                + ",".join(sorted(set(changes)))
+            )
+            if clock_error is not None:
+                raise error from clock_error
+            raise error
+        if clock_error is not None:
+            raise clock_error
+        return _clock_text(clock_value)
+
     def _envelope(
         self,
         *,
@@ -233,7 +419,7 @@ class DurableModelBudget:
             "aggregate_version": str(version),
             "payload": payload,
             "payload_hash": payload_digest(payload),
-            "committed_at": _clock_text(self._clock()),
+            "committed_at": self._clock_now(),
         }
 
     @staticmethod

@@ -83,6 +83,23 @@ class RecoveryQualificationAuthorityIngressTests(unittest.TestCase):
             )
         self.assertEqual(touched, [])
 
+    def test_tuple_subclass_is_rejected_before_iteration_dispatch(self):
+        touched: list[str] = []
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                touched.append("iter")
+                raise AssertionError("hostile recovery tuple iteration")
+
+        with self.assertRaisesRegex(TypeError, "must be a tuple"):
+            evidence(
+                recovery_module.RecoveryScenario.NETWORK_LOSS,
+                tests_run=HostileTuple(
+                    REQUIRED_TESTS[recovery_module.RecoveryScenario.NETWORK_LOSS]
+                ),
+            )
+        self.assertEqual(touched, [])
+
     def test_sequence_subclass_is_rejected_before_iteration_dispatch(self):
         touched: list[str] = []
 

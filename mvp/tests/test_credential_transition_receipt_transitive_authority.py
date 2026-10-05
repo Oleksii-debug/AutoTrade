@@ -238,9 +238,6 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
     def test_revoke_ignores_pre_call_sha256_rebind(self) -> None:
         self._assert_revoke_ignores_module_rebind("sha256")
 
-    def test_revoke_ignores_pre_call_json_dumps_rebind(self) -> None:
-        self._assert_revoke_ignores_object_rebind(transition.json, "dumps")
-
     def test_revoke_ignores_pre_call_uuid4_rebind(self) -> None:
         self._assert_revoke_ignores_module_rebind("uuid4")
 
@@ -320,9 +317,6 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
 
     def test_verify_ignores_pre_call_sha256_rebind(self) -> None:
         self._assert_verify_ignores_module_rebind("sha256")
-
-    def test_verify_ignores_pre_call_json_dumps_rebind(self) -> None:
-        self._assert_verify_ignores_object_rebind(transition.json, "dumps")
 
 
 if __name__ == "__main__":

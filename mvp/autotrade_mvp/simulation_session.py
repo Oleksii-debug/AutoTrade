@@ -1174,6 +1174,14 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                         prepared_request_time=timestamp,
                         recovery_now=timestamp if now is None else _now(now),
                     )
+                    if recovery.status == "BLOCKED":
+                        return _finalize_zero_wire_blocked(
+                            store,
+                            root,
+                            episode_id=episode_id,
+                            timestamp=timestamp,
+                            resumed=True,
+                        )
                     if recovery.status == "IN_PROGRESS":
                         # Dispatcher lease activity is an internal recovery
                         # phase, not a new product-level simulation status.

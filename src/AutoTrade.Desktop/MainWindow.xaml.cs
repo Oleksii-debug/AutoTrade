@@ -16,6 +16,7 @@ public partial class MainWindow : Window
     private EmergencyHostStatus? _lastKnownConnectedStatus;
     private EmergencyHostStatus? _lastKnownCurrentStatus;
     private WebView2? _productWebView;
+    private long _webGeneration;
     private bool _trustedWebDocumentActive;
 
     public MainWindow()
@@ -107,6 +108,7 @@ public partial class MainWindow : Window
                 "AutoTrade application web interface");
             ProductWebViewHost.Child = webView;
             _productWebView = webView;
+            long generation = ++_webGeneration;
 
             await webView.EnsureCoreWebView2Async(environment);
             if (_lifetime.IsCancellationRequested || !IsLoaded)
@@ -125,6 +127,12 @@ public partial class MainWindow : Window
             core.Settings.IsWebMessageEnabled = policy.AllowsWebMessageCommandAuthority;
             core.NavigationStarting += (_, e) =>
             {
+                if (!IsCurrentWebGeneration(webView, generation))
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
                 bool admitted =
                     Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
                     && policy.AllowsTopLevelNavigation(target);
@@ -139,6 +147,11 @@ public partial class MainWindow : Window
             };
             core.NavigationCompleted += (_, e) =>
             {
+                if (!IsCurrentWebGeneration(webView, generation))
+                {
+                    return;
+                }
+
                 if (!e.IsSuccess)
                 {
                     _trustedWebDocumentActive = false;
@@ -161,13 +174,19 @@ public partial class MainWindow : Window
             core.ServerCertificateErrorDetected += (_, e) =>
             {
                 e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+                if (!IsCurrentWebGeneration(webView, generation))
+                {
+                    return;
+                }
+
                 _trustedWebDocumentActive = false;
                 ReloadWebButton.IsEnabled = true;
                 SetLiveRegionText(
                     WebExperienceStatus,
                     "Blocked a certificate-invalid web request. No browser content is trusted until the web interface is reloaded.");
             };
-            core.ProcessFailed += WebView_ProcessFailed;
+            core.ProcessFailed += (_, e) =>
+                WebView_ProcessFailed(webView, generation, e);
 
             // Never persist the host credential in WebView state. Purge stale
             // cookies/service workers before first trusted navigation.
@@ -195,6 +214,11 @@ public partial class MainWindow : Window
                 // Strip caller/browser authority first. Native authority is then
                 // attached only to a scripted request from the admitted top-level document.
                 StripAuthority();
+                if (!IsCurrentWebGeneration(webView, generation))
+                {
+                    return;
+                }
+
                 try
                 {
                     EmergencyHostSession currentSession =
@@ -261,6 +285,10 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool IsCurrentWebGeneration(WebView2 webView, long generation) =>
+        generation == _webGeneration
+        && ReferenceEquals(webView, _productWebView);
+
     private static bool RequiresFreshWebViewAfterFailure(
         CoreWebView2ProcessFailedKind kind) =>
         kind is CoreWebView2ProcessFailedKind.BrowserProcessExited
@@ -268,10 +296,12 @@ public partial class MainWindow : Window
             or CoreWebView2ProcessFailedKind.RenderProcessUnresponsive;
 
     private void WebView_ProcessFailed(
-        object? sender,
+        WebView2 webView,
+        long generation,
         CoreWebView2ProcessFailedEventArgs e)
     {
-        if (!RequiresFreshWebViewAfterFailure(e.ProcessFailedKind))
+        if (!IsCurrentWebGeneration(webView, generation)
+            || !RequiresFreshWebViewAfterFailure(e.ProcessFailedKind))
         {
             return;
         }
@@ -292,6 +322,7 @@ public partial class MainWindow : Window
     private void DisposeWebExperience()
     {
         _trustedWebDocumentActive = false;
+        _webGeneration++;
         WebView2? webView = _productWebView;
         _productWebView = null;
         ProductWebViewHost.Child = null;

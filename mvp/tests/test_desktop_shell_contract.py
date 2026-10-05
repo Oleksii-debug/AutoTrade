@@ -84,6 +84,30 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("CoreWebView2WebResourceContext.XmlHttpRequest", code)
         self.assertIn("_trustedWebDocumentActive", code)
 
+    def test_webview2_old_generation_callbacks_cannot_mutate_new_browser_authority(self):
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("private long _webGeneration;", code)
+        self.assertIn("long generation = ++_webGeneration;", code)
+        self.assertIn("generation == _webGeneration", code)
+        self.assertIn("ReferenceEquals(webView, _productWebView)", code)
+        self.assertIn("_webGeneration++;", code)
+        self.assertIn("if (!IsCurrentWebGeneration(webView, generation))", code)
+        self.assertIn(
+            "WebView_ProcessFailed(webView, generation, e)",
+            code,
+        )
+        resource = code.split("core.WebResourceRequested += (_, e) =>", 1)[1].split(
+            "core.Navigate(origin.AbsoluteUri)", 1
+        )[0]
+        self.assertLess(
+            resource.index('e.Request.Headers.RemoveHeader("Authorization")'),
+            resource.index("IsCurrentWebGeneration(webView, generation)"),
+        )
+        self.assertLess(
+            resource.index("IsCurrentWebGeneration(webView, generation)"),
+            resource.index('e.Request.Headers.SetHeader(\n                        "Authorization"'),
+        )
+
     def test_webview2_async_startup_cannot_create_or_leak_browser_after_window_close(self):
         code = CODE.read_text(encoding="utf-8")
         connect = code.split("private async Task ConnectWebExperienceAsync", 1)[1].split(

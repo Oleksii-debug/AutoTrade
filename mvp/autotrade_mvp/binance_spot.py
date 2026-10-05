@@ -1561,7 +1561,8 @@ def prepare_order_request(
     if type(capability) is not CapabilitySnapshot:
         raise TypeError("capability must be exact CapabilitySnapshot")
     if type(symbol_rules) is not BinanceSpotSymbolRules:
-        raise TypeError("symbol_rules must be exact BinanceSpotSymbolRules")    if (
+        raise TypeError("symbol_rules must be exact BinanceSpotSymbolRules")
+    if (
         reference_price_observation is not None
         and type(reference_price_observation) is not BinanceSpotReferencePrice
     ):

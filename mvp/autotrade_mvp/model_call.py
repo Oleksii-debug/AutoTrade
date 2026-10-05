@@ -526,7 +526,35 @@ class DurableModelCallOrchestrator:
         )
 
     def _now(self) -> str:
-        return _utc_text(self.clock(), name="clock")
+        """Capture injected chronology without allowing authority redirection."""
+        callback_shape = DurableModelCallOrchestrator._callback_shape_snapshot(self)
+        clock = callback_shape[1].get("clock")
+        if not callable(clock):
+            raise ModelCallError("model-call clock authority is invalid")
+
+        clock_error: Exception | None = None
+        clock_value: object = None
+        try:
+            clock_value = clock()
+        except Exception as error:
+            clock_error = error
+        finally:
+            clock_changes = DurableModelCallOrchestrator._restore_callback_shape(
+                self,
+                callback_shape,
+            )
+
+        if clock_changes:
+            error = ModelCallError(
+                "clock mutated orchestrator authority:"
+                + ",".join(sorted(set(clock_changes)))
+            )
+            if clock_error is not None:
+                raise error from clock_error
+            raise error
+        if clock_error is not None:
+            raise clock_error
+        return _utc_text(clock_value, name="clock")
 
     @staticmethod
     def _safe_instance_snapshot(

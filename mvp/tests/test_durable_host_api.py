@@ -2239,6 +2239,41 @@ class JournalBackedHostApiTests(unittest.TestCase):
             self.assertEqual(store.events_after(0), ())
 
 
+    def test_command_identity_text_rejects_str_subclasses_without_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("command identity truthiness callback must not run")
+
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("command identity strip callback must not run")
+
+        store = self.store()
+        cases = (
+            ("command_id", "command_id", "11111111-1111-1111-1111-111111111111"),
+            ("idempotency_key", "key", "key-1"),
+            ("actor", "actor", "alice"),
+            ("session", "session", "session-a"),
+            ("account_id", "account_id", "paper-account-1"),
+            ("environment", "environment", "PAPER"),
+        )
+        for field, parameter, raw_value in cases:
+            with self.subTest(field=field):
+                callbacks.clear()
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    store.submit(
+                        self.command(
+                            **{parameter: HostileText(raw_value)}
+                        )
+                    )
+                self.assertEqual(callbacks, [])
+                self.assertEqual(store.state_version, 0)
+                self.assertEqual(store.events_after(0), ())
+
+
     def test_expected_state_version_rejects_str_subclass_before_truthiness(self):
         callbacks = []
 

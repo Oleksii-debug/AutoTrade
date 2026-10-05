@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.provider_account_page_chain import (
     ProviderAccountPageChain,
     ProviderAccountPageChainError,
     issue_provider_account_page_chain,
+    require_current_provider_account_page_chain_authority,
     require_provider_account_page_chain_authority,
 )
 from mvp.autotrade_mvp.provider_account_reconciliation_semantics import (
@@ -332,6 +333,45 @@ class ProviderAccountPageChainTests(unittest.TestCase):
             self.assertIsNone(value.pages[0]["request_cursor"])
             self.assertEqual(value.pages[0]["response_next_cursor"], "")
             require_provider_account_page_chain_authority(value)
+
+    def test_current_page_chain_rejects_acquisition_superseded_after_issuance(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            binding = self._binding(fixture)
+            response = self._direct_response(
+                fixture,
+                binding,
+                body=b'{"retCode":0,"result":{"list":[],"nextPageCursor":""}}',
+                marker="superseded-after-chain",
+            )
+            origin_set = self._origin_set(fixture, (response,))
+            value = issue_provider_account_page_chain(
+                absence_semantics=fixture[7],
+                origin_set=origin_set,
+                observations=(self._observation(response, binding),),
+                qualification_registry=fixture[2],
+                surface=SURFACE,
+                at=NOW,
+            )
+            acquisition_authority = fixture[5]
+            acquisition = fixture[6]
+            acquisition_authority.issue_serialized(
+                provider_scope=acquisition.provider_scope,
+                account_id=acquisition.account_id,
+                acquisition_request_id="page-chain-acquisition-after-issuance",
+                committed_at=NOW,
+            )
+
+            require_provider_account_page_chain_authority(value)
+            with self.assertRaisesRegex(
+                ProviderAccountPageChainError,
+                "not exact current acquisition authority",
+            ):
+                require_current_provider_account_page_chain_authority(
+                    value,
+                    qualification_registry=fixture[2],
+                    at=NOW,
+                )
 
     def test_page_chain_rejects_superseded_origin_set_acquisition(self):
         with TemporaryDirectory() as directory:

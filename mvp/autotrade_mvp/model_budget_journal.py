@@ -278,7 +278,17 @@ class DurableModelBudget:
         )
         authority_classes: list[type] = []
         seen_class_ids: set[int] = set()
-        for selected_class in (budget_class, journal_class, identity_class):
+        for selected_class in (
+            budget_class,
+            journal_class,
+            identity_class,
+            BudgetLedger,
+            BudgetSnapshot,
+            ModelDescriptor,
+            ModelRequest,
+            RouteDecision,
+            RoutingPolicy,
+        ):
             if selected_class is None:
                 continue
             for candidate_class in selected_class.__mro__:
@@ -576,7 +586,65 @@ class DurableModelBudget:
             for name in runtime_names
         )
 
+        # Module-binding identity alone does not detect in-place Python
+        # function poisoning. Freeze executable state for every trusted
+        # module helper already in the runtime graph.
+        function_type = type(clock_text)
+        staticmethod_type = staticmethod
+        classmethod_type = classmethod
+        property_type = property
+
+        def freeze_function(label: str, function):
+            return (
+                label,
+                function,
+                (
+                    ("__code__", object_getattribute(function, "__code__")),
+                    ("__defaults__", object_getattribute(function, "__defaults__")),
+                    ("__kwdefaults__", object_getattribute(function, "__kwdefaults__")),
+                ),
+            )
+
+        runtime_function_states = tuple(
+            freeze_function("module." + name, expected)
+            for name, expected in runtime_bindings
+            if type(expected) is function_type
+        )
+
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
+
+        def class_member_functions(name: str, member):
+            if type(member) is function_type:
+                return ((name, member),)
+            if type(member) in (staticmethod_type, classmethod_type):
+                function = object_getattribute(member, "__func__")
+                return ((name + ".__func__", function),)
+            if type(member) is property_type:
+                targets = []
+                for suffix in ("fget", "fset", "fdel"):
+                    function = object_getattribute(member, suffix)
+                    if type(function) is function_type:
+                        targets.append((name + "." + suffix, function))
+                return tuple(targets)
+            return ()
+
+        class_function_states = tuple(
+            freeze_function(
+                "class." + class_label + "." + member_label,
+                function,
+            )
+            for (
+                _authority_class,
+                class_label,
+                _expected_bases,
+                expected_class_state,
+            ) in snapshot[-1]
+            for member_name, member in expected_class_state.items()
+            for member_label, function in class_member_functions(
+                member_name,
+                member,
+            )
+        )
         clock = snapshot[1].get("_clock")
         if not callable(clock):
             raise ValueError("model budget clock authority is invalid")
@@ -590,6 +658,19 @@ class DurableModelBudget:
             clock_error = error
         finally:
             try:
+                for function_label, function, function_state in (
+                    *runtime_function_states,
+                    *class_function_states,
+                ):
+                    for attribute, expected in function_state:
+                        current = object_getattribute(function, attribute)
+                        if current is expected:
+                            continue
+                        changes.append(
+                            "function." + function_label + "." + attribute
+                        )
+                        object_setattr(function, attribute, expected)
+
                 for attribute, expected in restore_function_state:
                     current = object_getattribute(restore_clock_authority, attribute)
                     if current is expected:

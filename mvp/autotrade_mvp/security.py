@@ -15,10 +15,12 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
+from types import FunctionType
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
+from . import windows_secrets as _windows_secrets
 from .host_actions import required_roles_for_host_action
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
 
@@ -29,6 +31,37 @@ _REDACT_RE = re.compile(
 )
 
 CredentialHandle = PersistentCredentialHandle
+
+
+class _RetainedCredentialScopePolicy:
+    """Immutable scope allowlists used by the terminal credential lease."""
+
+    ALLOWED_PURPOSES = frozenset(ProtectedCredentialVault.ALLOWED_PURPOSES)
+    ALLOWED_ENVIRONMENTS = frozenset(ProtectedCredentialVault.ALLOWED_ENVIRONMENTS)
+
+
+def _retain_function_globals(function, *, globals_override=None):
+    """Retain one Python executable while snapshotting its direct global bindings."""
+
+    code = getattr(function, "__code__", None)
+    globals_map = getattr(function, "__globals__", None)
+    if code is None or type(globals_map) is not dict:
+        raise TypeError("credential authority executable is not canonical Python code")
+    retained_globals = dict(globals_map)
+    if globals_override:
+        retained_globals.update(globals_override)
+    retained = FunctionType(
+        code,
+        retained_globals,
+        function.__name__,
+        function.__defaults__,
+        function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        retained.__kwdefaults__ = dict(function.__kwdefaults__)
+    retained.__doc__ = function.__doc__
+    retained.__qualname__ = function.__qualname__
+    return retained
 
 
 def _required_text(value: object, *, name: str) -> str:
@@ -766,9 +799,67 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     lease_views = WeakKeyDictionary()
     original_init = boundary_type.__init__
     original_init_code = getattr(original_init, "__code__", None)
-    vault_normalize_scope = ProtectedCredentialVault._normalize_scope
-    vault_load = ProtectedCredentialVault._load
-    vault_handle = ProtectedCredentialVault._handle
+
+    retained_text = _retain_function_globals(_windows_secrets._text)
+    retained_provider_environment = _retain_function_globals(
+        _windows_secrets._provider_environment,
+        globals_override={"_text": retained_text},
+    )
+    retained_vault_leaf = _retain_function_globals(
+        _windows_secrets._require_vault_leaf
+    )
+    retained_lock_binding = _retain_function_globals(
+        _windows_secrets._assert_posix_lock_binding
+    )
+    lock_generator = getattr(
+        _windows_secrets._exclusive_file_lock,
+        "__wrapped__",
+        None,
+    )
+    retained_lock_generator = _retain_function_globals(
+        lock_generator,
+        globals_override={"_assert_posix_lock_binding": retained_lock_binding},
+    )
+    retained_file_lock = contextmanager(retained_lock_generator)
+    retained_scope_entropy = _retain_function_globals(_windows_secrets._scope_entropy)
+    retained_b64decode = _windows_secrets.b64decode
+
+    vault_normalize_scope = _retain_function_globals(
+        ProtectedCredentialVault._normalize_scope,
+        globals_override={
+            "_text": retained_text,
+            "_provider_environment": retained_provider_environment,
+            "ProtectedCredentialVault": _RetainedCredentialScopePolicy,
+        },
+    )
+    vault_load = _retain_function_globals(
+        ProtectedCredentialVault._load,
+        globals_override={
+            "_require_vault_leaf": retained_vault_leaf,
+            "_text": retained_text,
+            "PersistentCredentialHandle": PersistentCredentialHandle,
+            "b64decode": retained_b64decode,
+        },
+    )
+    vault_handle = _retain_function_globals(
+        ProtectedCredentialVault._handle,
+        globals_override={"PersistentCredentialHandle": PersistentCredentialHandle},
+    )
+    vault_lease_generator = getattr(
+        ProtectedCredentialVault.lease,
+        "__wrapped__",
+        None,
+    )
+    retained_vault_lease_generator = _retain_function_globals(
+        vault_lease_generator,
+        globals_override={
+            "PersistentCredentialHandle": PersistentCredentialHandle,
+            "_exclusive_file_lock": retained_file_lock,
+            "_scope_entropy": retained_scope_entropy,
+            "b64decode": retained_b64decode,
+        },
+    )
+    retained_vault_lease = contextmanager(retained_vault_lease_generator)
     vault_format_version = ProtectedCredentialVault.FORMAT_VERSION
     if (
         original_init_code is None
@@ -815,7 +906,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     boundary_type.__init__ = retained_init
     boundary_type.lease_for_execution = _build_execution_lease_authority(
         validate_session=boundary_type.validate_session,
-        vault_lease=ProtectedCredentialVault.lease,
+        vault_lease=retained_vault_lease,
         vault_for_boundary=vault_for_boundary,
         credential_text=_credential_text,
         handle_type=PersistentCredentialHandle,

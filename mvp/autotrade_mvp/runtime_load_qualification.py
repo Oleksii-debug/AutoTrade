@@ -458,6 +458,9 @@ class RuntimeCampaignEvidence:
             financial_latency_us=self.financial_latency_us,
             financial_staleness_us=self.financial_staleness_us,
             research_interference_us=self.research_interference_us,
+            recovered_financial_event_ids=self.recovered_financial_event_ids,
+            financial_latency_event_ids=self.recovered_financial_event_ids,
+            financial_staleness_event_ids=self.recovered_financial_event_ids,
             reconnect_backlog_remaining=self.reconnect_backlog_remaining,
             declared_duration_us=self.declared_duration_us,
             observed_duration_us=self.observed_duration_us,
@@ -598,4 +601,12 @@ def evaluate_runtime_campaign(
 ) -> RuntimeBudgetDecision:
     if not isinstance(evidence, RuntimeCampaignEvidence):
         raise TypeError("evidence must be RuntimeCampaignEvidence")
-    return evaluate_runtime_budget(spec, evidence.to_observation(spec))
+    decision = evaluate_runtime_budget(spec, evidence.to_observation(spec))
+    if decision.status != "PASS":
+        return decision
+    return RuntimeBudgetDecision(
+        status="INCONCLUSIVE",
+        scenario_id=decision.scenario_id,
+        reasons=("unverified_runtime_measurement_provenance",),
+        metrics=decision.metrics,
+    )

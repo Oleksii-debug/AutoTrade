@@ -24,7 +24,7 @@ def payload() -> dict:
         "evidence_refs": ["artifact:canonical-reconciled-outcome"],
         "intended_action": {"side": "HOLD"},
         "actual_execution": {"fills": []},
-        "outcome": {"label": "realized", "task_value_fact": "positive"},
+        "outcome": {\n            "class": "POSITIVE",\n            "label": "realized",\n            "label_mature": True,\n            "reconciliation_state": "RECONCILED",\n            "task_value_fact": "positive",\n        },
         "costs": {"USD": "0"},
     }
 
@@ -84,7 +84,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(fact.evidence_digest)
+            outcome = self._canonical_outcome(fact.evidence_digest)
 
             bound = bind_ablation_outcome_to_reconciled_fact(
                 store,
@@ -105,8 +105,8 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            positive = self._outcome(fact.evidence_digest, utility="1000000")
-            negative = self._outcome(fact.evidence_digest, utility="-1000000")
+            positive = self._canonical_outcome(fact.evidence_digest, utility="1000000")
+            negative = self._canonical_outcome(fact.evidence_digest, utility="-1000000")
 
             positive_bound = bind_ablation_outcome_to_reconciled_fact(
                 store,
@@ -133,7 +133,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
     def test_wrong_utility_evidence_digest_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
-            outcome = self._outcome("sha256:" + "b" * 64)
+            outcome = self._canonical_outcome("sha256:" + "b" * 64)
 
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
@@ -152,7 +152,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(
+            outcome = self._canonical_outcome(
                 fact.evidence_digest,
                 outcome_available_utc=BASE - timedelta(microseconds=1),
             )
@@ -174,7 +174,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(
+            outcome = self._canonical_outcome(
                 fact.evidence_digest,
                 outcome_available_utc=BASE + timedelta(days=2),
             )
@@ -196,7 +196,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(
+            outcome = self._canonical_outcome(
                 fact.evidence_digest,
                 superseded_at_utc=BASE + timedelta(hours=1),
             )
@@ -218,7 +218,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(fact.evidence_digest)
+            outcome = self._canonical_outcome(fact.evidence_digest)
 
             with self.assertRaisesRegex(
                 ValueError,
@@ -277,7 +277,7 @@ class AblationOutcomeBindingTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             hostile = HostileMemory(Path(directory) / "memory.sqlite3")
-            outcome = self._outcome(DIGEST)
+            outcome = self._canonical_outcome(DIGEST)
             with self.assertRaisesRegex(TypeError, "exact ExperienceMemory"):
                 bind_ablation_outcome_to_reconciled_fact(
                     hostile,
@@ -292,22 +292,25 @@ class AblationOutcomeBindingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(store)
-            outcome = self._outcome(fact.evidence_digest)
+            outcome = self._canonical_outcome(fact.evidence_digest)
 
             def hostile(*args, **kwargs):
                 calls.append("coverage")
                 raise AssertionError("instance population reader executed")
 
             store.coverage_population_snapshot = hostile
-            bound = bind_ablation_outcome_to_reconciled_fact(
-                store,
-                outcome,
-                causal_cutoff=BASE + timedelta(days=1),
-                granted_permissions={"research"},
-                task="wp63-ablation",
-                instrument_family="equity",
-            )
-            self.assertEqual(bound.population_unit_id, EPISODE_ID)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "shadows canonical executables",
+            ):
+                bind_ablation_outcome_to_reconciled_fact(
+                    store,
+                    outcome,
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                    task="wp63-ablation",
+                    instrument_family="equity",
+                )
             self.assertEqual(calls, [])
 
 

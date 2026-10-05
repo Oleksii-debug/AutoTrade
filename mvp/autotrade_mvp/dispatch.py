@@ -396,8 +396,10 @@ def _legacy_submission_intent_attempt(
         payload = first.get("payload")
         if not isinstance(payload, dict):
             raise RuntimeError("durable submission prepared payload is invalid")
+        historical_provider = payload.get("provider")
         if (
-            payload.get("provider") != provider
+            not isinstance(historical_provider, str)
+            or historical_provider.strip().lower() != provider.strip().lower()
             or payload.get("environment") != environment
             or payload.get("account_id") != account_id
             or payload.get("intent_id") != intent_id

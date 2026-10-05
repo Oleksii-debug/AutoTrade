@@ -386,8 +386,8 @@ def parse_account_trades(
     environment = observation.environment
     if not isinstance(rows, (list, tuple)):
         raise BinanceUsdmAdapterError("trade rows must be an array")
-    if not isinstance(instrument_versions, Mapping):
-        raise BinanceUsdmAdapterError("instrument_versions must be a mapping")
+    if type(instrument_versions) is not dict:
+        raise BinanceUsdmAdapterError("instrument_versions must be an exact dict")
     normalized_instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument_version in instrument_versions.items():
         provider_symbol = _provider_symbol(
@@ -405,18 +405,14 @@ def parse_account_trades(
         normalized_instruments[provider_symbol] = instrument_version
 
     client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
-    if not isinstance(client_map, Mapping):
+    if type(client_map) is not dict:
         raise BinanceUsdmAdapterError(
-            "client_ids_by_order_id must be a mapping"
+            "client_ids_by_order_id must be an exact dict"
         )
     normalized_client_map: dict[int, str] = {}
     seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():
-        if (
-            isinstance(raw_order_id, bool)
-            or not isinstance(raw_order_id, int)
-            or raw_order_id < 0
-        ):
+        if type(raw_order_id) is not int or raw_order_id < 0:
             raise BinanceUsdmAdapterError(
                 "client_ids_by_order_id keys must be non-negative integer order ids"
             )

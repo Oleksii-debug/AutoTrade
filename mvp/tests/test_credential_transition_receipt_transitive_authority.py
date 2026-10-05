@@ -318,6 +318,50 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
     def test_verify_ignores_pre_call_sha256_rebind(self) -> None:
         self._assert_verify_ignores_module_rebind("sha256")
 
+    def test_schema_version_name_rebind_cannot_mint_alternate_schema(self) -> None:
+        with patch.object(transition, "_SCHEMA_VERSION", "999.0.0"):
+            receipt = self._issued_receipt()
+        self.assertEqual(receipt.schema_version, "2.0.0")
+        self.assertEqual(
+            transition.verify_trade_credential_transition_receipt(
+                self.vault, receipt
+            ),
+            receipt,
+        )
+
+    def test_authority_key_name_rebind_cannot_create_alternate_namespace(self) -> None:
+        with patch.object(transition, "_AUTHORITY_KEY", "alternate_transition_authority"):
+            receipt = self._issued_receipt()
+        self.assertEqual(
+            transition.verify_trade_credential_transition_receipt(
+                self.vault, receipt
+            ),
+            receipt,
+        )
+
+    def test_receipt_fields_name_rebind_cannot_retarget_shape_validation(self) -> None:
+        receipt = self._issued_receipt()
+        with patch.object(
+            transition,
+            "_RECEIPT_FIELDS",
+            {"schema_version", "receipt_id"},
+        ):
+            verified = transition.verify_trade_credential_transition_receipt(
+                self.vault, receipt
+            )
+        self.assertEqual(verified, receipt)
+
+    def test_private_asdict_name_rebind_cannot_retarget_rotation_metadata(self) -> None:
+        self._assert_rotate_ignores_module_rebind("_CANONICAL_ASDICT")
+
+    def test_private_exact_type_names_rebind_cannot_retarget_revoke(self) -> None:
+        with (
+            patch.object(transition, "_CANONICAL_VAULT_TYPE", object),
+            patch.object(transition, "_CANONICAL_HANDLE_TYPE", object),
+        ):
+            receipt = self._issued_receipt()
+        self.assertEqual(receipt.operation, "REVOKED")
+
 
 if __name__ == "__main__":
     unittest.main()

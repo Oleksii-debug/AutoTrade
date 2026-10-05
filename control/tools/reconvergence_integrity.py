@@ -4,23 +4,45 @@ The guard detects stale/diverged reconvergence, protected-control damage and
 repository-tree destruction. When canonical mutation scopes are supplied, it also
 binds every changed path to those scopes. A candidate must descend from the exact
 base revision supplied by the pull-request event. Protected canonical sentinels
-cannot be deleted, renamed away or changed to another Git object type. A PR that
-deletes both a material absolute number and a material fraction of the base tree
-is blocked.
+cannot be deleted, renamed away or changed to another Git object type. Checked-in
+workflow authorities, their integration harness roots, and the executable
+reconvergence guard reject ordinary content modification unless an independently
+supplied trusted scope names that exact path. Untrusted creation of an additional
+workflow authority is rejected as well. A PR that deletes or renames away both a
+material absolute number and a material fraction of base-tree paths is blocked;
+copies do not count as source disappearance.
+
+Trusted scope approval is deliberately external to the candidate tree. The
+``pull_request_target`` workflow may consume an exact-head OWNER issue comment
+whose first line is ``AUTOTRADE_RECONVERGENCE_SCOPE_V1`` followed by one exact
+``head:`` line and explicit ``path:`` lines. The parser here validates that
+external record; PR body/title content remains non-authoritative. Approval for an
+older exact head is simply non-authoritative after the head moves. Exact trust-root
+approval is intentionally distinct from the optional full mutation-scope fence:
+approving one protected root never constrains or silently authorizes unrelated
+ordinary candidate paths.
 
 This directly protects against commits accidentally built from a stale or partial
-tree and against small unrelated changes hidden inside otherwise valid work.
+tree, candidate-controlled rewrites/spoofs of integration check authorities, and
+small unrelated changes hidden inside otherwise valid work.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
+
+TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+TRUSTED_MUTATION_SCOPE_MARKER = "AUTOTRADE_RECONVERGENCE_MUTATION_SCOPE_V1"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_GIT_OBJECT_HEX = frozenset("0123456789abcdef")
 
 PROTECTED_SENTINELS = frozenset(
     {
@@ -40,14 +62,97 @@ PROTECTED_SENTINELS = frozenset(
         "control/INDEX.json",
         "control/qualification.json",
         "control/work-packages/bank.json",
+        "control/__init__.py",
+        "control/tools/__init__.py",
         "control/tools/reconvergence_integrity.py",
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
         "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
         "requirements-dev.txt",
+        "provenance/components.json",
+        "contracts/fixtures/common-scalars.corpus.json",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "tools/baseline.py",
+        "tools/build_provenance_manifest.py",
+        "tools/check_nvda_qualification.py",
+        "tools/contract_version_guard.py",
+        "tools/generate_common_scalar_bindings.py",
+        "tools/generate_common_scalar_corpus.py",
+        "tools/generate_host_api_routes.py",
+        "tools/qualification/prepare_lean_composition.py",
         "tools/verify.py",
+        "tools/write_ci_evidence.py",
+        "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
+        "tests/Integration/LeanAdoption/Program.cs",
     }
 )
+
+SELF_PROTECTING_TRUST_ROOTS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        "control/tools/reconvergence_integrity.py",
+    }
+)
+
+EXECUTABLE_BOOTSTRAP_ROOTS = frozenset(
+    {
+        "control/__init__.py",
+        "control/tools/__init__.py",
+        "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
+    }
+)
+
+WORKFLOW_AUTHORITY_ROOTS = frozenset(
+    path
+    for path in PROTECTED_SENTINELS
+    if path.startswith(".github/workflows/")
+)
+
+INTEGRATION_HARNESS_ROOTS = frozenset(
+    {
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
+        "requirements-dev.txt",
+        "provenance/components.json",
+        "tools/baseline.py",
+        "tools/build_provenance_manifest.py",
+        "tools/check_nvda_qualification.py",
+        "tools/contract_version_guard.py",
+        "tools/generate_common_scalar_bindings.py",
+        "tools/generate_common_scalar_corpus.py",
+        "tools/generate_host_api_routes.py",
+        "tools/qualification/prepare_lean_composition.py",
+        "tools/verify.py",
+        "tools/write_ci_evidence.py",
+        "tests/Integration/LeanAdoption/LeanAdoptionProbe.csproj",
+        "tests/Integration/LeanAdoption/Program.cs",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "contracts/fixtures/common-scalars.corpus.json",
+    }
+)
+
+BOOTSTRAP_TRUST_ROOTS = frozenset(
+    {
+        "control/__init__.py",
+        "control/tools/__init__.py",
+        "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
+    }
+)
+
+_SIMPLE_STATUS = frozenset({"A", "D", "M", "T"})
+_SCORED_STATUS = re.compile(r"^[RC](?:100|0[0-9]{2})$")
 
 
 @dataclass(frozen=True)
@@ -70,26 +175,301 @@ class IntegrityAssessment:
     reasons: tuple[str, ...]
 
 
+def _exact_git_object_id(value: object, *, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) not in {40, 64}
+        or value != value.lower()
+        or any(character not in _GIT_OBJECT_HEX for character in value)
+    ):
+        raise ValueError(f"{field} must be an exact lowercase Git object id")
+    return value
+
+
+def reconvergence_evidence(
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
+    trusted_root_approvals: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Build secret-free exact-revision evidence from one trusted-base decision."""
+
+    if type(assessment) is not IntegrityAssessment:
+        raise TypeError("assessment must be exact IntegrityAssessment")
+    if type(max_deletions) is not int or max_deletions < 1:
+        raise ValueError("max_deletions must be a positive exact integer")
+    if (
+        type(max_deleted_fraction) is not float
+        or not (0.0 < max_deleted_fraction <= 1.0)
+    ):
+        raise ValueError("max_deleted_fraction must be an exact float in (0, 1]")
+    if type(scope_enforced) is not bool:
+        raise TypeError("scope_enforced must be exact bool")
+
+    base_sha = _exact_git_object_id(base_sha, field="base_sha")
+    head_sha = _exact_git_object_id(head_sha, field="head_sha")
+    approvals = _normalized_trust_root_approvals(trusted_root_approvals)
+    unresolved_limits = (
+        []
+        if scope_enforced
+        else ["mutation_scope_not_enforced_without_trusted_external_scope"]
+    )
+    checks_run = [
+        "exact-base-ancestry",
+        "protected-sentinel-integrity",
+        "protected-trust-root-authorization",
+        "mass-base-tree-deletion-or-rename-away",
+    ]
+    if scope_enforced:
+        checks_run.append("trusted-mutation-scope")
+    if approvals:
+        checks_run.append("exact-trust-root-change-surface")
+
+    return {
+        "schema_version": "1.1.0",
+        "source_sha": head_sha,
+        "trusted_guard_source_sha": base_sha,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "input_schema_version": "git-tree-reconvergence/v1",
+        "result": "PASS" if assessment.allowed else "FAIL",
+        "policy": {
+            "max_deletions": max_deletions,
+            "max_deleted_fraction": max_deleted_fraction,
+            "scope_enforced": scope_enforced,
+            "trusted_root_approval_count": len(approvals),
+        },
+        "approved_trust_roots": list(approvals),
+        "checks_run": checks_run,
+        "unresolved_limits": unresolved_limits,
+        "base_is_ancestor": assessment.base_is_ancestor,
+        "base_path_count": assessment.base_path_count,
+        "deletion_count": assessment.deletion_count,
+        "deletion_fraction": assessment.deletion_fraction,
+        "protected_deletions": list(assessment.protected_deletions),
+        "protected_violations": list(assessment.protected_violations),
+        "scope_violations": list(assessment.scope_violations),
+        "reasons": list(assessment.reasons),
+        "contains_secrets": False,
+    }
+
+
+def write_reconvergence_evidence(
+    output: Path,
+    *,
+    base_sha: str,
+    head_sha: str,
+    assessment: IntegrityAssessment,
+    max_deletions: int,
+    max_deleted_fraction: float,
+    scope_enforced: bool,
+    trusted_root_approvals: Sequence[str] | None,
+) -> None:
+    evidence = reconvergence_evidence(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        assessment=assessment,
+        max_deletions=max_deletions,
+        max_deleted_fraction=max_deleted_fraction,
+        scope_enforced=scope_enforced,
+        trusted_root_approvals=trusted_root_approvals,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def _validate_changed_path(value: object, *, name: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name} must be non-empty exact text")
+    if (
+        value.startswith("/")
+        or "\\" in value
+        or ":" in value
+        or any(ch in value for ch in ("\x00", "\n", "\r"))
+    ):
+        raise ValueError(f"{name} must be a canonical repository-relative path")
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError(f"{name} must not contain empty/dot path segments")
+    return value
+
+
+def parse_trusted_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse one external exact-head scope approval comment.
+
+    A comment is unrelated when its first line is not the version marker and is
+    ignored by returning ``None``. A marked record for another well-formed head
+    is also non-authoritative. A marked record targeting the current head is an
+    attempted authority record: malformed shape, duplicate paths, or empty scope
+    fail closed with ``ValueError``.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_SCOPE_APPROVAL_MARKER:
+        return None
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected approval head must be a lowercase 40-hex SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted scope approval requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted scope approval must contain at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError("trusted scope approval permits only path lines after head")
+        path = _validate_changed_path(
+            line.removeprefix("path: "),
+            name="approved scope path",
+        )
+        paths.append(path)
+    if not paths:
+        raise ValueError("trusted scope approval must contain at least one exact path")
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted scope approval must not repeat paths")
+    return tuple(paths)
+
+
+def parse_trusted_mutation_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse an external exact-head full changed-path approval record.
+
+    This authority is deliberately separate from trust-root approval. It names
+    the complete Git changed-path surface acknowledged for a trust-root
+    evolution; it is not semantic ownership and cannot itself authorize a
+    protected root.
+    """
+
+    if type(body) is not str:
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0] != TRUSTED_MUTATION_SCOPE_MARKER:
+        return None
+    if type(expected_head_sha) is not str or not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected mutation-scope head must be a lowercase 40-hex SHA")
+    if len(lines) < 2 or not lines[1].startswith("head: "):
+        raise ValueError("trusted mutation scope requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ")
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted mutation-scope head must be a lowercase 40-hex SHA")
+    if approved_head != expected_head_sha:
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted mutation scope must contain at least one exact path")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError(
+                "trusted mutation scope permits only path lines after head"
+            )
+        paths.append(
+            _validate_changed_path(
+                line.removeprefix("path: "),
+                name="trusted mutation-scope path",
+            )
+        )
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted mutation scope must not repeat paths")
+    return tuple(paths)
+
+
+def _validated_change(change: Change) -> Change:
+    if type(change) is not Change:
+        raise TypeError("changes must contain exact Change values")
+    if type(change.status) is not str:
+        raise ValueError("Git name-status must be exact text")
+
+    if change.status in _SIMPLE_STATUS:
+        if change.previous_path is not None:
+            raise ValueError(
+                f"{change.status} change must not carry a previous path"
+            )
+    elif _SCORED_STATUS.fullmatch(change.status):
+        if change.previous_path is None:
+            raise ValueError(
+                f"{change.status} change must carry a previous path"
+            )
+        _validate_changed_path(change.previous_path, name="previous changed path")
+    else:
+        raise ValueError(f"Unsupported or malformed Git name-status: {change.status!r}")
+
+    _validate_changed_path(change.path, name="changed path")
+    return change
+
+
 def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
     changes: list[Change] = []
     for raw in lines:
+        if type(raw) is not str:
+            raise TypeError("Git name-status records must be exact text")
+        if "\x00" in raw:
+            raise ValueError("Git name-status record contains NUL")
         line = raw.rstrip("\n")
         if not line:
             continue
         parts = line.split("\t")
         status = parts[0]
-        kind = status[:1]
-        if kind in {"R", "C"}:
+        if _SCORED_STATUS.fullmatch(status):
             if len(parts) != 3:
                 raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(
-                Change(status=status, previous_path=parts[1], path=parts[2])
-            )
+            change = Change(status=status, previous_path=parts[1], path=parts[2])
         else:
             if len(parts) != 2:
                 raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
+            change = Change(status=status, path=parts[1])
+        changes.append(_validated_change(change))
     return tuple(changes)
+
+
+def _is_workflow_authority_path(path: str) -> bool:
+    return path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+
+
+def _normalized_trust_root_approvals(
+    values: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    roots = (
+        SELF_PROTECTING_TRUST_ROOTS
+        | BOOTSTRAP_TRUST_ROOTS
+        | WORKFLOW_AUTHORITY_ROOTS
+        | INTEGRATION_HARNESS_ROOTS
+    )
+    approved: list[str] = []
+    for raw in values:
+        path = _validate_changed_path(raw, name="trusted root approval")
+        if path not in roots and not _is_workflow_authority_path(path):
+            raise ValueError(
+                "trusted root approval must name one exact executable trust root "
+                f"or workflow authority: {path!r}"
+            )
+        approved.append(path)
+    if len(set(approved)) != len(approved):
+        raise ValueError("trusted root approvals must be unique exact paths")
+    return tuple(approved)
 
 
 def assess_reconvergence(
@@ -101,56 +481,171 @@ def assess_reconvergence(
     protected_sentinels: frozenset[str] = PROTECTED_SENTINELS,
     base_is_ancestor: bool = True,
     allowed_scopes: Sequence[str] | None = None,
+    trusted_root_approvals: Sequence[str] | None = None,
 ) -> IntegrityAssessment:
     if max_deletions < 1:
         raise ValueError("max_deletions must be positive")
     if not (0 < max_deleted_fraction <= 1):
         raise ValueError("max_deleted_fraction must be in (0, 1]")
 
-    normalized_base = tuple(dict.fromkeys(base_paths))
+    normalized_base = tuple(
+        dict.fromkeys(
+            _validate_changed_path(path, name="base tree path")
+            for path in base_paths
+        )
+    )
     base_count = len(normalized_base)
     if base_count == 0:
         raise ValueError("base tree must contain at least one tracked path")
+    base_path_set = frozenset(normalized_base)
 
-    deleted = tuple(sorted({change.path for change in changes if change.status == "D"}))
-    protected = tuple(sorted(set(deleted).intersection(protected_sentinels)))
-    fraction = len(deleted) / base_count
+    validated_changes = tuple(_validated_change(change) for change in changes)
+
+    normalized_scopes: tuple[str, ...] | None = None
+    if allowed_scopes is not None:
+        if any(type(scope) is not str for scope in allowed_scopes):
+            raise TypeError("allowed scopes must contain exact strings")
+        normalized_scopes = _normalized_scopes(allowed_scopes)
+
+    normalized_trust_root_approvals = _normalized_trust_root_approvals(
+        trusted_root_approvals
+    )
+
+    touched_paths: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "R":
+            if change.previous_path is None:
+                raise ValueError("rename source path identity is missing")
+            touched_paths.add(change.previous_path)
+            touched_paths.add(change.path)
+        elif kind == "C":
+            touched_paths.add(change.path)
+        else:
+            touched_paths.add(change.path)
+
+    trust_root_scope_reasons: list[str] = []
+    if normalized_trust_root_approvals:
+        unused_root_approvals = sorted(
+            set(normalized_trust_root_approvals) - touched_paths
+        )
+        if unused_root_approvals:
+            trust_root_scope_reasons.append(
+                "trusted root approval names unchanged path(s): "
+                + ", ".join(unused_root_approvals)
+            )
+
+        # Trust-root approval is its own exact-head authority. The ordinary
+        # mutation-scope fence remains optional. When a trusted full mutation
+        # scope is supplied, however, require it to enumerate the exact changed
+        # path surface rather than silently broadening a root-evolution review.
+        if normalized_scopes is not None:
+            approved_paths = set(normalized_scopes)
+            missing_paths = sorted(touched_paths - approved_paths)
+            extra_or_broad_paths = sorted(approved_paths - touched_paths)
+            if missing_paths or extra_or_broad_paths:
+                detail: list[str] = []
+                if missing_paths:
+                    detail.append("missing " + ", ".join(missing_paths))
+                if extra_or_broad_paths:
+                    detail.append(
+                        "extra-or-broad " + ", ".join(extra_or_broad_paths)
+                    )
+                trust_root_scope_reasons.append(
+                    "trust-root evolution requires exact changed-path scope when "
+                    "mutation scope is supplied: "
+                    + "; ".join(detail)
+                )
+
+    def exactly_authorized(path: str) -> bool:
+        # Ordinary mutation ownership never grants executable trust-root authority.
+        return path in normalized_trust_root_approvals
+
+    disappeared_paths: set[str] = set()
+    direct_deletions: set[str] = set()
+    for change in validated_changes:
+        kind = change.status[:1]
+        if kind == "D" and change.path in base_path_set:
+            direct_deletions.add(change.path)
+            disappeared_paths.add(change.path)
+        elif (
+            kind == "R"
+            and change.previous_path is not None
+            and change.previous_path in base_path_set
+            and change.previous_path != change.path
+        ):
+            # Git rename classification must not let a large base-tree path
+            # disappearance evade the same destruction fence as explicit D.
+            disappeared_paths.add(change.previous_path)
+        # C* intentionally does not remove its source path.
+
+    disappeared = tuple(sorted(disappeared_paths))
+    protected = tuple(
+        sorted(
+            path
+            for path in direct_deletions
+            if path in protected_sentinels or _is_workflow_authority_path(path)
+        )
+    )
+    fraction = len(disappeared) / base_count
 
     protected_damage: set[str] = set(protected)
-    for change in changes:
+    for change in validated_changes:
         kind = change.status[:1]
         if (
             kind == "R"
-            and change.previous_path in protected_sentinels
+            and (
+                change.previous_path in protected_sentinels
+                or _is_workflow_authority_path(change.previous_path)
+            )
             and change.path != change.previous_path
         ):
             protected_damage.add(
                 f"{change.previous_path} -> {change.path} (rename)"
             )
-        if kind == "T" and change.path in protected_sentinels:
+        if kind == "T" and (
+            change.path in protected_sentinels
+            or _is_workflow_authority_path(change.path)
+        ):
             protected_damage.add(f"{change.path} (type change)")
+        if (
+            kind == "M"
+            and (
+                change.path in SELF_PROTECTING_TRUST_ROOTS
+                or change.path in BOOTSTRAP_TRUST_ROOTS
+                or _is_workflow_authority_path(change.path)
+                or change.path in INTEGRATION_HARNESS_ROOTS
+            )
+            and not exactly_authorized(change.path)
+        ):
+            protected_damage.add(
+                f"{change.path} (unauthorized trust-root modification)"
+            )
+        if (
+            kind in {"A", "R", "C"}
+            and (
+                _is_workflow_authority_path(change.path)
+                or change.path in EXECUTABLE_BOOTSTRAP_ROOTS
+                or change.path in INTEGRATION_HARNESS_ROOTS
+            )
+            and change.path not in base_path_set
+            and not exactly_authorized(change.path)
+        ):
+            authority_kind = (
+                "workflow-authority"
+                if _is_workflow_authority_path(change.path)
+                else "trust-root"
+            )
+            protected_damage.add(
+                f"{change.path} (unauthorized {authority_kind} creation)"
+            )
     protected_violations = tuple(sorted(protected_damage))
-
-    normalized_scopes: tuple[str, ...] | None = None
-    if allowed_scopes is not None:
-        normalized_scopes = _normalized_scopes(allowed_scopes)
 
     scope_damage: set[str] = set()
     if normalized_scopes is not None:
-        for change in changes:
-            kind = change.status[:1]
-            if kind == "R":
-                touched = (change.previous_path, change.path)
-            elif kind == "C":
-                # Copying does not mutate the source path.
-                touched = (change.path,)
-            else:
-                touched = (change.path,)
-            for path in touched:
-                if path is None:
-                    raise ValueError("changed path identity is missing")
-                if not any(path_covers(scope, path) for scope in normalized_scopes):
-                    scope_damage.add(path)
+        for path in touched_paths:
+            if not any(path_covers(scope, path) for scope in normalized_scopes):
+                scope_damage.add(path)
     scope_violations = tuple(sorted(scope_damage))
 
     reasons: list[str] = []
@@ -168,17 +663,18 @@ def assess_reconvergence(
             "changed paths outside declared mutation scope: "
             + ", ".join(scope_violations)
         )
-    if len(deleted) >= max_deletions and fraction >= max_deleted_fraction:
+    reasons.extend(trust_root_scope_reasons)
+    if len(disappeared) >= max_deletions and fraction >= max_deleted_fraction:
         reasons.append(
-            "mass base-tree deletion: "
-            f"{len(deleted)}/{base_count} paths ({fraction:.1%})"
+            "mass base-tree deletion/rename-away: "
+            f"{len(disappeared)}/{base_count} paths ({fraction:.1%})"
         )
 
     return IntegrityAssessment(
         allowed=not reasons,
         base_is_ancestor=base_is_ancestor,
         base_path_count=base_count,
-        deletion_count=len(deleted),
+        deletion_count=len(disappeared),
         deletion_fraction=fraction,
         protected_deletions=protected,
         protected_violations=protected_violations,
@@ -200,6 +696,19 @@ def _git_lines(
         stderr=subprocess.PIPE,
     )
     return tuple(completed.stdout.splitlines())
+
+
+def _git_commit_id(
+    revision: str,
+    *,
+    cwd: str | Path | None = None,
+) -> str:
+    if type(revision) is not str:
+        raise TypeError("Git revision must be exact text")
+    lines = _git_lines("rev-parse", "--verify", f"{revision}^{{commit}}", cwd=cwd)
+    if len(lines) != 1:
+        raise ValueError("Git revision did not resolve to exactly one commit")
+    return _exact_git_object_id(lines[0], field="resolved revision")
 
 
 def _git_is_ancestor(
@@ -235,6 +744,7 @@ def assess_git_revisions(
     max_deletions: int = 50,
     max_deleted_fraction: float = 0.35,
     allowed_scopes: Sequence[str] | None = None,
+    trusted_root_approvals: Sequence[str] | None = None,
     cwd: str | Path | None = None,
 ) -> IntegrityAssessment:
     """Assess revisions inside one explicit Git repository/worktree.
@@ -263,6 +773,7 @@ def assess_git_revisions(
         max_deleted_fraction=max_deleted_fraction,
         base_is_ancestor=base_is_ancestor,
         allowed_scopes=allowed_scopes,
+        trusted_root_approvals=trusted_root_approvals,
     )
 
 
@@ -275,6 +786,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-deletions", type=int, default=50)
     parser.add_argument("--max-deleted-fraction", type=float, default=0.35)
     parser.add_argument(
+        "--evidence-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional machine-readable evidence path. The trusted-base guard "
+            "writes exact resolved base/head identities and PASS/FAIL before exit."
+        ),
+    )
+    parser.add_argument(
+        "--trusted-root-approval",
+        action="append",
+        default=None,
+        help=(
+            "Externally approved exact trust-root path. This authorizes only "
+            "protected trust-root evolution and does not establish a full "
+            "candidate mutation scope."
+        ),
+    )
+    parser.add_argument(
         "--allowed-scope",
         action="append",
         default=None,
@@ -285,15 +815,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    allowed_scopes = args.allowed_scope
 
+    base_sha = _git_commit_id(args.base)
+    head_sha = _git_commit_id(args.head)
     assessment = assess_git_revisions(
-        args.base,
-        args.head,
+        base_sha,
+        head_sha,
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
-        allowed_scopes=allowed_scopes,
+        allowed_scopes=args.allowed_scope,
+        trusted_root_approvals=args.trusted_root_approval,
     )
+    if args.evidence_output is not None:
+        write_reconvergence_evidence(
+            args.evidence_output,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            assessment=assessment,
+            max_deletions=args.max_deletions,
+            max_deleted_fraction=args.max_deleted_fraction,
+            scope_enforced=args.allowed_scope is not None,
+            trusted_root_approvals=args.trusted_root_approval,
+        )
     print(
         "Reconvergence tree guard: "
         f"base_is_ancestor={str(assessment.base_is_ancestor).lower()} "

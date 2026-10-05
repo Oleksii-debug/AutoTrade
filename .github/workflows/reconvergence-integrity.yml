@@ -30,12 +30,13 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          set -euo pipefail
-          live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
-          test -n "$live_line"
-          read -r live_sha _ <<< "$live_line"
-          test -n "$live_sha"
-          test "$live_sha" = "$BASE_SHA"
+          live_base="$(
+            git ls-remote --refs origin \
+              "refs/heads/${BASE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test -n "${live_base}"
+          test "${live_base}" = "${BASE_SHA}"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash
@@ -44,89 +45,36 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          set -euo pipefail
           git fetch --no-tags origin "pull/${PR_NUMBER}/head"
-          test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "${HEAD_SHA}"
           git cat-file -e "${BASE_SHA}^{commit}"
           git cat-file -e "${HEAD_SHA}^{commit}"
-      - name: Resolve one-time trusted exact-head mutation scope
+      - name: Resolve trusted exact-path scope approval
         if: github.event_name == 'pull_request_target'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes.txt
         run: |
           python - <<'PY'
           import json
           import os
           from pathlib import Path
-          import re
-          import subprocess
           import urllib.parse
           import urllib.request
 
-          MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
-          SHA40 = re.compile(r"^[0-9a-f]{40}$")
-
-          def canonical_path(value: object) -> str:
-              if not isinstance(value, str) or not value:
-                  raise RuntimeError("approved scope path must be non-empty text")
-              if (
-                  value.startswith("/")
-                  or "\\" in value
-                  or ":" in value
-                  or any(ch in value for ch in ("\x00", "\n", "\r"))
-              ):
-                  raise RuntimeError(
-                      "approved scope path must be canonical repository-relative text"
-                  )
-              if any(part in {"", ".", ".."} for part in value.split("/")):
-                  raise RuntimeError("approved scope path contains invalid segment")
-              return value
-
-          def parse_record(body: object, expected_head: str):
-              if not isinstance(body, str):
-                  return None
-              lines = body.splitlines()
-              if not lines or lines[0].strip() != MARKER:
-                  return None
-              if not SHA40.fullmatch(expected_head):
-                  raise RuntimeError("event head is not lowercase 40-hex")
-              if len(lines) < 2 or not lines[1].startswith("head: "):
-                  raise RuntimeError("scope approval requires exact head line")
-              approved_head = lines[1].removeprefix("head: ").strip()
-              if not SHA40.fullmatch(approved_head):
-                  raise RuntimeError("approved head must be lowercase 40-hex")
-              if approved_head != expected_head:
-                  return None
-              if len(lines) < 3:
-                  raise RuntimeError("current-head approval requires at least one path")
-              paths = []
-              for line in lines[2:]:
-                  if not line.startswith("path: "):
-                      raise RuntimeError(
-                          "current-head approval permits only path lines after head"
-                      )
-                  paths.append(
-                      canonical_path(line.removeprefix("path: ").strip())
-                  )
-              if len(set(paths)) != len(paths):
-                  raise RuntimeError(
-                      "current-head approval must not repeat exact paths"
-                  )
-              return tuple(paths)
+          from control.tools.reconvergence_integrity import parse_trusted_scope_approval
 
           repository = os.environ["REPOSITORY"]
           pr_number = os.environ["PR_NUMBER"]
           head_sha = os.environ["HEAD_SHA"]
           token = os.environ["GH_TOKEN"]
           target = Path(os.environ["APPROVED_SCOPE_FILE"])
-          approved = []
-          seen = set()
+          approved: list[str] = []
+          seen: set[str] = set()
           page = 1
           while True:
               query = urllib.parse.urlencode({"per_page": 100, "page": page})
@@ -145,7 +93,10 @@ jobs:
               for comment in comments:
                   if comment.get("author_association") != "OWNER":
                       continue
-                  parsed = parse_record(comment.get("body"), head_sha)
+                  parsed = parse_trusted_scope_approval(
+                      comment.get("body"),
+                      expected_head_sha=head_sha,
+                  )
                   if parsed is not None:
                       for path in parsed:
                           if path not in seen:
@@ -155,99 +106,8 @@ jobs:
                   break
               page += 1
 
-          bootstrap_paths = {
-              ".github/workflows/reconvergence-integrity.yml",
-              "control/tools/reconvergence_integrity.py",
-              "tests/Control/test_reconvergence_integrity.py",
-              "tests/Control/test_reconvergence_integrity_entrypoint.py",
-              "tests/Control/test_reconvergence_integrity_security_regressions.py",
-              "tests/Control/test_reconvergence_workflow_authority.py",
-          }
-          frozen_authority_paths = {
-              "control/__init__.py",
-              "control/tools/__init__.py",
-              "control/tools/registry_state.py",
-              "Directory.Build.props",
-              "Directory.Build.targets",
-              "global.json",
-              "requirements-dev.txt",
-              "contracts/fixtures/common-scalars.corpus.json",
-              "tests/Contracts.DotNet/Contracts.DotNet.csproj",
-              "tests/Contracts.DotNet/Program.cs",
-              "tests/Desktop.Client/Desktop.Client.csproj",
-              "tests/Desktop.Client/Program.cs",
-              "tools/baseline.py",
-              "tools/build_provenance_manifest.py",
-              "tools/check_nvda_qualification.py",
-              "tools/verify.py",
-              "tools/write_ci_evidence.py",
-          }
-          base_sha = os.environ["BASE_SHA"]
-          changed = {
-              line
-              for line in subprocess.run(
-                  [
-                      "git",
-                      "diff",
-                      "--name-only",
-                      "--no-renames",
-                      base_sha,
-                      head_sha,
-                  ],
-                  check=True,
-                  text=True,
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-              ).stdout.splitlines()
-              if line
-          }
-          for path in changed:
-              canonical_path(path)
-          other_authority = {
-              path
-              for path in changed
-              if (
-                  (
-                      path.startswith(".github/workflows/")
-                      and path not in bootstrap_paths
-                  )
-                  or path in frozen_authority_paths
-              )
-          }
-          if other_authority:
-              raise RuntimeError(
-                  "non-bootstrap trust authority is frozen until terminal guard integration: "
-                  + ", ".join(sorted(other_authority))
-              )
-
-          sensitive = changed.intersection(bootstrap_paths)
-          approved_set = set(approved)
-          if sensitive:
-              outside = changed - bootstrap_paths
-              if outside:
-                  raise RuntimeError(
-                      "trust-root bootstrap candidate contains out-of-scope paths: "
-                      + ", ".join(sorted(outside))
-                  )
-              if approved_set != changed:
-                  raise RuntimeError(
-                      "current-head OWNER approval must exactly equal the bounded "
-                      "bootstrap candidate path set"
-                  )
-          elif approved_set:
-              raise RuntimeError(
-                  "OWNER bootstrap scope is forbidden for a candidate without "
-                  "bootstrap-sensitive paths"
-              )
-
-          approved = sorted(approved_set)
-          target.write_text(
-              "".join(f"{path}\n" for path in approved),
-              encoding="utf-8",
-          )
-          print(
-              f"Resolved {len(approved)} exact bounded current-head scope path(s)."
-          )
+          target.write_text("".join(f"{path}\n" for path in approved), encoding="utf-8")
+          print(f"Resolved {len(approved)} externally approved exact path(s).")
           PY
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
@@ -255,88 +115,49 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes.txt
         run: |
-          set -euo pipefail
-          args=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          args=(--base "${BASE_SHA}" --head "${HEAD_SHA}")
           while IFS= read -r scope; do
-            test -n "$scope"
-            args+=(--allowed-scope "$scope")
-          done < "$APPROVED_SCOPE_FILE"
+            test -n "${scope}"
+            args+=(--trusted-root-approval "${scope}")
+          done < "${APPROVED_SCOPE_FILE}"
+          args+=(--evidence-output "artifacts/reconvergence-integrity.json")
           python -m control.tools.reconvergence_integrity "${args[@]}"
+      - name: Upload exact-head reconvergence evidence
+        if: always() && github.event_name == 'pull_request_target'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconvergence-integrity-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: artifacts/reconvergence-integrity.json
+          if-no-files-found: error
       - name: Run trusted guard regression tests
-        run: python -m unittest tests.Control.test_reconvergence_integrity -v
-      - name: Reverify one-time trusted exact-head mutation scope
+        run: >-
+          python -m unittest
+          tests.Control.test_reconvergence_integrity
+          tests.Control.test_reconvergence_integrity_entrypoint
+          tests.Control.test_reconvergence_integrity_security_regressions
+          tests.Control.test_reconvergence_workflow_authority
+          -v
+      - name: Reverify trusted exact-path scope approval is unchanged
         if: github.event_name == 'pull_request_target'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes.txt
-          RECHECK_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-bootstrap-scopes-recheck.txt
+          APPROVED_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes.txt
+          RECHECK_SCOPE_FILE: ${{ runner.temp }}/autotrade-reconvergence-scopes-recheck.txt
         run: |
           python - <<'PY'
           import json
           import os
           from pathlib import Path
-          import re
-          import subprocess
           import urllib.parse
           import urllib.request
 
-          MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
-          SHA40 = re.compile(r"^[0-9a-f]{40}$")
-
-          def canonical_path(value: object) -> str:
-              if not isinstance(value, str) or not value:
-                  raise RuntimeError("approved scope path must be non-empty text")
-              if (
-                  value.startswith("/")
-                  or "\\" in value
-                  or ":" in value
-                  or any(ch in value for ch in ("\x00", "\n", "\r"))
-              ):
-                  raise RuntimeError(
-                      "approved scope path must be canonical repository-relative text"
-                  )
-              if any(part in {"", ".", ".."} for part in value.split("/")):
-                  raise RuntimeError("approved scope path contains invalid segment")
-              return value
-
-          def parse_record(body: object, expected_head: str):
-              if not isinstance(body, str):
-                  return None
-              lines = body.splitlines()
-              if not lines or lines[0].strip() != MARKER:
-                  return None
-              if not SHA40.fullmatch(expected_head):
-                  raise RuntimeError("event head is not lowercase 40-hex")
-              if len(lines) < 2 or not lines[1].startswith("head: "):
-                  raise RuntimeError("scope approval requires exact head line")
-              approved_head = lines[1].removeprefix("head: ").strip()
-              if not SHA40.fullmatch(approved_head):
-                  raise RuntimeError("approved head must be lowercase 40-hex")
-              if approved_head != expected_head:
-                  return None
-              if len(lines) < 3:
-                  raise RuntimeError("current-head approval requires at least one path")
-              paths = []
-              for line in lines[2:]:
-                  if not line.startswith("path: "):
-                      raise RuntimeError(
-                          "current-head approval permits only path lines after head"
-                      )
-                  paths.append(
-                      canonical_path(line.removeprefix("path: ").strip())
-                  )
-              if len(set(paths)) != len(paths):
-                  raise RuntimeError(
-                      "current-head approval must not repeat exact paths"
-                  )
-              return tuple(paths)
+          from control.tools.reconvergence_integrity import parse_trusted_scope_approval
 
           repository = os.environ["REPOSITORY"]
           pr_number = os.environ["PR_NUMBER"]
@@ -344,8 +165,8 @@ jobs:
           token = os.environ["GH_TOKEN"]
           original = Path(os.environ["APPROVED_SCOPE_FILE"])
           target = Path(os.environ["RECHECK_SCOPE_FILE"])
-          approved = []
-          seen = set()
+          approved: list[str] = []
+          seen: set[str] = set()
           page = 1
           while True:
               query = urllib.parse.urlencode({"per_page": 100, "page": page})
@@ -364,7 +185,10 @@ jobs:
               for comment in comments:
                   if comment.get("author_association") != "OWNER":
                       continue
-                  parsed = parse_record(comment.get("body"), head_sha)
+                  parsed = parse_trusted_scope_approval(
+                      comment.get("body"),
+                      expected_head_sha=head_sha,
+                  )
                   if parsed is not None:
                       for path in parsed:
                           if path not in seen:
@@ -374,101 +198,12 @@ jobs:
                   break
               page += 1
 
-          bootstrap_paths = {
-              ".github/workflows/reconvergence-integrity.yml",
-              "control/tools/reconvergence_integrity.py",
-              "tests/Control/test_reconvergence_integrity.py",
-              "tests/Control/test_reconvergence_integrity_entrypoint.py",
-              "tests/Control/test_reconvergence_integrity_security_regressions.py",
-              "tests/Control/test_reconvergence_workflow_authority.py",
-          }
-          frozen_authority_paths = {
-              "control/__init__.py",
-              "control/tools/__init__.py",
-              "control/tools/registry_state.py",
-              "Directory.Build.props",
-              "Directory.Build.targets",
-              "global.json",
-              "requirements-dev.txt",
-              "contracts/fixtures/common-scalars.corpus.json",
-              "tests/Contracts.DotNet/Contracts.DotNet.csproj",
-              "tests/Contracts.DotNet/Program.cs",
-              "tests/Desktop.Client/Desktop.Client.csproj",
-              "tests/Desktop.Client/Program.cs",
-              "tools/baseline.py",
-              "tools/build_provenance_manifest.py",
-              "tools/check_nvda_qualification.py",
-              "tools/verify.py",
-              "tools/write_ci_evidence.py",
-          }
-          base_sha = os.environ["BASE_SHA"]
-          changed = {
-              line
-              for line in subprocess.run(
-                  [
-                      "git",
-                      "diff",
-                      "--name-only",
-                      "--no-renames",
-                      base_sha,
-                      head_sha,
-                  ],
-                  check=True,
-                  text=True,
-                  stdout=subprocess.PIPE,
-                  stderr=subprocess.PIPE,
-              ).stdout.splitlines()
-              if line
-          }
-          for path in changed:
-              canonical_path(path)
-          other_authority = {
-              path
-              for path in changed
-              if (
-                  (
-                      path.startswith(".github/workflows/")
-                      and path not in bootstrap_paths
-                  )
-                  or path in frozen_authority_paths
-              )
-          }
-          if other_authority:
-              raise RuntimeError(
-                  "non-bootstrap trust authority is frozen until terminal guard integration: "
-                  + ", ".join(sorted(other_authority))
-              )
-
-          sensitive = changed.intersection(bootstrap_paths)
-          approved_set = set(approved)
-          if sensitive:
-              outside = changed - bootstrap_paths
-              if outside:
-                  raise RuntimeError(
-                      "trust-root bootstrap candidate contains out-of-scope paths: "
-                      + ", ".join(sorted(outside))
-                  )
-              if approved_set != changed:
-                  raise RuntimeError(
-                      "current-head OWNER approval must exactly equal the bounded "
-                      "bootstrap candidate path set"
-                  )
-          elif approved_set:
-              raise RuntimeError(
-                  "OWNER bootstrap scope is forbidden for a candidate without "
-                  "bootstrap-sensitive paths"
-              )
-
-          approved = sorted(approved_set)
-          target.write_text(
-              "".join(f"{path}\n" for path in approved),
-              encoding="utf-8",
-          )
+          target.write_text("".join(f"{path}\n" for path in approved), encoding="utf-8")
           if target.read_bytes() != original.read_bytes():
               raise RuntimeError(
-                  "trusted exact-head mutation scope changed during guard run"
+                  "trusted exact-path scope approval changed during reconvergence run"
               )
-          print(f"Reverified {len(approved)} unchanged scope path(s).")
+          print(f"Reverified {len(approved)} unchanged exact path approval(s).")
           PY
       - name: Reverify event base is still live target tip
         if: github.event_name == 'pull_request_target'
@@ -477,9 +212,10 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          set -euo pipefail
-          live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
-          test -n "$live_line"
-          read -r live_sha _ <<< "$live_line"
-          test -n "$live_sha"
-          test "$live_sha" = "$BASE_SHA"
+          live_base="$(
+            git ls-remote --refs origin \
+              "refs/heads/${BASE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test -n "${live_base}"
+          test "${live_base}" = "${BASE_SHA}"

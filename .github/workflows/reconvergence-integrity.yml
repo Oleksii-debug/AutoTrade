@@ -48,11 +48,12 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           if [ "$AUTHOR_LOGIN" = "$REPOSITORY_OWNER" ]; then
-            cat >> "$GITHUB_ENV" <<'EOF'
-          AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS
-          .github/workflows/reconvergence-integrity.yml
-          control/tools/reconvergence_integrity.py
-          EOF
+            {
+              printf '%s\n' 'AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS<<__AUTOTRADE_PROTECTED_PATHS__'
+              printf '%s\n' '.github/workflows/reconvergence-integrity.yml'
+              printf '%s\n' 'control/tools/reconvergence_integrity.py'
+              printf '%s\n' '__AUTOTRADE_PROTECTED_PATHS__'
+            } >> "$GITHUB_ENV"
           else
             echo 'AUTOTRADE_TRUSTED_PROTECTED_SENTINEL_PATHS=' >> "$GITHUB_ENV"
           fi

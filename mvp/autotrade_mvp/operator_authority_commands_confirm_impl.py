@@ -395,6 +395,8 @@ def execute_operator_authority_action(
                 name="environment",
             ),
             accepted_at=_accepted_datetime(accepted_at),
+            expected_authority_epoch=expected_epoch,
+            expected_authority_version=expected_version,
         )
     except ConfirmIntentError as error:
         raise OperatorAuthorityConflict(

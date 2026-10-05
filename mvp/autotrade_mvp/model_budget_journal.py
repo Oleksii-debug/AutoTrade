@@ -32,7 +32,6 @@ _AGGREGATE_TYPE = "model_budget"
 _COMMAND_ACTOR = "autotrade-model-budget"
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 
-
 # DurableModelBudget executes caller-owned clock callbacks while JournalStore
 # carries inherited financial persistence dispatch. A live per-call snapshot
 # cannot treat an already-rebound JournalStore.__bases__ chain as canonical.
@@ -54,7 +53,6 @@ def _model_budget_journal_class_authority_changes(
     authority=_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY,
 ) -> list[str]:
     """Detect and optionally restore trusted JournalStore class topology."""
-
     changes: list[str] = []
     for cls, expected_bases, expected_state in authority:
         current_bases = tuple(cls.__bases__)
@@ -450,11 +448,7 @@ class DurableModelBudget:
             class_authority,
         ) = snapshot
         changes: list[str] = []
-        # Restore import-time JournalStore topology before any generic class or
-        # instance recovery can resolve inherited persistence dispatch.
-        changes.extend(
-            _model_budget_journal_class_authority_changes(restore=True)
-        )
+        changes.extend(_model_budget_journal_class_authority_changes(restore=True))
         current_module_alias = dict.get(
             module_globals,
             "DurableModelBudget",
@@ -602,6 +596,8 @@ class DurableModelBudget:
 
     def _clock_now(self) -> str:
         restore_clock_authority = DurableModelBudget._restore_clock_authority
+        clock_text = _clock_text
+        module_globals = globals()
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -609,15 +605,28 @@ class DurableModelBudget:
 
         clock_error: Exception | None = None
         clock_value: object = None
+        changes: list[str] = []
         try:
             clock_value = clock()
         except Exception as error:
             clock_error = error
         finally:
-            changes = restore_clock_authority(
-                self,
-                snapshot,
-            )
+            try:
+                changes.extend(
+                    restore_clock_authority(
+                        self,
+                        snapshot,
+                    )
+                )
+            finally:
+                current_clock_text = dict.get(module_globals, "_clock_text")
+                if current_clock_text is not clock_text:
+                    changes.append("module._clock_text")
+                    dict.__setitem__(
+                        module_globals,
+                        "_clock_text",
+                        clock_text,
+                    )
 
         if changes:
             error = ValueError(
@@ -629,7 +638,7 @@ class DurableModelBudget:
             raise error
         if clock_error is not None:
             raise clock_error
-        return _clock_text(clock_value)
+        return clock_text(clock_value)
 
     def _envelope(
         self,

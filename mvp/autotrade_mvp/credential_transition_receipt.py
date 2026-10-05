@@ -58,9 +58,11 @@ class CredentialTransitionReceiptError(PermissionError):
     """Raised when a transition receipt is not current vault-issued evidence."""
 
 
-# Retain the installed vault transition primitives once. Public or class-level
-# rebinding after module import must not retarget credential transition authority.
+# Retain installed transition/integrity primitives once. Later module/class
+# rebinding must not retarget the already-selected credential authority path.
 _CANONICAL_EXCLUSIVE_FILE_LOCK = _exclusive_file_lock
+_CANONICAL_VAULT_TYPE = ProtectedCredentialVault
+_CANONICAL_HANDLE_TYPE = PersistentCredentialHandle
 _CANONICAL_VAULT_LOAD = ProtectedCredentialVault._load
 _CANONICAL_VAULT_HANDLE = ProtectedCredentialVault._handle
 _CANONICAL_VAULT_PROVE_CURRENT_IDENTITY = (
@@ -69,10 +71,23 @@ _CANONICAL_VAULT_PROVE_CURRENT_IDENTITY = (
 _CANONICAL_VAULT_WRITE = ProtectedCredentialVault._write
 _CANONICAL_SCOPE_ENTROPY = _scope_entropy
 _CANONICAL_TEXT = _text
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_SHA256 = sha256
+_CANONICAL_ASDICT = asdict
+_CANONICAL_B64DECODE = b64decode
+_CANONICAL_B64ENCODE = b64encode
+_CANONICAL_UUID4 = uuid4
+_CANONICAL_TIME_NS = time_ns
+_CANONICAL_URANDOM = os.urandom
+_CANONICAL_NORMALIZE_PROVIDER_ENVIRONMENT = normalize_provider_environment
 
 
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(
+def _canonical_bytes(
+    value: object,
+    *,
+    _json_dumps=_CANONICAL_JSON_DUMPS,
+) -> bytes:
+    return _json_dumps(
         value,
         sort_keys=True,
         separators=(",", ":"),
@@ -81,12 +96,12 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _digest(value: bytes) -> str:
-    return "sha256:" + sha256(value).hexdigest()
+def _digest(value: bytes, *, _sha256=_CANONICAL_SHA256) -> str:
+    return "sha256:" + _sha256(value).hexdigest()
 
 
-def _text_digest(value: str) -> str:
-    return _digest(value.encode("utf-8"))
+def _text_digest(value: str, *, _digest_fn=_digest) -> str:
+    return _digest_fn(value.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -118,7 +133,10 @@ class CredentialTransitionReceipt:
     transition_sequence: int
     completed_time_ns: int
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _normalize_provider_environment=_CANONICAL_NORMALIZE_PROVIDER_ENVIRONMENT,
+    ) -> None:
         if self.schema_version != _SCHEMA_VERSION:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt schema is unsupported"
@@ -144,7 +162,7 @@ class CredentialTransitionReceipt:
                 "credential transition receipt environment is not canonical"
             )
         try:
-            normalized_provider_environment = normalize_provider_environment(
+            normalized_provider_environment = _normalize_provider_environment(
                 provider_id=self.provider,
                 environment=self.environment,
                 provider_environment=self.provider_environment,
@@ -243,20 +261,33 @@ class CredentialTransitionReceipt:
             )
 
 
-def _receipt_subject(receipt: CredentialTransitionReceipt) -> dict[str, object]:
-    value = asdict(receipt)
+_CANONICAL_RECEIPT_TYPE = CredentialTransitionReceipt
+
+
+def _receipt_subject(
+    receipt: CredentialTransitionReceipt,
+    *,
+    _asdict=_CANONICAL_ASDICT,
+) -> dict[str, object]:
+    value = _asdict(receipt)
     value.pop("receipt_id")
     return value
 
 
-def _receipt_id_from_subject(subject: dict[str, object]) -> str:
-    return "credential-transition/" + _digest(_canonical_bytes(subject))
+def _receipt_id_from_subject(
+    subject: dict[str, object],
+    *,
+    _digest_fn=_digest,
+    _canonical_bytes_fn=_canonical_bytes,
+) -> str:
+    return "credential-transition/" + _digest_fn(_canonical_bytes_fn(subject))
 
 
 def _parse_receipt(
     value: object,
     *,
     _receipt_id_from_subject_fn=_receipt_id_from_subject,
+    _receipt_type=_CANONICAL_RECEIPT_TYPE,
 ) -> CredentialTransitionReceipt:
     if type(value) is not dict or set(value) != _RECEIPT_FIELDS:
         raise CredentialTransitionReceiptError(
@@ -282,7 +313,7 @@ def _parse_receipt(
         )
 
     try:
-        return CredentialTransitionReceipt(**value)
+        return _receipt_type(**value)
     except (TypeError, ValueError, CredentialTransitionReceiptError) as error:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt is invalid"
@@ -294,6 +325,8 @@ def _authority_section(
     *,
     create: bool,
     _parse_receipt_fn=_parse_receipt,
+    _uuid4=_CANONICAL_UUID4,
+    _b64decode=_CANONICAL_B64DECODE,
 ) -> dict[str, object]:
     section = state.get(_AUTHORITY_KEY)
     if section is None:
@@ -302,7 +335,7 @@ def _authority_section(
                 "credential transition authority is not initialized"
             )
         section = {
-            "instance_id": uuid4().hex,
+            "instance_id": _uuid4().hex,
             "latest_by_handle": {},
         }
         state[_AUTHORITY_KEY] = section
@@ -339,7 +372,7 @@ def _authority_section(
                 "credential transition receipt handle index mismatches receipt"
             )
         try:
-            seal = b64decode(item["seal_b64"], validate=True)
+            seal = _b64decode(item["seal_b64"], validate=True)
             if not seal:
                 raise ValueError("empty receipt seal")
         except Exception as error:
@@ -353,9 +386,11 @@ def _vault_authority_digest(
     vault: ProtectedCredentialVault,
     *,
     instance_id: str,
+    _digest_fn=_digest,
+    _canonical_bytes_fn=_canonical_bytes,
 ) -> str:
-    return _digest(
-        _canonical_bytes(
+    return _digest_fn(
+        _canonical_bytes_fn(
             {
                 "authority": "AUTOTRADE_PROTECTED_CREDENTIAL_VAULT",
                 "instance_id": instance_id,
@@ -369,10 +404,15 @@ def _record_state_digest(
     record: dict[str, object],
     *,
     _vault_handle=_CANONICAL_VAULT_HANDLE,
+    _b64decode=_CANONICAL_B64DECODE,
+    _asdict=_CANONICAL_ASDICT,
+    _text_digest_fn=_text_digest,
+    _digest_fn=_digest,
+    _canonical_bytes_fn=_canonical_bytes,
 ) -> str:
     handle = _vault_handle(record)
     try:
-        ciphertext = b64decode(record["ciphertext"], validate=True)
+        ciphertext = _b64decode(record["ciphertext"], validate=True)
     except Exception as error:
         raise CredentialTransitionReceiptError(
             "credential transition record ciphertext is invalid"
@@ -391,21 +431,26 @@ def _record_state_digest(
         raise CredentialTransitionReceiptError(
             "credential transition record active state is invalid"
         )
-    return _digest(
-        _canonical_bytes(
+    return _digest_fn(
+        _canonical_bytes_fn(
             {
-                "handle": asdict(handle),
-                "owner_identity_sha256": _text_digest(owner_identity),
-                "ciphertext_sha256": _digest(ciphertext),
+                "handle": _asdict(handle),
+                "owner_identity_sha256": _text_digest_fn(owner_identity),
+                "ciphertext_sha256": _digest_fn(ciphertext),
                 "active": active,
             }
         )
     )
 
 
-def _seal_entropy(receipt: CredentialTransitionReceipt) -> bytes:
-    return sha256(
-        _canonical_bytes(
+def _seal_entropy(
+    receipt: CredentialTransitionReceipt,
+    *,
+    _sha256=_CANONICAL_SHA256,
+    _canonical_bytes_fn=_canonical_bytes,
+) -> bytes:
+    return _sha256(
+        _canonical_bytes_fn(
             {
                 "purpose": "AUTOTRADE_CREDENTIAL_TRANSITION_RECEIPT_SEAL",
                 "receipt_id": receipt.receipt_id,
@@ -425,6 +470,7 @@ def _next_sequence(
     _receipt_subject_fn=_receipt_subject,
     _vault_authority_digest_fn=_vault_authority_digest,
     _seal_entropy_fn=_seal_entropy,
+    _b64decode=_CANONICAL_B64DECODE,
 ) -> tuple[int, str | None]:
     previous = section["latest_by_handle"].get(handle.handle_id)
     if previous is None:
@@ -456,7 +502,7 @@ def _next_sequence(
             "prior credential transition receipt scope does not match current credential"
         )
     try:
-        sealed = b64decode(previous["seal_b64"], validate=True)
+        sealed = _b64decode(previous["seal_b64"], validate=True)
         unsealed = vault._protector.unprotect(
             sealed,
             entropy=_seal_entropy_fn(parsed),
@@ -485,7 +531,11 @@ def _issue_locked(
     _record_state_digest_fn=_record_state_digest,
     _receipt_id_from_subject_fn=_receipt_id_from_subject,
     _seal_entropy_fn=_seal_entropy,
-    _clock=time_ns,
+    _text_digest_fn=_text_digest,
+    _asdict=_CANONICAL_ASDICT,
+    _b64encode=_CANONICAL_B64ENCODE,
+    _receipt_type=_CANONICAL_RECEIPT_TYPE,
+    _clock=_CANONICAL_TIME_NS,
 ) -> CredentialTransitionReceipt:
     if prior_handle.purpose != "TRADE" or current_handle.purpose != "TRADE":
         raise CredentialTransitionReceiptError(
@@ -525,14 +575,14 @@ def _issue_locked(
             current_handle.generation if operation == "ROTATED" else None
         ),
         "active_after": bool(record["active"]),
-        "owner_identity_sha256": _text_digest(owner_identity),
+        "owner_identity_sha256": _text_digest_fn(owner_identity),
         "vault_authority_sha256": authority_digest,
         "record_state_sha256": _record_state_digest_fn(record),
         "previous_receipt_id": previous_receipt_id,
         "transition_sequence": sequence,
         "completed_time_ns": _clock(),
     }
-    receipt = CredentialTransitionReceipt(
+    receipt = _receipt_type(
         receipt_id=_receipt_id_from_subject_fn(subject),
         **subject,
     )
@@ -550,8 +600,8 @@ def _issue_locked(
             "credential transition receipt issuer seal is invalid"
         )
     section["latest_by_handle"][receipt.handle_id] = {
-        "receipt": asdict(receipt),
-        "seal_b64": b64encode(seal).decode("ascii"),
+        "receipt": _asdict(receipt),
+        "seal_b64": _b64encode(seal).decode("ascii"),
     }
     return receipt
 
@@ -562,6 +612,8 @@ def rotate_trade_credential_with_receipt(
     *,
     execution_identity: str,
     new_secret_value: str,
+    _vault_type=_CANONICAL_VAULT_TYPE,
+    _handle_type=_CANONICAL_HANDLE_TYPE,
     _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
     _vault_load=_CANONICAL_VAULT_LOAD,
     _vault_handle=_CANONICAL_VAULT_HANDLE,
@@ -570,12 +622,13 @@ def rotate_trade_credential_with_receipt(
     _scope_entropy_fn=_CANONICAL_SCOPE_ENTROPY,
     _text_fn=_CANONICAL_TEXT,
     _issue_locked_fn=_issue_locked,
+    _b64encode=_CANONICAL_B64ENCODE,
 ) -> tuple[PersistentCredentialHandle, CredentialTransitionReceipt]:
     """Rotate one exact TRADE generation and atomically retain its receipt."""
 
-    if type(vault) is not ProtectedCredentialVault:
+    if type(vault) is not _vault_type:
         raise TypeError("vault must be an exact ProtectedCredentialVault")
-    if type(handle) is not PersistentCredentialHandle:
+    if type(handle) is not _handle_type:
         raise TypeError("handle must be an exact PersistentCredentialHandle")
     if handle.purpose != "TRADE":
         raise CredentialTransitionReceiptError(
@@ -605,7 +658,7 @@ def rotate_trade_credential_with_receipt(
             current,
             owner_identity=owner,
         )
-        next_handle = PersistentCredentialHandle(
+        next_handle = _handle_type(
             handle_id=current.handle_id,
             account_id=current.account_id,
             provider=current.provider,
@@ -624,8 +677,8 @@ def rotate_trade_credential_with_receipt(
             purpose=next_handle.purpose,
             generation=next_handle.generation,
         )
-        record["handle"] = asdict(next_handle)
-        record["ciphertext"] = b64encode(
+        record["handle"] = _CANONICAL_ASDICT(next_handle)
+        record["ciphertext"] = _b64encode(
             vault._protector.protect(
                 new_secret_value.encode("utf-8"),
                 entropy=entropy,
@@ -647,6 +700,8 @@ def revoke_trade_credential_with_receipt(
     handle: PersistentCredentialHandle,
     *,
     execution_identity: str,
+    _vault_type=_CANONICAL_VAULT_TYPE,
+    _handle_type=_CANONICAL_HANDLE_TYPE,
     _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
     _vault_load=_CANONICAL_VAULT_LOAD,
     _vault_handle=_CANONICAL_VAULT_HANDLE,
@@ -654,12 +709,14 @@ def revoke_trade_credential_with_receipt(
     _vault_write=_CANONICAL_VAULT_WRITE,
     _text_fn=_CANONICAL_TEXT,
     _issue_locked_fn=_issue_locked,
+    _b64encode=_CANONICAL_B64ENCODE,
+    _random_bytes=_CANONICAL_URANDOM,
 ) -> CredentialTransitionReceipt:
     """Revoke one exact TRADE generation and atomically retain its receipt."""
 
-    if type(vault) is not ProtectedCredentialVault:
+    if type(vault) is not _vault_type:
         raise TypeError("vault must be an exact ProtectedCredentialVault")
-    if type(handle) is not PersistentCredentialHandle:
+    if type(handle) is not _handle_type:
         raise TypeError("handle must be an exact PersistentCredentialHandle")
     if handle.purpose != "TRADE":
         raise CredentialTransitionReceiptError(
@@ -688,7 +745,7 @@ def revoke_trade_credential_with_receipt(
             owner_identity=owner,
         )
         record["active"] = False
-        record["ciphertext"] = b64encode(os.urandom(32)).decode("ascii")
+        record["ciphertext"] = _b64encode(_random_bytes(32)).decode("ascii")
         receipt = _issue_locked_fn(
             vault,
             state,
@@ -704,6 +761,8 @@ def verify_trade_credential_transition_receipt(
     vault: ProtectedCredentialVault,
     receipt: CredentialTransitionReceipt,
     *,
+    _vault_type=_CANONICAL_VAULT_TYPE,
+    _receipt_type=_CANONICAL_RECEIPT_TYPE,
     _file_lock=_CANONICAL_EXCLUSIVE_FILE_LOCK,
     _vault_load=_CANONICAL_VAULT_LOAD,
     _vault_handle=_CANONICAL_VAULT_HANDLE,
@@ -715,12 +774,13 @@ def verify_trade_credential_transition_receipt(
     _text_digest_fn=_text_digest,
     _record_state_digest_fn=_record_state_digest,
     _seal_entropy_fn=_seal_entropy,
+    _b64decode=_CANONICAL_B64DECODE,
 ) -> CredentialTransitionReceipt:
     """Revalidate one receipt against the exact current canonical vault state."""
 
-    if type(vault) is not ProtectedCredentialVault:
+    if type(vault) is not _vault_type:
         raise TypeError("vault must be an exact ProtectedCredentialVault")
-    if type(receipt) is not CredentialTransitionReceipt:
+    if type(receipt) is not _receipt_type:
         raise TypeError("receipt must be an exact CredentialTransitionReceipt")
 
     with _file_lock(vault.lock_path, vault_path=vault.path):
@@ -794,7 +854,7 @@ def verify_trade_credential_transition_receipt(
             )
 
         try:
-            sealed = b64decode(stored["seal_b64"], validate=True)
+            sealed = _b64decode(stored["seal_b64"], validate=True)
             unsealed = vault._protector.unprotect(
                 sealed,
                 entropy=_seal_entropy_fn(receipt),

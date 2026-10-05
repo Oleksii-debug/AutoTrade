@@ -1,4 +1,5 @@
 from dataclasses import fields
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -31,6 +32,18 @@ from mvp.tests.test_resolved_policy_financial_composition import (
     request,
     snapshot,
 )
+
+
+class _HostileText(str):
+    callbacks = 0
+
+    def strip(self, *_args, **_kwargs):
+        type(self).callbacks += 1
+        raise AssertionError("hostile text strip executed")
+
+    def upper(self):
+        type(self).callbacks += 1
+        raise AssertionError("hostile text upper executed")
 
 
 class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
@@ -97,6 +110,37 @@ class AuthenticatedInstrumentPriceSemanticsTests(unittest.TestCase):
                     artifact_store,
                     price="100.005",
                 )
+
+    def test_security_boundary_rejects_polymorphic_text_and_float_price(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            _HostileText.callbacks = 0
+            with self.assertRaisesRegex(TypeError, "provider_id must be exact text"):
+                self._digest(
+                    registry,
+                    artifact_store,
+                    provider_id=_HostileText("SIMULATED"),
+                )
+            self.assertEqual(_HostileText.callbacks, 0)
+
+            with self.assertRaisesRegex(TypeError, "LIMIT price must use exact"):
+                self._digest(
+                    registry,
+                    artifact_store,
+                    price=100.0,
+                )
+
+    def test_mutated_registry_rule_cannot_escape_metadata_reauthentication(self):
+        with TemporaryDirectory() as directory:
+            registry, artifact_store = self._registry_with_evidence(directory)
+            selected = registry.exact(f"{A}@1")
+            object.__setattr__(selected, "price_tick", Decimal("0.10"))
+
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "not bound to this instrument version",
+            ):
+                self._digest(registry, artifact_store)
 
     def test_metadata_must_be_causally_authenticated_before_digest_mint(self):
         with TemporaryDirectory() as directory:

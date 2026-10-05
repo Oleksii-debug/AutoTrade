@@ -89,9 +89,11 @@ def _point(value: str, *, name: str) -> datetime:
 
 
 def _at_point(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    # Exact datetime alone is insufficient: its tzinfo may still be a
+    # caller-controlled subclass whose callbacks execute during normalization.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountAbsenceCoverageError(
-            "at must be exact timezone-aware datetime"
+            "at must be exact datetime with datetime.timezone"
         )
     return value.astimezone(timezone.utc)
 

@@ -445,7 +445,10 @@ class DurableProviderQualificationRegistry:
                 )
             return False
         scope = _current_scope(record)
-        version = history.aggregate_versions.get(scope.content_digest, 0) + 1
+        version = self.store.next_aggregate_version(
+            _AGGREGATE_TYPE,
+            scope.content_digest,
+        )
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "protocol_key": protocol_key,

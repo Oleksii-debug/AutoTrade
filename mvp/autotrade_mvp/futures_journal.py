@@ -565,8 +565,18 @@ def _replay_linear_events(
         raise TypeError("opening_state must be exact VariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
+    detached = VariationMarginState(
+        contract=opening_state.contract,
+        signed_contracts=opening_state.signed_contracts,
+        last_settlement_price=opening_state.last_settlement_price,
+        settlement_scope=opening_state.settlement_scope,
+        cumulative_variation_margin=opening_state.cumulative_variation_margin,
+        settlement_history=opening_state.settlement_history,
+    )
+    if detached != opening_state:
+        raise FuturesError("durable linear opening state is not canonical")
 
-    state = opening_state
+    state = detached
     for expected_version, event in enumerate(events, start=1):
         if (
             event["event_type"] != _EVENT_TYPE
@@ -734,9 +744,19 @@ def _replay_inverse_events(
         raise TypeError("opening_state must be exact InverseVariationMarginState")
     if opening_state.settlement_history:
         raise FuturesError("durable opening state must have empty settlement history")
+    detached = InverseVariationMarginState(
+        contract=opening_state.contract,
+        signed_contracts=opening_state.signed_contracts,
+        last_settlement_price=opening_state.last_settlement_price,
+        settlement_scope=opening_state.settlement_scope,
+        cumulative_variation_margin=opening_state.cumulative_variation_margin,
+        settlement_history=opening_state.settlement_history,
+    )
+    if detached != opening_state:
+        raise FuturesError("durable inverse opening state is not canonical")
 
-    _verify_inverse_convention_evidence(opening_state.contract, authenticated_reader)
-    state = opening_state
+    _verify_inverse_convention_evidence(detached.contract, authenticated_reader)
+    state = detached
     for expected_version, event in enumerate(events, start=1):
         if (
             event["event_type"] != _EVENT_TYPE

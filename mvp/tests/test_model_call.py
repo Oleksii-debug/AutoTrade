@@ -3713,6 +3713,65 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_adapter_class_rebinding_is_restored_before_dynamic_dispatch(self):
+        class HostileOrchestrator(DurableModelCallOrchestrator):
+            __slots__ = ()
+            getattribute_calls = 0
+            setattr_calls = 0
+
+            def __getattribute__(self, name):
+                HostileOrchestrator.getattribute_calls += 1
+                raise AssertionError(
+                    "rebound orchestrator __getattribute__ must not execute"
+                )
+
+            def __setattr__(self, name, value):
+                HostileOrchestrator.setattr_calls += 1
+                raise AssertionError(
+                    "rebound orchestrator __setattr__ must not execute"
+                )
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_adapter(*_args):
+                object.__setattr__(
+                    orchestrator,
+                    "__class__",
+                    HostileOrchestrator,
+                )
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:"
+                "orchestrator.__class__",
+                result.reason,
+            )
+            self.assertIs(type(orchestrator), DurableModelCallOrchestrator)
+            self.assertEqual(HostileOrchestrator.getattribute_calls, 0)
+            self.assertEqual(HostileOrchestrator.setattr_calls, 0)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
+            )
+
     def test_adapter_cannot_install_budget_method_shadow(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

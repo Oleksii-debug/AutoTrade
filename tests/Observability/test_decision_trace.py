@@ -113,6 +113,48 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_append_rejects_integer_outside_strict_json_resource_domain(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-oversized-integer")
+            item["attributes"]["huge_counter"] = int("9" * 641)
+
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+                store.append(item)
+
+            self.assertFalse(path.exists())
+
+    def test_append_rejects_excessive_json_nesting_before_publication(self):
+        nested = 0
+        for _ in range(129):
+            nested = [nested]
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-excessive-nesting")
+            item["attributes"]["nested_depth"] = nested
+
+            with self.assertRaisesRegex(ValueError, "strict JSON resource domain"):
+                store.append(item)
+
+            self.assertFalse(path.exists())
+
+    def test_loader_rejects_preexisting_row_outside_strict_json_resource_domain(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            path.write_text(
+                '{"oversized":' + ("9" * 641) + '}\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "Corrupt decision trace store"):
+                store.records()
+
     def test_noncanonical_jsonl_bytes_fail_verification(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

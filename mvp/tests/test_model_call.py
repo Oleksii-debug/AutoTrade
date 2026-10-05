@@ -3579,6 +3579,140 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(terminal["event_type"], "ModelCallObserved")
             self.assertFalse(terminal["payload"]["schema_valid"])
 
+    def test_orchestrator_rejects_preinstalled_journal_method_shadow(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            budget.journal.commit_command = lambda *_args, **_kwargs: None
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "durable model budget journal authority is invalid",
+            ):
+                orchestrator_for(
+                    budget=budget,
+                    clock=MutableClock(),
+                )
+
+    def test_cancel_callback_cannot_shadow_nested_journal_commit(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            calls = []
+
+            def hostile_cancel():
+                budget.journal.commit_command = lambda *_args, **_kwargs: self.fail(
+                    "shadowed journal commit reached recovery authority"
+                )
+                return False
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"cancellation probe mutated orchestrator authority:journal\.commit_command",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_: calls.append("called") or observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                    cancel_requested=hostile_cancel,
+                )
+
+            self.assertEqual(calls, [])
+            self.assertNotIn("commit_command", budget.journal.__dict__)
+            self.assertEqual(budget.active_reservation(attempt_id), Decimal("1.2"))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(attempt_id)],
+                ["ModelCallPrepared"],
+            )
+
+    def test_adapter_cannot_shadow_nested_journal_commit(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_adapter(*_args):
+                budget.journal.commit_command = lambda *_args, **_kwargs: self.fail(
+                    "shadowed journal commit reached UNKNOWN settlement"
+                )
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:journal.commit_command",
+                result.reason,
+            )
+            self.assertNotIn("commit_command", budget.journal.__dict__)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_adapter_restore_does_not_execute_hostile_state_key_callbacks(self):
+        class HostileStateKey:
+            hash_calls = 0
+            str_calls = 0
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return 8675309
+
+            def __str__(self):
+                type(self).str_calls += 1
+                raise AssertionError("state-key string conversion must not execute")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            hostile_key = HostileStateKey()
+
+            def hostile_adapter(*_args):
+                budget.journal.__dict__[hostile_key] = "shadow"
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("journal.<invalid-state-key>", result.reason)
+            self.assertEqual(HostileStateKey.hash_calls, 1)
+            self.assertEqual(HostileStateKey.str_calls, 0)
+            self.assertTrue(
+                all(type(name) is str for name in budget.journal.__dict__)
+            )
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_adapter_cannot_install_budget_method_shadow(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

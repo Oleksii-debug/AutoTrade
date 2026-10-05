@@ -10,11 +10,18 @@ provider adapter configuration, API keys or real-order path.
 The `provider-free-product` workflow checks out the exact PR head and publishes
 **two distinct self-contained win-x64 executables from that same SHA/toolchain**:
 `AutoTrade.Desktop.exe` and `AutoTrade.Host.exe`. Each publish gets independent
-exact-head CI evidence. The candidate builder refuses a missing Host, stale build
-evidence, or a source-SHA mismatch and records each executable's SHA-256 and byte
-length in the dependency lock/candidate result. Host files live under
-`payload/host/` so the two self-contained .NET publishes cannot overwrite each
-other's runtime files.
+exact-head CI evidence. Immediately after that evidence is created, the workflow
+binds it to the SHA-256/byte identity of the primary executable and to a canonical
+digest of every other byte in that publish payload (excluding the evidence file
+itself to avoid a self-referential hash). Candidate assembly captures each publish
+once as a held snapshot and requires the held bytes to reproduce both bindings.
+A replacement of the executable, runtime/config files or other publish payload
+between evidence creation and candidate capture therefore fails closed instead of
+being relabelled as the evidenced exact-head build. The builder also refuses a
+missing Host, stale build evidence, or a source-SHA mismatch and records each
+executable's SHA-256 and byte length in the dependency lock/candidate result. Host
+files live under `payload/host/` so the two self-contained .NET publishes cannot
+overwrite each other's runtime files.
 
 The packaged C# Host is deliberately fail-closed today. Its default authority is
 `BLOCKED`; without the canonical journal/risk/provider execution authority it
@@ -74,9 +81,9 @@ completed Actions artifacts; adding a workflow is not a passing result.
 | 30 Web | One host-backed semantic UI; simulation/recovery/backup and safety commands; real browser lifecycle | Installed Windows browser evidence and operator acceptance |
 | 31 Desktop | Existing WPF shell owns ZERO host, authenticates, embeds the same UI with WebView2; separately packaged C# Host is fail-closed before bind | Compose canonical financial/provider authority into C# Host; execute compiled shell on Windows and verify shutdown/fallback |
 | 32 Accessibility | Named controls, semantic tables, labels, live regions, keyboard browser scenario | Real Windows 11 + NVDA test, focus transitions into/out of WebView2 |
-| 33 Packaging | Separate self-contained Desktop+Host publishes from one SHA, isolated embedded Python, exact Git source staging, archive hashes, installed-file preflight, packaged Host exit-78 oracle | Completed Windows packaged run, clean standard-user install, WebView2-present/absent cases |
+| 33 Packaging | Separate self-contained Desktop+Host publishes from one SHA, payload-bound publish evidence, isolated embedded Python, exact Git source staging, archive hashes, installed-file preflight, packaged Host exit-78 oracle | Completed Windows packaged run, clean standard-user install, WebView2-present/absent cases |
 | 34 Update | Existing backup, schema migration and signed update/rollback planning retained | Installed updater transaction, interrupted update and rollback on this exact package; no automatic upgrade is shipped |
-| 35 Qualification/freeze | Source SHA, file hashes, locks and exact-head CI artifacts; existing signed qualification gates retained | Real evidence, owner/trust signatures, rights/advisory review and final frozen package |
+| 35 Qualification/freeze | Source SHA, file hashes, locks, payload-bound publish provenance and exact-head CI artifacts; existing signed qualification gates retained | Real evidence, owner/trust signatures, rights/advisory review and final frozen package |
 | 36 Load | 120-observation resume equivalence; bounded HTTP capacity, explicit overload rejection and same-identity retry | Sustained market ingress, slow physical disk, large journals, concurrent research and target-machine latency/memory qualification |
 | 37 Whole ZERO | Actual process crash after partial booking, retained observation recovery without resend, canonical accounting, synthetic settlement, backup/restore and real keyboard browser state inspection | Successful packaged Windows execution and final operator-ready qualification |
 

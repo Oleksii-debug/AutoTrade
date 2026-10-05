@@ -19,30 +19,74 @@ public sealed record HostStartupAdmission(
         ArgumentNullException.ThrowIfNull(authority);
 
         HostAuthorityReadiness? readiness;
-        try { readiness = authority.Readiness; }
-        catch { return Blocked("host_authority_probe_failed"); }
+        try
+        {
+            readiness = authority.Readiness;
+        }
+        catch
+        {
+            return Blocked("host_authority_probe_failed");
+        }
 
-        if (readiness is null) return Blocked("host_authority_readiness_missing");
+        if (readiness is null)
+        {
+            return Blocked("host_authority_readiness_missing");
+        }
+
         string status = readiness.Status ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(status) || !string.Equals(status, status.Trim(), StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(status)
+            || !string.Equals(status, status.Trim(), StringComparison.Ordinal))
+        {
             return Blocked("host_authority_status_invalid");
+        }
 
         string[] reasonCodes;
-        try { reasonCodes = readiness.ReasonCodes?.ToArray() ?? []; }
-        catch { return Blocked("host_authority_reason_codes_invalid"); }
-        if (!ReasonCodesAreCanonical(reasonCodes)) return Blocked("host_authority_reason_codes_invalid");
+        try
+        {
+            reasonCodes = readiness.ReasonCodes?.ToArray() ?? [];
+        }
+        catch
+        {
+            return Blocked("host_authority_reason_codes_invalid");
+        }
+
+        if (!ReasonCodesAreCanonical(reasonCodes))
+        {
+            return Blocked("host_authority_reason_codes_invalid");
+        }
 
         bool ready = string.Equals(status, "READY", StringComparison.Ordinal);
         if (ready && reasonCodes.Length == 0)
-            return new(true, SuccessExitCode, "READY", Array.Empty<string>());
+        {
+            return new HostStartupAdmission(
+                ListenerBindingAuthorized: true,
+                ExitCode: SuccessExitCode,
+                Status: "READY",
+                ReasonCodes: Array.Empty<string>());
+        }
 
-        if (reasonCodes.Length == 0) reasonCodes = ["host_authority_not_ready"];
-        else if (ready) reasonCodes = [.. reasonCodes, "host_authority_ready_with_blockers"];
-        return new(false, AuthorityUnavailableExitCode, status, Array.AsReadOnly(reasonCodes));
+        if (reasonCodes.Length == 0)
+        {
+            reasonCodes = ["host_authority_not_ready"];
+        }
+        else if (ready)
+        {
+            reasonCodes = [.. reasonCodes, "host_authority_ready_with_blockers"];
+        }
+
+        return new HostStartupAdmission(
+            ListenerBindingAuthorized: false,
+            ExitCode: AuthorityUnavailableExitCode,
+            Status: status,
+            ReasonCodes: Array.AsReadOnly(reasonCodes));
     }
 
     private static HostStartupAdmission Blocked(string reasonCode) =>
-        new(false, AuthorityUnavailableExitCode, "BLOCKED", Array.AsReadOnly(new[] { reasonCode }));
+        new(
+            ListenerBindingAuthorized: false,
+            ExitCode: AuthorityUnavailableExitCode,
+            Status: "BLOCKED",
+            ReasonCodes: Array.AsReadOnly(new[] { reasonCode }));
 
     private static bool ReasonCodesAreCanonical(IEnumerable<string> reasonCodes)
     {
@@ -51,8 +95,14 @@ public sealed record HostStartupAdmission(
         {
             if (string.IsNullOrWhiteSpace(reasonCode)
                 || !string.Equals(reasonCode, reasonCode.Trim(), StringComparison.Ordinal)
-                || reasonCode.Any(character => !(character is >= 'a' and <= 'z' or >= '0' and <= '9' or '_'))
-                || !seen.Add(reasonCode)) return false;
+                || reasonCode.Any(character =>
+                    !(character is >= 'a' and <= 'z'
+                        or >= '0' and <= '9'
+                        or '_'))
+                || !seen.Add(reasonCode))
+            {
+                return false;
+            }
         }
         return true;
     }

@@ -257,6 +257,13 @@ class HostCommandStateTests(unittest.TestCase):
         events = self.store.events_after("1")
         self.assertEqual([item.cursor for item in events], [2, 3])
 
+    def test_event_cursor_requires_canonical_sequence_identity(self):
+        for after in ("", "00", "01", "+1", "-0", " 0", "0 ", "1\n", True, 0.0):
+            with self.subTest(after=after), self.assertRaises((TypeError, ValueError)):
+                self.store.events_after(after)
+        self.assertEqual(self.store.events_after("0"), ())
+        self.assertEqual(self.store.events_after(0), ())
+
     def test_event_retention_gap_requires_resnapshot(self):
         accepted = self.store.submit(self.command())
         self.store.update_operation(accepted.operation_id, "RUNNING")

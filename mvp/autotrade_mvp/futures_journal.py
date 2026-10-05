@@ -30,6 +30,7 @@ from .accounting import (
 )
 from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .futures import (
+    FuturesContract,
     FuturesError,
     FuturesSettlementEvidence,
     FuturesSettlementScope,
@@ -366,9 +367,21 @@ def _durable_scope(
         raise TypeError(
             "state must be exact VariationMarginState or InverseVariationMarginState"
         )
-    version = state.contract.canonical_instrument
+    contract = state.contract
+    if type(contract) is not FuturesContract:
+        raise FuturesError("durable settlement requires exact FuturesContract")
+    version = contract.canonical_instrument
     if version is None:
         raise FuturesError("durable settlement requires canonical InstrumentVersion")
+    try:
+        canonical_contract = FuturesContract.from_instrument_version(version)
+    except (TypeError, ValueError) as error:
+        raise FuturesError("durable settlement contract authority is invalid") from error
+    if canonical_contract != contract:
+        raise FuturesError(
+            "durable settlement contract conflicts with canonical InstrumentVersion"
+        )
+    version = canonical_contract.canonical_instrument
     scope = state.settlement_scope
     if scope.provider_id is None or scope.account_id is None or scope.environment is None:
         raise FuturesError(

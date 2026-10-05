@@ -177,7 +177,12 @@ def _event_uuid(kind: str, key: str) -> str:
     return str(uuid5(NAMESPACE_URL, f"https://events.autotrade.local/{kind}/{key}"))
 
 
-def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
+def handle_journal_event(
+    root: Path,
+    symbol: str,
+    evidence: dict,
+    financial_configuration_hash: str,
+) -> None:
     store = JournalStore(root / "journal.sqlite3")
     event_id = _event_uuid("simulation-episode", evidence["evidence_id"])
     existing = store.get_event(event_id)
@@ -199,6 +204,7 @@ def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
         "position": evidence["position"],
         "equity": evidence["equity"],
         "reconciled": evidence["reconciled"],
+        "financial_configuration_hash": financial_configuration_hash,
     }
     envelope = {
         "event_id": event_id,
@@ -528,24 +534,66 @@ def _reconcile(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
 
 
 def verify_replay(state_dir: str | Path) -> bool:
-    """Verify that every saved decision has exactly one matching evidence row."""
+    """Verify checkpoint, evidence and durable journal share one financial config root."""
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
-    if not checkpoint_path.is_file() or not evidence_path.is_file():
+    journal_path = root / "journal.sqlite3"
+    if not checkpoint_path.is_file() or not evidence_path.is_file() or not journal_path.is_file():
         return False
     try:
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if type(checkpoint) is not dict:
+            return False
+        if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+            return False
+        configuration = checkpoint["financial_configuration"]
+        configuration_hash = checkpoint["financial_configuration_hash"]
+        if type(configuration) is not dict or type(configuration_hash) is not str:
+            return False
+        if configuration_hash != _stable_hash(configuration):
+            return False
+        symbol = configuration.get("symbol")
+        if type(symbol) is not str or not symbol:
+            return False
         records = checkpoint["evidence_records"]
         ids = checkpoint["evidence_ids"]
-        rows = [json.loads(line) for line in evidence_path.read_text(encoding="utf-8").splitlines()]
+        rows = [
+            json.loads(line)
+            for line in evidence_path.read_text(encoding="utf-8").splitlines()
+        ]
         observed = {row["evidence_id"]: row for row in rows}
-    except (OSError, ValueError, KeyError, TypeError):
+        if (
+            not isinstance(records, dict)
+            or not isinstance(ids, list)
+            or len(ids) != len(set(ids)) != 0
+        ):
+            return False
+        if not (len(ids) == len(records) == len(observed) == len(rows)):
+            return False
+        if set(ids) != set(records) or set(ids) != set(observed):
+            return False
+        if any(observed[key] != records[key] for key in ids):
+            return False
+
+        store = JournalStore(journal_path)
+        events = store.load_events("simulation_portfolio", symbol)
+        if not events:
+            return False
+        for event in events:
+            if type(event) is not dict:
+                return False
+            if event.get("event_type") != "SimulationEpisodeRecorded":
+                continue
+            payload = event.get("payload")
+            if (
+                type(payload) is not dict
+                or payload.get("financial_configuration_hash") != configuration_hash
+            ):
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return False
-    return (isinstance(records, dict) and isinstance(ids, list)
-            and len(ids) == len(set(ids)) == len(rows) == len(observed)
-            and set(ids) == set(records) == set(observed)
-            and all(observed[key] == records[key] for key in ids))
 
 
 def run_vertical_slice(
@@ -689,7 +737,12 @@ def run_vertical_slice(
     handle_learning_evidence(evidence, evidence_path, evidence_ids, evidence_records)
     # Journal/outbox comes after checkpoint and append-only evidence. An
     # interrupted write is repaired by deterministic replay on the next run.
-    handle_journal_event(root, symbol, evidence)
+    handle_journal_event(
+        root,
+        symbol,
+        evidence,
+        checkpoint["financial_configuration_hash"],
+    )
     if not verify_replay(root):
         raise ValueError("Learning evidence does not replay against checkpoint")
     return RunResult(

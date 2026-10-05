@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import research.autotrade_research.evaluation.scientific_trial_owner as trial_owner_module
+
 from research.autotrade_research.evaluation.scientific_trial_owner import (
     evaluate_gates_with_scientific_trial_owner,
     gate_profile_subject_digest,
@@ -330,6 +332,49 @@ class ScientificTrialOwnerTests(unittest.TestCase):
                     evidence(),
                     scientific_registry=registry,
                 )
+
+    def test_wrapper_uses_one_detached_evidence_cut_for_base_and_owner(self):
+        gate_profile = profile()
+        with TemporaryDirectory() as directory:
+            registry = ScientificRegistry(Path(directory) / "science.sqlite3")
+            registered = registry.register_protocol(
+                bound_protocol(gate_profile, trial_budget=1)
+            )
+            fill_trials(registry, registered.protocol_id, 1)
+            caller_evidence = evidence(
+                trials_attempted=0,
+                trial_log_complete=False,
+            )
+            canonical_evaluate = trial_owner_module.evaluate_gates
+
+            def mutate_caller_after_base(profile_value, evidence_value, **kwargs):
+                decision = canonical_evaluate(
+                    profile_value,
+                    evidence_value,
+                    **kwargs,
+                )
+                object.__setattr__(caller_evidence, "trials_attempted", 1)
+                object.__setattr__(caller_evidence, "trial_log_complete", True)
+                return decision
+
+            with patch.object(
+                trial_owner_module,
+                "evaluate_gates",
+                new=mutate_caller_after_base,
+            ):
+                decision = evaluate_gates_with_scientific_trial_owner(
+                    gate_profile,
+                    caller_evidence,
+                    scientific_registry=registry,
+                )
+
+            self.assertEqual(caller_evidence.trials_attempted, 1)
+            self.assertTrue(caller_evidence.trial_log_complete)
+            self.assertEqual(
+                decision.checks["scientific_trial_owner"],
+                "FAIL",
+            )
+            self.assertEqual(decision.status, "FAIL")
 
     def test_wrapper_reports_missing_registry_owner_as_inconclusive(self):
         gate_profile = profile()

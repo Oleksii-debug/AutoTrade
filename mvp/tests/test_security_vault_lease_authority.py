@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import mvp.autotrade_mvp.security as security_module
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.windows_secrets import ProtectedCredentialVault
 
@@ -48,7 +49,9 @@ class SecurityVaultLeaseAuthorityTests(unittest.TestCase):
             allowed_origins={_ORIGIN},
             credential_vault=vault,
             session_authorizer=lambda subject, role, origin: (
-                subject == "host-a" and role == "OWNER" and origin == _ORIGIN
+                subject == "host-a"
+                and role in {"OWNER", "OPERATOR", "OBSERVER"}
+                and origin == _ORIGIN
             ),
             now=lambda: 100.0,
         )
@@ -111,11 +114,58 @@ class SecurityVaultLeaseAuthorityTests(unittest.TestCase):
 
             self.assertEqual(hostile_calls, [])
 
+    def test_session_validator_rebinding_cannot_authorize_forged_lease(self):
+        with TemporaryDirectory() as root:
+            _vault, boundary, _token, handle = self._boundary(root)
+            hostile_calls = []
+
+            def hostile_validate(_self, *_args, **_kwargs):
+                hostile_calls.append(True)
+                return object()
+
+            with patch.object(SecurityBoundary, "validate_session", hostile_validate):
+                with self.assertRaisesRegex(PermissionError, "Unknown session"):
+                    with self._lease(boundary, "forged-token", handle):
+                        self.fail("forged session reached credential plaintext")
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_scope_normalizer_rebinding_cannot_retarget_lease_scope(self):
+        with TemporaryDirectory() as root:
+            _vault, boundary, token, handle = self._boundary(root)
+            hostile_calls = []
+
+            def hostile_text(*_args, **_kwargs):
+                hostile_calls.append(True)
+                raise AssertionError("rebound credential scope normalizer executed")
+
+            with patch.object(security_module, "_credential_text", hostile_text):
+                with self._lease(boundary, token, handle) as plaintext:
+                    self.assertEqual(plaintext, "canonical-secret")
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_execution_role_rebinding_cannot_promote_observer_to_plaintext(self):
+        with TemporaryDirectory() as root:
+            _vault, boundary, _token, handle = self._boundary(root)
+            observer = boundary.create_session(
+                subject="host-a",
+                role="OBSERVER",
+                origin=_ORIGIN,
+                ttl_seconds=900,
+            )
+            with patch.object(SecurityBoundary, "_EXECUTION_ROLES", {"OBSERVER"}):
+                with self.assertRaisesRegex(PermissionError, "Role is not authorized"):
+                    with self._lease(boundary, observer.token, handle):
+                        self.fail("observer reached credential plaintext")
+
     def test_public_lease_signature_exposes_no_executable_authority_override(self):
         parameters = signature(SecurityBoundary.lease_for_execution).parameters
         self.assertNotIn("_vault_lease", parameters)
         self.assertNotIn("vault_lease", parameters)
         self.assertNotIn("lease_impl", parameters)
+        self.assertNotIn("validate_session", parameters)
+        self.assertNotIn("credential_text", parameters)
 
 
 if __name__ == "__main__":

@@ -831,6 +831,7 @@ class DurableModelCallOrchestrator:
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
         module_globals=globals(),
+        journal_class_authority_changes=_model_journal_class_authority_changes,
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
         (
@@ -860,10 +861,22 @@ class DurableModelCallOrchestrator:
                 orchestrator_class,
             )
 
+        current_journal_helper = dict.get(
+            module_globals,
+            "_model_journal_class_authority_changes",
+        )
+        if current_journal_helper is not journal_class_authority_changes:
+            changes.append("module._model_journal_class_authority_changes")
+            dict.__setitem__(
+                module_globals,
+                "_model_journal_class_authority_changes",
+                journal_class_authority_changes,
+            )
+
         # Restore the trusted JournalStore class topology before any generic
         # class-dictionary or instance recovery.  In particular, inherited
         # dispatch must not execute through a callback-injected base class.
-        changes.extend(_model_journal_class_authority_changes(restore=True))
+        changes.extend(journal_class_authority_changes(restore=True))
 
         # Restore raw class dictionaries first. Descriptor identity comparison
         # avoids invoking attacker-defined equality during recovery.

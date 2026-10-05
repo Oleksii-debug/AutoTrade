@@ -16,7 +16,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass
-from types import FunctionType
+from types import FunctionType, SimpleNamespace
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
@@ -901,11 +901,42 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
             provider_environment=handle.provider_environment,
         )
 
+    retained_os = SimpleNamespace(
+        name=_windows_secrets.os.name,
+        O_RDONLY=_windows_secrets.os.O_RDONLY,
+        O_RDWR=_windows_secrets.os.O_RDWR,
+        O_CREAT=_windows_secrets.os.O_CREAT,
+        open=_windows_secrets.os.open,
+        fstat=_windows_secrets.os.fstat,
+        stat=_windows_secrets.os.stat,
+        fdopen=_windows_secrets.os.fdopen,
+        fsync=_windows_secrets.os.fsync,
+        close=_windows_secrets.os.close,
+        lstat=_windows_secrets.os.lstat,
+    )
+    for flag_name in ("O_CLOEXEC", "O_NOFOLLOW"):
+        if hasattr(_windows_secrets.os, flag_name):
+            setattr(retained_os, flag_name, getattr(_windows_secrets.os, flag_name))
+    retained_stat = SimpleNamespace(
+        S_ISREG=_windows_secrets.stat.S_ISREG,
+        S_ISLNK=_windows_secrets.stat.S_ISLNK,
+    )
+    retained_sys = SimpleNamespace(platform=_windows_secrets.sys.platform)
+
     retained_vault_leaf = _retain_function_globals(
-        _windows_secrets._require_vault_leaf
+        _windows_secrets._require_vault_leaf,
+        globals_override={
+            "os": retained_os,
+            "stat": retained_stat,
+            "sys": retained_sys,
+        },
     )
     retained_lock_binding = _retain_function_globals(
-        _windows_secrets._assert_posix_lock_binding
+        _windows_secrets._assert_posix_lock_binding,
+        globals_override={
+            "os": retained_os,
+            "stat": retained_stat,
+        },
     )
     lock_generator = getattr(
         _windows_secrets._exclusive_file_lock,
@@ -914,7 +945,12 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     )
     retained_lock_generator = _retain_function_globals(
         lock_generator,
-        globals_override={"_assert_posix_lock_binding": retained_lock_binding},
+        globals_override={
+            "_assert_posix_lock_binding": retained_lock_binding,
+            "os": retained_os,
+            "stat": retained_stat,
+            "sys": retained_sys,
+        },
     )
     retained_file_lock = contextmanager(retained_lock_generator)
     retained_scope_entropy = _retain_function_globals(_windows_secrets._scope_entropy)

@@ -1195,6 +1195,70 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             [],
         )
 
+    def test_expiry_correction_to_covered_assignment_uses_current_inventory(self):
+        self.seed_option_position("-1")
+        self.seed_underlying_position("100")
+        first = self.evidence(
+            external_event_id="expiry-r1",
+            event_kind="EXPIRY",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+
+        correction = self.evidence(
+            external_event_id="assignment-after-expiry-r2",
+            event_kind="ASSIGNMENT",
+            signed_contracts="-1",
+            observed_at=utc(12, 18, 19, 2),
+            provider_revision="provider-r2",
+            corrects_external_event_id="expiry-r1",
+        )
+        corrected = self.authority.apply(correction)
+
+        self.assertTrue(corrected.inserted)
+        self.assertEqual(len(corrected.reversal_transaction_ids), 1)
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+        self.assertEqual(self.book.cash("USD"), Decimal("4901"))
+
+    def test_expiry_correction_to_uncovered_assignment_remains_fail_closed(self):
+        self.seed_option_position("-1")
+        first = self.evidence(
+            external_event_id="expiry-uncovered-r1",
+            event_kind="EXPIRY",
+            signed_contracts="-1",
+            provider_revision="provider-r1",
+        )
+        self.authority.apply(first)
+        before_transactions = tuple(self.book.transactions)
+        before_events = tuple(
+            self.store.load_events("option_lifecycle", self.authority.aggregate_id)
+        )
+
+        with self.assertRaisesRegex(
+            OptionLifecycleConflict,
+            "without atomic borrow authority",
+        ):
+            self.authority.apply(
+                self.evidence(
+                    external_event_id="assignment-uncovered-r2",
+                    event_kind="ASSIGNMENT",
+                    signed_contracts="-1",
+                    observed_at=utc(12, 18, 19, 2),
+                    provider_revision="provider-r2",
+                    corrects_external_event_id="expiry-uncovered-r1",
+                )
+            )
+
+        self.assertEqual(tuple(self.book.transactions), before_transactions)
+        self.assertEqual(
+            tuple(self.store.load_events("option_lifecycle", self.authority.aggregate_id)),
+            before_events,
+        )
+        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
+        self.assertEqual(self.book.position("ABC"), Decimal("0"))
+
     def test_correction_reusing_provider_revision_fails_closed(self):
         self.seed_option_position("-2")
         self.seed_underlying_position("200")

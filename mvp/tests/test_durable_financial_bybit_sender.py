@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.financial_send_authority import (
     FinanciallyBoundBybitOrderSender,
 )
 from mvp.autotrade_mvp.production_bybit import build_production_bybit_order_sender
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 
 
@@ -203,6 +204,40 @@ class DurableFinancialBybitProductSurfaceTests(unittest.TestCase):
                 intent_id="intent-1",
                 intent_hash="intent-hash-1",
                 prepared_request=object(),
+                now="2026-10-05T08:00:00Z",
+            )
+
+    def test_product_dispatch_rejects_exact_type_unissued_prepared_object(self):
+        product = self._dispatch_shell()
+        issued = self._prepared_shell()
+        forged = object.__new__(BybitPreparedSubmission)
+        for name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "instrument_version",
+            "body_sha256",
+        ):
+            object.__setattr__(
+                forged,
+                name,
+                object.__getattribute__(issued, name),
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "prepared submission authority changed",
+        ):
+            product.dispatch(
+                admission_id="admission-1",
+                action="TRADE",
+                attempt_id="attempt-1",
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                prepared_request=forged,
                 now="2026-10-05T08:00:00Z",
             )
 

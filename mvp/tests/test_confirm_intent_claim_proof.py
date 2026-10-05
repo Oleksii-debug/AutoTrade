@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
+import inspect
 import unittest
 
+from mvp.autotrade_mvp import operator_authority_commands as operator_commands
 from mvp.autotrade_mvp.authority import (
     AuthorityPolicy,
     AuthorityService,
@@ -55,6 +57,27 @@ class ConfirmIntentPendingClaimProofTests(unittest.TestCase):
             entity_policy_id="entity-policy-claim-proof",
             instrument_family="SPOT",
         )
+
+    def test_terminal_proof_callables_expose_no_authority_override_parameters(self) -> None:
+        for function in (
+            operator_commands.execute_operator_authority_action,
+            operator_commands.observed_authority_operation_effects,
+            operator_commands.validate_authority_success_evidence,
+        ):
+            names = set(inspect.signature(function).parameters)
+            self.assertFalse(
+                names
+                & {
+                    "resolver",
+                    "_resolver",
+                    "delegate",
+                    "_delegate",
+                    "pending_read",
+                    "_pending_read",
+                    "registry_type",
+                    "_registry_type",
+                }
+            )
 
     def test_matching_confirmation_event_without_exact_pending_claim_is_not_host_success(self) -> None:
         with TemporaryDirectory() as directory:
@@ -186,6 +209,32 @@ class ConfirmIntentPendingClaimProofTests(unittest.TestCase):
             )
             self.assertIsNone(claim)
 
+            # The old shim hardened the implementation only by assigning a
+            # mutable module-global resolver. Rebinding that name to the raw
+            # pre-proof resolver could therefore remove the pending-claim proof
+            # from already-imported Host callables. The public Host path must
+            # retain its installed proof independently of this mutable name.
+            original_impl_resolver = operator_commands._confirm_impl._resolved_confirmation
+            original_exported_resolver = operator_commands._resolved_confirmation
+            self.addCleanup(
+                setattr,
+                operator_commands._confirm_impl,
+                "_resolved_confirmation",
+                original_impl_resolver,
+            )
+            self.addCleanup(
+                setattr,
+                operator_commands,
+                "_resolved_confirmation",
+                original_exported_resolver,
+            )
+            operator_commands._confirm_impl._resolved_confirmation = (
+                operator_commands._base_resolved_confirmation
+            )
+            operator_commands._resolved_confirmation = (
+                operator_commands._base_resolved_confirmation
+            )
+
             completed = host.execute_authority_operation(accepted.operation_id)
             self.assertEqual(completed.phase, "FAILED")
             self.assertEqual(completed.affected_refs, ())
@@ -201,7 +250,8 @@ class ConfirmIntentPendingClaimProofTests(unittest.TestCase):
             self.assertIsNone(claim_after)
 
             # Restart must replay FAILED, never upgrade the forged event into a
-            # canonical host success.
+            # canonical host success even while the mutable implementation
+            # resolver remains rebound.
             restarted = JournalBackedHostCommandStore(
                 JournalStore(store.path),
                 account_id="acct-claim-proof",

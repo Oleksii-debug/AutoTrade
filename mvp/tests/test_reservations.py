@@ -6,11 +6,20 @@ from decimal import (
     localcontext,
 )
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from mvp.autotrade_mvp.durable_reservations import (
+    DurableReservationBook,
+    reservation_snapshot_digest,
+)
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
+    POST_BUST_HOLD_STATE,
     ReservationBook,
     ReservationConflict,
+    ReservationSnapshot,
 )
 
 
@@ -102,6 +111,100 @@ class ReservationFoundationTests(unittest.TestCase):
             )
         self.assertEqual(book.active(), ())
 
+    def test_reservation_text_authority_rejects_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile reservation text callback")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile reservation text callback")
+
+        book = ReservationBook()
+        with self.assertRaisesRegex(ValueError, "reservation_id"):
+            book.reserve(
+                reservation_id=HostileText("r-hostile"),
+                intent_id="i-hostile",
+                requirements={"CASH:USD": "1"},
+                available={"CASH:USD": "10"},
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.active(), ())
+
+        with self.assertRaisesRegex(ValueError, "resource"):
+            book.reserve(
+                reservation_id="r-hostile-resource",
+                intent_id="i-hostile-resource",
+                requirements={HostileText("CASH:USD"): "1"},
+                available={"CASH:USD": "10"},
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.active(), ())
+
+        book.reserve(
+            reservation_id="r-terminal",
+            intent_id="i-terminal",
+            requirements={"CASH:USD": "1"},
+            available={"CASH:USD": "10"},
+        )
+        with self.assertRaisesRegex(ValueError, "outcome"):
+            book.mark_terminal(
+                "r-terminal",
+                outcome=HostileText("CANCELED"),
+                resolution_evidence="provider-terminal",
+            )
+        self.assertEqual(touched, [])
+        self.assertEqual(book.get("r-terminal").state, "WORKING")
+
+    def test_reservation_snapshot_digest_rejects_subclass_before_field_reads(self):
+        touched = []
+
+        class HostileSnapshot(ReservationSnapshot):
+            def __getattribute__(self, name):
+                if name != "__class__":
+                    touched.append(name)
+                    raise AssertionError("hostile reservation snapshot field read")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileSnapshot)
+        with self.assertRaisesRegex(TypeError, "exact ReservationSnapshot"):
+            reservation_snapshot_digest(hostile)
+        self.assertEqual(touched, [])
+
+    def test_durable_reservation_scope_rejects_text_subclasses_before_callbacks(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile durable reservation text callback")
+
+            def upper(self, *args, **kwargs):
+                touched.append("upper")
+                raise AssertionError("hostile durable reservation text callback")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+
+            with self.assertRaisesRegex(ValueError, "environment"):
+                DurableReservationBook(
+                    store,
+                    environment=HostileText("SIMULATION"),
+                    account_id="account-1",
+                )
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(ValueError, "account_id"):
+                DurableReservationBook(
+                    store,
+                    environment="SIMULATION",
+                    account_id=HostileText("account-1"),
+                )
+            self.assertEqual(touched, [])
+
     def test_two_concurrent_intents_cannot_double_spend_cash(self):
         book = ReservationBook()
         book.reserve(
@@ -148,6 +251,108 @@ class ReservationFoundationTests(unittest.TestCase):
                 requirements={"CASH:USD": "40"},
                 available={"CASH:USD": "100"},
             )
+
+    def test_reversed_fill_restores_consumed_amount_to_held_capacity(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r1",
+            intent_id="i1",
+            requirements={"CASH:USD": "100"},
+            available={"CASH:USD": "1000"},
+        )
+        consumed = book.consume("r1", {"CASH:USD": "40"})
+        self.assertEqual(consumed.remaining["CASH:USD"], Decimal("60"))
+        self.assertEqual(consumed.consumed["CASH:USD"], Decimal("40"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+
+        restored = book.restore_consumption("r1", {"CASH:USD": "40"})
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("100"))
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "exceeds consumed reservation",
+        ):
+            book.restore_consumption("r1", {"CASH:USD": "1"})
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("100"))
+
+    def test_terminal_filled_bust_reconstitutes_full_worst_case_hold(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r-terminal-bust",
+            intent_id="i-terminal-bust",
+            requirements={"CASH:USD": "120", "FEE:USD": "5"},
+            available={"CASH:USD": "1000", "FEE:USD": "100"},
+        )
+        book.consume(
+            "r-terminal-bust",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+        )
+        terminal = book.mark_terminal(
+            "r-terminal-bust",
+            outcome="FILLED",
+            resolution_evidence="provider-filled-before-late-bust",
+        )
+        self.assertEqual(terminal.remaining["CASH:USD"], Decimal("0"))
+        self.assertEqual(terminal.remaining["FEE:USD"], Decimal("0"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("0"))
+
+        restored = book.restore_consumption(
+            "r-terminal-bust",
+            {"CASH:USD": "100", "FEE:USD": "2"},
+        )
+        self.assertEqual(restored.state, POST_BUST_HOLD_STATE)
+        self.assertIsNone(restored.resolution_evidence)
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("0"))
+        self.assertEqual(restored.consumed["FEE:USD"], Decimal("0"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("120"))
+        self.assertEqual(restored.remaining["FEE:USD"], Decimal("5"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("120"))
+        self.assertEqual(book.total_reserved("FEE:USD"), Decimal("5"))
+        self.assertEqual(book.active(), (restored,))
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "requires canonical reconciliation before UNKNOWN",
+        ):
+            book.mark_unknown("r-terminal-bust")
+        self.assertEqual(book.get("r-terminal-bust"), restored)
+
+    def test_terminal_filled_partial_bust_holds_original_minus_still_consumed(self):
+        book = ReservationBook()
+        book.reserve(
+            reservation_id="r-terminal-partial",
+            intent_id="i-terminal-partial",
+            requirements={"CASH:USD": "120"},
+            available={"CASH:USD": "1000"},
+        )
+        book.consume("r-terminal-partial", {"CASH:USD": "100"})
+        book.mark_terminal(
+            "r-terminal-partial",
+            outcome="FILLED",
+            resolution_evidence="provider-filled-before-partial-bust",
+        )
+
+        restored = book.restore_consumption(
+            "r-terminal-partial",
+            {"CASH:USD": "40"},
+        )
+        self.assertEqual(restored.state, POST_BUST_HOLD_STATE)
+        self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
+        self.assertEqual(restored.remaining["CASH:USD"], Decimal("60"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("60"))
+
+        # A later evidence-derived refill may consume the post-bust hold without
+        # converting it into ordinary WORKING/UNKNOWN authority.
+        refilled = book.consume(
+            "r-terminal-partial",
+            {"CASH:USD": "20"},
+        )
+        self.assertEqual(refilled.state, POST_BUST_HOLD_STATE)
+        self.assertEqual(refilled.consumed["CASH:USD"], Decimal("80"))
+        self.assertEqual(refilled.remaining["CASH:USD"], Decimal("40"))
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("40"))
 
     def test_partial_fill_reduces_reservation_and_cancel_releases_remainder(self):
         book = ReservationBook()
@@ -340,7 +545,6 @@ class ReservationFoundationTests(unittest.TestCase):
                 available={"CASH:USD": "100"},
             )
 
-
     def test_filled_terminal_releases_only_unused_worst_case_remainder(self):
         book = ReservationBook()
         book.reserve(
@@ -378,7 +582,6 @@ class ReservationFoundationTests(unittest.TestCase):
                         resolution_evidence="provider-history",
                     )
                 self.assertEqual(book.total_reserved("CASH:USD"), Decimal("90"))
-
 
 
 if __name__ == "__main__":

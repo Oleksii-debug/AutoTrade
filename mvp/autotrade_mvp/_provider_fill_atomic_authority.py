@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Mapping
 import weakref
 
-from . import provider_activity_accounting as _public
 from . import _provider_activity_accounting_impl as _impl
 
 
@@ -155,12 +154,11 @@ def commit_economic_batch_with_reservation_consumption(
 
 
 # Functions retained in the implementation resolve these names through module
-# globals, while external imports resolve the public facade attributes. Bind both
-# surfaces so provider-evidence and low-level paths cannot diverge.
+# globals. Patch only the internal composition seam: the public facade owns a
+# deliberately stricter caller-facing barrier that rejects any supplied provider
+# fill binding before delegation. Overwriting that facade here would reopen the
+# generic provider-fill publication bypass this module exists to constrain.
 _impl._prepare_provider_fill_binding = _prepare_provider_fill_binding
 _impl.commit_economic_batch_with_reservation_consumption = (
-    commit_economic_batch_with_reservation_consumption
-)
-_public.commit_economic_batch_with_reservation_consumption = (
     commit_economic_batch_with_reservation_consumption
 )

@@ -15,7 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .authority import AuthorityService
+from .authority import (
+    AuthorityConflict,
+    AuthorityService,
+    _authority_event_id,
+    _authority_store_call,
+)
 from .pending_intent_financial_binding import (
     DurablePendingIntentFinancialBindingRegistry,
     PendingIntentFinancialBinding,
@@ -26,7 +31,7 @@ from .pending_intents import (
     PendingFinancialIntent,
     PendingIntentError,
 )
-from .persistence import JournalStore
+from .persistence import JournalStore, payload_digest
 from .risk_policy_authority import (
     DurableRiskPolicyRegistry,
     RiskPolicyAuthorityError,
@@ -36,6 +41,93 @@ from .risk_policy_authority import (
 
 class ConfirmIntentError(RuntimeError):
     """Raised when server-owned confirmation authority cannot be completed."""
+
+
+class _JournalCutChanged(AuthorityConflict):
+    """The global journal moved before the cut-bound confirmation append."""
+
+
+class _CutBoundAuthorityService(AuthorityService):
+    """AuthorityService whose only write is CAS-bound to one global journal cut."""
+
+    def __init__(self, store: JournalStore, *, expected_journal_sequence: int) -> None:
+        if type(expected_journal_sequence) is not int or expected_journal_sequence < 0:
+            raise ValueError("expected_journal_sequence must be non-negative")
+        self._confirmation_journal_cut = expected_journal_sequence
+        super().__init__(store)
+
+    def _persist(
+        self,
+        event_type: str,
+        key: str,
+        payload: dict[str, object],
+        *,
+        committed_at: str,
+    ) -> None:
+        if event_type != "AuthorityConfirmationAdded":
+            raise AuthorityConflict(
+                "cut-bound confirmation service may persist only confirmation authority"
+            )
+
+        durable_next = _authority_store_call(
+            self,
+            "next_aggregate_version",
+            "authority_state",
+            "canonical",
+        )
+        durable_version = durable_next - 1
+        if durable_version != self._journal_version:
+            raise AuthorityConflict(
+                "durable authority journal advanced; reload required"
+            )
+
+        event_id = _authority_event_id(event_type, key)
+        existing = _authority_store_call(self, "get_event", event_id)
+        if existing is not None:
+            if existing["event_type"] != event_type or existing["payload"] != payload:
+                raise AuthorityConflict(
+                    "durable authority event conflicts with existing content"
+                )
+            # This can only be a legitimate concurrent idempotent completion if
+            # that exact confirmation itself was the immediate global successor
+            # to the RiskPolicy/claim cut validated by this service. Otherwise
+            # an intervening authority/risk/provider fact won the race and the
+            # caller must re-resolve rather than reinterpret the event as ours.
+            if (
+                existing.get("journal_sequence")
+                != self._confirmation_journal_cut + 1
+                or existing.get("aggregate_version")
+                != self._journal_version + 1
+            ):
+                raise _JournalCutChanged(
+                    "concurrent confirmation is outside validated journal successor"
+                )
+            self._journal_version += 1
+            return
+
+        envelope = {
+            "event_id": event_id,
+            "event_type": event_type,
+            "aggregate_type": "authority_state",
+            "aggregate_id": "canonical",
+            "aggregate_version": str(self._journal_version + 1),
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "committed_at": committed_at,
+        }
+        try:
+            result = _authority_store_call(
+                self,
+                "append_event",
+                envelope,
+                expected_journal_sequence=self._confirmation_journal_cut,
+            )
+        except ValueError as error:
+            raise _JournalCutChanged(
+                "global journal changed before financial confirmation append"
+            ) from error
+        if result.inserted:
+            self._journal_version += 1
 
 
 @dataclass(frozen=True)
@@ -74,6 +166,31 @@ def _risk_scope(binding: PendingIntentFinancialBinding) -> RiskPolicyScope:
         raise ConfirmIntentError("durable risk policy scope is invalid") from error
 
 
+def _sequence(value: object, *, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ConfirmIntentError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _require_authority_cut(
+    authority: AuthorityService,
+    *,
+    expected_epoch: int,
+    expected_version: int,
+) -> None:
+    actual_epoch = authority.epoch
+    actual_version = authority._journal_version
+    if (
+        type(actual_epoch) is not int
+        or type(actual_version) is not int
+        or actual_epoch != expected_epoch
+        or actual_version != expected_version
+    ):
+        raise ConfirmIntentError(
+            "authority state changed after confirmation acceptance"
+        )
+
+
 def confirm_pending_intent(
     store: JournalStore,
     *,
@@ -83,15 +200,17 @@ def confirm_pending_intent(
     account_id: str,
     environment: str,
     accepted_at: datetime,
+    expected_authority_epoch: int | None = None,
+    expected_authority_version: int | None = None,
 ) -> ConfirmedIntent:
     """Claim and persist an exact financial confirmation from server authority.
 
-    Ordering is intentional.  All read-only revalidation happens before the
-    pending intent is claimed.  The claim is then written before the authority
-    confirmation.  If the process crashes in that narrow window, retrying the
-    same confirmation/actor pair reuses the durable claim and finishes the
-    idempotent AuthorityConfirmationAdded write, even after pending expiry.  A
-    different actor or confirmation id can never take over the claimed intent.
+    Ordering is intentional.  Read-only validation happens before the one-way
+    pending claim.  After that claim, quantitative-policy episode and authority
+    cut are revalidated and AuthorityConfirmationAdded is atomically appended
+    only if the whole journal is still at that exact cut. Exact claim retries
+    remain recoverable after pending expiry; competing actor/confirmation pairs
+    can never take over the claim.
     """
 
     if type(store) is not JournalStore:
@@ -102,13 +221,24 @@ def confirm_pending_intent(
     account = _text(account_id, name="account_id")
     env = _text(environment, name="environment").upper()
     point = _utc(accepted_at, name="accepted_at")
+    if (expected_authority_epoch is None) != (expected_authority_version is None):
+        raise ConfirmIntentError(
+            "expected authority epoch and version must be supplied together"
+        )
+    supplied_authority_cut = expected_authority_epoch is not None
+    if supplied_authority_cut:
+        expected_epoch = _sequence(
+            expected_authority_epoch,
+            name="expected_authority_epoch",
+        )
+        expected_version = _sequence(
+            expected_authority_version,
+            name="expected_authority_version",
+        )
 
     pending_registry = DurablePendingIntentRegistry(store)
     binding_registry = DurablePendingIntentFinancialBindingRegistry(store)
 
-    # The binding registry owns durable binding parsing.  This package-internal
-    # read is deliberately read-only; no duplicate financial authority is
-    # reconstructed here.  The public host surface never receives the binding.
     try:
         binding = binding_registry._load(pending_id)
     except PendingIntentFinancialBindingError as error:
@@ -121,23 +251,21 @@ def confirm_pending_intent(
             "pending financial binding differs from authenticated host scope"
         )
 
+    scope = _risk_scope(binding)
+    requirements = dict(binding.reservation_requirements)
     try:
         risk_registry = DurableRiskPolicyRegistry(store)
-        current_risk_policy = risk_registry.resolve_current(_risk_scope(binding))
+        current_risk_policy = risk_registry.resolve_current(scope)
         binding_registry.resolve_current(
             pending_id,
             resolved_risk_policy=current_risk_policy,
-            reservation_requirements=dict(binding.reservation_requirements),
+            reservation_requirements=requirements,
         )
     except (RiskPolicyAuthorityError, PendingIntentFinancialBindingError) as error:
         raise ConfirmIntentError(
             "current quantitative risk authority no longer matches confirmed envelope"
         ) from error
 
-    # Read the registered economics without applying the first-claim expiry
-    # rule. claim_confirmation() below owns that rule and can distinguish a new
-    # claim from an exact durable retry. Calling resolve() here would wrongly
-    # block crash recovery after a previously durable claim has expired.
     try:
         pending, _existing_claim = pending_registry._read(pending_id)
     except PendingIntentError as error:
@@ -153,15 +281,25 @@ def confirm_pending_intent(
             "pending intent no longer matches authenticated financial-envelope binding"
         )
 
-    # Construct/replay AuthorityService before the one-way pending claim.  This
-    # catches corrupt or unavailable authority state without consuming the
-    # pending intent.  The exact authority policy is rechecked by
-    # add_financial_confirmation after the claim; any concurrent authority
-    # change can therefore only fail closed, never create executable authority.
     try:
-        authority = AuthorityService(store)
+        preclaim_authority = AuthorityService(store)
     except (TypeError, ValueError, RuntimeError) as error:
         raise ConfirmIntentError("authority state is unavailable") from error
+    if supplied_authority_cut:
+        _require_authority_cut(
+            preclaim_authority,
+            expected_epoch=expected_epoch,
+            expected_version=expected_version,
+        )
+    else:
+        expected_epoch = _sequence(
+            preclaim_authority.epoch,
+            name="authority_epoch",
+        )
+        expected_version = _sequence(
+            preclaim_authority._journal_version,
+            name="authority_version",
+        )
 
     try:
         claimed = pending_registry.claim_confirmation(
@@ -179,29 +317,63 @@ def confirm_pending_intent(
     if claimed != pending:
         raise ConfirmIntentError("durable pending intent changed during confirmation")
 
-    try:
-        authority.add_financial_confirmation(
-            confirmation_id=confirmation,
-            policy_id=claimed.policy_id,
-            intent_hash=claimed.intent_hash,
-            account_id=claimed.account_id,
-            environment=claimed.environment,
-            instrument_id=claimed.instrument_id,
-            instrument_version=claimed.instrument_version,
-            action=claimed.authority_action,
-            notional=claimed.notional,
-            expires_at=claimed.expires_at,
-            risk_intent=claimed.risk_intent,
-            risk_policy=current_risk_policy.policy,
-            reservation_requirements=dict(binding.reservation_requirements),
-        )
-    except (KeyError, TypeError, ValueError, RuntimeError) as error:
+    final_risk_policy = None
+    for _attempt in range(8):
+        try:
+            final_risk_policy = risk_registry.resolve_current(scope)
+            binding_registry.resolve_current(
+                pending_id,
+                resolved_risk_policy=final_risk_policy,
+                reservation_requirements=requirements,
+            )
+            authority = _CutBoundAuthorityService(
+                store,
+                expected_journal_sequence=(
+                    final_risk_policy.resolved_journal_sequence_cut
+                ),
+            )
+            _require_authority_cut(
+                authority,
+                expected_epoch=expected_epoch,
+                expected_version=expected_version,
+            )
+            authority.add_financial_confirmation(
+                confirmation_id=confirmation,
+                policy_id=claimed.policy_id,
+                intent_hash=claimed.intent_hash,
+                account_id=claimed.account_id,
+                environment=claimed.environment,
+                instrument_id=claimed.instrument_id,
+                instrument_version=claimed.instrument_version,
+                action=claimed.authority_action,
+                notional=claimed.notional,
+                expires_at=claimed.expires_at,
+                risk_intent=claimed.risk_intent,
+                risk_policy=final_risk_policy.policy,
+                reservation_requirements=requirements,
+            )
+            break
+        except _JournalCutChanged:
+            final_risk_policy = None
+            continue
+        except (RiskPolicyAuthorityError, PendingIntentFinancialBindingError) as error:
+            raise ConfirmIntentError(
+                "current quantitative risk authority changed after pending claim"
+            ) from error
+        except ConfirmIntentError:
+            raise
+        except (KeyError, TypeError, ValueError, RuntimeError) as error:
+            raise ConfirmIntentError(
+                "AuthorityService rejected the server-derived financial confirmation"
+            ) from error
+    else:
         raise ConfirmIntentError(
-            "AuthorityService rejected the server-derived financial confirmation"
-        ) from error
+            "global journal remained unstable during financial confirmation append"
+        )
 
-    # Re-open from the journal so success is based on durable readback, not only
-    # on the in-memory return from add_financial_confirmation.
+    if final_risk_policy is None:
+        raise ConfirmIntentError("financial confirmation risk authority is unavailable")
+
     try:
         verified_authority = AuthorityService(store)
         durable_confirmation = verified_authority._confirmations.get(confirmation)

@@ -187,6 +187,46 @@ class JournalBackedHostApiTests(unittest.TestCase):
             padded_durable.submit(command),
         )
 
+    def test_permission_ingress_requires_exact_origin_and_literal_true(self):
+        callbacks = []
+
+        class HostileOrigin(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("request origin strip callback must not run")
+
+        hostile_origin_store = JournalBackedHostCommandStore(
+            JournalStore(f"{self.directory.name}/hostile-origin.sqlite3"),
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: True,
+            request_origin_provider=lambda: HostileOrigin(
+                "https://local.autotrade.invalid"
+            ),
+        )
+        with self.assertRaisesRegex(PermissionError, "origin is unavailable"):
+            hostile_origin_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(hostile_origin_store.state_version, 0)
+
+        class TruthyDecision:
+            def __bool__(self):
+                callbacks.append("bool")
+                raise AssertionError("session decision truthiness must not run")
+
+        non_boolean_store = JournalBackedHostCommandStore(
+            JournalStore(f"{self.directory.name}/truthy-decision.sqlite3"),
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: TruthyDecision(),
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+        )
+        with self.assertRaisesRegex(PermissionError, "Session is not authorized"):
+            non_boolean_store.submit(self.command())
+        self.assertEqual(callbacks, [])
+        self.assertEqual(non_boolean_store.state_version, 0)
+
+
     def test_account_scope_rejects_str_subclass_without_strip_callback(self):
         callbacks = []
 

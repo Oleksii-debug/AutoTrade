@@ -676,8 +676,22 @@ class DurableModelCallOrchestrator:
         spec: ModelCallSpec,
         descriptors: tuple[ModelDescriptor, ...],
     ) -> PricingEvidenceSnapshot:
+        # Evidence callbacks are not authority over the caller's deterministic
+        # attempt identity or the route descriptor graph. Give the resolver
+        # detached, revalidated values so object.__setattr__ mutation of frozen
+        # dataclasses cannot rewrite the authoritative copies after attempt_id
+        # or routing identity has been established.
+        resolver_spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
+        resolver_descriptors = tuple(ModelDescriptor(**{
+            field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
+        }) for item in descriptors)
         try:
-            snapshot = self.pricing_evidence_resolver(spec, descriptors)
+            snapshot = self.pricing_evidence_resolver(
+                resolver_spec,
+                resolver_descriptors,
+            )
         except Exception as error:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
@@ -1263,6 +1277,11 @@ class DurableModelCallOrchestrator:
     ) -> ModelCallOutcome:
         if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
+        # Detach semantic call identity before any callback or concurrent caller
+        # can mutate a frozen dataclass through object.__setattr__.
+        spec = ModelCallSpec(**{
+            field.name: getattr(spec, field.name) for field in fields(ModelCallSpec)
+        })
         if type(policy) is not RoutingPolicy:
             raise TypeError("policy must be RoutingPolicy")
         if type(request) is not ModelRequest:

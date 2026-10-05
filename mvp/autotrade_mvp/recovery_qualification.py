@@ -40,9 +40,6 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
-_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
-
-
 class RecoveryScenario(StrEnum):
     POWER_LOSS = "POWER_LOSS"
     NETWORK_LOSS = "NETWORK_LOSS"
@@ -117,7 +114,7 @@ def _text_tuple(
     allow_empty: bool = False,
 ) -> tuple[str, ...]:
     if type(value) is not tuple:
-        raise TypeError(f"{name} must be a tuple")
+        raise TypeError(f"{name} must be an exact tuple")
     normalized = tuple(_text(item, name=name) for item in value)
     if not allow_empty and not normalized:
         raise ValueError(f"{name} must be non-empty")
@@ -126,9 +123,14 @@ def _text_tuple(
     return normalized
 
 
-def _exact_mapping(value: object, *, name: str) -> Mapping:
-    if type(value) not in {dict, _MAPPING_PROXY_TYPE}:
-        raise TypeError(f"{name} must be a mapping")
+def _exact_mapping(value: object, *, name: str) -> dict:
+    # Public qualification constructors must not trust an arbitrary mappingproxy:
+    # MappingProxyType(hostile_mapping) is still an exact built-in proxy but
+    # delegates iteration/lookups to the wrapped caller-controlled mapping.
+    # Accept only an exact detached dict here; the dataclasses freeze their
+    # validated module-owned copies to MappingProxyType on output.
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
     return value
 
 
@@ -592,7 +594,7 @@ def qualify_recovery_release(
     if type(policy) is not RecoveryQualificationPolicy:
         raise TypeError("policy must be RecoveryQualificationPolicy")
     if type(evidence) not in {list, tuple}:
-        raise TypeError("evidence must be a sequence")
+        raise TypeError("evidence must be an exact list or tuple")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -604,6 +606,7 @@ def qualify_recovery_release(
         raise TypeError(
             "qualification_receipt must be SignedQualificationAttestation"
         )
+
     by_scenario: dict[RecoveryScenario, RecoveryScenarioEvidence] = {}
     blockers: list[str] = []
     hard_failure = False
@@ -703,7 +706,9 @@ def qualify_recovery_release(
                 blockers.append("independent_evidence_attestation_failed")
                 hard_failure = True
             elif accepted.result != "PASS":
-                blockers.append("independent_evidence_attestation_inconclusive")
+                blockers.append(
+                    "independent_evidence_attestation_inconclusive"
+                )
                 inconclusive = True
             elif signed_refs != expected_refs:
                 blockers.append("independent_evidence_set_mismatch")
@@ -814,15 +819,13 @@ def qualify_recovery_release(
     else:
         status = RecoveryEvidenceStatus.PASS
 
-    measured = MappingProxyType(
-        {
-            scenario: item.downtime_ms
-            for scenario, item in sorted(
-                by_scenario.items(),
-                key=lambda pair: pair[0].value,
-            )
-        }
-    )
+    measured = {
+        scenario: item.downtime_ms
+        for scenario, item in sorted(
+            by_scenario.items(),
+            key=lambda pair: pair[0].value,
+        )
+    }
     return RecoveryQualificationDecision(
         status=status,
         source_sha=policy.source_sha,

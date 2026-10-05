@@ -16,12 +16,15 @@ WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
 class DesktopSafetyShellContractTests(unittest.TestCase):
-    def test_wpf_project_targets_windows_without_unreviewed_packages(self):
+    def test_wpf_project_targets_windows_with_only_exact_admitted_webview2_package(self):
         project = ET.parse(PROJECT).getroot()
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        package_refs = project.findall(".//PackageReference")
+        self.assertEqual(len(package_refs), 1)
+        self.assertEqual(package_refs[0].attrib.get("Include"), "Microsoft.Web.WebView2")
+        self.assertEqual(package_refs[0].attrib.get("Version"), "1.0.4258.31")
         self.assertEqual(project.tag, "Project")
 
     def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):

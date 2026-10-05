@@ -14,7 +14,7 @@ import json
 import weakref
 
 from .durable_provider_qualification import DurableProviderQualificationRegistry
-from .persistence import canonical_json
+from .persistence import JournalStore, canonical_json
 from .provider_account_absence_semantics import (
     ProviderAccountAbsenceSemanticsError,
     QualifiedProviderAccountAbsenceSemantics,
@@ -30,6 +30,7 @@ from .provider_origin import (
     ProviderOriginError,
     ProviderOriginObservation,
     require_provider_origin_response_binding_authority,
+    require_provider_origin_response_binding_store,
 )
 from .provider_route_reads import (
     ProviderRouteReadError,
@@ -37,6 +38,8 @@ from .provider_route_reads import (
 )
 
 _SCHEMA_VERSION = "1.0.0"
+_PROVIDER_ORIGIN_AGGREGATE = "qualified_authenticated_provider_read"
+_SUPPORTED_PROVIDER = "BYBIT"
 _SUPPORTED_PAGINATION_RULE = "BYBIT_V5_CURSOR_V1"
 _SUPPORTED_QUERY_SCOPE_RULE = "BYBIT_SPOT_ACCOUNT_QUERY_V1"
 
@@ -59,9 +62,13 @@ def _canonical_query(observation: ProviderOriginObservation) -> dict[str, str]:
 
 def _validated_observation(
     observation: ProviderOriginObservation,
-) -> tuple[AuthenticatedReadResponseBinding, dict[str, str]]:
+    *,
+    store: JournalStore,
+) -> tuple[AuthenticatedReadResponseBinding, dict[str, str], int]:
     if type(observation) is not ProviderOriginObservation:
         raise TypeError("observations must contain exact ProviderOriginObservation")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     binding = observation.response_binding
     if type(binding) is not AuthenticatedReadResponseBinding:
         raise ProviderAccountPageChainError(
@@ -69,6 +76,7 @@ def _validated_observation(
         )
     try:
         require_provider_origin_response_binding_authority(binding)
+        require_provider_origin_response_binding_store(binding, store)
         _require_qualified_provider_response_authority(
             observation.qualified_observation
         )
@@ -80,6 +88,7 @@ def _validated_observation(
     qualified = observation.qualified_observation
     if (
         binding.execution_class != "DIRECT_PROVIDER_WIRE"
+        or binding.provider_id != _SUPPORTED_PROVIDER
         or binding.provider_id != qualified.provider_id
         or binding.account_id != qualified.account_id
         or binding.environment != qualified.environment
@@ -88,9 +97,30 @@ def _validated_observation(
         or binding.response_sha256 != qualified.observation.response_sha256
     ):
         raise ProviderAccountPageChainError(
-            "provider-origin observation does not match exact durable response"
+            "provider-origin observation does not match exact supported durable response"
         )
-    return binding, _canonical_query(observation)
+
+    events = JournalStore.load_events(store, _PROVIDER_ORIGIN_AGGREGATE, binding.attempt_id)
+    if (
+        len(events) != 3
+        or events[0].get("event_type") != "AuthenticatedReadPrepared"
+        or events[2].get("event_type") != "AuthenticatedReadObserved"
+        or events[2].get("journal_sequence") != binding.journal_sequence
+    ):
+        raise ProviderAccountPageChainError(
+            "provider-origin durable request/response chronology is unavailable"
+        )
+    prepared_sequence = events[0].get("journal_sequence")
+    if (
+        type(prepared_sequence) is not int
+        or prepared_sequence < 1
+        or type(binding.journal_sequence) is not int
+        or binding.journal_sequence <= prepared_sequence
+    ):
+        raise ProviderAccountPageChainError(
+            "provider-origin durable request/response chronology is invalid"
+        )
+    return binding, _canonical_query(observation), prepared_sequence
 
 
 def _parse_bybit_page(observation: ProviderOriginObservation) -> tuple[str, int]:
@@ -338,7 +368,10 @@ def issue_provider_account_page_chain(
     root_query: dict[str, str] | None = None
 
     for observation in observations:
-        binding, query = _validated_observation(observation)
+        binding, query, prepared_sequence = _validated_observation(
+            observation,
+            store=qualification_registry.store,
+        )
         qualified = observation.qualified_observation
         base_query = qualified.query_binding.query_binding
         if (
@@ -393,8 +426,8 @@ def issue_provider_account_page_chain(
                 "request_cursor": cursor,
                 "response_next_cursor": next_cursor,
                 "response_sha256": binding.response_sha256,
-                "observed_at": binding.observed_at,
-                "journal_sequence": binding.journal_sequence,
+                "prepared_journal_sequence": prepared_sequence,
+                "observed_journal_sequence": binding.journal_sequence,
                 "item_count": item_count,
             },
             next_cursor,
@@ -432,14 +465,23 @@ def issue_provider_account_page_chain(
             "provider page chain contains disconnected or caller-added pages"
         )
 
-    previous_sequence = 0
+    previous_observed_sequence: int | None = None
     for page in ordered:
-        sequence = page["journal_sequence"]
-        if type(sequence) is not int or sequence <= previous_sequence:
+        prepared_sequence = page["prepared_journal_sequence"]
+        observed_sequence = page["observed_journal_sequence"]
+        if (
+            type(prepared_sequence) is not int
+            or type(observed_sequence) is not int
+            or prepared_sequence >= observed_sequence
+            or (
+                previous_observed_sequence is not None
+                and prepared_sequence <= previous_observed_sequence
+            )
+        ):
             raise ProviderAccountPageChainError(
                 "provider cursor chain violates durable causal order"
             )
-        previous_sequence = sequence
+        previous_observed_sequence = observed_sequence
 
     assert root_query is not None
     value = object.__new__(ProviderAccountPageChain)

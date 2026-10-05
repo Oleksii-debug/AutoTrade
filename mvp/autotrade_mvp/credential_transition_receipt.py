@@ -80,6 +80,9 @@ _CANONICAL_UUID4 = uuid4
 _CANONICAL_TIME_NS = time_ns
 _CANONICAL_URANDOM = os.urandom
 _CANONICAL_NORMALIZE_PROVIDER_ENVIRONMENT = normalize_provider_environment
+_CANONICAL_AUTHORITY_KEY = _AUTHORITY_KEY
+_CANONICAL_SCHEMA_VERSION = _SCHEMA_VERSION
+_CANONICAL_RECEIPT_FIELDS = frozenset(_RECEIPT_FIELDS)
 
 
 def _canonical_bytes(
@@ -136,8 +139,9 @@ class CredentialTransitionReceipt:
     def __post_init__(
         self,
         _normalize_provider_environment=_CANONICAL_NORMALIZE_PROVIDER_ENVIRONMENT,
+        _schema_version=_CANONICAL_SCHEMA_VERSION,
     ) -> None:
-        if self.schema_version != _SCHEMA_VERSION:
+        if self.schema_version != _schema_version:
             raise CredentialTransitionReceiptError(
                 "credential transition receipt schema is unsupported"
             )
@@ -288,8 +292,9 @@ def _parse_receipt(
     *,
     _receipt_id_from_subject_fn=_receipt_id_from_subject,
     _receipt_type=_CANONICAL_RECEIPT_TYPE,
+    _receipt_fields=_CANONICAL_RECEIPT_FIELDS,
 ) -> CredentialTransitionReceipt:
-    if type(value) is not dict or set(value) != _RECEIPT_FIELDS:
+    if type(value) is not dict or set(value) != _receipt_fields:
         raise CredentialTransitionReceiptError(
             "stored credential transition receipt shape is invalid"
         )
@@ -327,8 +332,9 @@ def _authority_section(
     _parse_receipt_fn=_parse_receipt,
     _uuid4=_CANONICAL_UUID4,
     _b64decode=_CANONICAL_B64DECODE,
+    _authority_key=_CANONICAL_AUTHORITY_KEY,
 ) -> dict[str, object]:
-    section = state.get(_AUTHORITY_KEY)
+    section = state.get(_authority_key)
     if section is None:
         if not create:
             raise CredentialTransitionReceiptError(
@@ -338,7 +344,7 @@ def _authority_section(
             "instance_id": _uuid4().hex,
             "latest_by_handle": {},
         }
-        state[_AUTHORITY_KEY] = section
+        state[_authority_key] = section
     if type(section) is not dict or set(section) != {"instance_id", "latest_by_handle"}:
         raise CredentialTransitionReceiptError(
             "credential transition authority metadata is invalid"
@@ -536,6 +542,7 @@ def _issue_locked(
     _b64encode=_CANONICAL_B64ENCODE,
     _receipt_type=_CANONICAL_RECEIPT_TYPE,
     _clock=_CANONICAL_TIME_NS,
+    _schema_version=_CANONICAL_SCHEMA_VERSION,
 ) -> CredentialTransitionReceipt:
     if prior_handle.purpose != "TRADE" or current_handle.purpose != "TRADE":
         raise CredentialTransitionReceiptError(
@@ -562,7 +569,7 @@ def _issue_locked(
         handle=current_handle,
     )
     subject = {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _schema_version,
         "operation": operation,
         "handle_id": current_handle.handle_id,
         "account_id": current_handle.account_id,

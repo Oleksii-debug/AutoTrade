@@ -713,7 +713,7 @@ class DurableModelCallOrchestrator:
         object | None,
         type | None,
         dict[str, object] | None,
-        tuple[tuple[type, str, Mapping[str, object]], ...],
+        tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
     ]:
         """Freeze exact class and instance authority around caller callbacks."""
         orchestrator_class = object.__getattribute__(self, "__class__")
@@ -793,6 +793,7 @@ class DurableModelCallOrchestrator:
             (
                 authority_class,
                 authority_class.__module__ + "." + authority_class.__qualname__,
+                tuple(type.__getattribute__(authority_class, "__bases__")),
                 MappingProxyType(dict(vars(authority_class))),
             )
             for authority_class in authority_classes
@@ -827,7 +828,7 @@ class DurableModelCallOrchestrator:
             object | None,
             type | None,
             dict[str, object] | None,
-            tuple[tuple[type, str, Mapping[str, object]], ...],
+            tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
@@ -854,7 +855,37 @@ class DurableModelCallOrchestrator:
 
         # Restore raw class dictionaries first. Descriptor identity comparison
         # avoids invoking attacker-defined equality during recovery.
-        for authority_class, class_label, expected_class_state in class_authority:
+        for (
+            authority_class,
+            class_label,
+            expected_bases,
+            expected_class_state,
+        ) in class_authority:
+            current_bases = type.__getattribute__(authority_class, "__bases__")
+            if len(current_bases) != len(expected_bases) or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            ):
+                label = "class." + class_label + ".__bases__"
+                changes.append(label)
+                try:
+                    type.__setattr__(authority_class, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        label + " could not be restored after callback"
+                    ) from error
+                restored_bases = type.__getattribute__(
+                    authority_class,
+                    "__bases__",
+                )
+                if len(restored_bases) != len(expected_bases) or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                ):
+                    raise ModelCallError(
+                        label + " could not be restored after callback"
+                    )
+
             current_class_state = vars(authority_class)
             current_names = set(current_class_state)
             expected_names = set(expected_class_state)

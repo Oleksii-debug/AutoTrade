@@ -1,6 +1,6 @@
 """Shared JournalStore regressions for ZERO checkpoint and Host UI outbox ownership.
 
-The provider-free worker and Host intentionally share one JournalStore.  Host
+The provider-free worker and Host intentionally share one JournalStore. Host
 control traffic is not ZERO runtime state and ZERO is not a UI publisher.
 """
 from pathlib import Path
@@ -57,7 +57,6 @@ class SharedStoreZeroCheckpointOutboxTests(unittest.TestCase):
             row["event_id"],
             topic="ui.host-events",
         )
-        self.assertIsNotNone(state)
         self.assertFalse(state["delivered"])
         self.assertEqual(state["outbox_id"], row["outbox_id"])
         self.assertEqual(state["envelope_hash"], row["envelope_hash"])

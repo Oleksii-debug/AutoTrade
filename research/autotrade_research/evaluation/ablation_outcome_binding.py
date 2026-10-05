@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID
 
 from research.autotrade_research.evaluation.ablation import (
     CanonicalAblationOutcomeEvidence,
@@ -24,6 +25,25 @@ from research.autotrade_research.memory.reconciled_outcome import (
     resolve_reconciled_outcome_fact,
     reverify_reconciled_outcome_fact,
 )
+
+
+def _canonical_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise MemoryIntegrityError(f"{name} must be exact canonical non-empty text")
+    return value
+
+
+def _sha256(value: object, *, name: str) -> str:
+    normalized = _canonical_text(value, name=name)
+    prefix = "sha256:"
+    if not normalized.startswith(prefix):
+        raise MemoryIntegrityError(f"{name} must be a sha256 digest")
+    material = normalized[len(prefix) :]
+    if len(material) != 64 or any(
+        character not in "0123456789abcdef" for character in material
+    ):
+        raise MemoryIntegrityError(f"{name} must be a canonical sha256 digest")
+    return normalized
 
 
 def _stored_utc(value: object, *, name: str) -> datetime:
@@ -43,7 +63,11 @@ def _stored_utc(value: object, *, name: str) -> datetime:
 
 @dataclass(frozen=True)
 class BoundReconciledAblationOutcome:
-    """Non-numeric binding between one ablation artifact and one memory fact."""
+    """Non-numeric binding between one ablation artifact and one memory fact.
+
+    This is a value object, not an issuer capability.  Its embedded reconciled fact
+    still has to be reverified against ExperienceMemory at every authority boundary.
+    """
 
     case_id: str
     variant: str
@@ -53,6 +77,16 @@ class BoundReconciledAblationOutcome:
     effective_outcome_available_utc: datetime
 
     def __post_init__(self) -> None:
+        _canonical_text(self.case_id, name="case_id")
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
+            raise MemoryIntegrityError("variant must be exact FULL or ABLATED text")
+        try:
+            canonical_episode_id = str(UUID(self.population_unit_id))
+        except (TypeError, ValueError, AttributeError) as error:
+            raise MemoryIntegrityError("population_unit_id must be a canonical UUID") from error
+        if canonical_episode_id != self.population_unit_id:
+            raise MemoryIntegrityError("population_unit_id must be a canonical UUID")
+        _sha256(self.ablation_artifact_digest, name="ablation_artifact_digest")
         if type(self.reconciled_fact) is not ReconciledOutcomeFactEvidence:
             raise TypeError("reconciled_fact must be exact ReconciledOutcomeFactEvidence")
         self.reconciled_fact.verify_integrity()
@@ -64,6 +98,14 @@ class BoundReconciledAblationOutcome:
             raise TypeError("effective_outcome_available_utc must be exact datetime")
         if self.effective_outcome_available_utc.tzinfo is not timezone.utc:
             raise ValueError("effective_outcome_available_utc must use exact UTC timezone")
+        fact_cutoff = _stored_utc(
+            self.reconciled_fact.causal_cutoff,
+            name="reconciled fact causal_cutoff",
+        )
+        if self.effective_outcome_available_utc > fact_cutoff:
+            raise MemoryIntegrityError(
+                "effective outcome availability cannot follow reconciled fact cutoff"
+            )
 
 
 def bind_ablation_outcome_to_reconciled_fact(

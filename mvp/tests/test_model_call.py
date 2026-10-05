@@ -893,7 +893,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 ["ModelCallPrepared", "ModelCallNotSent"],
             )
 
-    def test_zero_and_cancelled_new_attempts_never_touch_model_inventory(self):
+    def test_zero_cancelled_and_expired_new_attempts_never_touch_model_inventory(self):
         class ExplodingInventory:
             def __iter__(self):
                 raise AssertionError("model inventory must not be touched")
@@ -905,17 +905,26 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     maximum_cost=Decimal("2"),
                 ),
                 False,
+                NOW,
                 "NO_MODEL",
                 "zero_model_policy",
             ),
             (
                 fixed_policy(),
                 True,
+                NOW,
                 "REJECTED",
                 "request_cancelled",
             ),
+            (
+                fixed_policy(),
+                False,
+                NOW + timedelta(hours=2),
+                "REJECTED",
+                "deadline_expired",
+            ),
         )
-        for policy, cancelled, expected_status, expected_reason in cases:
+        for policy, cancelled, route_now, expected_status, expected_reason in cases:
             with self.subTest(expected_reason=expected_reason), TemporaryDirectory() as directory:
                 _journal, budget = open_budget(directory)
                 orchestrator = orchestrator_for(
@@ -939,7 +948,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                         "inventory-free route must not cross inference boundary"
                     ),
                     validate_result=lambda _value: True,
-                    now_utc=NOW,
+                    now_utc=route_now,
                 )
                 self.assertEqual(outcome.status, expected_status)
                 self.assertEqual(outcome.reason, expected_reason)

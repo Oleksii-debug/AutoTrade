@@ -698,11 +698,45 @@ def run_declared_target_host_campaign_with_resources(
     descriptor_states = (
         *_capture_descriptor_authority(
             RuntimeTargetHostResourceSnapshot,
-            ("__init__", "__post_init__", "payload"),
+            (
+                "process_id",
+                "monotonic_ns",
+                "process_cpu_ns",
+                "peak_rss_bytes",
+                "io_read_bytes",
+                "io_write_bytes",
+                "disk_total_bytes",
+                "disk_free_bytes",
+                "thread_count",
+                "__init__",
+                "__post_init__",
+                "payload",
+            ),
         ),
         *_capture_descriptor_authority(
             RuntimeTargetHostResourceEvidence,
             (
+                "authority_id",
+                "authority_digest",
+                "source_sha",
+                "release_artifact_id",
+                "release_artifact_sha256",
+                "scenario_id",
+                "spec_digest",
+                "host_fingerprint",
+                "inventory_artifact_id",
+                "inventory_payload_sha256",
+                "measurement_artifact_id",
+                "measurement_payload_sha256",
+                "run_receipt_artifact_id",
+                "run_receipt_payload_sha256",
+                "reconnect_backlog_remaining",
+                "before",
+                "after",
+                "resource_evidence_status",
+                "terminal_qualification_eligible",
+                "schema_version",
+                "evidence_type",
                 "__init__",
                 "__post_init__",
                 "canonical_payload",
@@ -711,11 +745,23 @@ def run_declared_target_host_campaign_with_resources(
             ),
         ),
         *_capture_descriptor_authority(
-            PublishedRuntimeTargetHostResourceEvidence, ("__init__",)
+            PublishedRuntimeTargetHostResourceEvidence,
+            (
+                "artifact_id",
+                "payload_sha256",
+                "resource_evidence_status",
+                "__init__",
+            ),
         ),
         *_capture_descriptor_authority(
             RuntimeTargetHostResourceRunResult,
-            ("__init__", "terminal_qualification_eligible"),
+            (
+                "run",
+                "resource_evidence",
+                "published_resource_evidence",
+                "__init__",
+                "terminal_qualification_eligible",
+            ),
         ),
     )
     class_function_states = tuple(

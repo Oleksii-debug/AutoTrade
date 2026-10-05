@@ -1587,13 +1587,79 @@ class DurableModelCallOrchestrator:
             )
 
         cancelled = cancel_requested or (lambda: False)
-        # The cancellation callback may consume time; check time afterwards.
-        cancelled_before_start = cancelled()
+        # The cancellation probe is caller-owned code that runs before the
+        # inference boundary. Freeze the exact durable authorities around it so
+        # it cannot redirect the NOT_SENT proof, release, chronology, or a later
+        # call through a retained orchestrator closure.
+        cancellation_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        cancellation_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        cancellation_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        cancellation_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        cancellation_error: Exception | None = None
+        cancellation_changes: list[str] = []
+        cancelled_before_start: object = False
+        try:
+            try:
+                cancelled_before_start = cancelled()
+            except Exception as error:
+                cancellation_error = error
+        finally:
+            for name, expected in cancellation_refs.items():
+                if getattr(self, name, None) is not expected:
+                    cancellation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in cancellation_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    cancellation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in cancellation_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    cancellation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in cancellation_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    cancellation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+
         temporal_reason = self._temporal_reason(prepared_payload, request)
-        if cancelled_before_start or temporal_reason is not None:
+        cancellation_reason: str | None = None
+        if cancellation_changes:
+            cancellation_reason = (
+                "cancellation_probe_mutated_orchestrator_authority:"
+                + ",".join(sorted(cancellation_changes))
+            )
+        elif cancellation_error is not None:
+            cancellation_reason = "cancellation_probe_failed"
+        elif type(cancelled_before_start) is not bool:
+            cancellation_reason = "cancellation_probe_returned_invalid_state"
+        elif cancelled_before_start:
+            cancellation_reason = "cancelled_before_call_boundary"
+        elif temporal_reason is not None:
+            cancellation_reason = temporal_reason
+
+        if cancellation_reason is not None:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "cancelled_before_call_boundary" if cancelled_before_start else temporal_reason,
+                "reason": cancellation_reason,
                 "released": str(decision.reserved_cost),
             }
             self._append(
@@ -1930,11 +1996,53 @@ class DurableModelCallOrchestrator:
             "result_schema_id": spec.result_schema_id,
             "schema_valid": None,
         }
+        validation_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        validation_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        validation_budget_refs = {
+            "journal": self.budget.journal,
+            "_clock": self.budget._clock,
+        }
+        validation_budget_values = {
+            "budget_id": self.budget.budget_id,
+            "environment": self.budget.environment,
+            "_ceiling": self.budget._ceiling,
+        }
+        validation_changes: list[str] = []
         try:
-            schema_valid = validate_result(json.loads(result_json))
-        except Exception:
-            schema_valid = False
-        if type(schema_valid) is not bool:
+            try:
+                schema_valid = validate_result(json.loads(result_json))
+            except Exception:
+                schema_valid = False
+        finally:
+            for name, expected in validation_refs.items():
+                if getattr(self, name, None) is not expected:
+                    validation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in validation_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    validation_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in validation_budget_refs.items():
+                if getattr(self.budget, name, None) is not expected:
+                    validation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+            for name, expected in validation_budget_values.items():
+                current = getattr(self.budget, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    validation_changes.append("budget." + name)
+                setattr(self.budget, name, expected)
+        if validation_changes or type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
         self._append(

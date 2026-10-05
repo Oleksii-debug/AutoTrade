@@ -83,6 +83,21 @@ def _text(value: object, *, name: str) -> str:
     return stripped
 
 
+def _freeze_request_body(value: object, *, name: str) -> Mapping[str, str]:
+    """Freeze an internally-shaped provider request without mapping callbacks."""
+
+    if type(value) is not dict:
+        raise BinanceSpotAdapterError(f"{name} must be an exact request mapping")
+    frozen: dict[str, str] = {}
+    for key, item in value.items():
+        if type(key) is not str or type(item) is not str:
+            raise BinanceSpotAdapterError(
+                f"{name} keys and values must be exact strings"
+            )
+        frozen[key] = item
+    return MappingProxyType(frozen)
+
+
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
     try:
         result = parse_bounded_exact_decimal(value)
@@ -1484,7 +1499,11 @@ class BinanceSpotPreparedRequest:
                     raise BinanceSpotAdapterError(
                         "market reference kind/window combination is invalid"
                     )
-        object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
+        object.__setattr__(
+            self,
+            "body",
+            _freeze_request_body(self.body, name="prepared request body"),
+        )
         object.__setattr__(self, "filter_source_sha256", digest)
         object.__setattr__(
             self,

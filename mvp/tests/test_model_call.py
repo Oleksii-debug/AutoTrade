@@ -2831,6 +2831,43 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(snapshot.incurred, Decimal("0"))
             self.assertEqual(snapshot.estimated_unbilled, Decimal("0"))
 
+    def test_cancel_callback_selection_does_not_execute_truthiness(self):
+        class HostileCancel:
+            bool_calls = 0
+            call_calls = 0
+
+            def __bool__(self):
+                type(self).bool_calls += 1
+                raise AssertionError("cancel callback truthiness must not execute")
+
+            def __call__(self):
+                type(self).call_calls += 1
+                return False
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            callback = HostileCancel()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=callback,
+            )
+
+            self.assertEqual(result.status, "OBSERVED_VALID")
+            self.assertEqual(HostileCancel.bool_calls, 0)
+            self.assertEqual(HostileCancel.call_calls, 1)
+
     def test_cancel_callback_rejects_executable_non_boolean_result(self):
         class HostileTruthiness:
             bool_calls = 0

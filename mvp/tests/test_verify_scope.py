@@ -65,7 +65,6 @@ class VerifyScopeTests(unittest.TestCase):
         self.assertIn("tests/Integration/LeanAdoption", text)
         self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
 
-
     def test_recovery_qualification_has_dedicated_exact_head_workflow(self):
         workflow = verify.ROOT / ".github" / "workflows" / "recovery-qualification.yml"
         text = workflow.read_text(encoding="utf-8")
@@ -85,8 +84,23 @@ class VerifyScopeTests(unittest.TestCase):
         )
         self.assertIn("tools/write_ci_evidence.py", text)
         self.assertIn("--suite recovery-qualification-foundation", text)
-        self.assertIn("mvp/autotrade_mvp/recovery_qualification.py", text)
-        self.assertIn("mvp/autotrade_mvp/qualification_attestation.py", text)
+
+        critical_trigger_paths = (
+            "docs/qualification/recovery/WP59_PROTOCOL_EVIDENCE.md",
+            "mvp/autotrade_mvp/recovery_qualification.py",
+            "mvp/autotrade_mvp/qualification_attestation.py",
+            "mvp/tests/test_recovery_qualification.py",
+            "mvp/tests/test_verify_scope.py",
+            "research/autotrade_research/artifacts/**",
+            "tools/write_ci_evidence.py",
+            ".github/workflows/recovery-qualification.yml",
+        )
+        for path in critical_trigger_paths:
+            self.assertGreaterEqual(
+                text.count(f'- "{path}"'),
+                2,
+                f"recovery qualification must rerun on pull_request and push changes to {path}",
+            )
 
 
 if __name__ == "__main__":

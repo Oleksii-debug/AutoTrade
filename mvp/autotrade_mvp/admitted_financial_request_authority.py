@@ -207,6 +207,10 @@ def _install_authority_types():
         __slots__ = ("__weakref__",)
 
         def __init__(self, store: JournalStore) -> None:
+            if type(self) is not AdmittedFinancialRequestAuthorityIssuer:
+                raise TypeError(
+                    "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
+                )
             if type(store) is not JournalStore:
                 raise TypeError("store must be exact JournalStore")
             registry = DurableFinancialRequestBindingRegistry(store)
@@ -218,6 +222,10 @@ def _install_authority_types():
                 issuer_states[self] = registry
 
         def _registry(self) -> DurableFinancialRequestBindingRegistry:
+            if type(self) is not AdmittedFinancialRequestAuthorityIssuer:
+                raise TypeError(
+                    "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
+                )
             with lock:
                 registry = issuer_states.get(self)
             if registry is None:
@@ -230,6 +238,10 @@ def _install_authority_types():
             self,
             authority: AdmittedFinancialRequestAuthority,
         ) -> tuple[str, FinancialRequestBindingMaterial]:
+            if type(self) is not AdmittedFinancialRequestAuthorityIssuer:
+                raise TypeError(
+                    "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
+                )
             if type(authority) is not AdmittedFinancialRequestAuthority:
                 raise AdmittedFinancialRequestAuthorityError(
                     "admitted financial request authority has invalid exact type"
@@ -258,6 +270,10 @@ def _install_authority_types():
             return admission_id, material
 
         def issue(self, admission_id: str) -> AdmittedFinancialRequestAuthority:
+            if type(self) is not AdmittedFinancialRequestAuthorityIssuer:
+                raise TypeError(
+                    "issuer must be exact AdmittedFinancialRequestAuthorityIssuer"
+                )
             aid = _exact_text(admission_id, name="admission_id")
             try:
                 material = self._registry().resolve(aid)

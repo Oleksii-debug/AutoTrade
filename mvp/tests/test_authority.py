@@ -2745,6 +2745,10 @@ class AuthorityTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
+                risk_event["payload"]["evaluated_intent_hash"],
+                risk_module.risk_intent_hash(public_risk_intent()),
+            )
+            self.assertEqual(
                 risk_event["payload"]["financial_idempotency_key"],
                 authority_module._authority_event_id(
                     "FinancialAdmissionIdempotency",

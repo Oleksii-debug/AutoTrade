@@ -292,51 +292,27 @@ class ProviderQualificationProtocol:
 
 
 # Runtime registration would reintroduce caller-selected protocol semantics.
-# The descriptor below fixes the product-owned protocol/case contract in source;
-# it deliberately does not configure signer roots or a trust-policy file. Those
-# remain a separate independently reviewed authority consumed only by the
-# canonical attestation verifier.
-_PROVIDER_ROUTE_V1 = ProviderQualificationProtocol(
-    key="PROVIDER_ROUTE_V1",
-    domain="PROVIDER",
-    gate="ROUTE_QUALIFICATION",
-    package_id="AUTOTRADE",
-    protocol_id="provider-route-v1",
-    protocol_version="1.0.0",
-    requirement_id="provider-route-required",
-)
-_SOURCE_PROTOCOLS: Mapping[str, ProviderQualificationProtocol] = MappingProxyType(
-    {_PROVIDER_ROUTE_V1.key: _PROVIDER_ROUTE_V1}
-)
-
-
+# Keep the one supported route descriptor in executable source literals instead of
+# a retained Python object or module-level mapping. A frozen dataclass can still
+# be mutated with object.__setattr__, and module globals can be rebound; neither
+# mechanism may become provider-Q authority.
 def source_provider_qualification_protocol(
     key: str,
 ) -> ProviderQualificationProtocol:
     key = _token(key, name="protocol key")
-    try:
-        protocol = _SOURCE_PROTOCOLS[key]
-    except KeyError as error:
+    if key != "PROVIDER_ROUTE_V1":
         raise ProviderQualificationUnavailable(
             "no source-controlled provider qualification protocol is configured"
-        ) from error
-    if type(protocol) is not ProviderQualificationProtocol:
-        raise ProviderQualificationUnavailable(
-            "provider qualification protocol authority is invalid"
         )
-    # Never expose the shared source-owned descriptor itself. Frozen dataclasses
-    # remain mutable through object.__setattr__, so returning the shared object
-    # would let one caller retarget future protocol resolution. Reconstruct an
-    # exact detached value from the retained source descriptor on every lookup.
     return ProviderQualificationProtocol(
-        key=protocol.key,
-        domain=protocol.domain,
-        gate=protocol.gate,
-        package_id=protocol.package_id,
-        protocol_id=protocol.protocol_id,
-        protocol_version=protocol.protocol_version,
-        requirement_id=protocol.requirement_id,
-        campaign_evidence_kind=protocol.campaign_evidence_kind,
+        key="PROVIDER_ROUTE_V1",
+        domain="PROVIDER",
+        gate="ROUTE_QUALIFICATION",
+        package_id="AUTOTRADE",
+        protocol_id="provider-route-v1",
+        protocol_version="1.0.0",
+        requirement_id="provider-route-required",
+        campaign_evidence_kind="PROVIDER_QUALIFICATION_CAMPAIGN",
     )
 
 

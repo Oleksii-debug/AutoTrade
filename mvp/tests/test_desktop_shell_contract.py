@@ -94,6 +94,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessExited", code)
         self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessUnresponsive", code)
         self.assertIn("_trustedWebDocumentActive = false", code)
+        self.assertIn("ProductWebViewHost.Visibility = Visibility.Collapsed", code)
         self.assertIn("ReloadWeb_Click", code)
         self.assertIn("DisposeWebExperience();", code)
         self.assertIn("webView?.Dispose();", code)

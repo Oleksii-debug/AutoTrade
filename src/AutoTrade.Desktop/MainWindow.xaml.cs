@@ -275,6 +275,7 @@ public partial class MainWindow : Window
         // WebView2 instance without re-entering the failing callback.
         _trustedWebDocumentActive = false;
         FocusWebButton.IsEnabled = false;
+        ProductWebViewHost.Visibility = Visibility.Collapsed;
         ReloadWebButton.IsEnabled = true;
         SetLiveRegionText(
             WebExperienceStatus,

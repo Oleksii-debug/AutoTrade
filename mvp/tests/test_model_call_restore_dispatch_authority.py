@@ -325,5 +325,57 @@ class ModelCallRestoreDispatchAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_model_call_clock_cannot_redirect_utc_normalizer(self):
+        original_utc_text = model_call_module._utc_text
+        forged_calls = []
+        inference_calls = []
+
+        def forged_utc_text(*_args, **_kwargs):
+            forged_calls.append("called")
+            raise AssertionError("clock redirected UTC normalizer")
+
+        def hostile_clock():
+            model_call_module._utc_text = forged_utc_text
+            return NOW_TEXT
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = ORIGINAL_ORCHESTRATOR_CLASS(
+                budget=budget,
+                clock=hostile_clock,
+                pricing_evidence_resolver=_pricing,
+                observation_evidence_resolver=lambda *_args: None,
+                billing_evidence_resolver=lambda *_args: None,
+            )
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+
+            try:
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    r"clock mutated orchestrator authority:.*module\._utc_text",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: inference_calls.append("inference"),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                    )
+            finally:
+                model_call_module._utc_text = original_utc_text
+
+            self.assertEqual(forged_calls, [])
+            self.assertIs(model_call_module._utc_text, original_utc_text)
+            self.assertEqual(inference_calls, [])
+            self.assertEqual(
+                budget.active_reservation(attempt_id),
+                Decimal("1.2"),
+            )
+            self.assertEqual(orchestrator._events(attempt_id), [])
+
+
 if __name__ == "__main__":
     unittest.main()

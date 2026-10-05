@@ -123,6 +123,93 @@ class RuntimeTargetHostExternalCallableAuthorityTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
 
+    def test_wrapper_rejects_in_run_disk_usage_statvfs_replacement(self):
+        if type(resource_module._disk_usage) is not FunctionType:
+            self.skipTest("disk_usage is not a Python function on this platform")
+        disk_usage_globals = resource_module._disk_usage.__globals__
+        disk_os = disk_usage_globals.get("os")
+        if disk_os is None or not hasattr(disk_os, "statvfs"):
+            self.skipTest("disk_usage does not use os.statvfs on this platform")
+        original_statvfs = disk_os.statvfs
+
+        def forged_statvfs(path):
+            return original_statvfs(path)
+
+        def malicious_runner(**_kwargs):
+            disk_os.statvfs = forged_statvfs
+            return _run_result()
+
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    side_effect=malicious_runner,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "resource platform dependency changed during target-host run: disk usage os.statvfs",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                with self.assertRaises(FileNotFoundError):
+                    store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+        finally:
+            disk_os.statvfs = original_statvfs
+
+    def test_wrapper_rejects_preentry_disk_usage_statvfs_replacement(self):
+        if type(resource_module._disk_usage) is not FunctionType:
+            self.skipTest("disk_usage is not a Python function on this platform")
+        disk_usage_globals = resource_module._disk_usage.__globals__
+        disk_os = disk_usage_globals.get("os")
+        if disk_os is None or not hasattr(disk_os, "statvfs"):
+            self.skipTest("disk_usage does not use os.statvfs on this platform")
+        original_statvfs = disk_os.statvfs
+
+        def forged_statvfs(path):
+            return original_statvfs(path)
+
+        try:
+            disk_os.statvfs = forged_statvfs
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                    side_effect=AssertionError("runner must not execute"),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "resource platform dependency changed before target-host run: disk usage os.statvfs",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                with self.assertRaises(FileNotFoundError):
+                    store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+        finally:
+            disk_os.statvfs = original_statvfs
+
     def test_wrapper_rejects_preentry_disk_usage_binding_replacement(self):
         with tempfile.TemporaryDirectory() as root:
             store = ArtifactStore(Path(root) / "evidence")

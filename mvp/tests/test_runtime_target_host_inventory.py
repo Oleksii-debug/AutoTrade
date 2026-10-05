@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -89,6 +90,29 @@ class RuntimeTargetHostInventoryTests(unittest.TestCase):
             "canonical non-empty text",
         ):
             host_identity_fingerprint({**IDENTITY, "machine": ""})
+
+    def test_host_identity_rejects_executable_mapping_before_callbacks(self) -> None:
+        callbacks: list[str] = []
+
+        class HostileMapping(Mapping):
+            def __getitem__(self, key):
+                callbacks.append(f"getitem:{key}")
+                raise AssertionError("hostile mapping callback executed")
+
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile mapping callback executed")
+
+            def __len__(self):
+                callbacks.append("len")
+                raise AssertionError("hostile mapping callback executed")
+
+        with self.assertRaisesRegex(
+            RuntimeTargetHostInventoryError,
+            "exact dict or canonical mappingproxy",
+        ):
+            host_identity_fingerprint(HostileMapping())
+        self.assertEqual(callbacks, [])
 
     def test_parser_rejects_duplicate_keys_and_noncanonical_json(self) -> None:
         expected = host_identity_fingerprint(IDENTITY)

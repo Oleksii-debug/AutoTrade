@@ -391,10 +391,12 @@ def _publish_run_receipt(
     *,
     artifact_id: str,
     receipt: RuntimeTargetHostRunReceipt,
+    publish_bytes: Callable[..., dict[str, object]],
 ) -> str:
     raw = receipt.canonical_bytes()
     digest = receipt.digest
-    manifest = evidence_store.publish_bytes(
+    manifest = publish_bytes(
+        evidence_store,
         artifact_id=artifact_id,
         data=raw,
         media_type=_JSON_MEDIA_TYPE,
@@ -519,8 +521,8 @@ def run_declared_target_host_campaign(
     measure_research = measure_declared_research_interference
     collect_measurement = collect_runtime_target_host_measurement
     publish_measurement = publish_runtime_target_host_measurement
-    read_snapshot = evidence_store.read_authenticated_snapshot
-    publish_bytes = evidence_store.publish_bytes
+    read_snapshot = ArtifactStore.read_authenticated_snapshot
+    publish_bytes = ArtifactStore.publish_bytes
     protected = (
         ("financial measurement issuer", measure_financial, _capture_callable_authority(measure_financial)),
         ("research measurement issuer", measure_research, _capture_callable_authority(measure_research)),
@@ -531,6 +533,14 @@ def run_declared_target_host_campaign(
     )
 
     def require_runner_authority() -> None:
+        if ArtifactStore.read_authenticated_snapshot is not read_snapshot:
+            raise RuntimeTargetHostRunnerError(
+                "ArtifactStore authenticated reader authority changed during target-host run"
+            )
+        if ArtifactStore.publish_bytes is not publish_bytes:
+            raise RuntimeTargetHostRunnerError(
+                "ArtifactStore publisher authority changed during target-host run"
+            )
         for name, function, state in protected:
             _require_callable_authority(function, state, name=name)
 
@@ -577,12 +587,12 @@ def run_declared_target_host_campaign(
         artifact=measurement,
     )
 
-    inventory_manifest, _inventory_raw = read_snapshot(inventory_artifact_id)
+    inventory_manifest, _inventory_raw = read_snapshot(evidence_store, inventory_artifact_id)
     if inventory_manifest.get("sha256") != published_inventory.payload_sha256:
         raise RuntimeTargetHostRunnerError(
             "retained target-host inventory changed during campaign"
         )
-    measurement_manifest, measurement_raw = read_snapshot(measurement_artifact_id)
+    measurement_manifest, measurement_raw = read_snapshot(evidence_store, measurement_artifact_id)
     if (
         measurement_manifest.get("sha256") != published_measurement.payload_sha256
         or measurement_raw != measurement.canonical_bytes()
@@ -616,8 +626,9 @@ def run_declared_target_host_campaign(
         evidence_store,
         artifact_id=run_receipt_artifact_id,
         receipt=receipt,
+        publish_bytes=publish_bytes,
     )
-    _receipt_manifest, receipt_raw = read_snapshot(run_receipt_artifact_id)
+    _receipt_manifest, receipt_raw = read_snapshot(evidence_store, run_receipt_artifact_id)
     if receipt_raw != receipt.canonical_bytes():
         raise RuntimeTargetHostRunnerError(
             "retained target-host run receipt bytes changed during publication"

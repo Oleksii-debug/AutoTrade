@@ -76,7 +76,8 @@ def publish_runtime_target_host_measurement(
     raw = artifact.canonical_bytes()
     digest = artifact.digest
 
-    manifest = evidence_store.publish_bytes(
+    manifest = ArtifactStore.publish_bytes(
+        evidence_store,
         artifact_id=normalized_artifact_id,
         data=raw,
         media_type=JSON_MEDIA_TYPE,

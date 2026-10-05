@@ -742,6 +742,19 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 borrow_available=True,
             )
 
+    def test_malformed_decimal_is_not_misreported_as_resource_exhaustion(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "bounded finite decimal",
+        ):
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity=" 1 ",
+                price="1",
+                expected_state_version=7,
+            )
+
     def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             finite_reads = 0

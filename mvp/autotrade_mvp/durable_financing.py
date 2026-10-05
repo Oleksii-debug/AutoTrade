@@ -1008,6 +1008,7 @@ class DurableFinancingBook:
                 event_id=event_id,
                 event=candidate_event,
                 economic_delta=candidate_update.economic_delta,
+                economic_transactions=economic_transactions,
             )
             history = resulting_history
         return FinancingRevisionBook(history)

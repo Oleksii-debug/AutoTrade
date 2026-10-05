@@ -67,15 +67,11 @@ def _oracle_bounded_rational(value: Fraction, *, name: str) -> Fraction:
         ) from error
 
 
-def _oracle_market_fill_price(
+def _oracle_require_market_price_grid(
     *,
     order: SimulatedOrder,
-    observation: LiquidityObservation,
     model: ExecutionModel,
-    capacity: Decimal,
-) -> Decimal:
-    """Independently reconstruct the declared adverse MARKET grid projection."""
-
+) -> None:
     if (
         model.price_tick is None
         or model.price_grid_instrument_version is None
@@ -91,6 +87,19 @@ def _oracle_market_fill_price(
         )
     if model.price_projection_policy != MARKET_PRICE_PROJECTION_POLICY_V1:
         raise ExecutionOracleError("unsupported market price projection policy")
+
+
+def _oracle_market_fill_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+) -> Decimal:
+    """Independently reconstruct the declared adverse MARKET grid projection."""
+
+    _oracle_require_market_price_grid(order=order, model=model)
+    assert model.price_tick is not None
 
     if model.data_fidelity == "BAR":
         if observation.bar_high is None or observation.bar_low is None:
@@ -154,11 +163,16 @@ def _oracle_market_fill_price(
             raise ExecutionOracleError(
                 "configured adverse costs produce non-positive execution price"
             )
-        return round_fraction_to_quantum(
+        projected = round_fraction_to_quantum(
             raw_fill,
             model.price_tick,
             mode="CEILING" if order.side == "BUY" else "FLOOR",
         )
+        if projected <= 0:
+            raise ExecutionOracleError(
+                "adverse price-grid projection produced non-positive execution price"
+            )
+        return projected
     except ExactDecimalError as error:
         raise ExecutionOracleError(
             "MARKET price projection exceeds exact arithmetic resource envelope"
@@ -259,6 +273,8 @@ def assert_conservative_execution(
     result = _detached_execution_result(result)
     if observation.instrument_version != order.instrument_version:
         raise ExecutionOracleError("instrument identity mismatch")
+    if order.order_type == "MARKET":
+        _oracle_require_market_price_grid(order=order, model=model)
     if result.model_fingerprint != model.fingerprint:
         raise ExecutionOracleError("result model fingerprint mismatch")
     if result.data_fidelity != model.data_fidelity or result.scenario != model.scenario:

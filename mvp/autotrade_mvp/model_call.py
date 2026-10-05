@@ -35,7 +35,11 @@ from .model_gateway import (
     _route_now,
     route_model,
 )
-from .persistence import canonical_json, payload_digest
+from .persistence import (
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .exact_decimal import exact_add, parse_bounded_exact_decimal
 
 
@@ -499,6 +503,15 @@ class DurableModelCallOrchestrator:
             raise ValueError(
                 "started_lease_seconds must be an integer from 1 through 3600"
             )
+        try:
+            require_exact_journal_store_authority(
+                budget.journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority is invalid"
+            ) from error
         self.budget = budget
         self.journal = budget.journal
         self.clock = clock
@@ -515,96 +528,167 @@ class DurableModelCallOrchestrator:
     def _now(self) -> str:
         return _utc_text(self.clock(), name="clock")
 
+    @staticmethod
+    def _safe_instance_snapshot(
+        value: object,
+        *,
+        subject: str,
+    ) -> dict[str, object]:
+        state = object.__getattribute__(value, "__dict__")
+        if type(state) is not dict:
+            raise ModelCallError(subject + " authority state is invalid")
+        keys = tuple(state)
+        if any(type(name) is not str for name in keys):
+            raise ModelCallError(subject + " authority state keys are invalid")
+        return dict.copy(state)
+
+    @staticmethod
+    def _restore_safe_instance_state(
+        value: object,
+        expected_state: dict[str, object],
+        *,
+        prefix: str,
+    ) -> list[str]:
+        current_state = object.__getattribute__(value, "__dict__")
+        if type(current_state) is not dict:
+            raise ModelCallError(prefix + " authority state is invalid")
+
+        changes: list[str] = []
+        current_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_keys):
+            changes.append(prefix + ".<invalid-state-key>")
+        current_names = {name for name in current_keys if type(name) is str}
+        expected_names = set(expected_state)
+        for name in sorted(current_names | expected_names):
+            if name not in expected_state or name not in current_state:
+                changes.append(prefix + "." + name)
+                continue
+            current = current_state[name]
+            expected = expected_state[name]
+            if type(expected) in (str, int, bool, Decimal, type(None)):
+                if type(current) is not type(expected) or current != expected:
+                    changes.append(prefix + "." + name)
+            elif current is not expected:
+                changes.append(prefix + "." + name)
+
+        # Avoid deleting hostile keys one-by-one: dict.clear() does not re-enter
+        # attacker-controlled __hash__/__str__ methods, and all restored keys
+        # come from the previously validated exact-str snapshot.
+        dict.clear(current_state)
+        dict.update(current_state, expected_state)
+        return changes
+
     def _callback_shape_snapshot(
         self,
     ) -> tuple[
-        frozenset[str],
-        frozenset[str],
         dict[str, object],
+        dict[str, object],
+        object,
+        dict[str, object],
+        object | None,
         dict[str, object] | None,
     ]:
-        """Freeze instance-shape and JournalStore state around caller callbacks.
-
-        Explicit authority fields are restored by each boundary. This companion
-        snapshot catches method shadows/new instance attributes and mutation of
-        the canonical JournalStore object's own authority state.
-        """
-        identity = getattr(self.journal, "_store_identity", None)
+        """Freeze instance and physical JournalStore authority around callbacks."""
+        self_state = self._safe_instance_snapshot(
+            self,
+            subject="model orchestrator",
+        )
+        budget_state = self._safe_instance_snapshot(
+            self.budget,
+            subject="model budget",
+        )
+        journal = self.journal
+        try:
+            require_exact_journal_store_authority(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority is invalid"
+            ) from error
+        journal_state = self._safe_instance_snapshot(
+            journal,
+            subject="model budget journal",
+        )
+        identity = journal_state.get("_store_identity")
         identity_state = (
-            dict(vars(identity))
+            self._safe_instance_snapshot(
+                identity,
+                subject="model budget journal identity",
+            )
             if identity is not None and hasattr(identity, "__dict__")
             else None
         )
         return (
-            frozenset(vars(self)),
-            frozenset(vars(self.budget)),
-            dict(vars(self.journal)),
+            self_state,
+            budget_state,
+            journal,
+            journal_state,
+            identity,
             identity_state,
         )
 
     def _restore_callback_shape(
         self,
         snapshot: tuple[
-            frozenset[str],
-            frozenset[str],
             dict[str, object],
+            dict[str, object],
+            object,
+            dict[str, object],
+            object | None,
             dict[str, object] | None,
         ],
     ) -> list[str]:
-        orchestrator_names, budget_names, journal_state, identity_state = snapshot
+        (
+            self_state,
+            budget_state,
+            journal,
+            journal_state,
+            identity,
+            identity_state,
+        ) = snapshot
         changes: list[str] = []
 
-        for name in tuple(vars(self)):
-            if name not in orchestrator_names:
-                changes.append(name)
-                delattr(self, name)
-        for name in tuple(vars(self.budget)):
-            if name not in budget_names:
-                changes.append("budget." + name)
-                delattr(self.budget, name)
+        changes.extend(
+            self._restore_safe_instance_state(
+                self,
+                self_state,
+                prefix="orchestrator",
+            )
+        )
+        changes.extend(
+            self._restore_safe_instance_state(
+                self.budget,
+                budget_state,
+                prefix="budget",
+            )
+        )
+        changes.extend(
+            self._restore_safe_instance_state(
+                journal,
+                journal_state,
+                prefix="journal",
+            )
+        )
+        if identity is not None and identity_state is not None:
+            changes.extend(
+                self._restore_safe_instance_state(
+                    identity,
+                    identity_state,
+                    prefix="journal._store_identity",
+                )
+            )
 
-        current_journal_state = vars(self.journal)
-        for name in sorted(set(current_journal_state) | set(journal_state)):
-            if name not in journal_state:
-                changes.append("journal." + name)
-                continue
-            if name not in current_journal_state:
-                changes.append("journal." + name)
-                continue
-            current = current_journal_state[name]
-            expected = journal_state[name]
-            if type(expected) in (str, int, bool, Decimal, type(None)):
-                if type(current) is not type(expected) or current != expected:
-                    changes.append("journal." + name)
-            elif current is not expected:
-                changes.append("journal." + name)
-        if changes:
-            current_journal_state.clear()
-            current_journal_state.update(journal_state)
-
-        identity = journal_state.get("_store_identity")
-        if identity_state is not None:
-            if identity is None or not hasattr(identity, "__dict__"):
-                changes.append("journal._store_identity")
-            else:
-                current_identity_state = vars(identity)
-                for name in sorted(set(current_identity_state) | set(identity_state)):
-                    if name not in identity_state or name not in current_identity_state:
-                        changes.append("journal._store_identity." + name)
-                        continue
-                    current = current_identity_state[name]
-                    expected = identity_state[name]
-                    if type(current) is not type(expected) or current != expected:
-                        changes.append("journal._store_identity." + name)
-                if any(
-                    item == "journal._store_identity"
-                    or item.startswith("journal._store_identity.")
-                    for item in changes
-                ):
-                    current_identity_state.clear()
-                    current_identity_state.update(identity_state)
-        elif identity is not None:
-            changes.append("journal._store_identity")
+        try:
+            require_exact_journal_store_authority(
+                journal,
+                subject="model budget journal",
+            )
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ModelCallError(
+                "durable model budget journal authority changed"
+            ) from error
         return changes
 
     @staticmethod

@@ -124,17 +124,19 @@ class AcceptedProviderAccountCutTests(unittest.TestCase):
                     at=NOW,
                 )
 
-    def test_mismatched_coverage_set_cannot_issue_cut(self):
-        with TemporaryDirectory() as first, TemporaryDirectory() as second:
-            one = self._fixture(first)
-            two = self._fixture(second)
-            with self.assertRaises(AcceptedProviderAccountCutError):
+    def test_non_authoritative_coverage_value_is_rejected_by_exact_type(self):
+        with TemporaryDirectory() as directory:
+            fixture = self._fixture(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "coverage_set must be exact ProviderAccountRequiredSurfaceCoverageSet",
+            ):
                 issue_accepted_serialized_readback_account_cut(
-                    account_acquisition_authority=one[1],
-                    account_acquisition=one[2],
-                    origin_set=one[3],
-                    coverage_set=self._coverage_set(two),
-                    qualification_registry=one[0],
+                    account_acquisition_authority=fixture[1],
+                    account_acquisition=fixture[2],
+                    origin_set=fixture[3],
+                    coverage_set=object(),
+                    qualification_registry=fixture[0],
                     at=NOW,
                 )
 

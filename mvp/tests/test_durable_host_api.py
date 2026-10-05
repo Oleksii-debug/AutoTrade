@@ -2154,6 +2154,17 @@ class JournalBackedHostApiTests(unittest.TestCase):
         recent = store.events_after(1)
         self.assertEqual([event.cursor for event in recent], [2, 3])
 
+    def test_event_cursor_requires_canonical_sequence_identity_before_journal_read(self):
+        store = self.store()
+
+        def unexpected_journal_read():
+            self.fail("noncanonical cursor reached durable event lookup")
+
+        store._events = unexpected_journal_read
+        for after in ("", "00", "01", "+1", "-0", " 0", "0 ", "1\n", True, 0.0):
+            with self.subTest(after=after), self.assertRaises((TypeError, ValueError)):
+                store.events_after(after)
+
     def test_true_concurrent_commit_fence_returns_state_conflict(self):
         first = self.store()
         original_commit = first._journal.commit_command

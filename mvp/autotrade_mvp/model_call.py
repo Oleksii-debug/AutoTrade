@@ -518,41 +518,55 @@ class DurableModelCallOrchestrator:
     @staticmethod
     def _capture_nested_budget_authority(
         budget: DurableModelBudget,
-    ) -> tuple[DurableModelBudget, dict[str, object], dict[str, object]]:
-        """Capture every mutable DurableModelBudget authority field."""
-        return (
-            budget,
-            {
-                "journal": budget.journal,
-                "_clock": budget._clock,
-            },
-            {
-                "budget_id": budget.budget_id,
-                "environment": budget.environment,
-                "_ceiling": budget._ceiling,
-            },
-        )
+    ) -> tuple[DurableModelBudget, dict[str, object]]:
+        """Capture the exact canonical DurableModelBudget instance state.
+
+        DurableModelBudget has no slots, so caller-owned callbacks can otherwise
+        install instance attributes that shadow class-owned methods such as
+        release(), settle(), or reconcile_unbilled() without replacing the
+        top-level budget reference or any of its five data fields.
+        """
+        state = object.__getattribute__(budget, "__dict__")
+        if type(state) is not dict:
+            raise ModelCallError("durable model budget authority state is invalid")
+        expected_fields = {
+            "journal",
+            "budget_id",
+            "environment",
+            "_clock",
+            "_ceiling",
+        }
+        if set(state) != expected_fields:
+            raise ModelCallError("durable model budget authority state is invalid")
+        return budget, dict.copy(state)
 
     @staticmethod
     def _restore_nested_budget_authority(
-        snapshot: tuple[
-            DurableModelBudget,
-            dict[str, object],
-            dict[str, object],
-        ],
+        snapshot: tuple[DurableModelBudget, dict[str, object]],
     ) -> list[str]:
-        """Restore captured budget internals before any later durable action."""
-        budget, refs, values = snapshot
+        """Restore budget fields and remove any callback-installed shadows."""
+        budget, expected_state = snapshot
+        current_state = object.__getattribute__(budget, "__dict__")
+        if type(current_state) is not dict:
+            raise ModelCallError("durable model budget authority state is invalid")
+
         changes: list[str] = []
-        for name, expected in refs.items():
-            if getattr(budget, name, None) is not expected:
+        expected_refs = {"journal", "_clock"}
+        for name in sorted(set(current_state) | set(expected_state)):
+            if name not in expected_state or name not in current_state:
                 changes.append("budget." + name)
-            setattr(budget, name, expected)
-        for name, expected in values.items():
-            current = getattr(budget, name, None)
-            if type(current) is not type(expected) or current != expected:
+                continue
+            current = current_state[name]
+            expected = expected_state[name]
+            if name in expected_refs:
+                changed = current is not expected
+            else:
+                changed = type(current) is not type(expected) or current != expected
+            if changed:
                 changes.append("budget." + name)
-            setattr(budget, name, expected)
+
+        dict.clear(current_state)
+        dict.update(current_state, expected_state)
         return changes
 
     @staticmethod

@@ -45,6 +45,107 @@ def _credential_text(value: object, *, name: str, uppercase: bool = False) -> st
     return normalized.upper() if uppercase else normalized
 
 
+class _RetainedCredentialUnprotector:
+    """Hold the exact protector unprotect binding selected at composition."""
+
+    __slots__ = ("__unprotect", "__function", "__code")
+
+    def __init__(self, protector: object) -> None:
+        unprotect = getattr(protector, "unprotect", None)
+        if not callable(unprotect):
+            raise TypeError("credential protector must retain callable unprotect")
+        function = getattr(unprotect, "__func__", None)
+        executable = function if function is not None else unprotect
+        self.__unprotect = unprotect
+        self.__function = function
+        self.__code = getattr(executable, "__code__", None)
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        function = self.__function
+        if function is not None:
+            if getattr(self.__unprotect, "__func__", None) is not function:
+                raise PermissionError("Credential protector binding changed")
+            if (
+                self.__code is not None
+                and getattr(function, "__code__", None) is not self.__code
+            ):
+                raise PermissionError("Credential protector code changed")
+        elif (
+            self.__code is not None
+            and getattr(self.__unprotect, "__code__", None) is not self.__code
+        ):
+            raise PermissionError("Credential protector code changed")
+        return self.__unprotect(ciphertext, entropy=entropy)
+
+
+class _RetainedCredentialLeaseView:
+    """Read current durable vault state through construction-retained authority."""
+
+    __slots__ = (
+        "path",
+        "lock_path",
+        "FORMAT_VERSION",
+        "_protector",
+        "__normalize_scope",
+        "__normalize_scope_code",
+        "__load",
+        "__load_code",
+        "__handle",
+        "__handle_code",
+    )
+
+    def __init__(
+        self,
+        vault: ProtectedCredentialVault,
+        *,
+        normalize_scope,
+        load,
+        handle_reader,
+        format_version: int,
+    ) -> None:
+        if type(vault) is not ProtectedCredentialVault:
+            raise TypeError("terminal credential vault authority must be exact")
+        if type(format_version) is not int or format_version < 1:
+            raise TypeError("credential vault format authority is invalid")
+        normalize_scope_code = getattr(normalize_scope, "__code__", None)
+        load_code = getattr(load, "__code__", None)
+        handle_code = getattr(handle_reader, "__code__", None)
+        if (
+            normalize_scope_code is None
+            or load_code is None
+            or handle_code is None
+        ):
+            raise TypeError("credential vault helper authority is not canonical")
+        self.path = vault.path
+        self.lock_path = vault.lock_path
+        self.FORMAT_VERSION = format_version
+        self._protector = _RetainedCredentialUnprotector(vault._protector)
+        self.__normalize_scope = normalize_scope
+        self.__normalize_scope_code = normalize_scope_code
+        self.__load = load
+        self.__load_code = load_code
+        self.__handle = handle_reader
+        self.__handle_code = handle_code
+
+    def _normalize_scope(self, **kwargs):
+        normalize_scope = self.__normalize_scope
+        if getattr(normalize_scope, "__code__", None) is not self.__normalize_scope_code:
+            raise PermissionError("Credential scope normalization code changed")
+        return normalize_scope(**kwargs)
+
+    def _load(self):
+        load = self.__load
+        if getattr(load, "__code__", None) is not self.__load_code:
+            raise PermissionError("Credential vault load code changed")
+        return load(self)
+
+    def _handle(self, record):
+        handle_reader = self.__handle
+        if getattr(handle_reader, "__code__", None) is not self.__handle_code:
+            raise PermissionError("Credential handle reader code changed")
+        return handle_reader(record)
+
+
 def _build_execution_lease_authority(
     *,
     validate_session,
@@ -660,17 +761,27 @@ class SecurityBoundary:
 
 
 def _install_security_boundary_execution_authority(boundary_type) -> None:
-    """Bind each initialized boundary to its exact composed credential vault."""
+    """Bind each initialized boundary to one retained terminal vault view."""
 
-    bound_vaults = WeakKeyDictionary()
+    lease_views = WeakKeyDictionary()
     original_init = boundary_type.__init__
     original_init_code = getattr(original_init, "__code__", None)
-    if original_init_code is None:
-        raise TypeError("SecurityBoundary constructor authority is not canonical")
+    vault_normalize_scope = ProtectedCredentialVault._normalize_scope
+    vault_load = ProtectedCredentialVault._load
+    vault_handle = ProtectedCredentialVault._handle
+    vault_format_version = ProtectedCredentialVault.FORMAT_VERSION
+    if (
+        original_init_code is None
+        or getattr(vault_normalize_scope, "__code__", None) is None
+        or getattr(vault_load, "__code__", None) is None
+        or getattr(vault_handle, "__code__", None) is None
+        or type(vault_format_version) is not int
+    ):
+        raise TypeError("SecurityBoundary credential authority is not canonical")
 
     def vault_for_boundary(boundary):
         try:
-            return bound_vaults[boundary]
+            return lease_views[boundary]
         except KeyError as error:
             raise PermissionError(
                 "Credential vault object authority is unavailable"
@@ -693,7 +804,13 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
             session_authorizer=session_authorizer,
             now=now,
         )
-        bound_vaults[self] = credential_vault
+        lease_views[self] = _RetainedCredentialLeaseView(
+            credential_vault,
+            normalize_scope=vault_normalize_scope,
+            load=vault_load,
+            handle_reader=vault_handle,
+            format_version=vault_format_version,
+        )
 
     boundary_type.__init__ = retained_init
     boundary_type.lease_for_execution = _build_execution_lease_authority(

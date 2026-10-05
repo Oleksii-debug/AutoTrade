@@ -12,11 +12,12 @@ request bytes match the bound request digest, constructs one canonical
 submission scope, and lets the existing dispatcher persist that scope in
 SubmissionPrepared.
 
-PAPER/LIVE is intentionally fail-closed here.  Production dispatch must consume
-the separately owned sealed product financial authority, current C/Q/account
-truth and recovery-issued one-use sender permit before the first irreversible
-byte.  A generic callable authority check or a durable content binding alone is
-not production trading authority.
+A recovery-bound SIMULATION surface additionally composes the current exact
+RecoveryController owner into GuardedDispatcher's existing final sender barrier.
+It reuses the same journal and recovery scope rather than introducing a second
+sender state machine.  PAPER/LIVE remains intentionally fail-closed: production
+dispatch must also consume the separately owned sealed product financial
+authority and current C/Q/account truth before the first irreversible byte.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from .durable_financial_request_binding import (
 )
 from .financial_request_binding import FinancialRequestBindingMaterial
 from .persistence import JournalStore, canonical_json
+from .recovery import OwnerFence, RecoveryController
 
 
 class FinancialBindingDispatchError(RuntimeError):
@@ -191,7 +193,90 @@ def _require_prepared_chronology(
             )
 
 
-def dispatch_durable_financial_request(
+def _recovery_sender_check(
+    dispatcher: GuardedDispatcher,
+    controller: RecoveryController,
+    store: JournalStore,
+) -> Callable[[str, int], None]:
+    """Bind the existing final sender barrier to one current recovery owner.
+
+    The returned callback is not caller-supplied authority.  It captures the
+    canonical unbound validator selected at composition and revalidates the
+    exact journal/scope/dispatcher owner immediately at the final barrier.
+    """
+
+    if type(controller) is not RecoveryController:
+        raise TypeError("recovery_controller must be exact RecoveryController")
+    state = vars(controller)
+    if state.get("_owner_store") is not store:
+        raise FinancialBindingDispatchError(
+            "recovery and dispatcher must share the same exact JournalStore"
+        )
+    expected_scope = f"{dispatcher.environment}:{dispatcher.account_id}"
+    if state.get("_owner_scope") != expected_scope:
+        raise FinancialBindingDispatchError(
+            "recovery scope differs from dispatcher environment/account scope"
+        )
+    owner = state.get("owner")
+    if type(owner) is not OwnerFence:
+        raise FinancialBindingDispatchError(
+            "recovery has no exact current owner fence"
+        )
+    if (
+        type(owner.owner_id) is not str
+        or not owner.owner_id
+        or type(owner.epoch) is not int
+        or owner.epoch < 1
+    ):
+        raise FinancialBindingDispatchError("recovery owner fence is invalid")
+    if (
+        dispatcher.owner_token != owner.owner_id
+        or dispatcher.owner_epoch != owner.epoch
+    ):
+        raise FinancialBindingDispatchError(
+            "dispatcher owner differs from current recovery owner"
+        )
+
+    captured_store = store
+    captured_scope = expected_scope
+    captured_environment = dispatcher.environment
+    captured_account = dispatcher.account_id
+    captured_owner_id = owner.owner_id
+    captured_owner_epoch = owner.epoch
+    validate_sender = RecoveryController.validate_sender
+    validate_sender_code = getattr(validate_sender, "__code__", None)
+    if validate_sender_code is None:
+        raise TypeError("recovery sender validator is not canonical Python code")
+
+    def sender_check(owner_token: str, owner_epoch: int) -> None:
+        if (
+            type(owner_token) is not str
+            or owner_token != captured_owner_id
+            or type(owner_epoch) is not int
+            or owner_epoch != captured_owner_epoch
+        ):
+            raise PermissionError("GuardedDispatcher sender identity changed")
+        if (
+            dispatcher.environment != captured_environment
+            or dispatcher.account_id != captured_account
+            or dispatcher.owner_token != captured_owner_id
+            or dispatcher.owner_epoch != captured_owner_epoch
+            or dispatcher.store is not captured_store
+        ):
+            raise PermissionError("GuardedDispatcher recovery binding changed")
+        current_state = vars(controller)
+        if current_state.get("_owner_store") is not captured_store:
+            raise PermissionError("Recovery JournalStore authority changed")
+        if current_state.get("_owner_scope") != captured_scope:
+            raise PermissionError("Recovery owner scope authority changed")
+        if getattr(validate_sender, "__code__", None) is not validate_sender_code:
+            raise PermissionError("Recovery sender validator code changed")
+        validate_sender(controller, captured_owner_id, captured_owner_epoch)
+
+    return sender_check
+
+
+def _dispatch_durable_financial_request(
     dispatcher: GuardedDispatcher,
     *,
     admission_id: str,
@@ -200,14 +285,8 @@ def dispatch_durable_financial_request(
     now: str,
     authority_check: Callable[[str, str], tuple[bool, str]],
     transport_send: Callable[[str, Mapping[str, Any], Callable[[], None]], Any],
+    sender_check: Callable[[str, int], None] | None,
 ) -> DispatchOutcome:
-    """Dispatch exactly the request sealed by one durable ADMITTED binding.
-
-    The generic callable seams are accepted only in SIMULATION.  PAPER/LIVE
-    requires the sealed product-owned authority/current-Q/recovery-sender union
-    tracked by #987/#1099/#1046 and is deliberately zero-wire here.
-    """
-
     if type(dispatcher) is not GuardedDispatcher:
         raise TypeError("dispatcher must be exact GuardedDispatcher")
     if dispatcher.environment != "SIMULATION":
@@ -220,6 +299,8 @@ def dispatch_durable_financial_request(
         raise TypeError("request must be a mapping")
     if not callable(authority_check) or not callable(transport_send):
         raise TypeError("authority_check and transport_send must be callable")
+    if sender_check is not None and not callable(sender_check):
+        raise TypeError("internal sender_check must be callable or None")
 
     try:
         store = dispatcher._journal_store_authority()
@@ -292,6 +373,7 @@ def dispatch_durable_financial_request(
         transport_send=transport_send,
         client_id_max_length=client_id_max_length,
         client_id_format=client_id_format,
+        sender_check=sender_check,
         submission_scope=scope,
     )
     _require_prepared_chronology(
@@ -302,3 +384,83 @@ def dispatch_durable_financial_request(
         material=material,
     )
     return outcome
+
+
+def dispatch_durable_financial_request(
+    dispatcher: GuardedDispatcher,
+    *,
+    admission_id: str,
+    attempt_id: str,
+    request: Mapping[str, Any],
+    now: str,
+    authority_check: Callable[[str, str], tuple[bool, str]],
+    transport_send: Callable[[str, Mapping[str, Any], Callable[[], None]], Any],
+) -> DispatchOutcome:
+    """Dispatch exactly the request sealed by one durable ADMITTED binding.
+
+    The generic callable seams are accepted only in SIMULATION.  PAPER/LIVE
+    requires the sealed product-owned authority/current-Q/recovery-sender union
+    tracked by #987/#1099/#1046 and is deliberately zero-wire here.
+    """
+
+    return _dispatch_durable_financial_request(
+        dispatcher,
+        admission_id=admission_id,
+        attempt_id=attempt_id,
+        request=request,
+        now=now,
+        authority_check=authority_check,
+        transport_send=transport_send,
+        sender_check=None,
+    )
+
+
+def dispatch_recovery_bound_durable_financial_request(
+    dispatcher: GuardedDispatcher,
+    *,
+    recovery_controller: RecoveryController,
+    admission_id: str,
+    attempt_id: str,
+    request: Mapping[str, Any],
+    now: str,
+    authority_check: Callable[[str, str], tuple[bool, str]],
+    transport_send: Callable[[str, Mapping[str, Any], Callable[[], None]], Any],
+) -> DispatchOutcome:
+    """Dispatch a durable financial request under the current recovery owner.
+
+    This surface is intentionally SIMULATION-only on the current Section-23
+    ancestry.  It removes caller-selected sender authority while proving the
+    recovery-owner integration needed by the eventual sealed production union.
+    """
+
+    if type(dispatcher) is not GuardedDispatcher:
+        raise TypeError("dispatcher must be exact GuardedDispatcher")
+    if dispatcher.environment != "SIMULATION":
+        raise FinancialBindingDispatchError(
+            "PAPER/LIVE financial dispatch requires sealed production authority"
+        )
+    try:
+        store = dispatcher._journal_store_authority()
+    except (PermissionError, TypeError, ValueError, RuntimeError) as error:
+        raise FinancialBindingDispatchError(
+            "dispatcher JournalStore authority is unavailable"
+        ) from error
+    if type(store) is not JournalStore:
+        raise FinancialBindingDispatchError(
+            "financial binding dispatch requires exact JournalStore authority"
+        )
+    sender_check = _recovery_sender_check(
+        dispatcher,
+        recovery_controller,
+        store,
+    )
+    return _dispatch_durable_financial_request(
+        dispatcher,
+        admission_id=admission_id,
+        attempt_id=attempt_id,
+        request=request,
+        now=now,
+        authority_check=authority_check,
+        transport_send=transport_send,
+        sender_check=sender_check,
+    )

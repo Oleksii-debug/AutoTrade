@@ -42,7 +42,7 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
                     "evidence_refs": ["artifact:source"],
                     "intended_action": {"side": "HOLD"},
                     "actual_execution": {"fills": []},
-                    "outcome": {"label": "observed"},
+                    "outcome": {\n                        "class": "POSITIVE",\n                        "label": "observed",\n                        "label_mature": True,\n                        "reconciliation_state": "RECONCILED",\n                    },
                     "costs": {"USD": "0"},
                 },
             )
@@ -138,7 +138,7 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             memory = self._memory(Path(directory) / "memory.sqlite3")
             fact = self._fact(memory)
-            outcome = self._outcome(fact)
+            outcome = self._canonical_outcome(fact)
             original = reconciled_module.resolve_reconciled_outcome_fact
 
             def hostile(*args, **kwargs):
@@ -166,7 +166,7 @@ class ReconciledOutcomeExecutableAuthorityTests(unittest.TestCase):
             fact = self._fact(memory)
             bound = bind_ablation_outcome_to_reconciled_fact(
                 memory,
-                self._outcome(fact),
+                self._canonical_outcome(fact),
                 causal_cutoff=BASE + timedelta(days=1),
                 granted_permissions={"RESEARCH"},
                 task="exec-authority",

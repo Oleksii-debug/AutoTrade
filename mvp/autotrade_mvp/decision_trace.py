@@ -37,6 +37,9 @@ _SENSITIVE_KEYS = {
     "password_hash",
     "secret",
     "client_secret",
+    "credential",
+    "credential_id",
+    "proxy_authorization",
     "session",
     "session_id",
     "session_token",
@@ -56,13 +59,49 @@ _SENSITIVE_KEYS = {
 
 
 def _normalized_key(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("diagnostic keys must be exact strings")
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value.strip())
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
     return "_".join(
         part
         for part in "".join(
             character.lower() if character.isalnum() else "_"
-            for character in str(value).strip()
+            for character in separated
         ).split("_")
         if part
+    )
+
+
+_BENIGN_DIAGNOSTIC_KEYS = {
+    "api_secret_rotation_count",
+    "token_budget",
+}
+
+_COMPOUND_SENSITIVE_KEY_PARTS = {
+    "authorization",
+    "password",
+    "secret",
+    "credential",
+    "cookie",
+    "session",
+    "token",
+    "apikey",
+}
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    parts = tuple(part for part in normalized.split("_") if part)
+    part_set = set(parts)
+    if any(part in _COMPOUND_SENSITIVE_KEY_PARTS for part in parts):
+        return True
+    if {"api", "key"} <= part_set or {"private", "key"} <= part_set:
+        return True
+    return "txc" in part_set and bool(
+        part_set & {"apikey", "payload", "signature"}
     )
 
 
@@ -180,9 +219,14 @@ def _redact(value: Any) -> Any:
             if type(key) is not str:
                 raise ValueError("diagnostic object keys must be exact strings")
             normalized = _normalized_key(key)
+            benign_counter = (
+                normalized in _BENIGN_DIAGNOSTIC_KEYS
+                and type(item) is int
+                and item >= 0
+            )
             result[key] = (
                 "[REDACTED]"
-                if normalized in _SENSITIVE_KEYS
+                if _is_sensitive_key(key) and not benign_counter
                 else _redact(item)
             )
         return result
@@ -205,6 +249,15 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _exact_identity_set(value: object, *, name: str) -> set[str]:
+    if type(value) not in (list, tuple):
+        raise ValueError(f"{name} must be an exact list or tuple")
+    if any(type(identity) is not str for identity in value):
+        raise ValueError(f"{name} must contain exact strings")
+    # Hash only after exact-string admission.
+    return set(value)
 
 
 def _validate_digest_map(
@@ -420,8 +473,14 @@ class DecisionTraceStore:
 
         if type(trace_id) is not str or not trace_id.strip():
             raise ValueError("trace_id must be an exact non-empty string")
-        events = set(available_event_ids)
-        evidence = set(available_evidence_ids)
+        events = _exact_identity_set(
+            available_event_ids,
+            name="available_event_ids",
+        )
+        evidence = _exact_identity_set(
+            available_evidence_ids,
+            name="available_evidence_ids",
+        )
         record = next(
             (item for item in self.records() if item.get("trace_id") == trace_id),
             None,
@@ -482,8 +541,8 @@ class DecisionTraceStore:
         self._validate_input(candidate)
         record = self.reconstruct(
             trace_id,
-            available_event_ids=available_event_digests.keys(),
-            available_evidence_ids=available_evidence_digests.keys(),
+            available_event_ids=tuple(available_event_digests),
+            available_evidence_ids=tuple(available_evidence_digests),
         )
         if record.get("source_sha") != expected_source_sha:
             raise ValueError("trace source identity mismatch")
@@ -544,7 +603,7 @@ class DecisionTraceStore:
             self.reconstruct(
                 trace_id,
                 available_event_ids=available_event_ids,
-                available_evidence_ids=available_evidence_ids or (),
+                available_evidence_ids=available_evidence_ids,
             )
             evidence_status = "UNVERIFIED"
             evidence_note = (

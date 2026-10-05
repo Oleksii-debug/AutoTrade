@@ -2747,5 +2747,61 @@ class BinanceSpotTemporalIngressTests(unittest.TestCase):
         )
         self.assertEqual(request.body["newClientOrderId"], "at-fixed-offset")
 
+class BinanceSpotWriteAdmissionRevalidationTests(unittest.TestCase):
+    def test_direct_intent_constructor_cannot_bypass_market_price_invariant(self):
+        forged = BinanceSpotOrderIntent(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal("1"),
+            price=Decimal("40000"),
+            time_in_force=None,
+        )
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "MARKET order must not carry limit price",
+        ):
+            prepare_order_request(
+                forged,
+                client_order_id="spot-direct-constructor",
+                capability=capability(),
+                symbol_rules=symbol_rules(apply_to_market=False),
+                at=NOW,
+            )
+
+    def test_optional_reference_is_type_fenced_before_provenance_attribute_read(self):
+        callbacks = []
+
+        class HostileReference:
+            @property
+            def source_sha256(self):
+                callbacks.append("source_sha256")
+                raise AssertionError("hostile reference provenance callback executed")
+
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="1",
+            price="40000",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "reference_price_observation must be exact BinanceSpotReferencePrice",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="spot-hostile-reference",
+                capability=capability(),
+                symbol_rules=symbol_rules(apply_to_market=False),
+                at=NOW,
+                reference_price_observation=HostileReference(),
+            )
+        self.assertEqual(callbacks, [])
+
 if __name__ == "__main__":
     unittest.main()

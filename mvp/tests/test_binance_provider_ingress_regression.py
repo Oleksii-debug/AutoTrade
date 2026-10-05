@@ -371,6 +371,132 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_ack_rejects_hostile_exact_dict_keys_before_equality_callbacks(self):
+        callbacks = []
+
+        class HostileKey(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                callbacks.append(other)
+                raise AssertionError("hostile ACK key equality executed")
+
+        cases = (
+            (
+                BinanceSpotAdapterError,
+                parse_spot_order_ack,
+                "spot-hostile-key",
+                {
+                    HostileKey("clientOrderId"): "spot-hostile-key",
+                    "symbol": "BTCUSDT",
+                    "orderId": 7,
+                    "transactTime": 1791187200123,
+                },
+            ),
+            (
+                BinanceUsdmAdapterError,
+                parse_usdm_order_ack,
+                "usdm-hostile-key",
+                {
+                    HostileKey("clientOrderId"): "usdm-hostile-key",
+                    "symbol": "BTCUSDT",
+                    "orderId": 8,
+                    "updateTime": 1791187200123,
+                },
+            ),
+        )
+        for error_type, parser, client_id, response in cases:
+            with self.subTest(parser=parser.__name__), self.assertRaisesRegex(
+                error_type,
+                "keys must be exact decoded strings",
+            ):
+                parser(
+                    attempt_id=str(uuid4()),
+                    client_order_id=client_id,
+                    response=response,
+                )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_rejects_nested_executable_json_values_before_callbacks(self):
+        callbacks = []
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile ACK nested-list callback executed")
+
+        cases = (
+            (
+                BinanceSpotAdapterError,
+                parse_spot_order_ack,
+                "spot-hostile-nested",
+                {
+                    "clientOrderId": "spot-hostile-nested",
+                    "symbol": "BTCUSDT",
+                    "orderId": 9,
+                    "transactTime": 1791187200123,
+                    "extra": HostileList(["value"]),
+                },
+            ),
+            (
+                BinanceUsdmAdapterError,
+                parse_usdm_order_ack,
+                "usdm-hostile-nested",
+                {
+                    "clientOrderId": "usdm-hostile-nested",
+                    "symbol": "BTCUSDT",
+                    "orderId": 10,
+                    "updateTime": 1791187200123,
+                    "extra": HostileList(["value"]),
+                },
+            ),
+        )
+        for error_type, parser, client_id, response in cases:
+            with self.subTest(parser=parser.__name__), self.assertRaisesRegex(
+                error_type,
+                "exact decoded JSON values",
+            ):
+                parser(
+                    attempt_id=str(uuid4()),
+                    client_order_id=client_id,
+                    response=response,
+                )
+        self.assertEqual(callbacks, [])
+
+    def test_ack_rejects_aliased_or_cyclic_decoded_container_graphs(self):
+        for error_type, parser, client_id, timestamp_name in (
+            (
+                BinanceSpotAdapterError,
+                parse_spot_order_ack,
+                "spot-cycle",
+                "transactTime",
+            ),
+            (
+                BinanceUsdmAdapterError,
+                parse_usdm_order_ack,
+                "usdm-cycle",
+                "updateTime",
+            ),
+        ):
+            extra = []
+            extra.append(extra)
+            response = {
+                "clientOrderId": client_id,
+                "symbol": "BTCUSDT",
+                "orderId": 11,
+                timestamp_name: 1791187200123,
+                "extra": extra,
+            }
+            with self.subTest(parser=parser.__name__), self.assertRaisesRegex(
+                error_type,
+                "without aliases or cycles",
+            ):
+                parser(
+                    attempt_id=str(uuid4()),
+                    client_order_id=client_id,
+                    response=response,
+                )
+
     def test_spot_ack_rejects_oversized_integer_timestamp_before_datetime_conversion(self):
         with self.assertRaisesRegex(
             BinanceSpotAdapterError,
@@ -525,6 +651,45 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_spot_exchange_info_rejects_nested_executable_unknown_filter_value(self):
+        callbacks = []
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile exchangeInfo nested-list callback executed")
+
+        payload = {
+            "symbol": "BTCUSDT",
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0",
+                    "maxPrice": "0",
+                    "tickSize": "0",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+                {
+                    "filterType": "FUTURE_UNKNOWN_FILTER",
+                    "providerExtension": HostileList(["value"]),
+                },
+            ],
+        }
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "exact decoded JSON values",
+        ):
+            BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload=payload,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_spot_exchange_info_rejects_filter_mapping_subclass_before_get_callback(self):
         callbacks = []
 
@@ -547,7 +712,7 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(callbacks, [])
 
 
-    def test_prepared_request_bodies_reject_mapping_subclass_before_callbacks(self):
+    def test_prepared_requests_reject_caller_minted_mapping_before_callbacks(self):
         callbacks = []
 
         class HostileBody(dict):
@@ -577,11 +742,14 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         )
         for error_type, construct in cases:
             with self.subTest(error_type=error_type.__name__):
-                with self.assertRaisesRegex(error_type, "exact request mapping"):
+                with self.assertRaisesRegex(
+                    error_type,
+                    "canonical order preparation",
+                ):
                     construct(HostileBody({"symbol": "BTCUSDT"}))
         self.assertEqual(callbacks, [])
 
-    def test_prepared_request_bodies_reject_string_subclasses_before_callbacks(self):
+    def test_prepared_requests_reject_caller_minted_text_before_callbacks(self):
         callbacks = []
 
         class HostileText(str):
@@ -611,7 +779,10 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         )
         for error_type, construct in cases:
             with self.subTest(error_type=error_type.__name__):
-                with self.assertRaisesRegex(error_type, "exact strings"):
+                with self.assertRaisesRegex(
+                    error_type,
+                    "canonical order preparation",
+                ):
                     construct({"symbol": HostileText("BTCUSDT")})
         self.assertEqual(callbacks, [])
 

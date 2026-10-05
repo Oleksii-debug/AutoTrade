@@ -25,6 +25,7 @@ from .gates import (
     GateDecision,
     GateProfile,
     _decimal_text,
+    _detached_gate_input,
     evaluate_gates,
 )
 from ..science.registry import (
@@ -350,8 +351,7 @@ def resolve_scientific_trial_owner(
 
     authority = _registry_authority_view(registry)
     canonical_profile = _canonical_gate_profile_authority_view(profile)
-    if type(evidence) is not EvaluationEvidence:
-        raise TypeError("evidence must be exact EvaluationEvidence")
+    canonical_evidence = _detached_gate_input(evidence, EvaluationEvidence)
     with _REGISTRY_CONNECT_DESCRIPTOR(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
@@ -371,19 +371,19 @@ def resolve_scientific_trial_owner(
                 "bound scientific protocol trial budget exceeds gate profile max_trials"
             )
     population_matches = (
-        evidence.trials_attempted is not None
-        and evidence.trials_attempted == trial_evidence.recorded_trials
+        canonical_evidence.trials_attempted is not None
+        and canonical_evidence.trials_attempted == trial_evidence.recorded_trials
     )
     completion_matches = (
-        evidence.trial_log_complete is not None
-        and evidence.trial_log_complete == trial_evidence.complete
+        canonical_evidence.trial_log_complete is not None
+        and canonical_evidence.trial_log_complete == trial_evidence.complete
     )
     return ScientificTrialOwnerEvidence(
         binding=binding,
         trial_evidence=trial_evidence,
         population_matches_gate_evidence=population_matches,
         completion_matches_gate_evidence=completion_matches,
-        complete_required=profile.require_complete_trials,
+        complete_required=canonical_profile.require_complete_trials,
     )
 
 
@@ -403,10 +403,9 @@ def evaluate_gates_with_scientific_trial_owner(
     """
 
     canonical_profile = _canonical_gate_profile_authority_view(profile)
-    if type(evidence) is not EvaluationEvidence:
-        raise TypeError("evidence must be exact EvaluationEvidence")
+    canonical_evidence = _detached_gate_input(evidence, EvaluationEvidence)
     _assert_registry_dispatch_unshadowed(scientific_registry)
-    base = evaluate_gates(canonical_profile, evidence, **gate_kwargs)
+    base = evaluate_gates(canonical_profile, canonical_evidence, **gate_kwargs)
     checks = dict(base.checks)
     provenance = dict(base.provenance or {})
     reasons = list(base.reasons)
@@ -414,7 +413,7 @@ def evaluate_gates_with_scientific_trial_owner(
         owner = resolve_scientific_trial_owner(
             registry=scientific_registry,
             profile=canonical_profile,
-            evidence=evidence,
+            evidence=canonical_evidence,
         )
     except KeyError:
         checks["scientific_trial_owner"] = "INCONCLUSIVE"

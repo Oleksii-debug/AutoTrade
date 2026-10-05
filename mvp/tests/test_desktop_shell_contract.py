@@ -313,6 +313,10 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('request.Headers.RemoveHeader("Authorization")', code)
         self.assertIn('request.Headers.RemoveHeader("X-AutoTrade-Actor")', code)
         self.assertIn("AllowsSessionHeaderForwarding(", code)
+        self.assertIn("IsSessionForwardingResourceContext(args.ResourceContext)", code)
+        self.assertIn("CoreWebView2WebResourceContext.Fetch", code)
+        self.assertIn("CoreWebView2WebResourceContext.XmlHttpRequest", code)
+        self.assertNotIn("CoreWebView2WebResourceContext.Document\n            or", code)
         self.assertLess(
             code.index('request.Headers.RemoveHeader("Authorization")'),
             code.index("AllowsSessionHeaderForwarding("),

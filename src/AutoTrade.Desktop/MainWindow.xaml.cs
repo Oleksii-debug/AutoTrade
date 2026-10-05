@@ -471,6 +471,7 @@ public partial class MainWindow : Window
         if (_authenticatedHostClient is null
             || _webSecurityPolicy is null
             || _trustedTopLevelDocument is null
+            || !IsSessionForwardingResourceContext(args.ResourceContext)
             || !Uri.TryCreate(request.Uri, UriKind.Absolute, out Uri? target)
             || !_webSecurityPolicy.AllowsSessionHeaderForwarding(
                 request.Method,
@@ -497,6 +498,11 @@ public partial class MainWindow : Window
             // sent without credentials and the host remains the rejecting authority.
         }
     }
+
+    private static bool IsSessionForwardingResourceContext(
+        CoreWebView2WebResourceContext context) =>
+        context is CoreWebView2WebResourceContext.Fetch
+            or CoreWebView2WebResourceContext.XmlHttpRequest;
 
     private void WebView_NewWindowRequested(
         object? sender,

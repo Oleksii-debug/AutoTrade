@@ -2599,6 +2599,83 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(second.status, "UNKNOWN")
 
 
+    def test_adapter_cannot_replace_observation_evidence_resolver_after_started(self):
+        forged_calls = []
+        with TemporaryDirectory() as directory:
+            _, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_resolver = orchestrator.observation_evidence_resolver
+            call_spec = spec()
+
+            def forged_resolver(value, binding):
+                forged_calls.append((value, binding))
+                return _observation_evidence(value, binding)
+
+            def mutating_adapter(*_args):
+                orchestrator.observation_evidence_resolver = forged_resolver
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:observation_evidence_resolver",
+                result.reason,
+            )
+            self.assertEqual(forged_calls, [])
+            self.assertIs(orchestrator.observation_evidence_resolver, trusted_resolver)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_adapter_cannot_redirect_budget_before_unknown_settlement(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            clock = MutableClock()
+            orchestrator = orchestrator_for(budget=budget, clock=clock)
+            trusted_budget = orchestrator.budget
+            trusted_journal = orchestrator.journal
+            call_spec = spec()
+
+            def mutating_adapter(*_args):
+                orchestrator.budget = object()
+                orchestrator.journal = object()
+                orchestrator.clock = lambda: "2099-01-01T00:00:00Z"
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=mutating_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("budget", result.reason)
+            self.assertIn("journal", result.reason)
+            self.assertIn("clock", result.reason)
+            self.assertIs(orchestrator.budget, trusted_budget)
+            self.assertIs(orchestrator.journal, trusted_journal)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(orchestrator.clock, clock)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+            self.assertEqual(
+                orchestrator._events(result.attempt_id)[-1]["event_type"],
+                "ModelCallUnknown",
+            )
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

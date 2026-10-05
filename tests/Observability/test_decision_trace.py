@@ -504,6 +504,16 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             backlog.record("queue.delay", ExplodingFloat(1.0))
         self.assertEqual(backlog.snapshot(), ())
 
+    def test_metric_labels_reject_non_finite_json_values_at_ingress(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "JSON compliant",
+            ):
+                backlog.record("queue.delay", 1.0, diagnostic=invalid)
+        self.assertEqual(backlog.snapshot(), ())
+
     def test_metric_snapshot_is_detached_from_internal_redacted_state(self):
         backlog = BoundedMetricBacklog(max_items=2)
         backlog.record(

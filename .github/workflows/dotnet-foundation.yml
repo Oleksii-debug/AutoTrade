@@ -100,6 +100,8 @@ jobs:
 
   desktop-build:
     runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,6 +114,12 @@ jobs:
           dotnet-version: "10.0.100"
       - run: python tools/dotnet_package_rights.py --check-policy
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --locked-mode
+      - name: Verify restored Desktop NuGet package rights
+        run: >-
+          python tools/dotnet_package_rights.py
+          --verify-restored
+          --packages-root "${{ env.NUGET_PACKAGES }}"
+          --project src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj --locked-mode
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore
@@ -119,7 +127,7 @@ jobs:
         run: >-
           python tools/write_ci_evidence.py
           --suite dotnet-desktop-foundation
-          --command "dotnet build AutoTrade.Desktop + Desktop.Client"
+          --command "locked WebView2 restore + package rights readback + AutoTrade.Desktop build + Desktop.Client"
           --output "artifacts/dotnet-desktop-Windows.json"
       - name: Upload exact-head desktop foundation evidence
         uses: actions/upload-artifact@v4

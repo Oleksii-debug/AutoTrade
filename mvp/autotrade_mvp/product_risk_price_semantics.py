@@ -506,6 +506,17 @@ def _install_product_risk_price_semantics_binding_authority(
     binding_post_init = binding_type.__post_init__
     binding_post_init_code = binding_post_init.__code__
     binding_getattribute = binding_type.__getattribute__
+    module_guard = _require_module_authority
+    module_guard_code = module_guard.__code__
+    canonical_instant = _instant
+    canonical_instant_code = canonical_instant.__code__
+    canonical_exact_decimal = _exact_decimal
+    canonical_exact_decimal_code = canonical_exact_decimal.__code__
+    canonical_instrument_ref = _instrument_ref
+    canonical_instrument_ref_code = canonical_instrument_ref.__code__
+    canonical_replace = replace
+    canonical_replace_code = canonical_replace.__code__
+    object_getattribute = object.__getattribute__
     fields = (
         "provider_id",
         "account_id",
@@ -525,7 +536,10 @@ def _install_product_risk_price_semantics_binding_authority(
         "instrument_evidence_binding",
         "_factory_token",
     )
-    bindings: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+    bindings: dict[
+        int,
+        tuple[object, object, tuple[object, ...], object],
+    ] = {}
 
     def authority_changed() -> None:
         raise ProductRiskPriceSemanticsError(
@@ -545,29 +559,62 @@ def _install_product_risk_price_semantics_binding_authority(
             or binding_type.__post_init__ is not binding_post_init
             or binding_post_init.__code__ is not binding_post_init_code
             or binding_type.__getattribute__ is not binding_getattribute
+            or _require_module_authority is not module_guard
+            or module_guard.__code__ is not module_guard_code
+            or _instant is not canonical_instant
+            or canonical_instant.__code__ is not canonical_instant_code
+            or _exact_decimal is not canonical_exact_decimal
+            or canonical_exact_decimal.__code__ is not canonical_exact_decimal_code
+            or _instrument_ref is not canonical_instrument_ref
+            or canonical_instrument_ref.__code__ is not canonical_instrument_ref_code
+            or replace is not canonical_replace
+            or canonical_replace.__code__ is not canonical_replace_code
         ):
             authority_changed()
 
     def snapshot(value) -> tuple[object, ...]:
         try:
-            return tuple(object.__getattribute__(value, name) for name in fields)
+            return tuple(object_getattribute(value, name) for name in fields)
         except AttributeError:
             authority_changed()
 
     def purge_dead() -> None:
-        for key, (ref, _composer, _expected) in tuple(bindings.items()):
-            if ref() is None:
+        for key, (
+            issued_ref,
+            _composer,
+            _expected,
+            prepared_ref,
+        ) in tuple(bindings.items()):
+            if issued_ref() is None or prepared_ref() is None:
                 bindings.pop(key, None)
 
-    def require_issued(self, value):
+    def binding_collected(key):
+        def cleanup(reference) -> None:
+            entry = bindings.get(key)
+            if entry is not None and entry[0] is reference:
+                bindings.pop(key, None)
+
+        return cleanup
+
+    def prepared_collected(key):
+        def cleanup(reference) -> None:
+            entry = bindings.get(key)
+            if entry is not None and entry[3] is reference:
+                bindings.pop(key, None)
+
+        return cleanup
+
+    def require_issued(self, value, prepared_request=None):
         implementation_changed()
         if type(value) is not binding_type:
             authority_changed()
         entry = bindings.get(id(value))
         if entry is None:
             authority_changed()
-        ref, issuing_composer, expected = entry
+        ref, issuing_composer, expected, issued_prepared_ref = entry
         if ref() is not value or issuing_composer is not self:
+            authority_changed()
+        if prepared_request is not None and issued_prepared_ref() is not prepared_request:
             authority_changed()
         if snapshot(value) != expected:
             authority_changed()
@@ -583,12 +630,14 @@ def _install_product_risk_price_semantics_binding_authority(
         if type(value) is not binding_type:
             authority_changed()
         purge_dead()
-        bindings[id(value)] = (
-            binding_ref(value),
+        key = id(value)
+        bindings[key] = (
+            binding_ref(value, binding_collected(key)),
             self,
             snapshot(value),
+            binding_ref(prepared_request, prepared_collected(key)),
         )
-        require_issued(self, value)
+        require_issued(self, value, prepared_request)
         return value
 
     def canonical_bind_snapshot(
@@ -599,7 +648,7 @@ def _install_product_risk_price_semantics_binding_authority(
         prepared_request: BybitPreparedSubmission,
     ) -> AuthoritativeRiskSnapshot:
         purge_dead()
-        expected = require_issued(self, binding)
+        expected = require_issued(self, binding, prepared_request)
         sealed_binding = binding_type(
             **dict(zip(fields, expected))
         )

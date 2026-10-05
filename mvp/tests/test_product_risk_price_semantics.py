@@ -1,14 +1,17 @@
 from dataclasses import replace
 from datetime import timedelta
+import gc
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from weakref import ref as weakref_ref
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp import bybit_v5 as bybit_module
 from mvp.autotrade_mvp import instruments as instruments_module
+from mvp.autotrade_mvp import product_risk_price_semantics as price_semantics_module
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
@@ -495,6 +498,107 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 "__getattribute__",
                 forged_getattribute,
             ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "binding authority changed",
+                ):
+                    composer.bind_snapshot(request, base, binding, prepared)
+            self.assertEqual(callbacks, [])
+
+    def test_same_body_different_canonical_preparation_cannot_rebind_snapshot(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+
+            other_capability = submission_write_capability(
+                account_id="bybit-account",
+                environment="PAPER",
+                instrument_version=f"{A}@1",
+                provider_environment="DEMO",
+            )
+            _, other_prepared = self._prepared(capability=other_capability)
+            self.assertEqual(prepared.body_sha256, other_prepared.body_sha256)
+            self.assertNotEqual(
+                prepared.capability_snapshot_id,
+                other_prepared.capability_snapshot_id,
+            )
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "binding authority changed",
+            ):
+                composer.bind_snapshot(
+                    request,
+                    base,
+                    binding,
+                    other_prepared,
+                )
+
+    def test_binding_collection_releases_composer_authorities_without_followup_call(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            registry_ref = weakref_ref(registry)
+            artifacts_ref = weakref_ref(artifacts)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+
+            del binding
+            del composer
+            del registry
+            del artifacts
+            gc.collect()
+
+            self.assertIsNone(registry_ref())
+            self.assertIsNone(artifacts_ref())
+
+    def test_product_helper_rebinding_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "_require_module_authority",
+                "_instant",
+                "_exact_decimal",
+                "_instrument_ref",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(price_semantics_module, name, forged):
+                        with self.assertRaisesRegex(
+                            ProductRiskPriceSemanticsError,
+                            "binding authority changed",
+                        ):
+                            composer.compose(request, prepared)
+                    self.assertEqual(callbacks, [])
+
+    def test_snapshot_replace_rebinding_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return base
+
+            with patch.object(price_semantics_module, "replace", forged):
                 with self.assertRaisesRegex(
                     ProductRiskPriceSemanticsError,
                     "binding authority changed",

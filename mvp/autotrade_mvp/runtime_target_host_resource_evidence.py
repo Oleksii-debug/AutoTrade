@@ -541,6 +541,223 @@ def _capture_descriptor_authority(
     return tuple(result)
 
 
+_RESOURCE_DESCRIPTOR_SPECS = (
+    (
+        RuntimeTargetHostResourceSnapshot,
+        (
+            "process_id",
+            "monotonic_ns",
+            "process_cpu_ns",
+            "peak_rss_bytes",
+            "io_read_bytes",
+            "io_write_bytes",
+            "disk_total_bytes",
+            "disk_free_bytes",
+            "thread_count",
+            "__init__",
+            "__post_init__",
+            "payload",
+        ),
+    ),
+    (
+        RuntimeTargetHostResourceEvidence,
+        (
+            "authority_id",
+            "authority_digest",
+            "source_sha",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "scenario_id",
+            "spec_digest",
+            "host_fingerprint",
+            "inventory_artifact_id",
+            "inventory_payload_sha256",
+            "measurement_artifact_id",
+            "measurement_payload_sha256",
+            "run_receipt_artifact_id",
+            "run_receipt_payload_sha256",
+            "reconnect_backlog_remaining",
+            "before",
+            "after",
+            "resource_evidence_status",
+            "terminal_qualification_eligible",
+            "schema_version",
+            "evidence_type",
+            "__init__",
+            "__post_init__",
+            "canonical_payload",
+            "canonical_bytes",
+            "digest",
+        ),
+    ),
+    (
+        PublishedRuntimeTargetHostResourceEvidence,
+        (
+            "artifact_id",
+            "payload_sha256",
+            "resource_evidence_status",
+            "__init__",
+        ),
+    ),
+    (
+        RuntimeTargetHostResourceRunResult,
+        (
+            "run",
+            "resource_evidence",
+            "published_resource_evidence",
+            "__init__",
+            "terminal_qualification_eligible",
+        ),
+    ),
+    (
+        RuntimeTargetHostRunResult,
+        (
+            "authority",
+            "research_plan",
+            "measurement",
+            "published_inventory",
+            "published_measurement",
+            "run_receipt",
+            "run_receipt_artifact_id",
+            "run_receipt_payload_sha256",
+            "__init__",
+            "terminal_qualification_eligible",
+        ),
+    ),
+    (
+        RuntimeTargetHostCampaignAuthority,
+        (
+            "authority_id",
+            "event_id",
+            "scenario_id",
+            "spec_digest",
+            "source_sha",
+            "configuration_hash",
+            "host_fingerprint",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "financial_plan_id",
+            "financial_plan_digest",
+            "store_identity_digest",
+            "journal_taxonomy_digest",
+            "declared_journal_sequence",
+            "payload_hash",
+            "__init__",
+            "__post_init__",
+            "digest",
+        ),
+    ),
+    (
+        RuntimeTargetHostMeasurementArtifact,
+        (
+            "authority_id",
+            "authority_digest",
+            "source_sha",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "scenario_id",
+            "spec_digest",
+            "configuration_hash",
+            "host_fingerprint",
+            "financial_plan_id",
+            "financial_plan_digest",
+            "store_identity_digest",
+            "journal_taxonomy_digest",
+            "authority_journal_sequence",
+            "conservation_start_journal_sequence",
+            "conservation_end_journal_sequence",
+            "conservation_digest",
+            "reconnect_backlog_remaining",
+            "financial_samples",
+            "research_samples",
+            "staleness_basis",
+            "resource_evidence_status",
+            "schema_version",
+            "evidence_type",
+            "__init__",
+            "__post_init__",
+            "terminal_qualification_eligible",
+            "financial_event_ids",
+            "financial_latency_us",
+            "financial_staleness_us",
+            "research_interference_us",
+            "canonical_payload",
+            "canonical_bytes",
+            "digest",
+        ),
+    ),
+    (
+        PublishedRuntimeTargetHostInventory,
+        (
+            "artifact_id",
+            "payload_sha256",
+            "host_fingerprint",
+            "collector_id",
+            "collector_version",
+            "__init__",
+        ),
+    ),
+    (
+        PublishedRuntimeTargetHostMeasurement,
+        (
+            "artifact_id",
+            "payload_sha256",
+            "authority_id",
+            "authority_digest",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "resource_evidence_status",
+            "__init__",
+        ),
+    ),
+    (
+        RuntimeTargetHostRunReceipt,
+        (
+            "authority_id",
+            "authority_digest",
+            "authority_journal_sequence",
+            "financial_plan_id",
+            "financial_plan_digest",
+            "research_plan_id",
+            "research_plan_digest",
+            "research_plan_declared_journal_sequence",
+            "source_sha",
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "inventory_artifact_id",
+            "inventory_payload_sha256",
+            "measurement_artifact_id",
+            "measurement_payload_sha256",
+            "scenario_id",
+            "spec_digest",
+            "host_fingerprint",
+            "resource_evidence_status",
+            "terminal_qualification_eligible",
+            "schema_version",
+            "evidence_type",
+            "__init__",
+            "canonical_payload",
+            "canonical_bytes",
+            "digest",
+        ),
+    ),
+)
+_RESOURCE_DESCRIPTOR_AUTHORITY = tuple(
+    descriptor_state
+    for owner, names in _RESOURCE_DESCRIPTOR_SPECS
+    for descriptor_state in _capture_descriptor_authority(owner, names)
+)
+_RESOURCE_CLASS_FUNCTION_AUTHORITY = tuple(
+    (
+        f"{owner.__name__}.{name}",
+        function,
+        _capture_callable_authority(function),
+    )
+    for owner, name, _descriptor, function, _code in _RESOURCE_DESCRIPTOR_AUTHORITY
+    if function is not None
+)
+
+
 def issue_runtime_target_host_resource_evidence(
     run: RuntimeTargetHostRunResult,
     *,
@@ -702,217 +919,30 @@ def run_declared_target_host_campaign_with_resources(
         raw_type_getattribute(RuntimeTargetHostResourceEvidence, "__dict__")
     )
     raw_descriptor_getitem = descriptor_namespace_type.__getitem__
-    descriptor_states = (
-        *_capture_descriptor_authority(
-            RuntimeTargetHostResourceSnapshot,
-            (
-                "process_id",
-                "monotonic_ns",
-                "process_cpu_ns",
-                "peak_rss_bytes",
-                "io_read_bytes",
-                "io_write_bytes",
-                "disk_total_bytes",
-                "disk_free_bytes",
-                "thread_count",
-                "__init__",
-                "__post_init__",
-                "payload",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostResourceEvidence,
-            (
-                "authority_id",
-                "authority_digest",
-                "source_sha",
-                "release_artifact_id",
-                "release_artifact_sha256",
-                "scenario_id",
-                "spec_digest",
-                "host_fingerprint",
-                "inventory_artifact_id",
-                "inventory_payload_sha256",
-                "measurement_artifact_id",
-                "measurement_payload_sha256",
-                "run_receipt_artifact_id",
-                "run_receipt_payload_sha256",
-                "reconnect_backlog_remaining",
-                "before",
-                "after",
-                "resource_evidence_status",
-                "terminal_qualification_eligible",
-                "schema_version",
-                "evidence_type",
-                "__init__",
-                "__post_init__",
-                "canonical_payload",
-                "canonical_bytes",
-                "digest",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            PublishedRuntimeTargetHostResourceEvidence,
-            (
-                "artifact_id",
-                "payload_sha256",
-                "resource_evidence_status",
-                "__init__",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostResourceRunResult,
-            (
-                "run",
-                "resource_evidence",
-                "published_resource_evidence",
-                "__init__",
-                "terminal_qualification_eligible",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostRunResult,
-            (
-                "authority",
-                "research_plan",
-                "measurement",
-                "published_inventory",
-                "published_measurement",
-                "run_receipt",
-                "run_receipt_artifact_id",
-                "run_receipt_payload_sha256",
-                "__init__",
-                "terminal_qualification_eligible",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostCampaignAuthority,
-            (
-                "authority_id",
-                "event_id",
-                "scenario_id",
-                "spec_digest",
-                "source_sha",
-                "configuration_hash",
-                "host_fingerprint",
-                "release_artifact_id",
-                "release_artifact_sha256",
-                "financial_plan_id",
-                "financial_plan_digest",
-                "store_identity_digest",
-                "journal_taxonomy_digest",
-                "declared_journal_sequence",
-                "payload_hash",
-                "__init__",
-                "__post_init__",
-                "digest",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostMeasurementArtifact,
-            (
-                "authority_id",
-                "authority_digest",
-                "source_sha",
-                "release_artifact_id",
-                "release_artifact_sha256",
-                "scenario_id",
-                "spec_digest",
-                "configuration_hash",
-                "host_fingerprint",
-                "financial_plan_id",
-                "financial_plan_digest",
-                "store_identity_digest",
-                "journal_taxonomy_digest",
-                "authority_journal_sequence",
-                "conservation_start_journal_sequence",
-                "conservation_end_journal_sequence",
-                "conservation_digest",
-                "reconnect_backlog_remaining",
-                "financial_samples",
-                "research_samples",
-                "staleness_basis",
-                "resource_evidence_status",
-                "schema_version",
-                "evidence_type",
-                "__init__",
-                "__post_init__",
-                "terminal_qualification_eligible",
-                "financial_event_ids",
-                "financial_latency_us",
-                "financial_staleness_us",
-                "research_interference_us",
-                "canonical_payload",
-                "canonical_bytes",
-                "digest",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            PublishedRuntimeTargetHostInventory,
-            (
-                "artifact_id",
-                "payload_sha256",
-                "host_fingerprint",
-                "collector_id",
-                "collector_version",
-                "__init__",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            PublishedRuntimeTargetHostMeasurement,
-            (
-                "artifact_id",
-                "payload_sha256",
-                "authority_id",
-                "authority_digest",
-                "release_artifact_id",
-                "release_artifact_sha256",
-                "resource_evidence_status",
-                "__init__",
-            ),
-        ),
-        *_capture_descriptor_authority(
-            RuntimeTargetHostRunReceipt,
-            (
-                "authority_id",
-                "authority_digest",
-                "authority_journal_sequence",
-                "financial_plan_id",
-                "financial_plan_digest",
-                "research_plan_id",
-                "research_plan_digest",
-                "research_plan_declared_journal_sequence",
-                "source_sha",
-                "release_artifact_id",
-                "release_artifact_sha256",
-                "inventory_artifact_id",
-                "inventory_payload_sha256",
-                "measurement_artifact_id",
-                "measurement_payload_sha256",
-                "scenario_id",
-                "spec_digest",
-                "host_fingerprint",
-                "resource_evidence_status",
-                "terminal_qualification_eligible",
-                "schema_version",
-                "evidence_type",
-                "__init__",
-                "canonical_payload",
-                "canonical_bytes",
-                "digest",
-            ),
-        ),
-    )
-    class_function_states = tuple(
-        (
-            f"{owner.__name__}.{name}",
-            function,
-            _capture_callable_authority(function),
-        )
-        for owner, name, _descriptor, function, _code in descriptor_states
-        if function is not None
-    )
+    descriptor_states = _RESOURCE_DESCRIPTOR_AUTHORITY
+    class_function_states = _RESOURCE_CLASS_FUNCTION_AUTHORITY
 
+    def require_resource_class_authority(*, phase: str) -> None:
+        for owner, name, descriptor, function, code in descriptor_states:
+            namespace = raw_type_getattribute(owner, "__dict__")
+            current = raw_descriptor_getitem(namespace, name)
+            if current is not descriptor:
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource evidence class descriptor changed "
+                    f"{phase}: {owner.__name__}.{name}"
+                )
+            if (
+                function is not None
+                and raw_object_getattribute(function, "__code__") is not code
+            ):
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource evidence class executable changed "
+                    f"{phase}: {owner.__name__}.{name}"
+                )
+        for name, function, state in class_function_states:
+            require_callable(function, state, name=name)
+
+    require_resource_class_authority(phase="before target-host run")
     before = capture_snapshot(evidence_root=evidence_store.root)
     run = runner(
         journal=journal,
@@ -955,24 +985,7 @@ def run_declared_target_host_campaign_with_resources(
         require_store_state,
         name="resource ArtifactStore verifier",
     )
-    for owner, name, descriptor, function, code in descriptor_states:
-        namespace = raw_type_getattribute(owner, "__dict__")
-        current = raw_descriptor_getitem(namespace, name)
-        if current is not descriptor:
-            raise RuntimeTargetHostResourceEvidenceError(
-                "resource evidence class descriptor changed during target-host run: "
-                f"{name}"
-            )
-        if (
-            function is not None
-            and raw_object_getattribute(function, "__code__") is not code
-        ):
-            raise RuntimeTargetHostResourceEvidenceError(
-                "resource evidence class executable changed during target-host run: "
-                f"{name}"
-            )
-    for name, function, state in class_function_states:
-        require_callable(function, state, name=name)
+    require_resource_class_authority(phase="during target-host run")
     if ArtifactStore.publish_bytes is not artifact_publish:
         raise RuntimeTargetHostResourceEvidenceError(
             "ArtifactStore publisher authority changed during target-host run"

@@ -125,7 +125,7 @@ def _normalized_exact_paths(paths: Sequence[str] | None) -> frozenset[str]:
         if (
             type(value) is not str
             or not value
-            or any(ord(character) in {0, 92} for character in value)
+            or any(ord(character) < 32 or ord(character) in {92, 127} for character in value)
             or value.startswith("/")
             or value.endswith("/")
             or "//" in value

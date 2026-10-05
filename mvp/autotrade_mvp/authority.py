@@ -1710,6 +1710,19 @@ class AuthoritativeRiskSnapshot:
                 "authoritative risk snapshot is missing evidence dimensions: "
                 + ", ".join(missing)
             )
+        if price_semantics_digest is not None:
+            instrument_evidence = refs["INSTRUMENT"]
+            if (
+                not instrument_evidence.startswith("sha256:")
+                or len(instrument_evidence) != 71
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in instrument_evidence[7:]
+                )
+            ):
+                raise ValueError(
+                    "INSTRUMENT evidence must be canonical instrument metadata binding"
+                )
         object.__setattr__(self, "context", normalized_context)
         object.__setattr__(self, "risk_policy", canonical_policy)
         object.__setattr__(self, "account_id", account)

@@ -10,6 +10,51 @@ NOW_TEXT = "2026-09-25T10:00:00+00:00"
 
 
 class ModelBudgetClockClassDispatchAuthorityTests(unittest.TestCase):
+    def test_clock_restores_rebound_journal_base_before_commit(self):
+        armed = False
+        canonical_base = JournalStore.__bases__[0]
+        forged_commit_calls = []
+
+        def hostile_commit_command(*_args, **_kwargs):
+            forged_commit_calls.append("forged")
+            self.fail("injected journal base reached durable budget commit")
+
+        HostileJournalBase = type(
+            "HostileJournalBase",
+            (canonical_base,),
+            {"commit_command": hostile_commit_command},
+        )
+
+        def hostile_clock():
+            nonlocal armed
+            if armed:
+                JournalStore.__bases__ = (HostileJournalBase,)
+            return NOW_TEXT
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="clock-base-rebinding-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=hostile_clock,
+            )
+            armed = True
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"model budget clock mutated authority:.*"
+                    r"JournalStore\.__bases__",
+                ):
+                    budget.reserve("clock-base-request", "0.2")
+
+                self.assertEqual(forged_commit_calls, [])
+                self.assertEqual(JournalStore.__bases__, (canonical_base,))
+                self.assertEqual(budget.snapshot().reserved, 0)
+            finally:
+                JournalStore.__bases__ = (canonical_base,)
+
     def test_clock_restores_rebound_recovery_and_journal_dispatch_before_effect(self):
         armed = False
         restore_descriptor = vars(DurableModelBudget)["_restore_clock_authority"]

@@ -1431,7 +1431,47 @@ class DurableModelCallOrchestrator:
                     decision.reason,
                 )
 
-        materialized = tuple(descriptors)
+        descriptor_boundary_refs = {
+            "budget": self.budget,
+            "journal": self.journal,
+            "clock": self.clock,
+            "pricing_evidence_resolver": self.pricing_evidence_resolver,
+            "observation_evidence_resolver": self.observation_evidence_resolver,
+            "billing_evidence_resolver": self.billing_evidence_resolver,
+        }
+        descriptor_boundary_values = {
+            "started_lease_seconds": self.started_lease_seconds,
+            "owner_token": self.owner_token,
+        }
+        descriptor_error: Exception | None = None
+        descriptor_changes: list[str] = []
+        try:
+            try:
+                materialized = tuple(descriptors)
+            except Exception as error:
+                descriptor_error = error
+        finally:
+            for name, expected in descriptor_boundary_refs.items():
+                if getattr(self, name, None) is not expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+            for name, expected in descriptor_boundary_values.items():
+                current = getattr(self, name, None)
+                if type(current) is not type(expected) or current != expected:
+                    descriptor_changes.append(name)
+                setattr(self, name, expected)
+
+        if descriptor_changes:
+            error = ModelCallError(
+                "descriptor iterable mutated orchestrator authority:"
+                + ",".join(sorted(descriptor_changes))
+            )
+            if descriptor_error is not None:
+                raise error from descriptor_error
+            raise error
+        if descriptor_error is not None:
+            raise descriptor_error
+
         if any(type(item) is not ModelDescriptor for item in materialized):
             raise TypeError("descriptors must be exact ModelDescriptor values")
         materialized = tuple(ModelDescriptor(**{

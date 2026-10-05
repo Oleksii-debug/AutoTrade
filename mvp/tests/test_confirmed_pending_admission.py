@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+from decimal import Decimal
 import inspect
 from tempfile import TemporaryDirectory
 import unittest
@@ -190,8 +191,10 @@ class ConfirmedPendingAdmissionTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             _source, pending, confirmed, scope = self._confirmed_source(store)
-            rejecting_context = public_risk_context()
-            object.__setattr__(rejecting_context, "daily_pnl", -600)
+            rejecting_context = replace(
+                public_risk_context(),
+                daily_pnl=Decimal("-600"),
+            )
             authority = self._fresh_service(
                 store,
                 scope,

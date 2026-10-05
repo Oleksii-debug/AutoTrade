@@ -152,7 +152,7 @@ def _install_product_risk_price_semantics_authority():
             )
         try:
             result = value if _TYPE(value) is _DECIMAL_TYPE else _DECIMAL_TYPE(value)
-        except (_INVALID_OPERATION_TYPE, ValueError) as error:
+        except (_INVALID_OPERATION_TYPE, _VALUE_ERROR) as error:
             raise _ERROR_TYPE(f"{name} is invalid") from error
         if not result.is_finite():
             raise _ERROR_TYPE(f"{name} must be finite")
@@ -286,7 +286,7 @@ def _install_product_risk_price_semantics_authority():
                 )
             prepared_reduce_only = body.get("reduceOnly", False)
             if (
-                _TYPE(prepared_reduce_only) is not bool
+                _TYPE(prepared_reduce_only) is not _BOOL
                 or prepared_reduce_only != intent.reduce_only
             ):
                 raise _ERROR_TYPE(

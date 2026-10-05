@@ -36,6 +36,7 @@ from .model_gateway import (
     route_model,
 )
 from .persistence import (
+    JournalStore,
     canonical_json,
     payload_digest,
     require_exact_journal_store_authority,
@@ -53,6 +54,31 @@ class ModelCallError(RuntimeError):
 
 class ModelCallNotSent(ModelCallError):
     """Legacy adapter hint; after durable STARTED it is not independent NOT_SENT proof."""
+
+
+_MODEL_JOURNAL_IMPORT_BASE_AUTHORITY = tuple(
+    (journal_class, tuple(journal_class.__bases__))
+    for journal_class in JournalStore.__mro__
+    if journal_class is not object
+)
+
+
+def _require_model_journal_import_base_authority(
+    authority=_MODEL_JOURNAL_IMPORT_BASE_AUTHORITY,
+) -> None:
+    """Reject a JournalStore inheritance chain changed after module import."""
+    for journal_class, expected_bases in authority:
+        current_bases = tuple(type.__getattribute__(journal_class, "__bases__"))
+        if (
+            len(current_bases) != len(expected_bases)
+            or any(
+                current is not expected
+                for current, expected in zip(current_bases, expected_bases)
+            )
+        ):
+            raise ModelCallError(
+                "durable model budget journal class base authority is invalid"
+            )
 
 
 # Callback code can retain the canonical JournalStore class itself.  Freezing
@@ -594,6 +620,7 @@ class DurableModelCallOrchestrator:
             raise ValueError(
                 "started_lease_seconds must be an integer from 1 through 3600"
             )
+        _require_model_journal_import_base_authority()
         try:
             require_exact_journal_store_authority(
                 budget.journal,
@@ -711,7 +738,10 @@ class DurableModelCallOrchestrator:
         object | None,
         type | None,
         dict[str, object] | None,
-        tuple[tuple[type, str, Mapping[str, object]], ...],
+        tuple[
+            tuple[type, str, tuple[type, ...], Mapping[str, object]],
+            ...,
+        ],
     ]:
         """Freeze exact class and instance authority around caller callbacks."""
         orchestrator_class = object.__getattribute__(self, "__class__")
@@ -791,6 +821,7 @@ class DurableModelCallOrchestrator:
             (
                 authority_class,
                 authority_class.__module__ + "." + authority_class.__qualname__,
+                tuple(type.__getattribute__(authority_class, "__bases__")),
                 MappingProxyType(dict(vars(authority_class))),
             )
             for authority_class in authority_classes
@@ -825,7 +856,10 @@ class DurableModelCallOrchestrator:
             object | None,
             type | None,
             dict[str, object] | None,
-            tuple[tuple[type, str, Mapping[str, object]], ...],
+            tuple[
+            tuple[type, str, tuple[type, ...], Mapping[str, object]],
+            ...,
+        ],
         ],
     ) -> list[str]:
         """Restore exact callback authority before any dynamic attribute access."""
@@ -852,7 +886,29 @@ class DurableModelCallOrchestrator:
 
         # Restore raw class dictionaries first. Descriptor identity comparison
         # avoids invoking attacker-defined equality during recovery.
-        for authority_class, class_label, expected_class_state in class_authority:
+        for (
+            authority_class,
+            class_label,
+            expected_bases,
+            expected_class_state,
+        ) in class_authority:
+            current_bases = tuple(type.__getattribute__(authority_class, "__bases__"))
+            if (
+                len(current_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(current_bases, expected_bases)
+                )
+            ):
+                base_label = "class." + class_label + ".__bases__"
+                changes.append(base_label)
+                try:
+                    type.__setattr__(authority_class, "__bases__", expected_bases)
+                except TypeError as error:
+                    raise ModelCallError(
+                        base_label + " could not be restored after callback"
+                    ) from error
+
             current_class_state = vars(authority_class)
             current_names = set(current_class_state)
             expected_names = set(expected_class_state)
@@ -879,6 +935,20 @@ class DurableModelCallOrchestrator:
                         raise ModelCallError(
                             label + " could not be restored after callback"
                         ) from error
+
+            restored_bases = tuple(
+                type.__getattribute__(authority_class, "__bases__")
+            )
+            if (
+                len(restored_bases) != len(expected_bases)
+                or any(
+                    current is not expected
+                    for current, expected in zip(restored_bases, expected_bases)
+                )
+            ):
+                raise ModelCallError(
+                    "class base authority restore is incomplete for " + class_label
+                )
 
             restored_class_state = vars(authority_class)
             if set(restored_class_state) != expected_names or any(

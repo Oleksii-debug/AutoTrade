@@ -66,6 +66,19 @@ def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     return normalized
 
 
+def _event_ids(values: Sequence[str], *, name: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise RuntimeBudgetError(f"{name} must be a sequence")
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise RuntimeBudgetError(
+                f"{name} must contain canonical non-empty event ids"
+            )
+        normalized.append(value)
+    return tuple(normalized)
+
+
 def nearest_rank_percentile(values: Sequence[int], percentile: int) -> int:
     """Return an integer nearest-rank percentile without float arithmetic."""
 
@@ -171,6 +184,9 @@ class RuntimeLoadObservation:
     reconnect_backlog_remaining: int
     declared_duration_us: int | None = None
     observed_duration_us: int | None = None
+    recovered_financial_event_ids: tuple[str, ...] = ()
+    financial_latency_event_ids: tuple[str, ...] = ()
+    financial_staleness_event_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.scenario_id, str) or not self.scenario_id.strip():
@@ -235,6 +251,30 @@ class RuntimeLoadObservation:
         )
         object.__setattr__(
             self,
+            "recovered_financial_event_ids",
+            _event_ids(
+                self.recovered_financial_event_ids,
+                name="recovered_financial_event_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "financial_latency_event_ids",
+            _event_ids(
+                self.financial_latency_event_ids,
+                name="financial_latency_event_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "financial_staleness_event_ids",
+            _event_ids(
+                self.financial_staleness_event_ids,
+                name="financial_staleness_event_ids",
+            ),
+        )
+        object.__setattr__(
+            self,
             "reconnect_backlog_remaining",
             _positive_int(
                 self.reconnect_backlog_remaining,
@@ -275,6 +315,9 @@ class RuntimeLoadObservation:
         reconnect_backlog_remaining: int,
         declared_duration_us: int | None = None,
         observed_duration_us: int | None = None,
+        recovered_financial_event_ids: Sequence[str] = (),
+        financial_latency_event_ids: Sequence[str] = (),
+        financial_staleness_event_ids: Sequence[str] = (),
     ) -> "RuntimeLoadObservation":
         if not isinstance(scenario_id, str) or not scenario_id.strip():
             raise RuntimeBudgetError("scenario_id is required")
@@ -308,6 +351,18 @@ class RuntimeLoadObservation:
             ),
             declared_duration_us=declared_duration_us,
             observed_duration_us=observed_duration_us,
+            recovered_financial_event_ids=_event_ids(
+                recovered_financial_event_ids,
+                name="recovered_financial_event_ids",
+            ),
+            financial_latency_event_ids=_event_ids(
+                financial_latency_event_ids,
+                name="financial_latency_event_ids",
+            ),
+            financial_staleness_event_ids=_event_ids(
+                financial_staleness_event_ids,
+                name="financial_staleness_event_ids",
+            ),
         )
 
 
@@ -322,6 +377,64 @@ class RuntimeBudgetDecision:
         if self.status not in {"PASS", "FAIL", "INCONCLUSIVE"}:
             raise RuntimeBudgetError("unsupported decision status")
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+
+
+def _coverage_reasons(
+    observation: RuntimeLoadObservation,
+) -> tuple[list[str], bool, bool]:
+    """Validate one-to-one durable-event identity for financial measurements."""
+
+    insufficient: list[str] = []
+    recovered_ids = observation.recovered_financial_event_ids
+    latency_ids = observation.financial_latency_event_ids
+    staleness_ids = observation.financial_staleness_event_ids
+    recovered_set = set(recovered_ids)
+
+    recovered_identity_valid = True
+    if len(recovered_ids) != observation.recovered_financial_events:
+        insufficient.append("incomplete_recovered_financial_event_identity")
+        recovered_identity_valid = False
+    if len(recovered_set) != len(recovered_ids):
+        insufficient.append("duplicate_recovered_financial_event_ids")
+        recovered_identity_valid = False
+
+    latency_valid = recovered_identity_valid
+    if len(latency_ids) != len(observation.financial_latency_us):
+        insufficient.append("unbound_financial_latency_samples")
+        latency_valid = False
+    if len(set(latency_ids)) != len(latency_ids):
+        insufficient.append("duplicate_financial_latency_event_ids")
+        latency_valid = False
+    if set(latency_ids) - recovered_set:
+        insufficient.append("unknown_financial_latency_event_ids")
+        latency_valid = False
+    if recovered_set - set(latency_ids):
+        insufficient.append("incomplete_financial_latency_coverage")
+        latency_valid = False
+    if len(observation.financial_latency_us) != observation.recovered_financial_events:
+        if "incomplete_financial_latency_coverage" not in insufficient:
+            insufficient.append("incomplete_financial_latency_coverage")
+        latency_valid = False
+
+    staleness_valid = recovered_identity_valid
+    if len(staleness_ids) != len(observation.financial_staleness_us):
+        insufficient.append("unbound_financial_staleness_samples")
+        staleness_valid = False
+    if len(set(staleness_ids)) != len(staleness_ids):
+        insufficient.append("duplicate_financial_staleness_event_ids")
+        staleness_valid = False
+    if set(staleness_ids) - recovered_set:
+        insufficient.append("unknown_financial_staleness_event_ids")
+        staleness_valid = False
+    if recovered_set - set(staleness_ids):
+        insufficient.append("incomplete_financial_staleness_coverage")
+        staleness_valid = False
+    if len(observation.financial_staleness_us) != observation.recovered_financial_events:
+        if "incomplete_financial_staleness_coverage" not in insufficient:
+            insufficient.append("incomplete_financial_staleness_coverage")
+        staleness_valid = False
+
+    return insufficient, latency_valid, staleness_valid
 
 
 def evaluate_runtime_budget(
@@ -346,11 +459,24 @@ def evaluate_runtime_budget(
         raise RuntimeBudgetError("observation belongs to another budget spec digest")
 
     reasons: list[str] = []
+    latency_count = len(observation.financial_latency_us)
+    staleness_count = len(observation.financial_staleness_us)
     metrics: dict[str, int] = {
         "expected_financial_events": observation.expected_financial_events,
         "recovered_financial_events": observation.recovered_financial_events,
         "reconnect_backlog_remaining": observation.reconnect_backlog_remaining,
-        "financial_sample_count": len(observation.financial_latency_us),
+        "financial_sample_count": latency_count,
+        "financial_latency_sample_count": latency_count,
+        "financial_staleness_sample_count": staleness_count,
+        "recovered_financial_event_identity_count": len(
+            observation.recovered_financial_event_ids
+        ),
+        "financial_latency_event_identity_count": len(
+            observation.financial_latency_event_ids
+        ),
+        "financial_staleness_event_identity_count": len(
+            observation.financial_staleness_event_ids
+        ),
         "research_sample_count": len(observation.research_interference_us),
     }
 
@@ -386,19 +512,26 @@ def evaluate_runtime_budget(
         ):
             reasons.append("declared_throughput_not_met")
 
-    if len(observation.financial_latency_us) < spec.min_financial_samples:
+    coverage_reasons, latency_coverage_valid, staleness_coverage_valid = (
+        _coverage_reasons(observation)
+    )
+    insufficient.extend(coverage_reasons)
+    if latency_count < spec.min_financial_samples:
         insufficient.append("insufficient_financial_latency_samples")
-    if len(observation.financial_staleness_us) < spec.min_financial_samples:
+    if staleness_count < spec.min_financial_samples:
         insufficient.append("insufficient_staleness_samples")
     if len(observation.research_interference_us) < spec.min_research_samples:
         insufficient.append("insufficient_research_interference_samples")
 
-    if observation.financial_latency_us:
+    # Aggregate thresholds are meaningful only after one-to-one retained-event
+    # coverage is proven. Anonymous/duplicate/missing identities cannot be used
+    # to manufacture a favorable percentile or staleness maximum.
+    if latency_coverage_valid and observation.financial_latency_us:
         p95 = nearest_rank_percentile(observation.financial_latency_us, 95)
         metrics["p95_financial_latency_us"] = p95
         if p95 > spec.max_p95_financial_latency_us:
             reasons.append("financial_latency_budget_exceeded")
-    if observation.financial_staleness_us:
+    if staleness_coverage_valid and observation.financial_staleness_us:
         max_staleness = max(observation.financial_staleness_us)
         metrics["max_financial_staleness_us"] = max_staleness
         if max_staleness > spec.max_financial_staleness_us:
@@ -414,7 +547,7 @@ def evaluate_runtime_budget(
         final_reasons = tuple(dict.fromkeys(reasons + insufficient))
     elif insufficient:
         status = "INCONCLUSIVE"
-        final_reasons = tuple(insufficient)
+        final_reasons = tuple(dict.fromkeys(insufficient))
     else:
         status = "PASS"
         final_reasons = ()

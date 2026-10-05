@@ -104,7 +104,33 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
             with self.subTest(overrides=overrides), self.assertRaises(RuntimeBudgetError):
                 RuntimeBudgetSpec(**kwargs)
 
-    def test_valid_factory_evidence_still_passes_declared_budget(self):
+    def test_valid_factory_evidence_with_exact_event_coverage_passes_declared_budget(self):
+        current = spec()
+        event_ids = ("financial-1", "financial-2")
+        observation = RuntimeLoadObservation.create(
+            scenario_id=current.scenario_id,
+            spec_digest=current.digest,
+            release_sha=SHA,
+            configuration_hash=HASH,
+            host_fingerprint=HOST,
+            expected_financial_events=2,
+            recovered_financial_events=2,
+            financial_latency_us=(100, 200),
+            financial_staleness_us=(100, 200),
+            research_interference_us=(50,),
+            reconnect_backlog_remaining=0,
+            declared_duration_us=1_000_000,
+            observed_duration_us=900_000,
+            recovered_financial_event_ids=event_ids,
+            financial_latency_event_ids=event_ids,
+            financial_staleness_event_ids=event_ids,
+        )
+        decision = evaluate_runtime_budget(current, observation)
+        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.metrics["recovered_financial_events"], 2)
+        self.assertEqual(decision.metrics["recovered_financial_event_identity_count"], 2)
+
+    def test_factory_evidence_without_event_identity_is_inconclusive(self):
         current = spec()
         observation = RuntimeLoadObservation.create(
             scenario_id=current.scenario_id,
@@ -122,8 +148,8 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
             observed_duration_us=900_000,
         )
         decision = evaluate_runtime_budget(current, observation)
-        self.assertEqual(decision.status, "PASS")
-        self.assertEqual(decision.metrics["recovered_financial_events"], 2)
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_recovered_financial_event_identity", decision.reasons)
 
 
 if __name__ == "__main__":

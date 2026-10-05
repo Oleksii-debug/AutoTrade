@@ -37,6 +37,7 @@ SPEC_DIGEST = "sha256:" + ("7" * 64)
 def _snapshot(
     *,
     monotonic_ns: int,
+    process_id: int = 4242,
     process_cpu_ns: int,
     peak_rss_bytes: int = 100_000,
     io_read_bytes: int = 1_000,
@@ -46,6 +47,7 @@ def _snapshot(
     thread_count: int = 3,
 ) -> RuntimeTargetHostResourceSnapshot:
     return RuntimeTargetHostResourceSnapshot(
+        process_id=process_id,
         monotonic_ns=monotonic_ns,
         process_cpu_ns=process_cpu_ns,
         peak_rss_bytes=peak_rss_bytes,
@@ -98,6 +100,10 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with (
                 patch(
+                    "mvp.autotrade_mvp.runtime_target_host_resource_evidence.os.getpid",
+                    return_value=4242,
+                ),
+                patch(
                     "mvp.autotrade_mvp.runtime_target_host_resource_evidence.perf_counter_ns",
                     return_value=11_000,
                 ),
@@ -130,6 +136,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
                     evidence_root=Path(root)
                 )
 
+        self.assertEqual(observed.process_id, 4242)
         self.assertEqual(observed.monotonic_ns, 11_000)
         self.assertEqual(observed.process_cpu_ns, 7_000)
         self.assertEqual(observed.peak_rss_bytes, 123_456)
@@ -197,6 +204,7 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.resource_evidence_status, "COLLECTED_PROCESS_DISK_V1")
         self.assertFalse(evidence.terminal_qualification_eligible)
         payload = evidence.canonical_payload()
+        self.assertEqual(payload["derived"]["process_id"], 4242)
         self.assertEqual(
             payload["unclosed_authorities"],
             [
@@ -214,6 +222,27 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeTargetHostResourceEvidenceError,
             "monotonic cut moved backwards",
+        ):
+            issue_runtime_target_host_resource_evidence(
+                _run_result(),
+                before=before,
+                after=after,
+            )
+
+    def test_process_identity_change_fails_closed_through_canonical_issuer(self):
+        before = _snapshot(
+            monotonic_ns=10_000,
+            process_cpu_ns=2_000,
+            process_id=111,
+        )
+        after = _snapshot(
+            monotonic_ns=10_001,
+            process_cpu_ns=2_001,
+            process_id=222,
+        )
+        with self.assertRaisesRegex(
+            RuntimeTargetHostResourceEvidenceError,
+            "process identity changed",
         ):
             issue_runtime_target_host_resource_evidence(
                 _run_result(),
@@ -316,6 +345,52 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             manifest["sha256"],
             result.published_resource_evidence.payload_sha256,
         )
+
+    def test_wrapper_rejects_callback_mutation_of_resource_evidence_class(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+        original_post_init = RuntimeTargetHostResourceEvidence.__post_init__
+
+        def forged_post_init(self, _token):
+            return None
+
+        def malicious_runner(**_kwargs):
+            RuntimeTargetHostResourceEvidence.__post_init__ = forged_post_init
+            return run
+
+        with tempfile.TemporaryDirectory() as root:
+            store = ArtifactStore(Path(root) / "evidence")
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        side_effect=(before, after),
+                    ),
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "class descriptor changed",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=object(),
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+            finally:
+                RuntimeTargetHostResourceEvidence.__post_init__ = original_post_init
 
     def test_wrapper_rejects_resource_artifact_identity_collision_before_run(self):
         with tempfile.TemporaryDirectory() as root:

@@ -50,6 +50,7 @@ _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
+_MAX_UNIX_MILLIS = 253_402_300_799_999
 BINANCE_SPOT_DEPTH_POLICY_ID = "BINANCE_SPOT_DIFF_DEPTH_V1"
 
 
@@ -98,6 +99,13 @@ def _millis(value: object, *, name: str) -> str:
     if type(value) is int:
         raw = value
     elif type(value) is str and value.isdigit():
+        # Bound provider text before integer materialization.  Python's
+        # arbitrary-size integer parser and datetime conversion are not a
+        # financial ingress resource policy.
+        if len(value) > len(str(_MAX_UNIX_MILLIS)):
+            raise BinanceSpotAdapterError(
+                f"{name} exceeds the supported UTC millisecond range"
+            )
         raw = int(value)
         if str(raw) != value:
             raise BinanceSpotAdapterError(
@@ -107,9 +115,9 @@ def _millis(value: object, *, name: str) -> str:
         raise BinanceSpotAdapterError(
             f"{name} must be an integer millisecond timestamp"
         )
-    if raw < 0:
+    if raw < 0 or raw > _MAX_UNIX_MILLIS:
         raise BinanceSpotAdapterError(
-            f"{name} must be a non-negative integer millisecond timestamp"
+            f"{name} exceeds the supported UTC millisecond range"
         )
     seconds, remainder = divmod(raw, 1000)
     instant = datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(milliseconds=remainder)

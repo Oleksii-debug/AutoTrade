@@ -384,8 +384,8 @@ def parse_account_trades(
     rows = observation.payload
     account_id = observation.account_id
     environment = observation.environment
-    if not isinstance(rows, (list, tuple)):
-        raise BinanceUsdmAdapterError("trade rows must be an array")
+    if type(rows) is not tuple:
+        raise BinanceUsdmAdapterError("trade rows must be an exact decoded array")
     if type(instrument_versions) is not dict:
         raise BinanceUsdmAdapterError("instrument_versions must be an exact dict")
     normalized_instruments: dict[str, str] = {}
@@ -426,9 +426,9 @@ def parse_account_trades(
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
-        if not isinstance(raw, Mapping):
+        if type(raw) is not MappingProxyType:
             raise BinanceUsdmAdapterError(
-                f"trade row {index} must be an object"
+                f"trade row {index} must be an exact decoded object"
             )
 
         symbol = _provider_symbol(
@@ -443,11 +443,9 @@ def parse_account_trades(
         trade_id = raw.get("id")
         order_id = raw.get("orderId")
         if (
-            isinstance(trade_id, bool)
-            or not isinstance(trade_id, int)
+            type(trade_id) is not int
             or trade_id < 0
-            or isinstance(order_id, bool)
-            or not isinstance(order_id, int)
+            or type(order_id) is not int
             or order_id < 0
         ):
             raise BinanceUsdmAdapterError(

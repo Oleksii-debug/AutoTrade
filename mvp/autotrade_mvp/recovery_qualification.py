@@ -707,15 +707,13 @@ def qualify_recovery_release(
     else:
         status = RecoveryEvidenceStatus.PASS
 
-    measured = MappingProxyType(
-        {
-            scenario: item.downtime_ms
-            for scenario, item in sorted(
-                by_scenario.items(),
-                key=lambda pair: pair[0].value,
-            )
-        }
-    )
+    measured = {
+        scenario: item.downtime_ms
+        for scenario, item in sorted(
+            by_scenario.items(),
+            key=lambda pair: pair[0].value,
+        )
+    }
     return RecoveryQualificationDecision(
         status=status,
         source_sha=policy.source_sha,

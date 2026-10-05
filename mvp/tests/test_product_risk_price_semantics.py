@@ -370,7 +370,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
             binding = composer.compose(request, prepared)
 
-            bound = composer.bind_snapshot(request, base, binding)
+            bound = composer.bind_snapshot(request, base, binding, prepared)
 
             self.assertNotEqual(bound.snapshot_id, base.snapshot_id)
             self.assertEqual(
@@ -381,6 +381,31 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 bound.evidence_refs["INSTRUMENT"],
                 binding.instrument_evidence_binding,
             )
+
+    def test_snapshot_binding_rejects_a_different_canonical_prepared_request(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+            _, other_prepared = self._prepared(
+                order_type="MARKET",
+                price=None,
+                capability=capability,
+            )
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "prepared request differs",
+            ):
+                composer.bind_snapshot(
+                    request,
+                    base,
+                    binding,
+                    other_prepared,
+                )
 
     def test_conflicting_instrument_evidence_cannot_be_overwritten(self):
         with TemporaryDirectory() as directory:
@@ -398,7 +423,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 ProductRiskPriceSemanticsError,
                 "INSTRUMENT evidence differs",
             ):
-                composer.bind_snapshot(request, base, binding)
+                composer.bind_snapshot(request, base, binding, prepared)
 
     def test_composer_does_not_relax_paper_live_generic_resolver_block(self):
         with TemporaryDirectory() as directory:
@@ -411,6 +436,7 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 request,
                 base,
                 composer.compose(request, prepared),
+                prepared,
             )
             calls = []
 

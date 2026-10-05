@@ -198,9 +198,9 @@ def _compose(
         raise TypeError("utility_rule must be exact ResolvedAblationUtilityRuleProvenance")
     if type(cost_rule) is not ResolvedAblationCostRuleProvenance:
         raise TypeError("cost_rule must be exact ResolvedAblationCostRuleProvenance")
-    facts.verify_integrity()
-    utility_rule.verify_integrity()
-    cost_rule.verify_integrity()
+    ResolvedAblationUtilityFactProvenance.verify_integrity(facts)
+    ResolvedAblationUtilityRuleProvenance.verify_integrity(utility_rule)
+    ResolvedAblationCostRuleProvenance.verify_integrity(cost_rule)
     if not (
         facts.protocol_digest
         == utility_rule.protocol_digest
@@ -290,7 +290,7 @@ def reverify_ablation_owned_operand_preflight(
         raise TypeError(
             "evidence must be exact ResolvedAblationOwnedOperandPreflight"
         )
-    evidence.verify_integrity()
+    ResolvedAblationOwnedOperandPreflight.verify_integrity(evidence)
     resolved = resolve_ablation_owned_operand_preflight(
         authority,
         pairs,

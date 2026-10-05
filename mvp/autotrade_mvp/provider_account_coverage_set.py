@@ -12,7 +12,7 @@ before the later canonical account-cut/PROVEN_ABSENT issuer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import weakref
@@ -58,9 +58,11 @@ class ProviderAccountCoverageSetError(ValueError):
 
 
 def _at(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    # Reject executable nested tzinfo before resolving any current acquisition/Q
+    # authority. Exact datetime.timezone is an inert stdlib fixed-offset object.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountCoverageSetError(
-            "at must be exact timezone-aware datetime"
+            "at must be exact datetime with exact datetime.timezone tzinfo"
         )
     return value
 

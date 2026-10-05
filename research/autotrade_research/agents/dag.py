@@ -254,9 +254,23 @@ class DagPlan:
         object.__setattr__(self, "total_budget", budget)
 
 
+def _require_canonical_record_accessor(record_type: type, name: str) -> None:
+    """Fail closed if a canonical authority DTO's instance accessor was rebound.
+
+    The public readmission boundary must not execute caller-controlled class
+    callbacks before it has detached and revalidated the DTO fields.
+    """
+
+    if type.__getattribute__(record_type, "__getattribute__") is not object.__getattribute__:
+        raise SpecialistDagError(
+            f"{name} canonical instance accessor has been rebound"
+        )
+
+
 def _readmit_spec(value: object) -> SpecialistSpec:
     if type(value) is not SpecialistSpec:
         raise SpecialistDagError("specialist specification must be exact SpecialistSpec")
+    _require_canonical_record_accessor(SpecialistSpec, "SpecialistSpec")
     return SpecialistSpec(
         role_id=value.role_id,
         correlation_group=value.correlation_group,
@@ -270,6 +284,7 @@ def _readmit_spec(value: object) -> SpecialistSpec:
 def _readmit_run(value: object) -> SpecialistRun:
     if type(value) is not SpecialistRun:
         raise SpecialistDagError("specialist result must be exact SpecialistRun")
+    _require_canonical_record_accessor(SpecialistRun, "SpecialistRun")
     return SpecialistRun(
         role_id=value.role_id,
         input_snapshot_id=value.input_snapshot_id,
@@ -286,6 +301,7 @@ def _readmit_run(value: object) -> SpecialistRun:
 def _readmit_plan(value: object) -> DagPlan:
     if type(value) is not DagPlan:
         raise SpecialistDagError("plan must be an exact DagPlan")
+    _require_canonical_record_accessor(DagPlan, "DagPlan")
     return DagPlan(
         input_snapshot_id=value.input_snapshot_id,
         scheduled_roles=value.scheduled_roles,
@@ -472,7 +488,28 @@ def aggregate_specialists(
         available_inputs=raw_available,
         total_budget=total_budget,
     )
-    if plan != canonical_plan:
+    # Never dispatch through DagPlan.__eq__: the canonical class is public
+    # Python state and can be monkey-patched after a plan was created. Compare
+    # detached, already-readmitted fields through object.__getattribute__
+    # instead, so class-level equality rebinding cannot self-authenticate a
+    # forged schedule.
+    plan_state = (
+        object.__getattribute__(plan, "input_snapshot_id"),
+        object.__getattribute__(plan, "scheduled_roles"),
+        object.__getattribute__(plan, "skipped_roles"),
+        object.__getattribute__(plan, "reserved_cost"),
+        object.__getattribute__(plan, "available_inputs"),
+        object.__getattribute__(plan, "total_budget"),
+    )
+    canonical_plan_state = (
+        object.__getattribute__(canonical_plan, "input_snapshot_id"),
+        object.__getattribute__(canonical_plan, "scheduled_roles"),
+        object.__getattribute__(canonical_plan, "skipped_roles"),
+        object.__getattribute__(canonical_plan, "reserved_cost"),
+        object.__getattribute__(canonical_plan, "available_inputs"),
+        object.__getattribute__(canonical_plan, "total_budget"),
+    )
+    if plan_state != canonical_plan_state:
         raise SpecialistDagError(
             "DagPlan does not match canonical planner output for this context"
         )

@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.binance_spot import (
     BinanceSpotDepthCursor,
     BinanceSpotDepthRange,
     BinanceSpotOrderIntent,
+    BinanceSpotPreparedRequest,
     BinanceSpotReferencePrice,
     BinanceSpotSymbolRules,
     parse_account_trades as parse_spot_account_trades,
@@ -17,6 +18,7 @@ from mvp.autotrade_mvp.binance_spot import (
 )
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
+    BinanceUsdmPreparedRequest,
     parse_account_trades as parse_usdm_account_trades,
     parse_order_ack as parse_usdm_order_ack,
 )
@@ -542,6 +544,75 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
                     "filters": [HostileFilter({"filterType": "PRICE_FILTER"})],
                 },
             )
+        self.assertEqual(callbacks, [])
+
+
+    def test_prepared_request_bodies_reject_mapping_subclass_before_callbacks(self):
+        callbacks = []
+
+        class HostileBody(dict):
+            def items(self):
+                callbacks.append("items")
+                raise AssertionError("hostile prepared-body callback executed")
+
+        cases = (
+            (
+                BinanceSpotAdapterError,
+                lambda body: BinanceSpotPreparedRequest(
+                    endpoint="/api/v3/order",
+                    body=body,
+                    capability_snapshot_id="cap-spot",
+                    filter_source_sha256="sha256:" + "a" * 64,
+                ),
+            ),
+            (
+                BinanceUsdmAdapterError,
+                lambda body: BinanceUsdmPreparedRequest(
+                    endpoint="/fapi/v1/order",
+                    body=body,
+                    capability_snapshot_id="cap-usdm",
+                    documentation_refs=("https://developers.binance.com/",),
+                ),
+            ),
+        )
+        for error_type, construct in cases:
+            with self.subTest(error_type=error_type.__name__):
+                with self.assertRaisesRegex(error_type, "exact request mapping"):
+                    construct(HostileBody({"symbol": "BTCUSDT"}))
+        self.assertEqual(callbacks, [])
+
+    def test_prepared_request_bodies_reject_string_subclasses_before_callbacks(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile request text callback executed")
+
+        cases = (
+            (
+                BinanceSpotAdapterError,
+                lambda body: BinanceSpotPreparedRequest(
+                    endpoint="/api/v3/order",
+                    body=body,
+                    capability_snapshot_id="cap-spot",
+                    filter_source_sha256="sha256:" + "b" * 64,
+                ),
+            ),
+            (
+                BinanceUsdmAdapterError,
+                lambda body: BinanceUsdmPreparedRequest(
+                    endpoint="/fapi/v1/order",
+                    body=body,
+                    capability_snapshot_id="cap-usdm",
+                    documentation_refs=("https://developers.binance.com/",),
+                ),
+            ),
+        )
+        for error_type, construct in cases:
+            with self.subTest(error_type=error_type.__name__):
+                with self.assertRaisesRegex(error_type, "exact strings"):
+                    construct({"symbol": HostileText("BTCUSDT")})
         self.assertEqual(callbacks, [])
 
 

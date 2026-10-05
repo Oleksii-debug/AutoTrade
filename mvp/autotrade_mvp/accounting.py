@@ -383,6 +383,7 @@ def _make_cached_transaction_digest(
     _fingerprint=_transaction_digest_fingerprint,
     _limit=_TRANSACTION_DIGEST_CACHE_LIMIT,
     _lock_factory=RLock,
+    _conflict_type=AccountingConflict,
 ):
     """Bind digest memoization state outside mutable module-global authority."""
 
@@ -403,7 +404,9 @@ def _make_cached_transaction_digest(
         # object.__setattr__. Never publish a digest if the graph changed
         # while canonical validation/digesting was in progress.
         if _fingerprint(transaction) != fingerprint:
-            return digest
+            raise _conflict_type(
+                "transaction changed during digest computation"
+            )
         with lock:
             if len(cache) >= _limit:
                 cache.clear()

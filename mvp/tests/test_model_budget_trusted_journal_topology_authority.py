@@ -115,6 +115,35 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 [],
             )
 
+    def test_budget_detects_in_place_journal_generation_identity_mutation(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="identity-mutation-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            raw_identity = vars(journal)["_store_identity"]
+            if raw_identity.identity_source == "posix_stat":
+                field = "filesystem_inode"
+            else:
+                field = "windows_file_index_low"
+            original = getattr(raw_identity, field)
+            self.assertIsInstance(original, int)
+            object.__setattr__(raw_identity, field, original + 1)
+            try:
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"JournalStore generation changed",
+                ):
+                    budget.reserve("identity-mutation-request", "0.2")
+            finally:
+                object.__setattr__(raw_identity, field, original)
+
+            self.assertEqual(budget.snapshot().reserved, 0)
+
     def test_budget_rejects_journal_retarget_after_construction(self):
         with TemporaryDirectory() as directory:
             first = JournalStore(Path(directory) / "first.db")

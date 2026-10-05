@@ -1281,6 +1281,11 @@ def run_declared_target_host_campaign_with_resources(
     require_resource_class_authority(phase="before target-host run")
     backlog_start = outbox_backlog_cut(journal)
     before = capture_snapshot(evidence_root=evidence_store.root)
+    backlog_start_after_snapshot = outbox_backlog_cut(journal)
+    if backlog_start_after_snapshot != backlog_start:
+        raise RuntimeTargetHostResourceEvidenceError(
+            "outbox backlog changed while opening the resource measurement cut"
+        )
     run = runner(
         journal=journal,
         evidence_store=evidence_store,
@@ -1347,12 +1352,32 @@ def run_declared_target_host_campaign_with_resources(
     )
     require_callable(runner, runner_state, name="canonical target-host runner")
 
+    # Freeze the durable backlog endpoint before the final resource snapshot.
+    # High-water reconstruction may run afterwards, but it is only accepted if
+    # no outbox transition occurred after this endpoint. This prevents a
+    # post-resource-cut ENQUEUED->DELIVERED pair from inflating the retained
+    # campaign high-water while restoring the same terminal pending count.
+    backlog_end = outbox_backlog_cut(journal)
+
+    # Preserve the inherited resource-measurement boundary: the second
+    # process/disk cut closes after the caller workload, authority revalidation,
+    # and the O(1) durable backlog endpoint cut. Full backlog replay is
+    # qualification work and may perform SQLite reads proportional to the
+    # campaign transition count, so it remains outside elapsed/CPU/I/O metrics.
+    after = capture_snapshot(evidence_root=evidence_store.root)
     backlog_evidence = outbox_backlog_high_water(
         journal,
         start_transition_sequence=backlog_start["transition_sequence"],
         start_pending_count=backlog_start["pending_count"],
     )
-    after = capture_snapshot(evidence_root=evidence_store.root)
+    if (
+        backlog_evidence["end_transition_sequence"]
+        != backlog_end["transition_sequence"]
+        or backlog_evidence["end_pending_count"] != backlog_end["pending_count"]
+    ):
+        raise RuntimeTargetHostResourceEvidenceError(
+            "outbox backlog changed after the post-workload causal cut"
+        )
     evidence = issue_evidence(
         run,
         before=before,

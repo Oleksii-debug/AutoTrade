@@ -115,6 +115,35 @@ class ModelBudgetTrustedJournalTopologyAuthorityTests(unittest.TestCase):
                 [],
             )
 
+    def test_budget_rejects_post_construction_journal_method_shadow(self):
+        forged_calls = []
+
+        def hostile_get_event(*_args, **_kwargs):
+            forged_calls.append("forged")
+            self.fail("post-construction get_event shadow reached dispatch")
+
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            budget = DurableModelBudget(
+                journal=journal,
+                budget_id="post-shadow-budget",
+                ceiling="5",
+                environment="PAPER",
+                clock=lambda: NOW_TEXT,
+            )
+            journal.get_event = hostile_get_event
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    r"instance state is shadowed",
+                ):
+                    budget.reserve("post-shadow-request", "0.2")
+            finally:
+                del journal.get_event
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(budget.snapshot().reserved, 0)
+
     def test_budget_detects_in_place_journal_generation_identity_mutation(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")

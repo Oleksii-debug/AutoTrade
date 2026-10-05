@@ -32,6 +32,7 @@ from .model_gateway import (
     RouteDecision,
     RouteStatus,
     RoutingPolicy,
+    _route_now,
     route_model,
 )
 from .persistence import canonical_json, payload_digest
@@ -1295,11 +1296,15 @@ class DurableModelCallOrchestrator:
 
         first = existing[0] if existing else None
         if first is None:
+            # Bind all new-attempt routing decisions to one exact time snapshot.
+            # Without this, omitted now_utc could be sampled before and after
+            # slow inventory/pricing work and cross the request deadline.
+            route_now = _route_now(now_utc)
             inventory_free = route_model(
                 policy,
                 request,
                 (),
-                now_utc=now_utc,
+                now_utc=route_now,
             )
             if inventory_free.reason in {
                 "request_cancelled",
@@ -1310,7 +1315,7 @@ class DurableModelCallOrchestrator:
                     policy,
                     request,
                     (),
-                    now_utc=now_utc,
+                    now_utc=route_now,
                 )
                 if decision.status is RouteStatus.ADMITTED:
                     raise ModelCallError(
@@ -1406,7 +1411,7 @@ class DurableModelCallOrchestrator:
                 policy,
                 request,
                 materialized,
-                now_utc=now_utc,
+                now_utc=route_now,
                 reservation_context=self._reservation_context(spec, pricing),
             )
             if decision.status is not RouteStatus.ADMITTED:

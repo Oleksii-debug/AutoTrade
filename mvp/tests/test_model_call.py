@@ -961,6 +961,38 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 )
                 self.assertEqual(budget.snapshot().reserved, Decimal("0"))
 
+    def test_new_attempt_freezes_one_route_time_snapshot_for_all_admission(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            with patch(
+                "mvp.autotrade_mvp.model_call._route_now",
+                return_value=NOW,
+            ) as route_now:
+                with patch.object(
+                    budget,
+                    "admit_route",
+                    wraps=budget.admit_route,
+                ) as admit_route:
+                    outcome = orchestrator.execute(
+                        spec=call_spec,
+                        policy=fixed_policy(),
+                        request=request_for(orchestrator, call_spec),
+                        descriptors=[descriptor()],
+                        call=lambda *_args: observation(),
+                        validate_result=lambda _value: True,
+                        now_utc=None,
+                    )
+
+            self.assertEqual(outcome.status, "OBSERVED")
+            route_now.assert_called_once_with(None)
+            self.assertEqual(admit_route.call_count, 1)
+            self.assertEqual(admit_route.call_args.kwargs["now_utc"], NOW)
+
     def test_zero_mode_never_calls_and_creates_no_reservation(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

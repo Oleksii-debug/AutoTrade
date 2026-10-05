@@ -75,7 +75,7 @@ class JournalBackedHostCommandStore:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be a JournalStore")
-        if not isinstance(account_id, str) or not account_id.strip():
+        if type(account_id) is not str or not str.strip(account_id):
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")
@@ -86,7 +86,7 @@ class JournalBackedHostCommandStore:
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
-        self.account_id = account_id.strip()
+        self.account_id = str.strip(account_id)
         self.environment = environment
         self.aggregate_id = "host:" + payload_digest(
             {

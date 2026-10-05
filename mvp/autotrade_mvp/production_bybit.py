@@ -777,6 +777,7 @@ def build_production_bybit_order_sender(
     runtime: FinancialProductionHostRuntime,
     *,
     financial_issuer: "FinancialSendAuthorityIssuer",
+    financial_binding_registry: "DurableFinancialRequestBindingRegistry",
     provider_environment: str,
     capability_snapshot_id: str,
     capability_registry: CapabilityRegistry,
@@ -787,15 +788,21 @@ def build_production_bybit_order_sender(
     quota_gate: QuotaGate | None = None,
     wire_client: ProviderWireClient | None = None,
     recv_window_ms: int = 5000,
-) -> "FinanciallyBoundBybitOrderSender":
-    """Compose the product-facing Bybit sender under sealed financial authority.
+) -> "DurableFinanciallyBoundBybitOrderSender":
+    """Compose the product Bybit sender under persisted financial authority.
 
-    Product composition cannot obtain the callback-taking raw sender through this
-    public factory.  The exact issuer must belong to the same current production
-    host, and the returned surface accepts only issuer-minted financial send
-    capabilities.
+    Product composition cannot obtain the callback-taking raw sender or supply a
+    detached financial capability through this public factory.  Every returned
+    sender resolves the durable admitted-request binding immediately before the
+    existing issuer mint and exact financially-bound provider dispatch.
     """
 
+    from .durable_financial_bybit_sender import (
+        bind_durable_financial_bybit_order_sender,
+    )
+    from .durable_financial_request_binding import (
+        DurableFinancialRequestBindingRegistry,
+    )
     from .financial_send_authority import (
         FinancialSendAuthorityIssuer,
         bind_financial_bybit_order_sender,
@@ -803,6 +810,10 @@ def build_production_bybit_order_sender(
 
     if type(financial_issuer) is not FinancialSendAuthorityIssuer:
         raise TypeError("financial_issuer must be exact FinancialSendAuthorityIssuer")
+    if type(financial_binding_registry) is not DurableFinancialRequestBindingRegistry:
+        raise TypeError(
+            "financial_binding_registry must be exact DurableFinancialRequestBindingRegistry"
+        )
     if financial_issuer.runtime is not runtime:
         raise PermissionError(
             "financial issuer and Bybit sender must share one production host"
@@ -820,4 +831,9 @@ def build_production_bybit_order_sender(
         wire_client=wire_client,
         recv_window_ms=recv_window_ms,
     )
-    return bind_financial_bybit_order_sender(sender, financial_issuer)
+    financially_bound = bind_financial_bybit_order_sender(sender, financial_issuer)
+    return bind_durable_financial_bybit_order_sender(
+        financially_bound,
+        financial_issuer,
+        financial_binding_registry,
+    )

@@ -152,7 +152,8 @@ class ProviderFreeApplication(EmbeddedWebHostApplication):
         # empty-journal ownership rule remains intact and no order is sent.
         if not journal.load_events_by_aggregate_type('canonical_autonomous_simulation'):
             run_autonomous_simulation(PRICES, state_dir, run_id='provider-free-product',
-                now=START_TIME, stop_after_episodes=1, partial_fills=True)
+                now=START_TIME, stop_after_episodes=1, partial_fills=True,
+                target_quantity='2')
         else:
             _protocol(journal)
             # Structural/status verification is read-only on restart. Recovery is
@@ -307,7 +308,7 @@ def build_product(data_dir, *, port=0, desktop_session_sink=None):
             'risk': {'mode': 'ZERO', 'real_order_submission': 'UNAVAILABLE',
                 'active_reservations': status.get('active_reservations', []),
                 'restore_trading_gate': 'RECONCILIATION_REQUIRED' if (data / 'RESTORE_RECONCILIATION_REQUIRED.json').exists() else 'NOT_RESTORED'},
-            'strategy': {'strategy': 'moving-average-2-3-long-only-target-1',
+            'strategy': {'strategy': 'moving-average-2-3-long-only-target-2',
                 'decisions': [{k: v for k, v in e.items() if k != 'provider_state'} for e in completed[-100:]],
                 'agent_decisions': [e['payload'] for e in store.load_events_by_aggregate_type('simulation_agent_decision')[-100:]],
                 'economic_edge_status': 'INCONCLUSIVE'},

@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.host_network import TransportResponse
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.production_host import (
     ProductionHostConfig,
+    ProductionHostRuntime,
     _InstanceFence,
     _StoreIdentityGate,
     build_production_host,

@@ -42,9 +42,28 @@ _GATE_PROFILE_DIGEST_FIELD = "gate_profile_digest"
 _REGISTRY_CRITICAL_INSTANCE_OVERRIDES = frozenset(
     {"_connect", "trial_completeness_evidence"}
 )
+_REGISTRY_CONNECT_DESCRIPTOR = ScientificRegistry.__dict__["_connect"]
+_REGISTRY_PATH_DESCRIPTOR = ScientificRegistry.__dict__["path"]
+_REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR = ScientificRegistry.__dict__[
+    "trial_completeness_evidence"
+]
+
+
+def _assert_registry_class_authority_intact() -> None:
+    expected = {
+        "_connect": _REGISTRY_CONNECT_DESCRIPTOR,
+        "path": _REGISTRY_PATH_DESCRIPTOR,
+        "trial_completeness_evidence": _REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR,
+    }
+    for name, descriptor in expected.items():
+        if ScientificRegistry.__dict__.get(name) is not descriptor:
+            raise TypeError(
+                f"ScientificRegistry class authority descriptor changed: {name}"
+            )
 
 
 def _assert_registry_dispatch_unshadowed(registry: ScientificRegistry) -> None:
+    _assert_registry_class_authority_intact()
     if type(registry) is not ScientificRegistry:
         raise TypeError("registry must be exact ScientificRegistry")
     shadowed = _REGISTRY_CRITICAL_INSTANCE_OVERRIDES.intersection(registry.__dict__)
@@ -59,7 +78,7 @@ def _registry_authority_view(registry: ScientificRegistry) -> ScientificRegistry
     """Freeze one caller registry onto one pathlib-owned DB path for this cut."""
 
     _assert_registry_dispatch_unshadowed(registry)
-    path = object.__getattribute__(registry, "path")
+    path = _REGISTRY_PATH_DESCRIPTOR.__get__(registry, ScientificRegistry)
     if type(path) is not type(Path()) or not path.is_absolute():
         raise TypeError(
             "ScientificRegistry path must be a frozen absolute pathlib path"
@@ -222,7 +241,7 @@ class ScientificTrialOwnerEvidence:
 
 def _registered_protocol_rows(registry: ScientificRegistry) -> tuple[dict[str, Any], ...]:
     authority = _registry_authority_view(registry)
-    with ScientificRegistry._connect(authority) as con:
+    with _REGISTRY_CONNECT_DESCRIPTOR(authority) as con:
         con.execute("BEGIN")
         rows = con.execute(
             "SELECT protocol_id,protocol_hash,payload_json "
@@ -333,13 +352,13 @@ def resolve_scientific_trial_owner(
     canonical_profile = _canonical_gate_profile_authority_view(profile)
     if type(evidence) is not EvaluationEvidence:
         raise TypeError("evidence must be exact EvaluationEvidence")
-    with ScientificRegistry._connect(authority) as authority_guard:
+    with _REGISTRY_CONNECT_DESCRIPTOR(authority) as authority_guard:
         authority_guard.execute("BEGIN IMMEDIATE")
         binding = resolve_gate_profile_protocol_binding(
             registry=authority,
             profile=canonical_profile,
         )
-        trial_evidence = ScientificRegistry.trial_completeness_evidence(
+        trial_evidence = _REGISTRY_TRIAL_COMPLETENESS_DESCRIPTOR(
             authority,
             binding.protocol_id,
         )

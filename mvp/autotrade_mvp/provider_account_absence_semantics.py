@@ -44,7 +44,7 @@ _REQUIRED_SURFACES = (
     "ORDER_HISTORY",
 )
 _RULE_ID_RE = re.compile(r"^[A-Z][A-Z0-9._:/+-]{0,127}$")
-_ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,255}$")
+_ENDPOINT_RE = re.compile(r"^/[A-Za-z0-9._~!$&'()*+,;=:@/-]{1,255}$")
 _QID_RE = re.compile(r"^provider-qualification:sha256:[0-9a-f]{64}$")
 _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -66,8 +66,15 @@ def _endpoint(value: object) -> str:
     if (
         type(value) is not str
         or value.startswith("//")
+        or value.endswith("/")
+        or "//" in value
+        or "/./" in value
+        or "/../" in value
+        or value.endswith("/.")
+        or value.endswith("/..")
         or "://" in value
         or "\\" in value
+        or "%" in value
         or _ENDPOINT_RE.fullmatch(value) is None
     ):
         raise ProviderAccountAbsenceSemanticsError(

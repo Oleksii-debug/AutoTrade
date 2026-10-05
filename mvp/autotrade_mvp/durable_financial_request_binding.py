@@ -879,17 +879,23 @@ class DurableFinancialRequestBindingRegistry:
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload hash mismatch"
             )
-        payload_fields = frozenset(payload)
+        material = _material_from_payload(payload.get("material"))
+        expected_origin = _production_request_origin_receipt(material)
+        expected_fields = (
+            _BINDING_PAYLOAD_PRODUCTION_FIELDS
+            if expected_origin is not None
+            else _BINDING_PAYLOAD_BASE_FIELDS
+        )
         if (
-            payload_fields
-            not in (
-                _BINDING_PAYLOAD_BASE_FIELDS,
-                _BINDING_PAYLOAD_PRODUCTION_FIELDS,
-            )
+            frozenset(payload) != expected_fields
             or payload.get("schema_version") != _SCHEMA_VERSION
             or payload.get("admission_id") != aid
             or payload.get("journal_store_identity_digest")
             != self._store_identity_digest
+            or (
+                expected_origin is not None
+                and payload.get("provider_request_origin") != expected_origin
+            )
         ):
             raise DurableFinancialRequestBindingError(
                 "admitted financial request binding payload is invalid"

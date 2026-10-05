@@ -8,7 +8,7 @@ Caller-created booleans or content digests cannot enter this authority.
 from __future__ import annotations
 
 from dataclasses import dataclass, InitVar
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
@@ -48,7 +48,7 @@ class ProviderAccountOriginSetError(ValueError):
 
 
 def _utc(value: object, *, name: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountOriginSetError(
             f"{name} must be exact timezone-aware datetime"
         )

@@ -13,7 +13,7 @@ PROVEN_ABSENT, reservation release, or PAPER/LIVE authorization.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import weakref
@@ -53,9 +53,12 @@ class AcceptedProviderAccountCutError(ValueError):
 
 
 def _at(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    # ``datetime.utcoffset()`` dispatches through tzinfo.  A caller-controlled
+    # tzinfo therefore executes before the current acquisition/Q checks below
+    # unless the nested timezone object is itself exact inert stdlib authority.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise AcceptedProviderAccountCutError(
-            "at must be exact timezone-aware datetime"
+            "at must be exact datetime with exact datetime.timezone tzinfo"
         )
     return value
 

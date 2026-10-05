@@ -9,7 +9,7 @@ authority here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
@@ -42,6 +42,17 @@ _SCOPE_RE = re.compile(r"^provider-financial-scope:sha256:[0-9a-f]{64}$")
 
 class ProviderAccountReconciliationSemanticsError(ValueError):
     """Provider Q lacks exact current account-reconciliation semantics."""
+
+
+def _at(value: object) -> datetime:
+    # ``DurableProviderQualificationRegistry.current`` presently normalizes
+    # datetimes through ``utcoffset``/``astimezone``.  Do not permit a public
+    # WP-20 caller to make that lower authority execute caller-owned tzinfo code.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderAccountReconciliationSemanticsError(
+            "at must be exact datetime with exact datetime.timezone tzinfo"
+        )
+    return value
 
 
 def account_reconciliation_route_semantics(
@@ -259,6 +270,7 @@ def resolve_current_provider_account_reconciliation_semantics(
 ) -> QualifiedProviderAccountReconciliationSemantics:
     """Resolve exact source-owned account reconciliation semantics from current Q."""
 
+    point = _at(at)
     if type(qualification_registry) is not DurableProviderQualificationRegistry:
         raise TypeError(
             "qualification_registry must be exact DurableProviderQualificationRegistry"
@@ -296,7 +308,7 @@ def resolve_current_provider_account_reconciliation_semantics(
     try:
         qualification_registry.require_exact_current(
             scope=current_scope,
-            at=at,
+            at=point,
             expected_qualification_id=qualification_id,
         )
     except ProviderQualificationError as error:

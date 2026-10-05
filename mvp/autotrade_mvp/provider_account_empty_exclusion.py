@@ -15,7 +15,7 @@ account cut, produce PROVEN_ABSENT, or release UNKNOWN reservations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import weakref
@@ -53,9 +53,11 @@ class ProviderAccountEmptyExclusionError(ValueError):
 
 
 def _at(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    # Never call a caller-owned tzinfo method before issuer/currentness checks.
+    # Exact datetime.timezone values are inert fixed-offset stdlib objects.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountEmptyExclusionError(
-            "at must be exact timezone-aware datetime"
+            "at must be exact datetime with exact datetime.timezone tzinfo"
         )
     return value
 

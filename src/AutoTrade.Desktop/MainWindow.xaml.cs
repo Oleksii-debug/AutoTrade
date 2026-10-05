@@ -53,12 +53,7 @@ public partial class MainWindow : Window
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
         _lifetime.Cancel();
-        _trustedTopLevelDocument = null;
-        if (_webView is { } webView)
-        {
-            _webView = null;
-            webView.Dispose();
-        }
+        DisposeWebExperience();
     }
 
     private async void RefreshHostStatus_Click(object sender, RoutedEventArgs e)
@@ -343,6 +338,8 @@ public partial class MainWindow : Window
 
     private async Task InitializeWebExperienceAsync()
     {
+        DisposeWebExperience();
+
         if (_authenticatedHostClient is null)
         {
             SetWebExperienceStatus(
@@ -422,6 +419,7 @@ public partial class MainWindow : Window
         core.NewWindowRequested += WebView_NewWindowRequested;
         core.DownloadStarting += WebView_DownloadStarting;
         core.PermissionRequested += WebView_PermissionRequested;
+        core.ProcessFailed += WebView_ProcessFailed;
     }
 
     private void WebView_NavigationStarting(
@@ -523,6 +521,54 @@ public partial class MainWindow : Window
         CoreWebView2PermissionRequestedEventArgs args)
     {
         args.State = CoreWebView2PermissionState.Deny;
+    }
+
+    private void WebView_ProcessFailed(
+        object? sender,
+        CoreWebView2ProcessFailedEventArgs args)
+    {
+        _trustedTopLevelDocument = null;
+        SetWebExperienceStatus(
+            "Embedded web process failed (" + args.ProcessFailedKind
+            + "). No browser content is trusted after the failure. "
+            + "Native status and emergency controls remain available. "
+            + "Use Reload web experience to create a fresh browser surface.");
+    }
+
+    private void DisposeWebExperience()
+    {
+        _trustedTopLevelDocument = null;
+        _webSecurityPolicy = null;
+        WebView2? webView = _webView;
+        _webView = null;
+        if (webView is null)
+        {
+            WebExperienceContainer.Child = null;
+            return;
+        }
+
+        if (ReferenceEquals(WebExperienceContainer.Child, webView))
+        {
+            WebExperienceContainer.Child = null;
+        }
+        webView.Dispose();
+    }
+
+    private async void ReloadWebExperience_Click(object sender, RoutedEventArgs e)
+    {
+        ReloadWebExperienceButton.IsEnabled = false;
+        try
+        {
+            await InitializeWebExperienceAsync();
+        }
+        finally
+        {
+            ReloadWebExperienceButton.IsEnabled = true;
+            if (IsLoaded)
+            {
+                ReloadWebExperienceButton.Focus();
+            }
+        }
     }
 
 }

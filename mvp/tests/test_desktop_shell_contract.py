@@ -9,6 +9,7 @@ XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
+AUTHENTICATED_CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "AuthenticatedEmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WEB_POLICY = ROOT / "src" / "AutoTrade.Desktop" / "WebExperienceSecurityPolicy.cs"
 COMMON_SCHEMA = ROOT / "contracts" / "jsonschema" / "common.schema.json"
@@ -21,7 +22,11 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        self.assertEqual(text.count("<PackageReference"), 1)
+        self.assertIn(
+            '<PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />',
+            text,
+        )
         self.assertEqual(project.tag, "Project")
 
     def test_embedded_web_policy_is_fail_closed_and_host_api_scoped(self):
@@ -284,7 +289,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
     def test_webview2_live_composition_is_origin_fenced_and_native_fallback_independent(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")
-        client = CLIENT.read_text(encoding="utf-8")
+        client = AUTHENTICATED_CLIENT.read_text(encoding="utf-8")
 
         self.assertIn('x:Name="WebExperienceContainer"', text)
         self.assertIn('AutomationProperties.Name="Web experience status"', text)
@@ -297,6 +302,12 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("core.NewWindowRequested += WebView_NewWindowRequested", code)
         self.assertIn("core.DownloadStarting += WebView_DownloadStarting", code)
         self.assertIn("core.PermissionRequested += WebView_PermissionRequested", code)
+        self.assertIn("core.ProcessFailed += WebView_ProcessFailed", code)
+        self.assertIn('Content="_Reload web experience"', text)
+        self.assertIn('AutomationProperties.Name="Reload web experience"', text)
+        self.assertIn("ReloadWebExperience_Click", code)
+        self.assertIn("DisposeWebExperience()", code)
+        self.assertIn("No browser content is trusted after the failure.", code)
         self.assertIn("settings.AreHostObjectsAllowed = false", code)
         self.assertIn("settings.IsBuiltInErrorPageEnabled = false", code)
         self.assertIn('request.Headers.RemoveHeader("Authorization")', code)

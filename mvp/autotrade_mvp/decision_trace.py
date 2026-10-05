@@ -460,7 +460,10 @@ class DecisionTraceStore:
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
         with durable_path_lock(self.path):
-            records = self._load()
+            try:
+                records = self._load()
+            except ValueError as error:
+                raise ValueError("Existing decision trace chain is corrupt") from error
             # Validate the exact loaded snapshot before idempotency handling. A
             # second path read could otherwise verify a newer file while stale or
             # corrupt rows from the first read are still used for the append.
@@ -489,7 +492,10 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        records = self._load()
+        try:
+            records = self._load()
+        except ValueError as error:
+            raise ValueError("Decision trace chain is corrupt") from error
         if records and not self._records_are_valid(records):
             raise ValueError("Decision trace chain is corrupt")
         return records

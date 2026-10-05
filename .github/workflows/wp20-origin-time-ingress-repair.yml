@@ -1,0 +1,94 @@
+name: WP20 origin time ingress repair
+
+on:
+  push:
+    branches:
+      - "wp20/inert-datetime-ingress-20261005-sol56-g88"
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply bounded inert-time repair
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("mvp/autotrade_mvp/provider_account_origin_set.py")
+          source = source_path.read_text(encoding="utf-8")
+          old_import = "from datetime import datetime\n"
+          new_import = "from datetime import datetime, timezone\n"
+          if new_import not in source:
+              if source.count(old_import) != 1:
+                  raise SystemExit("unexpected provider_account_origin_set datetime import")
+              source = source.replace(old_import, new_import, 1)
+
+          old_utc = '''def _utc(value: object, *, name: str) -> datetime:\n    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:\n        raise ProviderAccountOriginSetError(\n            f"{name} must be exact timezone-aware datetime"\n        )\n    return value\n'''
+          new_utc = '''def _utc(value: object, *, name: str) -> datetime:\n    if type(value) is not datetime or type(value.tzinfo) is not timezone:\n        raise ProviderAccountOriginSetError(\n            f"{name} must be exact timezone-aware datetime"\n        )\n    return value\n'''
+          if new_utc not in source:
+              if source.count(old_utc) != 1:
+                  raise SystemExit("unexpected provider_account_origin_set _utc implementation")
+              source = source.replace(old_utc, new_utc, 1)
+          source_path.write_text(source, encoding="utf-8")
+
+          test_path = Path("mvp/tests/test_provider_account_inert_time_ingress.py")
+          test = test_path.read_text(encoding="utf-8")
+          import_anchor = "from mvp.autotrade_mvp import provider_account_empty_exclusion as empty_exclusion\n"
+          import_line = "from mvp.autotrade_mvp import provider_account_origin_set as origin_set\n"
+          if import_line not in test:
+              if test.count(import_anchor) != 1:
+                  raise SystemExit("unexpected inert-time import anchor")
+              test = test.replace(import_anchor, import_anchor + import_line, 1)
+
+          method_anchor = "    def test_public_reconciliation_resolver_rejects_hostile_time_before_registry_lookup(self):\n"
+          new_method = '''    def test_origin_set_rejects_executable_nested_tzinfo_without_calling_it(self):\n        hostile = _ExecutableTimezone()\n        value = datetime(2026, 10, 5, 16, 0, tzinfo=hostile)\n        with self.assertRaises(origin_set.ProviderAccountOriginSetError):\n            origin_set._utc(value, name="at")\n        self.assertEqual(hostile.calls, 0)\n\n'''
+          if new_method not in test:
+              if test.count(method_anchor) != 1:
+                  raise SystemExit("unexpected inert-time method anchor")
+              test = test.replace(method_anchor, new_method + method_anchor, 1)
+
+          acceptance_anchor = "            self.assertIs(reconciliation_semantics._at(value), value)\n"
+          acceptance_line = "            self.assertIs(origin_set._utc(value, name=\"at\"), value)\n"
+          if acceptance_line not in test:
+              if test.count(acceptance_anchor) != 1:
+                  raise SystemExit("unexpected inert-time acceptance anchor")
+              test = test.replace(acceptance_anchor, acceptance_anchor + acceptance_line, 1)
+          test_path.write_text(test, encoding="utf-8")
+          PY
+
+      - name: Focused verification
+        shell: bash
+        run: |
+          python -m py_compile \
+            mvp/autotrade_mvp/provider_account_origin_set.py \
+            mvp/tests/test_provider_account_inert_time_ingress.py
+          python -m unittest \
+            mvp.tests.test_provider_account_inert_time_ingress \
+            mvp.tests.test_provider_account_origin_set
+
+      - name: Commit repair on canonical PR branch
+        shell: bash
+        run: |
+          if git diff --quiet -- \
+              mvp/autotrade_mvp/provider_account_origin_set.py \
+              mvp/tests/test_provider_account_inert_time_ingress.py; then
+            echo "No repair diff to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            mvp/autotrade_mvp/provider_account_origin_set.py \
+            mvp/tests/test_provider_account_inert_time_ingress.py
+          git commit -m "fix: make provider origin time ingress inert"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

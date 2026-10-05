@@ -1225,6 +1225,30 @@ class JournalStore:
         return maximum
 
     @staticmethod
+    def _outbox_transition_tail_value(
+        connection: sqlite3.Connection,
+    ) -> tuple[int, int] | None:
+        """Return the latest retained transition scalar without full-history replay."""
+
+        row = connection.execute(
+            """
+            SELECT transition_sequence, pending_count
+            FROM outbox_backlog_transitions
+            ORDER BY transition_sequence DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        transition_sequence = row["transition_sequence"]
+        pending_count = row["pending_count"]
+        if type(transition_sequence) is not int or transition_sequence <= 0:
+            raise ValueError("outbox backlog tail transition is not canonical")
+        if type(pending_count) is not int or pending_count < 0:
+            raise ValueError("outbox backlog tail pending count is not canonical")
+        return transition_sequence, pending_count
+
+    @staticmethod
     def _pending_outbox_count_value(connection: sqlite3.Connection) -> int:
         row = connection.execute(
             "SELECT COUNT(*) AS pending_count "
@@ -1249,8 +1273,17 @@ class JournalStore:
         if transition_kind not in {"ENQUEUED", "DELIVERED"}:
             raise ValueError("outbox backlog transition kind is invalid")
         outbox_id = self._require_text(outbox_id, "outbox_id")
-        next_sequence = self._outbox_transition_sequence_value(connection) + 1
+        tail = self._outbox_transition_tail_value(connection)
+        next_sequence = 1 if tail is None else tail[0] + 1
         pending_count = self._pending_outbox_count_value(connection)
+        if tail is not None:
+            expected_pending_count = tail[1] + (
+                1 if transition_kind == "ENQUEUED" else -1
+            )
+            if expected_pending_count < 0 or pending_count != expected_pending_count:
+                raise ValueError(
+                    "outbox backlog transition does not extend durable tail"
+                )
         connection.execute(
             """
             INSERT INTO outbox_backlog_transitions(
@@ -1325,15 +1358,8 @@ class JournalStore:
         with self._connect() as connection:
             connection.execute("BEGIN")
             try:
-                row = connection.execute(
-                    """
-                    SELECT transition_sequence, pending_count
-                    FROM outbox_backlog_transitions
-                    ORDER BY transition_sequence DESC
-                    LIMIT 1
-                    """
-                ).fetchone()
-                if row is None:
+                tail = self._outbox_transition_tail_value(connection)
+                if tail is None:
                     if start_transition_sequence != 0:
                         raise ValueError(
                             "outbox backlog start transition is ahead of durable tail"
@@ -1341,19 +1367,7 @@ class JournalStore:
                     transition_sequence = 0
                     pending_count = start_pending_count
                 else:
-                    transition_sequence = row["transition_sequence"]
-                    pending_count = row["pending_count"]
-                    if (
-                        type(transition_sequence) is not int
-                        or transition_sequence <= 0
-                    ):
-                        raise ValueError(
-                            "outbox backlog tail transition is not canonical"
-                        )
-                    if type(pending_count) is not int or pending_count < 0:
-                        raise ValueError(
-                            "outbox backlog tail pending count is not canonical"
-                        )
+                    transition_sequence, pending_count = tail
                     if transition_sequence < start_transition_sequence:
                         raise ValueError(
                             "outbox backlog start transition is ahead of durable tail"

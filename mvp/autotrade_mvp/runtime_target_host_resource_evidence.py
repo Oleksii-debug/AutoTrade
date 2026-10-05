@@ -329,6 +329,29 @@ _RESOURCE_JOURNAL_AUTHORITY_CHECK = require_exact_journal_store_authority
 _RESOURCE_OUTBOX_BACKLOG_CUT = JournalStore.outbox_backlog_cut
 _RESOURCE_OUTBOX_BACKLOG_TAIL_CUT = JournalStore.outbox_backlog_tail_cut
 _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER = JournalStore.outbox_backlog_high_water_since
+_RESOURCE_JOURNAL_BACKLOG_DEPENDENCIES = (
+    ("JournalStore connection", "_connect", JournalStore._connect),
+    (
+        "JournalStore Windows connection",
+        "_connect_windows",
+        JournalStore._connect_windows,
+    ),
+    (
+        "JournalStore backlog transition writer",
+        "_append_outbox_backlog_transition",
+        JournalStore._append_outbox_backlog_transition,
+    ),
+    (
+        "JournalStore outbox transition sequence",
+        "_outbox_transition_sequence_value",
+        JournalStore._outbox_transition_sequence_value,
+    ),
+    (
+        "JournalStore pending outbox count",
+        "_pending_outbox_count_value",
+        JournalStore._pending_outbox_count_value,
+    ),
+)
 _RESOURCE_JOURNAL_CALLABLE_AUTHORITY = (
     (
         "JournalStore authority verifier",
@@ -349,6 +372,15 @@ _RESOURCE_JOURNAL_CALLABLE_AUTHORITY = (
         "JournalStore outbox backlog high-water",
         _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER,
         _capture_callable_authority(_RESOURCE_OUTBOX_BACKLOG_HIGH_WATER),
+    ),
+    *(
+        (
+            dependency_name,
+            dependency,
+            _capture_callable_authority(dependency),
+        )
+        for dependency_name, _attribute_name, dependency
+        in _RESOURCE_JOURNAL_BACKLOG_DEPENDENCIES
     ),
 )
 
@@ -1113,6 +1145,7 @@ def run_declared_target_host_campaign_with_resources(
     outbox_backlog_cut = _RESOURCE_OUTBOX_BACKLOG_CUT
     outbox_backlog_tail_cut = _RESOURCE_OUTBOX_BACKLOG_TAIL_CUT
     outbox_backlog_high_water = _RESOURCE_OUTBOX_BACKLOG_HIGH_WATER
+    journal_backlog_dependencies = _RESOURCE_JOURNAL_BACKLOG_DEPENDENCIES
     journal_callable_states = _RESOURCE_JOURNAL_CALLABLE_AUTHORITY
     store_authority = _capture_artifact_store_authority(evidence_store)
     resource_platform_states = _RESOURCE_PLATFORM_AUTHORITY
@@ -1255,6 +1288,15 @@ def run_declared_target_host_campaign_with_resources(
             raise RuntimeTargetHostResourceEvidenceError(
                 "resource JournalStore backlog authority changed " + phase
             )
+        for dependency_name, attribute_name, dependency in journal_backlog_dependencies:
+            if (
+                raw_type_getattribute(journal_store_type, attribute_name)
+                is not dependency
+            ):
+                raise RuntimeTargetHostResourceEvidenceError(
+                    "resource JournalStore backlog dependency changed "
+                    f"{phase}: {dependency_name}"
+                )
         for name, function, state in journal_callable_states:
             try:
                 require_callable(function, state, name=name)

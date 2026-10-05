@@ -351,6 +351,8 @@ class DecisionTraceStore:
         self.path = Path(os.path.abspath(path_text))
 
     def _load(self) -> list[dict[str, Any]]:
+        if not self.path.parent.exists():
+            return []
         try:
             validate_publication_destination(self.path)
         except (DurablePublishLockError, OSError) as error:

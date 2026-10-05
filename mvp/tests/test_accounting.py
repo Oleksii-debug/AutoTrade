@@ -895,6 +895,7 @@ class AccountingFoundationTests(unittest.TestCase):
             "type": hostile_builtin,
             "id": hostile_builtin,
             "object": HostileObject,
+            "tuple": hostile_builtin,
             "str": object,
             "TypeError": hostile_builtin,
             "ValueError": hostile_builtin,

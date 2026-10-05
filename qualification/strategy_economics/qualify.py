@@ -44,6 +44,7 @@ class StrategyEconomicsAuthorityError(ValueError):
 # rebinding must not redirect which implementation this composition uses.
 _BIND_STRATEGY_ECONOMICS = bind_strategy_economics
 _INSTRUMENT_REGISTRY_EXACT = InstrumentRegistry.exact
+_INSTRUMENT_REGISTRY_AT = InstrumentRegistry.at
 _REVERIFY_PROVIDER_ECONOMIC_CUT = reverify_provider_economic_cut
 
 _BASE_REQUIRED_OWNERS = (
@@ -299,6 +300,19 @@ def assess_strategy_economics_authority(
         instrument_registry,
         economics_binding.instrument_version,
     )
+    effective_instrument = _INSTRUMENT_REGISTRY_AT(
+        instrument_registry,
+        instrument.instrument_id,
+        economics_binding.information_cutoff,
+    )
+    if effective_instrument != instrument:
+        raise StrategyEconomicsAuthorityError(
+            "instrument_version is not the registry version effective at information_cutoff"
+        )
+    if proposal.symbol != instrument.provider_symbol:
+        raise StrategyEconomicsAuthorityError(
+            "proposal symbol does not match instrument provider_symbol"
+        )
 
     verified = {
         "instrument_registry_shape",

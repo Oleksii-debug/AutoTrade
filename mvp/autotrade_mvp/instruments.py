@@ -1336,6 +1336,7 @@ def _install_authenticated_price_semantics_authority():
     datetime_type = datetime
     decimal_type = Decimal
     evidence_type = AuthenticatedPriceSemanticsEvidence
+    canonical_getattr = getattr
 
     at_known = registry_type.at_known
     at_known_code = at_known.__code__
@@ -1348,15 +1349,15 @@ def _install_authenticated_price_semantics_authority():
     exact_multiple = _is_exact_multiple
     exact_multiple_code = _is_exact_multiple.__code__
     bounded_decimal_parser = parse_bounded_exact_decimal
-    bounded_decimal_parser_code = getattr(bounded_decimal_parser, "__code__", None)
+    bounded_decimal_parser_code = canonical_getattr(bounded_decimal_parser, "__code__", None)
     decimal_multiple = is_exact_decimal_multiple
-    decimal_multiple_code = getattr(decimal_multiple, "__code__", None)
+    decimal_multiple_code = canonical_getattr(decimal_multiple, "__code__", None)
     metadata_binding = version_type.metadata_evidence_binding
     metadata_binding_code = metadata_binding.__code__
     versions_for = _registry_versions_for
-    versions_for_code = getattr(versions_for, "__code__", None)
+    versions_for_code = canonical_getattr(versions_for, "__code__", None)
     trusted_reader = trusted_authenticated_reader
-    trusted_reader_code = getattr(trusted_reader, "__code__", None)
+    trusted_reader_code = canonical_getattr(trusted_reader, "__code__", None)
     detach = _detached_instrument_version
     detach_code = detach.__code__
     canonical_ref = _instrument_version_ref
@@ -1367,7 +1368,7 @@ def _install_authenticated_price_semantics_authority():
     utc_code = utc.__code__
     json_module = json
     json_dumps = json.dumps
-    json_dumps_code = getattr(json_dumps, "__code__", None)
+    json_dumps_code = canonical_getattr(json_dumps, "__code__", None)
     sha256_function = sha256
     decimal_text = _decimal_text
     decimal_text_code = _decimal_text.__code__
@@ -1386,7 +1387,7 @@ def _install_authenticated_price_semantics_authority():
     settlement_payload_code = settlement_payload.__code__
     registry_error_type = InstrumentRegistryError
     canonical_decimal_text_function = canonical_decimal_text
-    canonical_decimal_text_code = getattr(canonical_decimal_text_function, "__code__", None)
+    canonical_decimal_text_code = canonical_getattr(canonical_decimal_text_function, "__code__", None)
     exact_decimal_error_type = ExactDecimalError
     timezone_type = timezone
     mapping_type = Mapping
@@ -1397,7 +1398,6 @@ def _install_authenticated_price_semantics_authority():
     canonical_type = type
     canonical_int = int
     canonical_tuple = tuple
-    canonical_getattr = getattr
     canonical_any = any
     canonical_isinstance = isinstance
     invalid_operation_type = InvalidOperation
@@ -1505,10 +1505,10 @@ def _install_authenticated_price_semantics_authority():
         """Compose exact authenticated rule identity plus its metadata binding."""
 
         require_executable_authority()
-        if type(registry) is not registry_type:
-            raise TypeError("registry must be exact InstrumentRegistry")
-        if type(artifact_store) is not artifact_store_type:
-            raise TypeError("artifact_store must be the canonical ArtifactStore")
+        if canonical_type(registry) is not registry_type:
+            raise type_error_type("registry must be exact InstrumentRegistry")
+        if canonical_type(artifact_store) is not artifact_store_type:
+            raise type_error_type("artifact_store must be the canonical ArtifactStore")
 
         exact_text_inputs = {
             "instrument_version": instrument_version,
@@ -1518,14 +1518,14 @@ def _install_authenticated_price_semantics_authority():
             "order_type": order_type,
         }
         for name, value in exact_text_inputs.items():
-            if type(value) is not str:
-                raise TypeError(f"{name} must be exact text")
+            if canonical_type(value) is not canonical_str:
+                raise type_error_type(f"{name} must be exact text")
             if not value or value != value.strip():
-                raise InstrumentRegistryError(
+                raise registry_error_type(
                     f"{name} must be canonical non-empty text"
                 )
-        if type(evaluated_at) is not datetime_type:
-            raise TypeError("evaluated_at must be exact datetime")
+        if canonical_type(evaluated_at) is not datetime_type:
+            raise type_error_type("evaluated_at must be exact datetime")
 
         canonical_version_ref = canonical_ref(
             instrument_version,
@@ -1543,8 +1543,8 @@ def _install_authenticated_price_semantics_authority():
             knowledge_cutoff=point,
             artifact_store=artifact_store,
         )
-        if type(selected) is not version_type:
-            raise InstrumentRegistryError(
+        if canonical_type(selected) is not version_type:
+            raise registry_error_type(
                 "causal instrument lookup returned non-canonical version"
             )
         version = detach(selected)
@@ -1558,44 +1558,44 @@ def _install_authenticated_price_semantics_authority():
             artifact_store=artifact_store,
             trusted_read=trusted_read,
         ):
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "instrument metadata evidence is not causally known at evaluated_at"
             )
         if version.version != expected_version:
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "causal instrument version differs from admitted instrument_version"
             )
 
         provider = provider_id.upper()
         if version.provider_id.upper() != provider:
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "causal instrument provider differs from financial provider"
             )
         policy = entity_policy_id
         canonical_side = side.upper()
         if canonical_side not in {"BUY", "SELL"}:
-            raise InstrumentRegistryError("side is unsupported")
+            raise registry_error_type("side is unsupported")
         canonical_order_type = order_type.upper()
 
         if canonical_order_type == "LIMIT":
             if price is None:
-                raise InstrumentRegistryError(
+                raise registry_error_type(
                     "LIMIT price semantics require an exact price"
                 )
-            if type(price) not in {decimal_type, str, int} or type(price) is bool:
-                raise TypeError(
+            if canonical_type(price) not in {decimal_type, canonical_str, canonical_int} or canonical_type(price) is canonical_bool:
+                raise type_error_type(
                     "LIMIT price must use exact Decimal, string or integer input"
                 )
             validate_price(version, price)
             price_constraint = "EXACT_ADMITTED_PRICE"
         elif canonical_order_type == "MARKET":
             if price is not None:
-                raise InstrumentRegistryError(
+                raise registry_error_type(
                     "MARKET no-wire-price semantics require price to be absent"
                 )
             price_constraint = "NO_WIRE_PRICE"
         else:
-            raise InstrumentRegistryError(
+            raise registry_error_type(
                 "order_type has no canonical financial price-semantics contract"
             )
 
@@ -1660,8 +1660,8 @@ def _install_authenticated_price_semantics_authority():
             order_type=order_type,
             price=price,
         )
-        if type(evidence) is not evidence_type:
-            raise InstrumentRegistryError(
+        if canonical_type(evidence) is not evidence_type:
+            raise registry_error_type(
                 "instrument price-semantics evidence authority changed"
             )
         return evidence.digest

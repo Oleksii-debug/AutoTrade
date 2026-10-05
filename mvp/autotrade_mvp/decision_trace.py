@@ -412,11 +412,10 @@ class DecisionTraceStore:
             record["previous_hash"] = previous_hash
             record["record_hash"] = _hash_record(record)
 
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(canonical_json(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            payload = "".join(
+                canonical_json(item) + "\n" for item in [*records, record]
+            ).encode("utf-8")
+            atomic_write_bytes(self.path, payload)
             return True
 
     def records(self) -> list[dict[str, Any]]:
@@ -655,7 +654,7 @@ class BoundedMetricBacklog:
     """Bounded diagnostic queue; unlike durable traces, metrics may be dropped."""
 
     def __init__(self, max_items: int = 256) -> None:
-        if not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0:
+        if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         self._items: deque[dict[str, Any]] = deque(maxlen=max_items)
         self._dropped = 0
@@ -665,11 +664,10 @@ class BoundedMetricBacklog:
         return self._dropped
 
     def record(self, name: str, value: float, **labels: Any) -> None:
-        if not isinstance(name, str) or not name.strip():
+        if type(name) is not str or not name.strip():
             raise ValueError("metric name is required")
         if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
+            type(value) not in (int, float)
             or not isfinite(value)
         ):
             raise ValueError("metric value must be a finite number")

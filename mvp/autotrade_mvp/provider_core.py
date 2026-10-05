@@ -820,6 +820,7 @@ def observe_submission_json_response(
             "provider_id": provider,
             "request_sha256": response_binding.request_hash,
             "submission_scope_hash": response_binding.submission_scope_hash,
+            "http_status": response_binding.http_status,
             "response_sha256": response_binding.response_sha256,
             "sent_at": response_binding.sent_at,
             "endpoint": normalized_endpoint,

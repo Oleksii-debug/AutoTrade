@@ -651,6 +651,45 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
             )
         self.assertEqual(callbacks, [])
 
+    def test_spot_exchange_info_rejects_nested_executable_unknown_filter_value(self):
+        callbacks = []
+
+        class HostileList(list):
+            def __iter__(self):
+                callbacks.append("iter")
+                raise AssertionError("hostile exchangeInfo nested-list callback executed")
+
+        payload = {
+            "symbol": "BTCUSDT",
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0",
+                    "maxPrice": "0",
+                    "tickSize": "0",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+                {
+                    "filterType": "FUTURE_UNKNOWN_FILTER",
+                    "providerExtension": HostileList(["value"]),
+                },
+            ],
+        }
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "exact decoded JSON values",
+        ):
+            BinanceSpotSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT:v1",
+                symbol_payload=payload,
+            )
+        self.assertEqual(callbacks, [])
+
     def test_spot_exchange_info_rejects_filter_mapping_subclass_before_get_callback(self):
         callbacks = []
 

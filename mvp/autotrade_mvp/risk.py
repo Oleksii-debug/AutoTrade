@@ -425,6 +425,7 @@ def _canonical_scenario_digest_mapping(
 
 RISK_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RISK_INTENT_HASH_RE = re.compile(r"^risk-intent:sha256:[0-9a-f]{64}$")
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
@@ -1567,14 +1568,8 @@ def bind_risk_decision(
     evaluated_intent_hash = decision.evaluated_intent_hash
     if evaluated_intent_hash is None:
         raise ValueError("risk decision lacks evaluated intent identity")
-    if not evaluated_intent_hash.startswith("risk-intent:sha256:") or len(
-        evaluated_intent_hash
-    ) != len("risk-intent:sha256:") + 64:
+    if _RISK_INTENT_HASH_RE.fullmatch(evaluated_intent_hash) is None:
         raise ValueError("risk decision evaluated intent identity is malformed")
-    try:
-        int(evaluated_intent_hash.rsplit(":", 1)[1], 16)
-    except ValueError as error:
-        raise ValueError("risk decision evaluated intent identity is malformed") from error
     if ihash != evaluated_intent_hash:
         raise ValueError("intent_hash does not match the evaluated risk intent")
     capability = _risk_binding_text(

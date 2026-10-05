@@ -357,6 +357,7 @@ def _install_absence_semantics_authority():
         value: QualifiedProviderAccountAbsenceSemantics,
         *,
         qualification_registry: DurableProviderQualificationRegistry | None = None,
+        at: datetime | None = None,
     ) -> QualifiedProviderAccountAbsenceSemantics:
         snapshot = material(value)
         prune()
@@ -383,6 +384,36 @@ def _install_absence_semantics_authority():
                     "provider absence semantics and Q registry must share "
                     "the same exact JournalStore generation"
                 )
+            if at is None:
+                raise ProviderAccountAbsenceSemanticsError(
+                    "current provider absence semantics require an exact consumption time"
+                )
+            try:
+                current_reconciliation = (
+                    resolve_current_provider_account_reconciliation_semantics(
+                        qualification_registry=qualification_registry,
+                        qualification_id=value.qualification_id,
+                        provider_scope_digest=value.provider_scope_digest,
+                        at=at,
+                    )
+                )
+            except ProviderAccountReconciliationSemanticsError as error:
+                raise ProviderAccountAbsenceSemanticsError(
+                    "provider absence semantics Q is not exact current authority"
+                ) from error
+            if (
+                current_reconciliation.content_digest
+                != value.reconciliation_semantics_digest
+                or current_reconciliation.qualification_route_semantics_digest
+                != value.qualification_route_semantics_digest
+            ):
+                raise ProviderAccountAbsenceSemanticsError(
+                    "provider absence semantics no longer match current reconciliation Q"
+                )
+        elif at is not None:
+            raise ProviderAccountAbsenceSemanticsError(
+                "consumption time requires the exact qualification registry"
+            )
         return value
 
     return register, require
@@ -514,13 +545,15 @@ def require_provider_account_absence_rule(
     surface: str,
     endpoint: str,
     data_entitlement: str,
-    qualification_registry: DurableProviderQualificationRegistry | None = None,
+    qualification_registry: DurableProviderQualificationRegistry,
+    at: datetime,
 ) -> dict[str, object]:
     """Return one exact qualified rule; never a coverage/absence verdict."""
 
     accepted = require_provider_account_absence_semantics_authority(
         value,
         qualification_registry=qualification_registry,
+        at=at,
     )
     expected_surface = _surface(surface)
     expected_endpoint = _endpoint(endpoint)

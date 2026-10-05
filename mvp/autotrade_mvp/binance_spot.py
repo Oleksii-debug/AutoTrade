@@ -1659,8 +1659,8 @@ def parse_account_trades(
     environment = observation.environment
     if type(rows) is not tuple:
         raise BinanceSpotAdapterError("trade rows must be an exact decoded array")
-    if not isinstance(instrument_versions, Mapping):
-        raise BinanceSpotAdapterError("instrument_versions must be a mapping")
+    if type(instrument_versions) is not dict:
+        raise BinanceSpotAdapterError("instrument_versions must be an exact dict")
     normalized_instruments: dict[str, str] = {}
     for raw_symbol, raw_instrument_version in instrument_versions.items():
         provider_symbol = _text(
@@ -1682,8 +1682,8 @@ def parse_account_trades(
         normalized_instruments[provider_symbol] = instrument_version
 
     client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
-    if not isinstance(client_map, Mapping):
-        raise BinanceSpotAdapterError("client_ids_by_order_id must be a mapping")
+    if type(client_map) is not dict:
+        raise BinanceSpotAdapterError("client_ids_by_order_id must be an exact dict")
     normalized_client_map: dict[int, str] = {}
     seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():

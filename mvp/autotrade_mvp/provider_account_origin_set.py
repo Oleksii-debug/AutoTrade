@@ -239,8 +239,12 @@ def _install_origin_set_authority():
             raise ProviderAccountOriginSetError(
                 "origin-set authority identity collision"
             )
+        value_ref = weakref.ref(
+            value,
+            lambda _ref, object_id=object_id: states.pop(object_id, None),
+        )
         states[object_id] = (
-            weakref.ref(value),
+            value_ref,
             state,
             qualification_registry,
             account_acquisition_authority,

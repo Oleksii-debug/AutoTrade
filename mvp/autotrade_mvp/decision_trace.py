@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.durable_publish import atomic_write_bytes, durable_path_lock
 
 
 GENESIS_HASH = "0" * 64
@@ -426,12 +426,12 @@ class DecisionTraceStore:
         prepared = _redact(trace)
         self._validate_input(prepared)
         self._require_linked_evidence(prepared)
-        lock_path = self.path.with_name(self.path.name + ".lock")
-        with ResourceLock(lock_path, blocking=True):
+        with durable_path_lock(self.path):
             records = self._load()
-            # Integrity verification must precede idempotency handling. Otherwise
-            # an identical retry could silently succeed against a tampered chain.
-            if records and not self.verify():
+            # Validate the exact loaded snapshot before idempotency handling. A
+            # second path read could otherwise verify a newer file while stale or
+            # corrupt rows from the first read are still used for the append.
+            if records and not self._records_are_valid(records):
                 raise ValueError("Existing decision trace chain is corrupt")
 
             trace_id = prepared["trace_id"]
@@ -449,16 +449,15 @@ class DecisionTraceStore:
             record["previous_hash"] = previous_hash
             record["record_hash"] = _hash_record(record)
 
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(canonical_json(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            payload = "".join(
+                canonical_json(item) + "\n" for item in [*records, record]
+            ).encode("utf-8")
+            atomic_write_bytes(self.path, payload)
             return True
 
     def records(self) -> list[dict[str, Any]]:
         records = self._load()
-        if records and not self.verify():
+        if records and not self._records_are_valid(records):
             raise ValueError("Decision trace chain is corrupt")
         return records
 
@@ -654,12 +653,7 @@ class DecisionTraceStore:
             lines.append("- none")
         return "\n".join(lines) + "\n"
 
-    def verify(self) -> bool:
-        try:
-            records = self._load()
-        except ValueError:
-            return False
-
+    def _records_are_valid(self, records: list[dict[str, Any]]) -> bool:
         seen: set[str] = set()
         expected_previous = GENESIS_HASH
         for record in records:
@@ -672,10 +666,15 @@ class DecisionTraceStore:
                 if record.get("previous_hash") != expected_previous:
                     return False
                 recorded_at = record.get("recorded_at")
-                if not isinstance(recorded_at, str) or not recorded_at:
+                if type(recorded_at) is not str or not recorded_at:
                     return False
                 record_hash = record.get("record_hash")
-                if not isinstance(record_hash, str) or len(record_hash) != 64:
+                if (
+                    type(record_hash) is not str
+                    or len(record_hash) != 64
+                    or record_hash != record_hash.lower()
+                    or any(ch not in "0123456789abcdef" for ch in record_hash)
+                ):
                     return False
                 if _hash_record(record) != record_hash:
                     return False
@@ -684,12 +683,19 @@ class DecisionTraceStore:
                 return False
         return True
 
+    def verify(self) -> bool:
+        try:
+            records = self._load()
+        except ValueError:
+            return False
+        return self._records_are_valid(records)
+
 
 class BoundedMetricBacklog:
     """Bounded diagnostic queue; unlike durable traces, metrics may be dropped."""
 
     def __init__(self, max_items: int = 256) -> None:
-        if not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0:
+        if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         self._items: deque[dict[str, Any]] = deque(maxlen=max_items)
         self._dropped = 0
@@ -699,11 +705,10 @@ class BoundedMetricBacklog:
         return self._dropped
 
     def record(self, name: str, value: float, **labels: Any) -> None:
-        if not isinstance(name, str) or not name.strip():
+        if type(name) is not str or not name.strip():
             raise ValueError("metric name is required")
         if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
+            type(value) not in (int, float)
             or not isfinite(value)
         ):
             raise ValueError("metric value must be a finite number")

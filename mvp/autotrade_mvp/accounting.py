@@ -744,10 +744,10 @@ def _make_scoped_economic_constructor(
             raise ValueError("unsupported environment")
         normalized_account = normalize_name(account_id, field="account_id")
         book = book_type(transactions)
+        bind_owner(self, normalized_environment, normalized_account, book)
         _setattr(self, "environment", normalized_environment)
         _setattr(self, "account_id", normalized_account)
         _setattr(self, "_book", book)
-        bind_owner(self, normalized_environment, normalized_account, book)
 
     return init
 

@@ -548,7 +548,11 @@ class DurableModelCallOrchestrator:
             "_clock",
             "_ceiling",
         }
-        if set(state) != expected_fields:
+        state_keys = tuple(state)
+        if (
+            any(type(name) is not str for name in state_keys)
+            or set(state_keys) != expected_fields
+        ):
             raise ModelCallError("durable model budget authority state is invalid")
 
         journal = state["journal"]
@@ -586,17 +590,21 @@ class DurableModelCallOrchestrator:
             )
 
         changes: list[str] = []
-        for name in sorted(
-            set(current_journal_state) | set(expected_journal_state),
-            key=str,
-        ):
+        current_journal_keys = tuple(current_journal_state)
+        if any(type(name) is not str for name in current_journal_keys):
+            changes.append("budget.journal.<invalid-state-key>")
+        current_journal_names = {
+            name for name in current_journal_keys if type(name) is str
+        }
+        expected_journal_names = set(expected_journal_state)
+        for name in sorted(current_journal_names | expected_journal_names):
             if name not in expected_journal_state or name not in current_journal_state:
-                changes.append("budget.journal." + str(name))
+                changes.append("budget.journal." + name)
                 continue
             current = current_journal_state[name]
             expected = expected_journal_state[name]
             if type(current) is not type(expected) or current != expected:
-                changes.append("budget.journal." + str(name))
+                changes.append("budget.journal." + name)
 
         dict.clear(current_journal_state)
         dict.update(current_journal_state, expected_journal_state)
@@ -615,7 +623,13 @@ class DurableModelCallOrchestrator:
             raise ModelCallError("durable model budget authority state is invalid")
 
         expected_refs = {"journal", "_clock"}
-        for name in sorted(set(current_state) | set(expected_state)):
+        current_budget_keys = tuple(current_state)
+        if any(type(name) is not str for name in current_budget_keys):
+            changes.append("budget.<invalid-state-key>")
+        current_budget_names = {
+            name for name in current_budget_keys if type(name) is str
+        }
+        for name in sorted(current_budget_names | set(expected_state)):
             if name not in expected_state or name not in current_state:
                 changes.append("budget." + name)
                 continue

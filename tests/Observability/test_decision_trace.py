@@ -4,8 +4,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import unittest
+from unittest.mock import patch
 
-from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.durable_publish import (
+    DurablePublishLockError,
+    durable_path_lock,
+)
 from mvp.autotrade_mvp.decision_trace import BoundedMetricBacklog, DecisionTraceStore
 
 
@@ -51,10 +55,119 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_constructor_rejects_pathlike_callbacks_before_execution(self):
+        calls = []
+
+        class ExplodingPath:
+            def __fspath__(self):
+                calls.append("fspath")
+                raise AssertionError("caller path callback must not execute")
+
+        class ExplodingStr(str):
+            def __fspath__(self):
+                calls.append("str-fspath")
+                raise AssertionError("string-subclass path callback must not execute")
+
+        with self.assertRaisesRegex(TypeError, "exact str or pathlib Path"):
+            DecisionTraceStore(ExplodingPath())
+        with self.assertRaisesRegex(TypeError, "exact str or pathlib Path"):
+            DecisionTraceStore(ExplodingStr("decision-traces.jsonl"))
+        self.assertEqual(calls, [])
+
+    def test_diagnostic_scalar_subclasses_and_objects_fail_before_callbacks(self):
+        calls = []
+
+        class ExplodingInt(int):
+            def __repr__(self):
+                calls.append("int-repr")
+                raise AssertionError("caller integer callback must not execute")
+
+            def __str__(self):
+                calls.append("int-str")
+                raise AssertionError("caller integer callback must not execute")
+
+        class ExplodingObject:
+            def __repr__(self):
+                calls.append("object-repr")
+                raise AssertionError("caller object callback must not execute")
+
+            def __str__(self):
+                calls.append("object-str")
+                raise AssertionError("caller object callback must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            hostile_number = evidence_trace("decision-hostile-number")
+            hostile_number["attributes"]["score"] = ExplodingInt(7)
+            with self.assertRaisesRegex(ValueError, "JSON scalars"):
+                store.append(hostile_number)
+            self.assertFalse(path.exists())
+
+            hostile_object = evidence_trace("decision-hostile-object")
+            hostile_object["attributes"]["object"] = ExplodingObject()
+            with self.assertRaisesRegex(ValueError, "JSON scalars"):
+                store.append(hostile_object)
+            self.assertFalse(path.exists())
+
+        self.assertEqual(calls, [])
+
+    def test_noncanonical_jsonl_bytes_fail_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-noncanonical"))
+            raw = path.read_text(encoding="utf-8")
+            path.write_text(raw.replace("{", "{ ", 1), encoding="utf-8")
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
+    def test_blank_row_and_missing_final_newline_fail_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-canonical-row"))
+            raw = path.read_text(encoding="utf-8")
+
+            path.write_text(raw.rstrip("\n"), encoding="utf-8")
+            self.assertFalse(store.verify())
+
+            path.write_text(raw + "\n", encoding="utf-8")
+            self.assertFalse(store.verify())
+
+    def test_crlf_reencoding_fails_exact_byte_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-crlf"))
+            raw = path.read_bytes()
+            self.assertIn(b"\n", raw)
+            path.write_bytes(raw.replace(b"\n", b"\r\n"))
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
+    def test_duplicate_key_textual_tamper_fails_verification(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-duplicate-key"))
+            raw = path.read_text(encoding="utf-8")
+            tampered = raw.replace(
+                "{",
+                '{"trace_id":"shadow-duplicate",',
+                1,
+            )
+            path.write_text(tampered, encoding="utf-8")
+            self.assertFalse(store.verify())
+            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+                store.records()
+
     def test_append_waits_for_shared_cross_process_writer_lock(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"
-            lock_path = path.with_name(path.name + ".lock")
             store = DecisionTraceStore(path)
             started = Event()
             completed = Event()
@@ -70,7 +183,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 finally:
                     completed.set()
 
-            with ResourceLock(lock_path, blocking=False):
+            with durable_path_lock(path):
                 thread = Thread(target=writer, daemon=True)
                 thread.start()
                 self.assertTrue(started.wait(timeout=1.0))
@@ -85,6 +198,68 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(results, [True])
             self.assertTrue(store.verify())
+
+    def test_records_validate_the_exact_loaded_snapshot_without_second_read(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace())
+            valid = json.loads(path.read_text(encoding="utf-8"))
+            corrupt = dict(valid)
+            corrupt["previous_hash"] = "1" * 64
+
+            class SwitchingStore(DecisionTraceStore):
+                def __init__(self, backing_path):
+                    super().__init__(backing_path)
+                    self.load_calls = 0
+
+                def _load(self):
+                    self.load_calls += 1
+                    if self.load_calls == 1:
+                        return [dict(corrupt)]
+                    return [dict(valid)]
+
+            switching = SwitchingStore(path)
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
+                switching.records()
+            self.assertEqual(switching.load_calls, 1)
+
+    def test_atomic_publication_failure_preserves_previous_trace(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-before-failure"))
+            before = path.read_bytes()
+
+            with patch(
+                "mvp.autotrade_mvp.decision_trace.atomic_write_bytes",
+                side_effect=OSError("injected publication failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "injected publication failure"):
+                    store.append(evidence_trace("decision-after-failure"))
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(store.verify())
+            self.assertEqual(
+                [item["trace_id"] for item in store.records()],
+                ["decision-before-failure"],
+            )
+
+    def test_hardlink_alias_cannot_split_decision_trace_lock_identity(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "decision-traces.jsonl"
+            alias = root / "decision-traces-alias.jsonl"
+            store = DecisionTraceStore(path)
+            store.append(evidence_trace("decision-original"))
+            try:
+                os.link(path, alias)
+            except OSError as error:
+                self.skipTest(f"hard links unavailable: {error}")
+
+            alias_store = DecisionTraceStore(alias)
+            with self.assertRaises(DurablePublishLockError):
+                alias_store.append(evidence_trace("decision-alias"))
 
     def test_durable_trace_redacts_sensitive_diagnostics_before_persistence(self):
         with TemporaryDirectory() as directory:
@@ -257,6 +432,29 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         self.assertEqual(backlog.snapshot(), ())
         backlog.record("queue.delay", 1)
         self.assertEqual(backlog.snapshot()[0]["value"], 1)
+
+    def test_metric_backlog_rejects_polymorphic_scalars_before_callbacks(self):
+        class ExplodingInt(int):
+            def __le__(self, other):
+                raise AssertionError("integer comparison callback executed")
+
+        class ExplodingFloat(float):
+            def __float__(self):
+                raise AssertionError("float callback executed")
+
+        class ExplodingStr(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("string callback executed")
+
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            BoundedMetricBacklog(max_items=ExplodingInt(2))
+
+        backlog = BoundedMetricBacklog(max_items=2)
+        with self.assertRaisesRegex(ValueError, "metric name is required"):
+            backlog.record(ExplodingStr("queue.delay"), 1.0)
+        with self.assertRaisesRegex(ValueError, "finite number"):
+            backlog.record("queue.delay", ExplodingFloat(1.0))
+        self.assertEqual(backlog.snapshot(), ())
 
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)

@@ -4,6 +4,7 @@ import unittest
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
+    MARKET_PRICE_PROJECTION_POLICY_V1,
     LiquidityObservation,
     SimulatedOrder,
     simulate_execution,
@@ -11,6 +12,7 @@ from mvp.autotrade_mvp.execution_realism import (
 
 
 CALIBRATION = "a" * 64
+PRICE_GRID_EVIDENCE = "b" * 64
 
 
 def model(**overrides):
@@ -27,6 +29,10 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_tick="0.01",
+        price_grid_instrument_version="ABC@v1",
+        price_grid_evidence_sha256=PRICE_GRID_EVIDENCE,
+        price_projection_policy=MARKET_PRICE_PROJECTION_POLICY_V1,
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -60,6 +66,92 @@ def top(**overrides):
 
 
 class ExecutionRealismTests(unittest.TestCase):
+    def test_market_requires_complete_authoritative_price_grid_evidence(self):
+        missing = model(
+            price_tick=None,
+            price_grid_instrument_version=None,
+            price_grid_evidence_sha256=None,
+            price_projection_policy=None,
+        )
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "authoritative price-grid projection evidence",
+        ):
+            simulate_execution(order(quantity="1"), top(available_volume="3"), missing)
+
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "must provide tick, instrument, evidence digest and projection policy together",
+        ):
+            model(price_grid_evidence_sha256=None)
+
+        wrong_instrument = model(price_grid_instrument_version="XYZ@v1")
+        with self.assertRaisesRegex(
+            ExecutionRealismError,
+            "price-grid instrument_version must match",
+        ):
+            simulate_execution(
+                order(quantity="1"),
+                top(available_volume="3"),
+                wrong_instrument,
+            )
+
+    def test_market_price_projection_is_context_independent_and_adverse_by_side(self):
+        q = top(
+            available_volume="3",
+            bid="100",
+            ask="100",
+        )
+        m = model(
+            max_participation="1",
+            slippage_bps="0",
+            impact_bps_at_max_participation="10",
+            fee_rate="0",
+            minimum_fee="0",
+            scenario_cost_multiplier="1",
+            price_tick="0.01",
+        )
+
+        observed = {}
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_FLOOR),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    buy = simulate_execution(
+                        order(quantity="1", side="BUY"),
+                        q,
+                        m,
+                    )
+                    sell = simulate_execution(
+                        order(quantity="1", side="SELL"),
+                        q,
+                        m,
+                    )
+                observed[(precision, rounding)] = (
+                    buy.fill_price,
+                    sell.fill_price,
+                    buy.model_fingerprint,
+                    sell.model_fingerprint,
+                )
+                self.assertEqual(buy.fill_price, Decimal("100.04"))
+                self.assertEqual(sell.fill_price, Decimal("99.96"))
+
+        self.assertEqual(len(set(observed.values())), 1)
+
+    def test_market_price_grid_identity_is_part_of_model_fingerprint(self):
+        baseline = model(price_tick="0.01")
+        changed_tick = model(price_tick="0.05")
+        changed_evidence = model(price_grid_evidence_sha256="c" * 64)
+        self.assertNotEqual(baseline.fingerprint, changed_tick.fingerprint)
+        self.assertNotEqual(baseline.fingerprint, changed_evidence.fingerprint)
+
     def test_execution_scalar_ingress_rejects_hostile_subclasses_without_callbacks(self):
         class HostileDecimal(Decimal):
             finite_calls = 0

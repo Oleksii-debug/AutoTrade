@@ -1237,9 +1237,15 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string ExpectedStateVersion);
 }
 
+internal sealed record DesktopHostConnection(
+    IEmergencyHostClient Client,
+    IEmergencyHostSessionProvider? SessionProvider);
+
 internal static class DesktopHostClientFactory
 {
-    public static IEmergencyHostClient Create()
+    public static IEmergencyHostClient Create() => CreateConnection().Client;
+
+    public static DesktopHostConnection CreateConnection()
     {
         string? uriText = Environment.GetEnvironmentVariable("AUTOTRADE_HOST_URI");
         Uri? uri;
@@ -1252,9 +1258,11 @@ internal static class DesktopHostClientFactory
         }
         else if (!Uri.TryCreate(uriText.Trim(), UriKind.Absolute, out uri) || uri is null)
         {
-            return new DisconnectedEmergencyHostClient(
-                "Authenticated host URI configuration is invalid. "
-                + "No durable emergency command can be issued until it is repaired.");
+            return new DesktopHostConnection(
+                new DisconnectedEmergencyHostClient(
+                    "Authenticated host URI configuration is invalid. "
+                    + "No durable emergency command can be issued until it is repaired."),
+                null);
         }
 
         string? credentialTarget =
@@ -1275,23 +1283,27 @@ internal static class DesktopHostClientFactory
                 string.IsNullOrWhiteSpace(credentialTarget)
                     ? WindowsCredentialManagerSessionProvider.CredentialTargetForOrigin(uri)
                     : credentialTarget.Trim();
-            return new AuthenticatedEmergencyHostClient(
+            WindowsCredentialManagerSessionProvider sessionProvider = new(
+                canonicalCredentialTarget,
+                uri);
+            IEmergencyHostClient client = new AuthenticatedEmergencyHostClient(
                 httpClient,
                 uri,
-                new WindowsCredentialManagerSessionProvider(
-                    canonicalCredentialTarget,
-                    uri),
+                sessionProvider,
                 new WindowsCredentialManagerPendingCommandStore(
                     canonicalCredentialTarget + ":pending-emergency-command-v1"));
+            return new DesktopHostConnection(client, sessionProvider);
         }
         catch (Exception error) when (
             error is ArgumentException
             or InvalidOperationException
             or PlatformNotSupportedException)
         {
-            return new DisconnectedEmergencyHostClient(
-                "Authenticated host configuration is invalid. "
-                + "No durable emergency command can be issued until pairing/configuration is repaired.");
+            return new DesktopHostConnection(
+                new DisconnectedEmergencyHostClient(
+                    "Authenticated host configuration is invalid. "
+                    + "No durable emergency command can be issued until pairing/configuration is repaired."),
+                null);
         }
     }
 }

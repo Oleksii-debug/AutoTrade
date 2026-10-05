@@ -1,0 +1,14 @@
+{
+  "packages": [
+    {
+      "content_hash_sha512_base64": "sHVZ2MQrHT1J3q5/6csn0fIP27rzpTO/RRC+wPQDrZheB7T4t2n+vVbY6SdCKr4WRV9s/gmBM3PPMWWJtoDzMg==",
+      "expected_license_text_path": "provenance/licenses/Microsoft.Web.WebView2.LICENSE.txt",
+      "license_file": "LICENSE.txt",
+      "license_id": "BSD-3-Clause",
+      "name": "Microsoft.Web.WebView2",
+      "notice_file": "NOTICE.txt",
+      "version": "1.0.4258.31"
+    }
+  ],
+  "schema_version": "1.0.0"
+}

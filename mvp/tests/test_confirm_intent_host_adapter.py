@@ -421,6 +421,141 @@ class ConfirmIntentHostAdapterTests(unittest.TestCase):
         self.assertEqual(claim["confirmation_id"], COMMAND_ID)
         self.assertEqual(claim["actor_id"], "owner-1")
 
+    def test_terminal_readback_rejects_intervening_authority_event(self) -> None:
+        host = self.host()
+        accepted = host.submit(self.command())
+        binding = DurablePendingIntentFinancialBindingRegistry(self.store)._load(
+            "pending-host-confirm-1"
+        )
+
+        def bypass_safe_composition(_journal, **kwargs):
+            pending = self.pending.claim_confirmation(
+                "pending-host-confirm-1",
+                confirmation_id=COMMAND_ID,
+                actor_id="owner-1",
+                account_id="acct-1",
+                environment="PAPER",
+                policy_id="authority-policy-1",
+                authority_policy_version=3,
+                at=kwargs["accepted_at"],
+            )
+            AuthorityService(self.store).register_policy(
+                AuthorityPolicy.create(
+                    policy_id="intervening-policy",
+                    account_id="acct-1",
+                    environments={"PAPER"},
+                    instruments={InstrumentVersionIdentity(INSTRUMENT_ID, 9)},
+                    actions={"ORDER.SUBMIT"},
+                    max_notional="1000",
+                    valid_from=(NOW - timedelta(minutes=5)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    expires_at=(NOW + timedelta(hours=1)).isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    autonomous=True,
+                    protection_only=False,
+                    version=1,
+                )
+            )
+            AuthorityService(self.store).add_financial_confirmation(
+                confirmation_id=COMMAND_ID,
+                policy_id=pending.policy_id,
+                intent_hash=pending.intent_hash,
+                account_id=pending.account_id,
+                environment=pending.environment,
+                instrument_id=pending.instrument_id,
+                instrument_version=pending.instrument_version,
+                action=pending.authority_action,
+                notional=pending.notional,
+                expires_at=pending.expires_at,
+                risk_intent=pending.risk_intent,
+                risk_policy=self._risk_policy(),
+                reservation_requirements=dict(binding.reservation_requirements),
+            )
+
+        with patch.object(
+            operator_commands._confirm_impl,
+            "confirm_pending_intent",
+            bypass_safe_composition,
+        ):
+            failed = host.execute_authority_operation(accepted.operation_id)
+
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
+        authority_events = self.store.load_events("authority_state", "canonical")
+        target = [
+            event
+            for event in authority_events
+            if event.get("event_type") == "AuthorityConfirmationAdded"
+            and event.get("payload", {}).get("confirmation_id") == COMMAND_ID
+        ]
+        self.assertEqual(len(target), 1)
+        accepted_payload = host.events_after(0)[0].payload["action_payload"]
+        self.assertEqual(
+            target[0]["aggregate_version"],
+            int(accepted_payload["expected_authority_version"]) + 2,
+        )
+
+    def test_terminal_readback_rejects_claim_written_after_confirmation(self) -> None:
+        host = self.host()
+        accepted = host.submit(self.command())
+        binding = DurablePendingIntentFinancialBindingRegistry(self.store)._load(
+            "pending-host-confirm-1"
+        )
+
+        def bypass_safe_composition(_journal, **kwargs):
+            pending, claim = self.pending._read("pending-host-confirm-1")
+            self.assertIsNone(claim)
+            AuthorityService(self.store).add_financial_confirmation(
+                confirmation_id=COMMAND_ID,
+                policy_id=pending.policy_id,
+                intent_hash=pending.intent_hash,
+                account_id=pending.account_id,
+                environment=pending.environment,
+                instrument_id=pending.instrument_id,
+                instrument_version=pending.instrument_version,
+                action=pending.authority_action,
+                notional=pending.notional,
+                expires_at=pending.expires_at,
+                risk_intent=pending.risk_intent,
+                risk_policy=self._risk_policy(),
+                reservation_requirements=dict(binding.reservation_requirements),
+            )
+            self.pending.claim_confirmation(
+                "pending-host-confirm-1",
+                confirmation_id=COMMAND_ID,
+                actor_id="owner-1",
+                account_id="acct-1",
+                environment="PAPER",
+                policy_id="authority-policy-1",
+                authority_policy_version=3,
+                at=kwargs["accepted_at"],
+            )
+
+        with patch.object(
+            operator_commands._confirm_impl,
+            "confirm_pending_intent",
+            bypass_safe_composition,
+        ):
+            failed = host.execute_authority_operation(accepted.operation_id)
+
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertIn(COMMAND_ID, AuthorityService(self.store)._confirmations)
+        pending_events = self.pending._events("pending-host-confirm-1")
+        authority_events = self.store.load_events("authority_state", "canonical")
+        claim_event = pending_events[-1]
+        confirmation_event = [
+            event
+            for event in authority_events
+            if event.get("event_type") == "AuthorityConfirmationAdded"
+            and event.get("payload", {}).get("confirmation_id") == COMMAND_ID
+        ][0]
+        self.assertGreater(
+            claim_event["journal_sequence"],
+            confirmation_event["journal_sequence"],
+        )
+
     def test_stale_authority_cut_fails_without_claiming_pending_intent(self) -> None:
         host = self.host()
         accepted = host.submit(self.command())

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -7,8 +8,9 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import ArtifactStore
 from mvp.autotrade_mvp.execution_oracle import ExecutionOracleError
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.execution_qualification import (
     ExecutionModelQualification,
     ExecutionQualificationError,
@@ -17,16 +19,41 @@ from mvp.autotrade_mvp.execution_qualification import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
     LiquidityObservation,
     SimulatedOrder,
 )
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
 PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
+
+
+def instrument(*, price_tick="0.01"):
+    return InstrumentVersion(
+        instrument_id=INSTRUMENT_ID,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="share",
+        contract_multiplier="1",
+        price_tick=price_tick,
+        quantity_step="1",
+        minimum_quantity="1",
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
 
 
 def model(**overrides):
@@ -43,6 +70,7 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_projection=ExecutionPriceProjectionPolicy.from_instrument(instrument()),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -51,7 +79,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -64,7 +92,7 @@ def order(**overrides):
 
 def observation(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -87,7 +115,7 @@ def qualification(exec_model, **overrides):
         protocol_sha256=PROTOCOL,
         evidence_artifact_id=ARTIFACT_ID,
         evidence_sha256=EVIDENCE,
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
     )
     values.update(overrides)
     return ExecutionModelQualification(**values)
@@ -113,8 +141,9 @@ class ExecutionQualificationTests(unittest.TestCase):
         values = dict(
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
@@ -123,6 +152,70 @@ class ExecutionQualificationTests(unittest.TestCase):
         values.update(overrides)
         return values
 
+    def test_qualified_wrapper_rejects_polymorphic_inputs_before_authority_reads(self):
+        class OrderAlias(SimulatedOrder):
+            pass
+
+        class ModelAlias(ExecutionModel):
+            pass
+
+        base_order = order()
+        aliased_order = OrderAlias(**base_order.__dict__)
+        with self.assertRaisesRegex(TypeError, "order must be exact SimulatedOrder"):
+            simulate_qualified_execution(
+                order=aliased_order,
+                observation=observation(),
+                model=model(),
+                qualification=qualification(model()),
+                instrument=instrument(),
+                asset_class="EQUITY",
+                protocol_sha256=PROTOCOL,
+                artifact_store=self.store,
+                evidence_artifact_id=ARTIFACT_ID,
+            )
+
+        base_model = model()
+        aliased_model = ModelAlias(**base_model.__dict__)
+        with self.assertRaisesRegex(TypeError, "model must be exact ExecutionModel"):
+            validate_execution_qualification(
+                **self.validation_kwargs(aliased_model)
+            )
+
+    def test_qualification_text_ingress_rejects_hostile_subclasses_without_callbacks(self):
+        class HostileText(str):
+            strip_calls = 0
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_calls += 1
+                raise AssertionError("hostile qualification text callback executed")
+
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "asset_class is required",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    asset_class=HostileText("EQUITY"),
+                )
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
+        mutated = qualification(exec_model)
+        object.__setattr__(mutated, "purpose", HostileText("REPLAY"))
+        with self.assertRaisesRegex(
+            TypeError,
+            "qualification.purpose must be exact str",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    qualification=mutated,
+                )
+            )
+        self.assertEqual(HostileText.strip_calls, 0)
+
     def test_exact_qualified_model_can_execute_simulation(self):
         exec_model = model()
         result = simulate_qualified_execution(
@@ -130,6 +223,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             observation=observation(),
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
@@ -265,6 +359,26 @@ class ExecutionQualificationTests(unittest.TestCase):
                 )
             )
 
+    def test_qualified_projection_must_match_canonical_instrument_price_tick(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "price_projection_authority",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    instrument=instrument(price_tick="0.05"),
+                )
+            )
+
+    def test_qualification_requires_exact_canonical_instrument_type(self):
+        exec_model = model()
+        with self.assertRaisesRegex(TypeError, "instrument must be exact InstrumentVersion"):
+            validate_execution_qualification(
+                **self.validation_kwargs(exec_model, instrument=object())
+            )
+
     def test_instrument_specific_qualification_cannot_cross_instrument(self):
         exec_model = model()
         with self.assertRaisesRegex(
@@ -276,9 +390,9 @@ class ExecutionQualificationTests(unittest.TestCase):
                     exec_model,
                     qualification=qualification(
                         exec_model,
-                        instrument_version="ABC@v1",
+                        instrument_version=INSTRUMENT_REF,
                     ),
-                    instrument_version="XYZ@v2",
+                    instrument_version="22222222-2222-4222-8222-222222222222@2",
                 )
             )
 
@@ -335,12 +449,14 @@ class ExecutionQualificationTests(unittest.TestCase):
             observation=observation(),
             model=exec_model,
             qualification=qualification(exec_model),
+            instrument=instrument(),
             asset_class="EQUITY",
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
             purpose="REPLAY",
         )
+        self.assertEqual(valid.status, "FILLED")
         forged = replace(valid, fill_price=Decimal("100"))
         with patch(
             "mvp.autotrade_mvp.execution_qualification.simulate_execution",
@@ -352,6 +468,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     observation=observation(),
                     model=exec_model,
                     qualification=qualification(exec_model),
+                    instrument=instrument(),
                     asset_class="EQUITY",
                     protocol_sha256=PROTOCOL,
                     artifact_store=self.store,

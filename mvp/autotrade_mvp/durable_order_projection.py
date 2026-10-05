@@ -11,15 +11,25 @@ from dataclasses import dataclass
 from hashlib import sha256
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
+from .exact_decimal import (
+    parse_bounded_exact_decimal,
+    ExactDecimalError,
+    exact_sum,
+    exact_multiply,
+    exact_subtract,
+    as_fraction,
+    terminating_decimal,
+    round_fraction_to_quantum,
+)
 from typing import Mapping, Sequence
 from threading import RLock
 import weakref
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 from .dispatch import (
@@ -32,8 +42,13 @@ from .order_projection import (
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .persistence import (JournalStore, canonical_json, payload_digest,
-    require_exact_journal_store_authority, journal_store_authority_scope)
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+    journal_store_authority_scope,
+)
 
 
 _AGGREGATE_TYPE = "order_projection_book"
@@ -53,9 +68,17 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
+
+
+def _evidence_text(value: object, *, name: str) -> str:
+    """Reduce authority-bearing evidence text without polymorphic dispatch."""
+
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be canonical non-empty text")
+    return value
 
 
 def _environment(value: str) -> str:
@@ -85,7 +108,6 @@ def _decimal(value, *, name: str) -> Decimal:
         raise ValueError(f"{name} must be a bounded finite decimal") from error
 
 
-
 def _decimal_text(value, *, name: str) -> str:
     number = _decimal(value, name=name)
     if number == 0:
@@ -105,44 +127,62 @@ def _canonical_evidence_refs(
 ) -> tuple[dict[str, str], ...]:
     if value is None:
         return ()
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise TypeError("evidence_refs must be a sequence of EvidenceRef mappings")
+    if type(value) is list:
+        evidence_items = tuple(list.copy(value))
+    elif type(value) is tuple:
+        evidence_items = value
+    else:
+        raise TypeError(
+            "evidence_refs must be an exact list or tuple of EvidenceRef mappings"
+        )
+
     normalized: list[dict[str, str]] = []
-    identities: set[str] = set()
+    seen_artifact_ids: set[str] = set()
     allowed = {"artifact_id", "sha256", "source_uri", "observed_at", "rights_id"}
-    for index, raw in enumerate(value):
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"evidence_refs[{index}] must be a mapping")
-        unknown = set(raw) - allowed
+    for index, raw in enumerate(evidence_items):
+        if type(raw) is not dict:
+            raise TypeError(f"evidence_refs[{index}] must be an exact dict")
+        if any(type(key) is not str for key in raw):
+            raise TypeError(f"evidence_refs[{index}] keys must be exact strings")
+        item = dict.copy(raw)
+        unknown = set(item) - allowed
         if unknown:
             raise ValueError(
                 "evidence ref contains unsupported fields: "
-                + ", ".join(sorted(str(item) for item in unknown))
+                + ", ".join(sorted(str(field) for field in unknown))
             )
-        artifact_id = _text(raw.get("artifact_id"), name="artifact_id")
+
+        artifact_id = _evidence_text(item.get("artifact_id"), name="artifact_id")
         try:
-            artifact_id = str(UUID(artifact_id))
+            canonical_artifact_id = str(UUID(artifact_id))
         except ValueError as error:
             raise ValueError("artifact_id must be a UUID") from error
-        digest = _text(raw.get("sha256"), name="sha256")
+        if artifact_id != canonical_artifact_id:
+            raise ValueError("artifact_id must be a canonical lowercase UUID")
+
+        digest = _evidence_text(item.get("sha256"), name="sha256")
         if (
             len(digest) != 71
             or not digest.startswith("sha256:")
             or any(ch not in "0123456789abcdef" for ch in digest[7:])
         ):
             raise ValueError("sha256 must be canonical lowercase SHA-256")
+
         ref: dict[str, str] = {
             "artifact_id": artifact_id,
             "sha256": digest,
-            "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
+            "observed_at": _instant(
+                _evidence_text(item.get("observed_at"), name="observed_at"),
+                name="observed_at",
+            ),
         }
         for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
-        identity = canonical_json(ref)
-        if identity in identities:
-            raise ValueError("evidence_refs must be unique")
-        identities.add(identity)
+            if item.get(optional) is not None:
+                ref[optional] = _evidence_text(item.get(optional), name=optional)
+
+        if artifact_id in seen_artifact_ids:
+            raise ValueError("evidence_refs must have unique artifact_id values")
+        seen_artifact_ids.add(artifact_id)
         normalized.append(ref)
     return tuple(normalized)
 
@@ -228,58 +268,258 @@ class PreparedOrderMutation:
     already_committed: bool = False
 
 
-_ORDER_STATE_FIELDS = frozenset({
-    "store", "provider_id", "account_id", "environment", "host_id", "owner_epoch",
-    "evidence_artifact_store", "aggregate_id", "_book", "_idempotency",
-})
-_ORDER_SCOPE_FIELDS = ("provider_id", "account_id", "environment", "host_id", "owner_epoch", "aggregate_id")
+_ORDER_STATE_FIELDS = frozenset(
+    {
+        "store",
+        "provider_id",
+        "account_id",
+        "environment",
+        "host_id",
+        "owner_epoch",
+        "evidence_artifact_store",
+        "_provider_evidence_reader",
+        "aggregate_id",
+        "_book",
+        "_idempotency",
+    }
+)
+_ORDER_SCOPE_FIELDS = (
+    "provider_id",
+    "account_id",
+    "environment",
+    "host_id",
+    "owner_epoch",
+    "aggregate_id",
+)
 
 
 def _order_projection_binding_operations():
     bindings = {}
     lock = RLock()
+    artifact_store_type = ArtifactStore
+    trusted_reader_factory = trusted_authenticated_reader
+
+    def evidence_namespace(evidence):
+        if evidence is None:
+            return None
+        if type(evidence) is not artifact_store_type:
+            raise TypeError(
+                "evidence_artifact_store must be the exact canonical ArtifactStore"
+            )
+        state = object.__getattribute__(evidence, "__dict__")
+        values = tuple(
+            state[name]
+            for name in ("root", "objects", "manifests", "staging", "lock_path")
+        )
+        return tuple((type(value), value) for value in values)
+
+    def current_entry(value):
+        object_id = id(value)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        owner_ref = entry[0]
+        owner = owner_ref()
+        if owner is value:
+            return entry
+        if owner is None:
+            bindings.pop(object_id, None)
+            return None
+        raise OrderProjectionConflict(
+            "durable OMS selection authority identity collision"
+        )
 
     def registered(value):
         with lock:
-            entry = bindings.get(id(value))
-            return entry is not None and entry[0]() is value
+            return current_entry(value) is not None
 
     def bind(value):
         with lock:
-            if registered(value):
-                raise OrderProjectionConflict("durable OMS composition is already initialized")
-            for key in [key for key, entry in bindings.items() if entry[0]() is None]:
-                bindings.pop(key)
+            if current_entry(value) is not None:
+                raise OrderProjectionConflict(
+                    "durable OMS composition is already initialized"
+                )
             state = object.__getattribute__(value, "__dict__")
             store = state["store"]
-            identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
+            identity = require_exact_journal_store_authority(
+                store,
+                subject="durable OMS JournalStore",
+            )
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+            evidence = state["evidence_artifact_store"]
+            frozen_evidence_namespace = evidence_namespace(evidence)
+            trusted_reader = None
+            if evidence is not None:
+                evidence_state = object.__getattribute__(evidence, "__dict__")
+                try:
+                    trusted_reader = trusted_reader_factory(
+                        evidence_state["root"],
+                        publication_store=evidence,
+                    )
+                except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+                    raise OrderProjectionConflict(
+                        "provider evidence trusted reader authority is unavailable"
+                    ) from error
+
+            # Keep every registry weakref callback-free. Python exposes weakref
+            # callbacks through weakref.getweakrefs(), so a cleanup callback on
+            # a live OMS would itself become a caller-invokable trust-binding
+            # eraser. The live projection owns store/evidence through its normal
+            # immutable state and owns the trusted reader through a private
+            # immutable field; the registry retains only weak references.
+            owner_ref = weakref.ref(value)
+            store_ref = weakref.ref(store)
+            evidence_ref = None if evidence is None else weakref.ref(evidence)
+            reader_ref = (
+                None if trusted_reader is None else weakref.ref(trusted_reader)
+            )
+            object.__setattr__(
+                value,
+                "_provider_evidence_reader",
+                trusted_reader,
+            )
+            object_id = id(value)
+            bindings[object_id] = (
+                owner_ref,
+                store_ref,
+                identity,
+                scope,
+                evidence_ref,
+                frozen_evidence_namespace,
+                reader_ref,
+            )
+
+            # Publish no partially replayed financial authority to competing
+            # threads. The RLock remains held across initial durable replay;
+            # re-entrant require() calls from this initializer are permitted,
+            # while other threads block until replay either completes or the
+            # unpublished binding is removed.
+            try:
+                DurableOrderBookProjection._reload(value)
+            except BaseException:
+                entry = bindings.get(object_id)
+                if entry is not None and entry[0]() is value:
+                    bindings.pop(object_id, None)
+                state = object.__getattribute__(value, "__dict__")
+                if state.get("_provider_evidence_reader") is trusted_reader:
+                    object.__setattr__(
+                        value,
+                        "_provider_evidence_reader",
+                        None,
+                    )
+                raise
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:
             raise TypeError("OMS must be exact DurableOrderBookProjection")
         with lock:
-            entry = bindings.get(id(value))
-            if entry is None or entry[0]() is not value:
-                raise OrderProjectionConflict("durable OMS selection authority is unavailable")
-            _, store, identity, scope, evidence = entry
+            entry = current_entry(value)
+            if entry is None:
+                raise OrderProjectionConflict(
+                    "durable OMS selection authority is unavailable"
+                )
+            (
+                _,
+                store_ref,
+                identity,
+                scope,
+                evidence_ref,
+                frozen_evidence_namespace,
+                reader_ref,
+            ) = entry
+            store = store_ref()
+            evidence = None if evidence_ref is None else evidence_ref()
+            trusted_reader = None if reader_ref is None else reader_ref()
+            if store is None:
+                raise OrderProjectionConflict(
+                    "durable OMS selected store authority was lost"
+                )
+            if evidence_ref is not None and evidence is None:
+                raise OrderProjectionConflict(
+                    "provider evidence ArtifactStore authority was lost"
+                )
+            if reader_ref is not None and trusted_reader is None:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority was released while OMS is live"
+                )
+
             state = object.__getattribute__(value, "__dict__")
-            if type(state) is not dict or any(type(key) is not str for key in state) or set(state) != _ORDER_STATE_FIELDS:
+            if (
+                type(state) is not dict
+                or any(type(key) is not str for key in state)
+                or set(state) != _ORDER_STATE_FIELDS
+            ):
                 raise OrderProjectionConflict("durable OMS instance state is shadowed")
-            if any(type(state[name]) is not str or state[name] != selected
-                   for name, selected in zip(_ORDER_SCOPE_FIELDS, scope)):
+            if any(
+                type(state[name]) is not str or state[name] != selected
+                for name, selected in zip(_ORDER_SCOPE_FIELDS, scope)
+            ):
                 raise OrderProjectionConflict("durable OMS scope changed")
             if state["store"] is not store or state["evidence_artifact_store"] is not evidence:
                 raise OrderProjectionConflict("durable OMS selected store changed")
-            if require_exact_journal_store_authority(store, subject="durable OMS JournalStore") != identity:
-                raise OrderProjectionConflict("durable OMS JournalStore generation changed")
+            if state["_provider_evidence_reader"] is not trusted_reader:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority changed"
+                )
+            if (
+                require_exact_journal_store_authority(
+                    store,
+                    subject="durable OMS JournalStore",
+                )
+                != identity
+            ):
+                raise OrderProjectionConflict(
+                    "durable OMS JournalStore generation changed"
+                )
+            if evidence is not None:
+                if type(evidence) is not artifact_store_type:
+                    raise OrderProjectionConflict(
+                        "provider evidence ArtifactStore authority changed"
+                    )
+                try:
+                    current_namespace = evidence_namespace(evidence)
+                except (TypeError, KeyError) as error:
+                    raise OrderProjectionConflict(
+                        "provider evidence ArtifactStore namespace authority changed"
+                    ) from error
+                if current_namespace != frozen_evidence_namespace:
+                    raise OrderProjectionConflict(
+                        "provider evidence ArtifactStore namespace authority changed"
+                    )
+                if trusted_reader is None:
+                    raise OrderProjectionConflict(
+                        "provider evidence trusted reader authority is unavailable"
+                    )
+            elif trusted_reader is not None:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority is inconsistent"
+                )
             return store, identity
 
-    return registered, bind, require
+    def read_provider_evidence(value, artifact_id: str):
+        require(value)
+        with lock:
+            entry = current_entry(value)
+            if entry is None:
+                raise OrderProjectionConflict(
+                    "durable OMS selection authority is unavailable"
+                )
+            reader_ref = entry[6]
+            trusted_reader = None if reader_ref is None else reader_ref()
+            if trusted_reader is None:
+                raise OrderProjectionConflict(
+                    "provider evidence trusted reader authority is unavailable"
+                )
+        return trusted_reader(artifact_id)
 
+    return registered, bind, require, read_provider_evidence
 
-_order_projection_is_registered, _bind_order_projection, require_exact_order_projection_authority = _order_projection_binding_operations()
+(
+    _order_projection_is_registered,
+    _bind_order_projection,
+    require_exact_order_projection_authority,
+    _read_authenticated_provider_evidence,
+) = _order_projection_binding_operations()
 
 
 class DurableOrderBookProjection:
@@ -312,7 +552,9 @@ class DurableOrderBookProjection:
         if type(self) is not DurableOrderBookProjection:
             raise TypeError("OMS must be exact DurableOrderBookProjection")
         if _order_projection_is_registered(self):
-            raise OrderProjectionConflict("durable OMS composition is already initialized")
+            raise OrderProjectionConflict(
+                "durable OMS composition is already initialized"
+            )
         require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
         self.store = store
         self.provider_id = _text(provider_id, name="provider_id").upper()
@@ -320,11 +562,12 @@ class DurableOrderBookProjection:
         self.environment = _environment(environment)
         self.host_id = _text(host_id, name="host_id")
         self.owner_epoch = _text(owner_epoch, name="owner_epoch")
-        if evidence_artifact_store is not None and not isinstance(
-            evidence_artifact_store, ArtifactStore
-        ):
-            raise TypeError("evidence_artifact_store must be ArtifactStore")
+        if evidence_artifact_store is not None and type(evidence_artifact_store) is not ArtifactStore:
+            raise TypeError(
+                "evidence_artifact_store must be the exact canonical ArtifactStore"
+            )
         self.evidence_artifact_store = evidence_artifact_store
+        self._provider_evidence_reader = None
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -336,7 +579,6 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         _bind_order_projection(self)
-        self._reload()
 
     def _new_book(self) -> OrderBookProjection:
         return OrderBookProjection(
@@ -367,6 +609,7 @@ class DurableOrderBookProjection:
         request: Mapping[str, object],
         evidence_refs: Sequence[Mapping[str, object]] | None,
         committed_at: str,
+        _read_authenticated_snapshot=_read_authenticated_provider_evidence,
     ) -> tuple[dict[str, str], ...]:
         refs = _canonical_evidence_refs(evidence_refs)
         requires = self._requires_provider_evidence(operation, request)
@@ -385,9 +628,6 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "provider evidence requires the trusted ArtifactStore boundary"
                 )
-            # REPLAY/SIMULATION are deterministic synthetic environments. They
-            # may carry canonical evidence identity without claiming that a
-            # real provider artifact has been qualified by the trusted store.
             return refs
 
         committed = _instant(committed_at, name="committed_at")
@@ -404,15 +644,19 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest = self.evidence_artifact_store.load_manifest(
-                    ref["artifact_id"]
+                manifest, artifact_bytes = _read_authenticated_snapshot(
+                    self,
+                    ref["artifact_id"],
                 )
-                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
-            except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
+            except (FileNotFoundError, ArtifactIntegrityError, OSError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
                 ) from error
-            if manifest.get("sha256") != ref["sha256"]:
+            artifact_digest = "sha256:" + sha256(artifact_bytes).hexdigest()
+            if (
+                manifest.get("sha256") != ref["sha256"]
+                or artifact_digest != ref["sha256"]
+            ):
                 raise OrderProjectionConflict(
                     "provider evidence digest differs from immutable artifact"
                 )
@@ -655,8 +899,6 @@ class DurableOrderBookProjection:
             }
         )
 
-        # Freeze the durable global cut before reading OMS state. Recovery
-        # without a new OMS event uses this cursor as its commit-time CAS.
         store, identity = require_exact_order_projection_authority(self)
         with journal_store_authority_scope(store, identity):
             journal_sequence_cut = JournalStore.current_journal_sequence(store)
@@ -677,8 +919,6 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "committed order mutation lacks one canonical durable event"
                 )
-            # Retain the exact durable envelope for recovery provenance.
-            # Recovery resolves this prior event from a held journal snapshot.
             envelope = dict(matching[0])
             envelope.pop("journal_sequence")
             envelope["aggregate_version"] = str(envelope["aggregate_version"])
@@ -770,7 +1010,9 @@ class DurableOrderBookProjection:
             store, identity = require_exact_order_projection_authority(self)
             with journal_store_authority_scope(store, identity):
                 append_result = JournalStore.append_event(
-                    store, plan.envelope, outbox_topic=plan.outbox_topic,
+                    store,
+                    plan.envelope,
+                    outbox_topic=plan.outbox_topic,
                 )
         except Exception:
             self._reload()
@@ -810,7 +1052,6 @@ class DurableOrderBookProjection:
 
     def refresh(self) -> None:
         """Reload the order projection after an external atomic commit."""
-
         self._reload()
 
     @property
@@ -927,7 +1168,9 @@ class DurableOrderBookProjection:
             account_id=self.account_id,
             attempt_id=attempt,
         )
-        events = self.store.load_events("submission_attempt", aggregate_id)
+        store, identity = require_exact_order_projection_authority(self)
+        with journal_store_authority_scope(store, identity):
+            events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
         if not events:
             raise KeyError(attempt)
 
@@ -955,9 +1198,7 @@ class DurableOrderBookProjection:
                 prepared_payload.get("account_id"),
                 name="submission account_id",
             )
-            environment = _environment(
-                prepared_payload.get("environment")
-            )
+            environment = _environment(prepared_payload.get("environment"))
             client_order_id = _text(
                 prepared_payload.get("client_order_id"),
                 name="submission client_order_id",
@@ -974,7 +1215,6 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "submission attempt scope differs from order projection"
             )
-        # Fail early if the durable dispatch refers to no canonical order.
         self.order(client_order_id)
 
         results: list[DurableOrderMutationResult] = []
@@ -1015,10 +1255,6 @@ class DurableOrderBookProjection:
                     )
                 terminal_seen = True
                 payload = event.get("payload")
-                # Shared dispatch now stores SHA-bound raw provider bytes,
-                # not a lossy float/Decimal-incompatible JSON response mirror.
-                # Reconstruct the exact typed response at the projection
-                # boundary and check the digest before any ACK state mutation.
                 if isinstance(payload, dict) and _has_exact_response_markers(payload):
                     if payload.get("response_encoding") != "utf-8-json":
                         raise OrderProjectionConflict(
@@ -1044,8 +1280,6 @@ class DurableOrderBookProjection:
                             "exact submission response evidence is invalid"
                         ) from error
                 else:
-                    # Only a marker-free historical row may use its legacy
-                    # response mirror; partial exact evidence is fail-closed.
                     response = (
                         payload.get("response")
                         if isinstance(payload, dict)
@@ -1097,8 +1331,6 @@ class DurableOrderBookProjection:
                     raise OrderProjectionConflict(
                         "blocked submission cannot follow send-start"
                     )
-                # No provider-side order lifecycle fact exists when the send
-                # barrier blocked the attempt. Keep the pre-send order pending.
                 continue
 
         return tuple(results)

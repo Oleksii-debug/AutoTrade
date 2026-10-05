@@ -14,7 +14,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from research.autotrade_research.artifacts import (
+from autotrade_runtime.artifacts import (
     ArtifactStore, ArtifactIntegrityError, trusted_authenticated_reader,
 )
 

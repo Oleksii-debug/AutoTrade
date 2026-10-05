@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.execution_oracle import (
@@ -8,13 +8,17 @@ from mvp.autotrade_mvp.execution_oracle import (
 )
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceProjectionPolicy,
+    ExecutionRealismError,
     LiquidityObservation,
+    SimulatedExecution,
     SimulatedOrder,
     simulate_execution,
 )
 
 
 CALIBRATION = "a" * 64
+INSTRUMENT_BINDING = "c" * 64
 
 
 def model(**overrides):
@@ -30,6 +34,13 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_projection=ExecutionPriceProjectionPolicy(
+            policy_id="ADVERSE_INSTRUMENT_TICK",
+            policy_version="1",
+            instrument_version="ABC@v1",
+            price_quantum="0.01",
+            instrument_metadata_binding=INSTRUMENT_BINDING,
+        ),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -63,12 +74,334 @@ def observation(**overrides):
 
 
 class ExecutionOracleTests(unittest.TestCase):
+    def test_oracle_rejects_domain_subclasses_before_economic_checks(self):
+        class DerivedOrder(SimulatedOrder):
+            pass
+
+        class DerivedObservation(LiquidityObservation):
+            pass
+
+        class DerivedModel(ExecutionModel):
+            pass
+
+        class DerivedExecution(SimulatedExecution):
+            pass
+
+        exact_order = order()
+        exact_observation = observation()
+        exact_model = model()
+        exact_result = simulate_execution(
+            exact_order,
+            exact_observation,
+            exact_model,
+        )
+        derived_order = DerivedOrder(**exact_order.__dict__)
+        derived_observation = DerivedObservation(**exact_observation.__dict__)
+        derived_model = DerivedModel(**exact_model.__dict__)
+        derived_result = DerivedExecution(**exact_result.__dict__)
+
+        with self.assertRaisesRegex(TypeError, "exact SimulatedOrder"):
+            assert_conservative_execution(
+                order=derived_order,
+                observation=exact_observation,
+                model=exact_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact LiquidityObservation"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=derived_observation,
+                model=exact_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact ExecutionModel"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=derived_model,
+                result=exact_result,
+            )
+        with self.assertRaisesRegex(TypeError, "exact SimulatedExecution"):
+            assert_conservative_execution(
+                order=exact_order,
+                observation=exact_observation,
+                model=exact_model,
+                result=derived_result,
+            )
+
+    def test_oracle_revalidates_exact_objects_after_frozen_mutation(self):
+        class HostileDecimal(Decimal):
+            compare_calls = 0
+
+            def __lt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile Decimal comparison executed")
+
+            def __gt__(self, other):
+                type(self).compare_calls += 1
+                raise AssertionError("hostile Decimal comparison executed")
+
+        class HostileText(str):
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                raise AssertionError("hostile text equality executed")
+
+        o, q, m = order(), observation(), model()
+        mutated_result = simulate_execution(o, q, m)
+        object.__setattr__(
+            mutated_result,
+            "filled_quantity",
+            HostileDecimal("1"),
+        )
+        with self.assertRaisesRegex(TypeError, "filled_quantity must be exact Decimal"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=mutated_result,
+            )
+        self.assertEqual(HostileDecimal.compare_calls, 0)
+
+        mutated_text_result = simulate_execution(o, q, m)
+        object.__setattr__(
+            mutated_text_result,
+            "model_fingerprint",
+            HostileText(mutated_text_result.model_fingerprint),
+        )
+        with self.assertRaisesRegex(TypeError, "model_fingerprint must be exact text"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=mutated_text_result,
+            )
+        self.assertEqual(HostileText.equality_calls, 0)
+
+        injected_result = simulate_execution(o, q, m)
+        object.__setattr__(injected_result, "shadow_authority", "forged")
+        with self.assertRaisesRegex(TypeError, "unexpected state fields"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=injected_result,
+            )
+
+        class HostileStateField(str):
+            armed = False
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                if type(self).armed:
+                    raise AssertionError("hostile result state-field equality executed")
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        hostile_key_result = simulate_execution(o, q, m)
+        hostile_state = dict(hostile_key_result.__dict__)
+        filled_quantity = hostile_state.pop("filled_quantity")
+        hostile_state[HostileStateField("filled_quantity")] = filled_quantity
+        object.__setattr__(hostile_key_result, "__dict__", hostile_state)
+        HostileStateField.armed = True
+        with self.assertRaisesRegex(TypeError, "non-canonical state field names"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=hostile_key_result,
+            )
+        self.assertEqual(HostileStateField.equality_calls, 0)
+
+        mutated_order = order()
+        object.__setattr__(mutated_order, "quantity", Decimal("-1"))
+        with self.assertRaisesRegex(ExecutionRealismError, "quantity must be positive"):
+            assert_conservative_execution(
+                order=mutated_order,
+                observation=q,
+                model=m,
+                result=simulate_execution(o, q, m),
+            )
+
+    def test_oracle_rejects_forged_arrival_evidence(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, arrival_at="2026-09-24T10:00:00Z")
+        with self.assertRaisesRegex(ExecutionOracleError, "independently derived arrival"):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
     def test_existing_conservative_market_fill_passes_independent_oracle(self):
         o = order()
         q = observation()
         m = model()
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
+    def test_oracle_requires_market_projection_authority_before_result_checks(self):
+        o, q, valid_model = order(), observation(), model()
+        result = simulate_execution(o, q, valid_model)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "requires authoritative price projection policy",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=model(price_projection=None),
+                result=result,
+            )
+
+    def test_oracle_market_projection_is_invariant_to_ambient_decimal_context(self):
+        o = order(quantity="10")
+        q = observation(available_volume="30")
+        m = model(max_participation="0.5")
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+    def test_oracle_rejects_off_grid_market_reference(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "market reference price is not aligned to authoritative price quantum",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=observation(ask="101.005"),
+                model=m,
+                result=result,
+            )
+
+    def test_oracle_rejects_market_price_that_differs_from_adverse_tick_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, fill_price=result.fill_price + Decimal("0.01"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "independently projected adverse tick bound",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=forged,
+            )
+
+    def test_oracle_limit_arithmetic_is_invariant_to_ambient_decimal_context(self):
+        o = order(
+            order_type="LIMIT",
+            quantity="9999999999999999999.99",
+            lot_size="0.01",
+            limit_price="102.12345678901234567890123456789",
+        )
+        q = observation(
+            available_volume="12345678901234567890.12",
+            ask="101",
+        )
+        m = model(
+            max_participation="0.123456789012345678",
+            fee_rate="0.001234567890123456789",
+        )
+        with localcontext() as context:
+            context.prec = 80
+            result = simulate_execution(o, q, m)
+
+        for precision, rounding in (
+            (6, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (80, ROUND_CEILING),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    assert_conservative_execution(
+                        order=o,
+                        observation=q,
+                        model=m,
+                        result=result,
+                    )
+
+    def test_oracle_rejects_status_quantity_contradictions(self):
+        o, q, m = order(), observation(), model()
+        full = simulate_execution(o, q, m)
+        self.assertEqual(full.status, "FILLED")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(full, status="NO_FILL"),
+            )
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=o,
+                observation=q,
+                model=m,
+                result=replace(full, status="PARTIAL"),
+            )
+
+        partial_order = order(quantity="20")
+        partial_observation = observation(available_volume="20")
+        partial = simulate_execution(partial_order, partial_observation, m)
+        self.assertEqual(partial.status, "PARTIAL")
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "positive fill status must match exact execution completeness",
+        ):
+            assert_conservative_execution(
+                order=partial_order,
+                observation=partial_observation,
+                model=m,
+                result=replace(partial, status="FILLED"),
+            )
+
+        no_fill_order = order(order_type="LIMIT", limit_price="90")
+        no_fill = simulate_execution(no_fill_order, q, m)
+        self.assertEqual(no_fill.filled_quantity, Decimal("0"))
+        with self.assertRaisesRegex(
+            ExecutionOracleError,
+            "zero fill cannot claim FILLED or PARTIAL status",
+        ):
+            assert_conservative_execution(
+                order=no_fill_order,
+                observation=q,
+                model=m,
+                result=replace(no_fill, status="FILLED"),
+            )
 
     def test_oracle_rejects_quantity_above_participation_capacity(self):
         o = order(quantity="20")
@@ -114,9 +447,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("101"),
-            fee=Decimal("0.101"),
+            fee=Decimal("1.010"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(ExecutionOracleError, "same or earlier"):
@@ -136,9 +469,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("110"),
-            fee=Decimal("0.110"),
+            fee=Decimal("1.100"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(
@@ -166,9 +499,9 @@ class ExecutionOracleTests(unittest.TestCase):
         forged = replace(
             waiting,
             status="FILLED",
-            filled_quantity=Decimal("1"),
+            filled_quantity=Decimal("10"),
             fill_price=Decimal("110"),
-            fee=Decimal("0.110"),
+            fee=Decimal("1.100"),
             trade_time=q.market_time,
         )
         with self.assertRaisesRegex(ExecutionOracleError, "before venue arrival"):

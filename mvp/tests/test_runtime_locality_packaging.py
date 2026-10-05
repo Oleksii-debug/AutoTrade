@@ -237,6 +237,10 @@ else:
             root = Path(directory)
             staging = root / "staging"
             staging.mkdir()
+            # Release packaging now stages the full exact-Git neutral runtime.
+            # Prepare the only nested POSIX authority parent that the publisher
+            # intentionally refuses to synthesize through a detached child fd.
+            (staging / "autotrade_runtime" / "artifacts").mkdir(parents=True)
             executable = staging / "AutoTrade.Desktop.exe"
             dependency_lock = staging / "dependency-lock.json"
             sbom = staging / "sbom.spdx.json"

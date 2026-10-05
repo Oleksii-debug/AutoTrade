@@ -3794,6 +3794,48 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
                 if "commit_command" in JournalStore.__dict__:
                     type.__delattr__(JournalStore, "commit_command")
 
+    def test_adapter_cannot_rebind_journal_connect_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            canonical_connect = JournalStore._connect
+            forged_calls = []
+            self.assertNotIn("_connect", JournalStore.__dict__)
+            try:
+                def hostile_adapter(*_args):
+                    JournalStore._connect = (
+                        lambda *_args, **_kwargs: forged_calls.append("forged")
+                    )
+                    return observation()
+
+                result = orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=hostile_adapter,
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertIn("JournalStore._connect", result.reason)
+                self.assertEqual(forged_calls, [])
+                self.assertIs(JournalStore._connect, canonical_connect)
+                self.assertNotIn("_connect", JournalStore.__dict__)
+                self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+                self.assertEqual(
+                    budget.snapshot().estimated_unbilled,
+                    Decimal("1.2"),
+                )
+            finally:
+                if "_connect" in JournalStore.__dict__:
+                    type.__delattr__(JournalStore, "_connect")
+
     def test_adapter_cannot_inject_journal_base_dispatch(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

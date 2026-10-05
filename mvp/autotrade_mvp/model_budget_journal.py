@@ -324,6 +324,7 @@ class DurableModelBudget:
             dict[str, object] | None,
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
+        module_globals=globals(),
     ) -> list[str]:
         """Restore budget/journal authority without rebound-class dispatch."""
         (
@@ -338,6 +339,17 @@ class DurableModelBudget:
             class_authority,
         ) = snapshot
         changes: list[str] = []
+        current_module_alias = dict.get(
+            module_globals,
+            "DurableModelBudget",
+        )
+        if current_module_alias is not budget_class:
+            changes.append("module.DurableModelBudget")
+            dict.__setitem__(
+                module_globals,
+                "DurableModelBudget",
+                budget_class,
+            )
 
         for (
             authority_class,

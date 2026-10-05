@@ -1,8 +1,10 @@
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 from uuid import uuid4
+import gc
 import sqlite3
 import unittest
+import weakref
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -87,6 +89,40 @@ def provider_evidence(
 
 
 class DurableOrderProjectionTests(unittest.TestCase):
+    def test_destroyed_oms_releases_bound_store_authorities_without_next_bind(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.db")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            oms = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            oms_ref = weakref.ref(oms)
+            store_ref = weakref.ref(store)
+            artifacts_ref = weakref.ref(artifacts)
+            # Binding weakrefs must remain callback-free: a caller can
+            # enumerate weakrefs and invoke exposed callbacks manually.
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(oms))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(store))
+            )
+            self.assertTrue(
+                all(ref.__callback__ is None for ref in weakref.getweakrefs(artifacts))
+            )
+
+            del oms
+            gc.collect()
+            self.assertIsNone(oms_ref())
+
+            del store
+            del artifacts
+            gc.collect()
+            self.assertIsNone(store_ref())
+            self.assertIsNone(artifacts_ref())
+
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

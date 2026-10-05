@@ -118,6 +118,12 @@ def _authority_event_id(authority_id: str) -> str:
     return f"runtime-target-host-authority-{digest}"
 
 
+def _authority_aggregate_id(authority_id: str) -> str:
+    """Keep authority aggregate identity disjoint from financial-plan IDs."""
+
+    return _authority_event_id(authority_id)
+
+
 def _authority_payload(
     *,
     authority_id: str,
@@ -196,7 +202,10 @@ def _decode_authority(
         raise RuntimeTargetHostCampaignAuthorityError(
             "target-host authority aggregate type conflicts"
         )
-    if event.get("aggregate_id") != authority_id or event.get("aggregate_version") != 1:
+    if (
+        event.get("aggregate_id") != _authority_aggregate_id(authority_id)
+        or event.get("aggregate_version") != 1
+    ):
         raise RuntimeTargetHostCampaignAuthorityError(
             "target-host authority durable identity conflicts"
         )
@@ -432,7 +441,7 @@ def declare_runtime_target_host_campaign_authority(
                     "event_id": event_id,
                     "event_type": _EVENT_TYPE,
                     "aggregate_type": _AGGREGATE_TYPE,
-                    "aggregate_id": authority_id,
+                    "aggregate_id": _authority_aggregate_id(authority_id),
                     "aggregate_version": "1",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),

@@ -13,7 +13,7 @@ chronology owned by WP-48/#1018.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .durable_provider_qualification import DurableProviderQualificationRegistry
 from .provider_account_absence_coverage import (
@@ -45,9 +45,13 @@ class ProviderAccountCurrentnessError(ValueError):
 
 
 def _at(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    # Reading ``datetime.tzinfo`` is inert, while ``datetime.utcoffset()`` may
+    # dispatch into caller-owned Python when tzinfo is a subclass.  Currentness
+    # validation happens before trusted chronology is available, so reject that
+    # executable ingress rather than allowing it to mutate authority globals.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise ProviderAccountCurrentnessError(
-            "at must be exact timezone-aware datetime"
+            "at must be exact datetime with exact datetime.timezone tzinfo"
         )
     return value
 

@@ -2654,8 +2654,10 @@ def allocate_evidence_bound_objective_targets(
         try:
             normalized = normalize_allocation_valuation(
                 symbol=symbol,
-                market_payload=resolved_market[symbol].payload,
-                valuation_payload=valuation.payload,
+                market_payload=_allocation_payload_snapshot(
+                    resolved_market[symbol]
+                ),
+                valuation_payload=_allocation_payload_snapshot(valuation),
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,

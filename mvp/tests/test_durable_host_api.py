@@ -187,6 +187,23 @@ class JournalBackedHostApiTests(unittest.TestCase):
             padded_durable.submit(command),
         )
 
+    def test_account_scope_rejects_str_subclass_without_strip_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("account_id strip callback must not run")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "account_id must be a non-empty string",
+        ):
+            self.store(account_id=HostileText("paper-account-1"))
+
+        self.assertEqual(callbacks, [])
+
+
     def test_whitespace_only_account_scope_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "account_id must be a non-empty string"):
             self.store(account_id="   ")

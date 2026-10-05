@@ -1047,6 +1047,45 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
     if normalize_scope_code is None or load_code is None or handle_code is None:
         raise TypeError("credential vault helper authority is not canonical")
 
+    def retained_load_path(path):
+        path_text = str(path)
+        retained_open = path.open
+        retained_open_function = getattr(retained_open, "__func__", None)
+        retained_open_code = getattr(retained_open_function, "__code__", None)
+
+        class _TerminalLoadPath:
+            __slots__ = ()
+
+            def __fspath__(self):
+                return path_text
+
+            def __str__(self):
+                return path_text
+
+            def exists(self):
+                try:
+                    retained_os.stat(path)
+                except OSError:
+                    return False
+                return True
+
+            def read_text(self, *, encoding=None, errors=None):
+                if (
+                    retained_open_function is not None
+                    and retained_open_code is not None
+                    and getattr(retained_open_function, "__code__", None)
+                    is not retained_open_code
+                ):
+                    raise PermissionError("Credential vault path open code changed")
+                with retained_open(
+                    mode="r",
+                    encoding=encoding,
+                    errors=errors,
+                ) as stream:
+                    return stream.read()
+
+        return _TerminalLoadPath()
+
     def retained_vault_view(vault):
         if type(vault) is not vault_type:
             raise TypeError("terminal credential vault authority must be exact")
@@ -1055,6 +1094,10 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
             lock_path=vault.lock_path,
             FORMAT_VERSION=vault_format_version,
             _protector=retained_unprotector(vault._protector),
+        )
+        load_view = namespace_type(
+            path=retained_load_path(vault.path),
+            FORMAT_VERSION=vault_format_version,
         )
 
         def normalize_scope(**kwargs):
@@ -1065,7 +1108,7 @@ def _install_security_boundary_execution_authority(boundary_type) -> None:
         def load():
             if getattr(vault_load, "__code__", None) is not load_code:
                 raise PermissionError("Credential vault load code changed")
-            return vault_load(view)
+            return vault_load(load_view)
 
         def handle(record):
             if getattr(vault_handle, "__code__", None) is not handle_code:

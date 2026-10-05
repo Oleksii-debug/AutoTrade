@@ -423,6 +423,8 @@ def issue_provider_account_page_chain(
                 "request_cursor": cursor,
                 "response_next_cursor": next_cursor,
                 "response_sha256": binding.response_sha256,
+                "observed_at": binding.observed_at,
+                "journal_sequence": binding.journal_sequence,
                 "prepared_journal_sequence": prepared_sequence,
                 "observed_journal_sequence": binding.journal_sequence,
                 "item_count": item_count,

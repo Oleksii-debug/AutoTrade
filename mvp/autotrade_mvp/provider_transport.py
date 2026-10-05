@@ -1247,8 +1247,14 @@ def _binance_exact_trading_response(
     """
     exact = _exact_trading_response(value)
     status = exact.http_status
+    if status is None:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_http_status_unavailable_execution_unknown",
+        )
     parsed = exact.payload
-    if status is not None and 500 <= status <= 599:
+    if 500 <= status <= 599:
         return ExactJsonTransportResponse(
             exact.response_bytes,
             http_status=status,

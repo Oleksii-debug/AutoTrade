@@ -121,7 +121,7 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             raw = path.read_text(encoding="utf-8")
             path.write_text(raw.replace("{", "{ ", 1), encoding="utf-8")
             self.assertFalse(store.verify())
-            with self.assertRaisesRegex(ValueError, "non-canonical durable row"):
+            with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                 store.records()
 
     def test_blank_row_and_missing_final_newline_fail_verification(self):

@@ -154,6 +154,19 @@ class ExecutionRealismTests(unittest.TestCase):
         two = model(price_projection_policy_version=2)
         self.assertNotEqual(one.fingerprint, two.fingerprint)
 
+    def test_market_projection_requires_all_policy_evidence_fields(self):
+        for override in (
+            {"price_projection_policy_id": None},
+            {"price_projection_policy_version": None},
+            {"price_grid_instrument_version": None},
+        ):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(
+                    ExecutionRealismError,
+                    "complete price projection policy evidence",
+                ):
+                    simulate_execution(order(), top(), model(**override))
+
     def test_market_price_grid_scope_must_match_order_instrument(self):
         with self.assertRaisesRegex(
             ExecutionRealismError,

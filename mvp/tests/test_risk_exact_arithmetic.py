@@ -348,7 +348,9 @@ class RiskExactArithmeticTests(unittest.TestCase):
                     raise AssertionError("hostile liquidation scope read")
                 return super().__getattribute__(name)
 
-        hostile = HostileScope(**vars(base))
+        hostile = object.__new__(HostileScope)
+        for field_name, field_value in vars(base).items():
+            object.__setattr__(hostile, field_name, field_value)
         with self.assertRaisesRegex(
             TypeError,
             "exact LiquidationScope",
@@ -721,10 +723,10 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
 
     def test_exact_resource_overflow_fails_before_risk_authority(self):
-        oversized = "9" * 129
+        oversized = "9" * 257
         with self.assertRaisesRegex(
             ValueError,
-            "bounded finite decimal",
+            "exact Decimal resource envelope",
         ):
             RiskContext.create(
                 state_version=7,
@@ -763,8 +765,8 @@ class RiskExactArithmeticTests(unittest.TestCase):
         self.assertEqual(HostileDecimal.finite_reads, 0)
 
     def test_intermediate_notional_overflow_fails_closed(self):
-        large = "1" + "0" * 64
-        wide_limit = "9" * 128
+        large = "1" + "0" * 200
+        wide_limit = "9" * 256
         intent = RiskIntent.create(
             symbol="ABC",
             side="BUY",

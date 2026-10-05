@@ -246,6 +246,7 @@ class DurableModelBudget:
         object | None,
         type | None,
         dict[str, object] | None,
+        type,
         tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
     ]:
         """Freeze budget/journal authority before executing the injected clock."""
@@ -255,7 +256,8 @@ class DurableModelBudget:
             subject="model budget",
         )
         journal = budget_state.get("journal")
-        if not isinstance(journal, JournalStore):
+        module_journal_class = JournalStore
+        if not isinstance(journal, module_journal_class):
             raise ValueError("model budget journal authority is invalid")
         journal_class = object.__getattribute__(journal, "__class__")
         journal_state = DurableModelBudget._safe_authority_state(
@@ -307,6 +309,7 @@ class DurableModelBudget:
             identity,
             identity_class,
             identity_state,
+            module_journal_class,
             class_authority,
         )
 
@@ -322,6 +325,7 @@ class DurableModelBudget:
             object | None,
             type | None,
             dict[str, object] | None,
+            type,
             tuple[tuple[type, str, tuple[type, ...], Mapping[str, object]], ...],
         ],
         module_globals=globals(),
@@ -336,6 +340,7 @@ class DurableModelBudget:
             identity,
             identity_class,
             identity_state,
+            module_journal_class,
             class_authority,
         ) = snapshot
         changes: list[str] = []
@@ -349,6 +354,18 @@ class DurableModelBudget:
                 module_globals,
                 "DurableModelBudget",
                 budget_class,
+            )
+
+        current_journal_alias = dict.get(
+            module_globals,
+            "JournalStore",
+        )
+        if current_journal_alias is not module_journal_class:
+            changes.append("module.JournalStore")
+            dict.__setitem__(
+                module_globals,
+                "JournalStore",
+                module_journal_class,
             )
 
         for (

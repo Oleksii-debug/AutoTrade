@@ -88,6 +88,21 @@ class _CutBoundAuthorityService(AuthorityService):
                 raise AuthorityConflict(
                     "durable authority event conflicts with existing content"
                 )
+            # This can only be a legitimate concurrent idempotent completion if
+            # that exact confirmation itself was the immediate global successor
+            # to the RiskPolicy/claim cut validated by this service. Otherwise
+            # an intervening authority/risk/provider fact won the race and the
+            # caller must re-resolve rather than reinterpret the event as ours.
+            if (
+                existing.get("journal_sequence")
+                != self._confirmation_journal_cut + 1
+                or existing.get("aggregate_version")
+                != self._journal_version + 1
+            ):
+                raise _JournalCutChanged(
+                    "concurrent confirmation is outside validated journal successor"
+                )
+            self._journal_version += 1
             return
 
         envelope = {
@@ -266,10 +281,6 @@ def confirm_pending_intent(
             "pending intent no longer matches authenticated financial-envelope binding"
         )
 
-    # Establish the accepted authority cut before consuming the pending intent.
-    # Direct package callers bind to the current exact cut; the Host adapter
-    # supplies its already-durable acceptance cut so a race after Host checking
-    # cannot silently upgrade the command onto newer authority state.
     try:
         preclaim_authority = AuthorityService(store)
     except (TypeError, ValueError, RuntimeError) as error:
@@ -306,10 +317,6 @@ def confirm_pending_intent(
     if claimed != pending:
         raise ConfirmIntentError("durable pending intent changed during confirmation")
 
-    # The pending claim is now durable.  Re-resolve the exact activation episode
-    # and couple the confirmation append to the same whole-journal cut.  A small
-    # bounded retry absorbs unrelated concurrent journal traffic; every retry
-    # rechecks both RiskPolicy episode and accepted AuthorityService cut first.
     final_risk_policy = None
     for _attempt in range(8):
         try:

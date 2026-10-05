@@ -72,7 +72,6 @@ def _model_budget_journal_class_authority_changes(
                     raise ValueError(
                         "model budget journal class base authority could not be restored"
                     ) from error
-
         current_state = vars(cls)
         current_keys = tuple(current_state)
         if any(type(name) is not str for name in current_keys):
@@ -100,25 +99,17 @@ def _model_budget_journal_class_authority_changes(
                         raise ValueError(
                             "model budget journal class authority could not be restored"
                         ) from error
-
         if restore:
             restored_bases = tuple(cls.__bases__)
-            if (
-                len(restored_bases) != len(expected_bases)
-                or any(
-                    current is not expected
-                    for current, expected in zip(restored_bases, expected_bases)
-                )
+            if len(restored_bases) != len(expected_bases) or any(
+                current is not expected
+                for current, expected in zip(restored_bases, expected_bases)
             ):
                 raise ValueError(
                     "model budget journal class base authority restore is incomplete"
                 )
             restored_state = vars(cls)
-            if set(restored_state) != set(expected_state):
-                raise ValueError(
-                    "model budget journal class authority restore is incomplete"
-                )
-            if any(
+            if set(restored_state) != set(expected_state) or any(
                 restored_state[name] is not expected_state[name]
                 for name in expected_state
             ):
@@ -598,6 +589,11 @@ class DurableModelBudget:
         restore_clock_authority = DurableModelBudget._restore_clock_authority
         clock_text = _clock_text
         module_globals = globals()
+        clock_dependencies = (
+            ("datetime", datetime),
+            ("timedelta", timedelta),
+            ("timezone", timezone),
+        )
         snapshot = DurableModelBudget._clock_authority_snapshot(self)
         clock = snapshot[1].get("_clock")
         if not callable(clock):
@@ -619,13 +615,18 @@ class DurableModelBudget:
                     )
                 )
             finally:
-                current_clock_text = dict.get(module_globals, "_clock_text")
-                if current_clock_text is not clock_text:
-                    changes.append("module._clock_text")
+                for name, expected in (
+                    ("_clock_text", clock_text),
+                    *clock_dependencies,
+                ):
+                    current = dict.get(module_globals, name)
+                    if current is expected:
+                        continue
+                    changes.append("module." + name)
                     dict.__setitem__(
                         module_globals,
-                        "_clock_text",
-                        clock_text,
+                        name,
+                        expected,
                     )
 
         if changes:

@@ -15,7 +15,7 @@ one JournalStore command transaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -53,6 +53,7 @@ _FINANCING_EVENT_TYPE = "ProviderFinancingRevisionAccepted"
 _FINANCING_TOPIC = "autotrade.financing.events"
 _ACTOR = "provider-financing-accounting"
 _EVIDENCE_SCHEMA_VERSION = "1.0.0"
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 class AuthenticatedArtifactStore(Protocol):
@@ -436,12 +437,12 @@ def _milliseconds_instant(value: object, *, name: str) -> datetime:
         raise FinancingError(f"{name} must be bounded epoch milliseconds") from error
     if milliseconds < 0:
         raise FinancingError(f"{name} must be non-negative")
-    seconds, remainder = divmod(milliseconds, 1000)
+    # Provider chronology is product authority, not host C-library authority.
+    # Fixed-epoch timedelta arithmetic is deterministic across supported hosts
+    # and preserves exact millisecond identity without time_t conversion.
     try:
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
-            microsecond=remainder * 1000
-        )
-    except (OverflowError, OSError, ValueError) as error:
+        return _UTC_EPOCH + timedelta(milliseconds=milliseconds)
+    except (OverflowError, ValueError) as error:
         raise FinancingError(f"{name} is outside supported UTC range") from error
 
 

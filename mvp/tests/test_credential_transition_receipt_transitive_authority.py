@@ -50,9 +50,9 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
 
         return rebound
 
-    def _assert_rotate_ignores_module_rebind(self, name: str) -> None:
+    def _assert_rotate_ignores_object_rebind(self, target, name: str) -> None:
         calls: list[object] = []
-        with patch.object(transition, name, new=self._rebound(name, calls)):
+        with patch.object(target, name, new=self._rebound(name, calls)):
             current, receipt = transition.rotate_trade_credential_with_receipt(
                 self.vault,
                 self.handle,
@@ -63,48 +63,28 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
         self.assertEqual(receipt.operation, "ROTATED")
         self.assertEqual(calls, [])
 
+    def _assert_rotate_ignores_module_rebind(self, name: str) -> None:
+        self._assert_rotate_ignores_object_rebind(transition, name)
+
     def _assert_rotate_ignores_vault_method_rebind(self, name: str) -> None:
+        self._assert_rotate_ignores_object_rebind(ProtectedCredentialVault, name)
+
+    def _assert_revoke_ignores_object_rebind(self, target, name: str) -> None:
         calls: list[object] = []
-        with patch.object(
-            ProtectedCredentialVault,
-            name,
-            new=self._rebound(name, calls),
-        ):
-            current, receipt = transition.rotate_trade_credential_with_receipt(
+        with patch.object(target, name, new=self._rebound(name, calls)):
+            receipt = transition.revoke_trade_credential_with_receipt(
                 self.vault,
                 self.handle,
                 execution_identity="windows-user-1",
-                new_secret_value="secret-v2",
             )
-        self.assertEqual(current.generation, self.handle.generation + 1)
-        self.assertEqual(receipt.operation, "ROTATED")
+        self.assertEqual(receipt.operation, "REVOKED")
         self.assertEqual(calls, [])
 
     def _assert_revoke_ignores_module_rebind(self, name: str) -> None:
-        calls: list[object] = []
-        with patch.object(transition, name, new=self._rebound(name, calls)):
-            receipt = transition.revoke_trade_credential_with_receipt(
-                self.vault,
-                self.handle,
-                execution_identity="windows-user-1",
-            )
-        self.assertEqual(receipt.operation, "REVOKED")
-        self.assertEqual(calls, [])
+        self._assert_revoke_ignores_object_rebind(transition, name)
 
     def _assert_revoke_ignores_vault_method_rebind(self, name: str) -> None:
-        calls: list[object] = []
-        with patch.object(
-            ProtectedCredentialVault,
-            name,
-            new=self._rebound(name, calls),
-        ):
-            receipt = transition.revoke_trade_credential_with_receipt(
-                self.vault,
-                self.handle,
-                execution_identity="windows-user-1",
-            )
-        self.assertEqual(receipt.operation, "REVOKED")
-        self.assertEqual(calls, [])
+        self._assert_revoke_ignores_object_rebind(ProtectedCredentialVault, name)
 
     def _issued_receipt(self):
         return transition.revoke_trade_credential_with_receipt(
@@ -113,10 +93,10 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
             execution_identity="windows-user-1",
         )
 
-    def _assert_verify_ignores_module_rebind(self, name: str) -> None:
+    def _assert_verify_ignores_object_rebind(self, target, name: str) -> None:
         receipt = self._issued_receipt()
         calls: list[object] = []
-        with patch.object(transition, name, new=self._rebound(name, calls)):
+        with patch.object(target, name, new=self._rebound(name, calls)):
             verified = transition.verify_trade_credential_transition_receipt(
                 self.vault,
                 receipt,
@@ -124,20 +104,11 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
         self.assertEqual(verified, receipt)
         self.assertEqual(calls, [])
 
+    def _assert_verify_ignores_module_rebind(self, name: str) -> None:
+        self._assert_verify_ignores_object_rebind(transition, name)
+
     def _assert_verify_ignores_vault_method_rebind(self, name: str) -> None:
-        receipt = self._issued_receipt()
-        calls: list[object] = []
-        with patch.object(
-            ProtectedCredentialVault,
-            name,
-            new=self._rebound(name, calls),
-        ):
-            verified = transition.verify_trade_credential_transition_receipt(
-                self.vault,
-                receipt,
-            )
-        self.assertEqual(verified, receipt)
-        self.assertEqual(calls, [])
+        self._assert_verify_ignores_object_rebind(ProtectedCredentialVault, name)
 
     def test_public_entrypoints_expose_no_authority_override_parameters(self) -> None:
         for operation in (
@@ -184,6 +155,15 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
     def test_rotate_ignores_pre_call_issue_helper_rebind(self) -> None:
         self._assert_rotate_ignores_module_rebind("_issue_locked")
 
+    def test_rotate_ignores_pre_call_vault_type_rebind(self) -> None:
+        self._assert_rotate_ignores_module_rebind("ProtectedCredentialVault")
+
+    def test_rotate_ignores_pre_call_handle_type_rebind(self) -> None:
+        self._assert_rotate_ignores_module_rebind("PersistentCredentialHandle")
+
+    def test_rotate_ignores_pre_call_b64encode_rebind(self) -> None:
+        self._assert_rotate_ignores_module_rebind("b64encode")
+
     def test_rotate_ignores_pre_call_vault_load_rebind(self) -> None:
         self._assert_rotate_ignores_vault_method_rebind("_load")
 
@@ -224,6 +204,51 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
 
     def test_revoke_ignores_pre_call_seal_entropy_rebind(self) -> None:
         self._assert_revoke_ignores_module_rebind("_seal_entropy")
+
+    def test_revoke_ignores_pre_call_vault_type_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("ProtectedCredentialVault")
+
+    def test_revoke_ignores_pre_call_handle_type_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("PersistentCredentialHandle")
+
+    def test_revoke_ignores_pre_call_receipt_type_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("CredentialTransitionReceipt")
+
+    def test_revoke_ignores_pre_call_provider_normalizer_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("normalize_provider_environment")
+
+    def test_revoke_ignores_pre_call_text_digest_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("_text_digest")
+
+    def test_revoke_ignores_pre_call_digest_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("_digest")
+
+    def test_revoke_ignores_pre_call_canonical_bytes_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("_canonical_bytes")
+
+    def test_revoke_ignores_pre_call_asdict_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("asdict")
+
+    def test_revoke_ignores_pre_call_b64encode_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("b64encode")
+
+    def test_revoke_ignores_pre_call_b64decode_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("b64decode")
+
+    def test_revoke_ignores_pre_call_sha256_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("sha256")
+
+    def test_revoke_ignores_pre_call_json_dumps_rebind(self) -> None:
+        self._assert_revoke_ignores_object_rebind(transition.json, "dumps")
+
+    def test_revoke_ignores_pre_call_uuid4_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("uuid4")
+
+    def test_revoke_ignores_pre_call_time_ns_rebind(self) -> None:
+        self._assert_revoke_ignores_module_rebind("time_ns")
+
+    def test_revoke_ignores_pre_call_urandom_rebind(self) -> None:
+        self._assert_revoke_ignores_object_rebind(transition.os, "urandom")
 
     def test_revoke_ignores_pre_call_vault_load_rebind(self) -> None:
         self._assert_revoke_ignores_vault_method_rebind("_load")
@@ -268,6 +293,36 @@ class CredentialTransitionReceiptTransitiveAuthorityTests(unittest.TestCase):
 
     def test_verify_ignores_pre_call_seal_entropy_rebind(self) -> None:
         self._assert_verify_ignores_module_rebind("_seal_entropy")
+
+    def test_verify_ignores_pre_call_vault_type_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("ProtectedCredentialVault")
+
+    def test_verify_ignores_pre_call_receipt_type_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("CredentialTransitionReceipt")
+
+    def test_verify_ignores_pre_call_provider_normalizer_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("normalize_provider_environment")
+
+    def test_verify_ignores_pre_call_text_digest_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("_text_digest")
+
+    def test_verify_ignores_pre_call_digest_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("_digest")
+
+    def test_verify_ignores_pre_call_canonical_bytes_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("_canonical_bytes")
+
+    def test_verify_ignores_pre_call_asdict_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("asdict")
+
+    def test_verify_ignores_pre_call_b64decode_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("b64decode")
+
+    def test_verify_ignores_pre_call_sha256_rebind(self) -> None:
+        self._assert_verify_ignores_module_rebind("sha256")
+
+    def test_verify_ignores_pre_call_json_dumps_rebind(self) -> None:
+        self._assert_verify_ignores_object_rebind(transition.json, "dumps")
 
 
 if __name__ == "__main__":

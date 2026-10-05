@@ -633,13 +633,14 @@ class DecisionTraceStore:
             return True
 
     def records(self) -> list[dict[str, Any]]:
-        try:
-            records = self._load()
-        except ValueError as error:
-            raise ValueError("Decision trace chain is corrupt") from error
-        if records and not self._records_are_valid(records):
-            raise ValueError("Decision trace chain is corrupt")
-        return records
+        with durable_path_lock(self.path):
+            try:
+                records = self._load()
+            except ValueError as error:
+                raise ValueError("Decision trace chain is corrupt") from error
+            if records and not self._records_are_valid(records):
+                raise ValueError("Decision trace chain is corrupt")
+            return records
 
     def reconstruct(
         self,

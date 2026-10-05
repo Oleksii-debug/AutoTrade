@@ -18,7 +18,7 @@ from .durable_provider_qualification import (
     DurableProviderQualificationRegistry,
     ProviderQualificationError,
 )
-from .persistence import canonical_json
+from .persistence import JournalStore, canonical_json
 from .provider_account_acquisition import (
     DurableProviderAccountAcquisitionAuthority,
     ProviderAccountAcquisitionError,
@@ -176,6 +176,8 @@ def _install_origin_set_authority():
             DurableProviderQualificationRegistry,
             DurableProviderAccountAcquisitionAuthority,
             SerializedProviderAccountAcquisition,
+            JournalStore,
+            object,
         ],
     ] = {}
 
@@ -220,10 +222,15 @@ def _install_origin_set_authority():
             raise TypeError(
                 "account_acquisition must be exact SerializedProviderAccountAcquisition"
             )
-        if qualification_registry.store is not account_acquisition_authority.store:
+        store = qualification_registry.store
+        if (
+            type(store) is not JournalStore
+            or store is not account_acquisition_authority.store
+        ):
             raise ProviderAccountOriginSetError(
-                "origin-set currentness authorities must share one JournalStore"
+                "origin-set currentness authorities must share one exact JournalStore"
             )
+        store_identity = store.store_identity
         prune()
         object_id = id(value)
         state = snapshot(value)
@@ -238,6 +245,8 @@ def _install_origin_set_authority():
             qualification_registry,
             account_acquisition_authority,
             account_acquisition,
+            store,
+            store_identity,
         )
 
     def require(
@@ -268,6 +277,17 @@ def _install_origin_set_authority():
         qualification_registry = state[2]
         account_acquisition_authority = state[3]
         account_acquisition = state[4]
+        store = state[5]
+        store_identity = state[6]
+        if (
+            type(store) is not JournalStore
+            or qualification_registry.store is not store
+            or account_acquisition_authority.store is not store
+            or store.store_identity != store_identity
+        ):
+            raise ProviderAccountOriginSetError(
+                "origin-set currentness JournalStore generation changed"
+            )
 
         try:
             current_acquisition = account_acquisition_authority.require_current(

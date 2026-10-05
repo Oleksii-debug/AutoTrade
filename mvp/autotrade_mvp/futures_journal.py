@@ -420,19 +420,7 @@ def _detached_durable_contract(contract: FuturesContract) -> FuturesContract:
         raise FuturesError("durable settlement requires canonical InstrumentVersion")
     try:
         detached_version = _detached_instrument_version(version)
-        detached = FuturesContract(
-            instrument=contract.instrument,
-            payoff=contract.payoff,
-            multiplier=contract.multiplier,
-            quote_currency=contract.quote_currency,
-            settlement_currency=contract.settlement_currency,
-            last_trade_at=contract.last_trade_at,
-            delivery_cutoff=contract.delivery_cutoff,
-            expiry=contract.expiry,
-            settlement_method=contract.settlement_method,
-            price_base_currency=contract.price_base_currency,
-            canonical_instrument=detached_version,
-        )
+        detached = FuturesContract.from_instrument_version(detached_version)
     except (TypeError, ValueError) as error:
         raise FuturesError(
             "durable settlement contract conflicts with canonical InstrumentVersion"

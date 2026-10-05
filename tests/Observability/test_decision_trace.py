@@ -33,6 +33,15 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
 
 
 class DecisionTraceEvidenceTests(unittest.TestCase):
+    def test_missing_trace_read_does_not_create_parent_directory(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "not-created" / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            self.assertEqual(store.records(), [])
+            self.assertTrue(store.verify())
+            self.assertFalse(path.parent.exists())
+
     def test_relative_backing_path_is_frozen_across_cwd_change(self):
         original_cwd = os.getcwd()
         with TemporaryDirectory() as source_directory, TemporaryDirectory() as other_directory:

@@ -30,6 +30,7 @@ def model(**overrides):
         slippage_bps="5",
         impact_bps_at_max_participation="10",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -69,6 +70,15 @@ class ExecutionOracleTests(unittest.TestCase):
         m = model()
         result = simulate_execution(o, q, m)
         assert_conservative_execution(order=o, observation=q, model=m, result=result)
+
+    def test_oracle_reconstructs_market_price_grid_not_just_reference_bound(self):
+        o, q, m = order(), observation(), model()
+        result = simulate_execution(o, q, m)
+        forged = replace(result, fill_price=Decimal("101.11"))
+        with self.assertRaisesRegex(ExecutionOracleError, "independent price-grid projection"):
+            assert_conservative_execution(
+                order=o, observation=q, model=m, result=forged
+            )
 
     def test_oracle_rejects_quantity_above_participation_capacity(self):
         o = order(quantity="20")

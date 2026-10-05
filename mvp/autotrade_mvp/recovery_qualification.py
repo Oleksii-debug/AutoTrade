@@ -40,9 +40,6 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
-_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
-
-
 class RecoveryScenario(StrEnum):
     POWER_LOSS = "POWER_LOSS"
     NETWORK_LOSS = "NETWORK_LOSS"
@@ -126,9 +123,14 @@ def _text_tuple(
     return normalized
 
 
-def _exact_mapping(value: object, *, name: str) -> Mapping:
-    if type(value) not in {dict, _MAPPING_PROXY_TYPE}:
-        raise TypeError(f"{name} must be an exact dict or MappingProxyType mapping")
+def _exact_mapping(value: object, *, name: str) -> dict:
+    # Public qualification constructors must not trust an arbitrary mappingproxy:
+    # MappingProxyType(hostile_mapping) is still an exact built-in proxy but
+    # delegates iteration/lookups to the wrapped caller-controlled mapping.
+    # Accept only an exact detached dict here; the dataclasses freeze their
+    # validated module-owned copies to MappingProxyType on output.
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
     return value
 
 
@@ -817,15 +819,13 @@ def qualify_recovery_release(
     else:
         status = RecoveryEvidenceStatus.PASS
 
-    measured = MappingProxyType(
-        {
-            scenario: item.downtime_ms
-            for scenario, item in sorted(
-                by_scenario.items(),
-                key=lambda pair: pair[0].value,
-            )
-        }
-    )
+    measured = {
+        scenario: item.downtime_ms
+        for scenario, item in sorted(
+            by_scenario.items(),
+            key=lambda pair: pair[0].value,
+        )
+    }
     return RecoveryQualificationDecision(
         status=status,
         source_sha=policy.source_sha,

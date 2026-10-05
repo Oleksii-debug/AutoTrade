@@ -581,23 +581,38 @@ class DurableModelCallOrchestrator:
     def _callback_shape_snapshot(
         self,
     ) -> tuple[
-        dict[str, object],
+        type,
         dict[str, object],
         object,
+        type,
+        dict[str, object],
+        object,
+        type,
         dict[str, object],
         object | None,
+        type | None,
         dict[str, object] | None,
     ]:
-        """Freeze instance and physical JournalStore authority around callbacks."""
-        self_state = self._safe_instance_snapshot(
+        """Freeze exact class and instance authority around caller callbacks."""
+        orchestrator_class = object.__getattribute__(self, "__class__")
+        if orchestrator_class is not DurableModelCallOrchestrator:
+            raise ModelCallError("model orchestrator class authority is invalid")
+        self_state = DurableModelCallOrchestrator._safe_instance_snapshot(
             self,
             subject="model orchestrator",
         )
-        budget_state = self._safe_instance_snapshot(
-            self.budget,
+        budget = self_state.get("budget")
+        if type(budget) is not DurableModelBudget:
+            raise ModelCallError("model budget authority is invalid")
+        budget_class = object.__getattribute__(budget, "__class__")
+        budget_state = DurableModelCallOrchestrator._safe_instance_snapshot(
+            budget,
             subject="model budget",
         )
-        journal = self.journal
+        journal = self_state.get("journal")
+        if journal is None or journal is not budget_state.get("journal"):
+            raise ModelCallError("model budget journal authority is inconsistent")
+        journal_class = object.__getattribute__(journal, "__class__")
         try:
             require_exact_journal_store_authority(
                 journal,
@@ -607,65 +622,114 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 "durable model budget journal authority is invalid"
             ) from error
-        journal_state = self._safe_instance_snapshot(
+        journal_state = DurableModelCallOrchestrator._safe_instance_snapshot(
             journal,
             subject="model budget journal",
         )
         identity = journal_state.get("_store_identity")
+        identity_class = (
+            object.__getattribute__(identity, "__class__")
+            if identity is not None
+            else None
+        )
         identity_state = (
-            self._safe_instance_snapshot(
+            DurableModelCallOrchestrator._safe_instance_snapshot(
                 identity,
                 subject="model budget journal identity",
             )
-            if identity is not None and hasattr(identity, "__dict__")
+            if identity is not None
             else None
         )
         return (
+            orchestrator_class,
             self_state,
+            budget,
+            budget_class,
             budget_state,
             journal,
+            journal_class,
             journal_state,
             identity,
+            identity_class,
             identity_state,
         )
 
+    @staticmethod
     def _restore_callback_shape(
-        self,
+        self: "DurableModelCallOrchestrator",
         snapshot: tuple[
-            dict[str, object],
+            type,
             dict[str, object],
             object,
+            type,
+            dict[str, object],
+            object,
+            type,
             dict[str, object],
             object | None,
+            type | None,
             dict[str, object] | None,
         ],
     ) -> list[str]:
+        """Restore exact callback authority before any dynamic attribute access."""
         (
+            orchestrator_class,
             self_state,
+            budget,
+            budget_class,
             budget_state,
             journal,
+            journal_class,
             journal_state,
             identity,
+            identity_class,
             identity_state,
         ) = snapshot
         changes: list[str] = []
 
+        def restore_class(
+            value: object,
+            expected_class: type,
+            *,
+            label: str,
+        ) -> None:
+            current_class = object.__getattribute__(value, "__class__")
+            if current_class is expected_class:
+                return
+            changes.append(label)
+            try:
+                object.__setattr__(value, "__class__", expected_class)
+            except (AttributeError, TypeError) as error:
+                raise ModelCallError(
+                    label + " could not be restored after callback"
+                ) from error
+
+        restore_class(self, orchestrator_class, label="orchestrator.__class__")
+        restore_class(budget, budget_class, label="budget.__class__")
+        restore_class(journal, journal_class, label="journal.__class__")
+        if identity is not None and identity_class is not None:
+            restore_class(
+                identity,
+                identity_class,
+                label="journal._store_identity.__class__",
+            )
+
         changes.extend(
-            self._restore_safe_instance_state(
+            DurableModelCallOrchestrator._restore_safe_instance_state(
                 self,
                 self_state,
                 prefix="orchestrator",
             )
         )
         changes.extend(
-            self._restore_safe_instance_state(
-                self.budget,
+            DurableModelCallOrchestrator._restore_safe_instance_state(
+                budget,
                 budget_state,
                 prefix="budget",
             )
         )
         changes.extend(
-            self._restore_safe_instance_state(
+            DurableModelCallOrchestrator._restore_safe_instance_state(
                 journal,
                 journal_state,
                 prefix="journal",
@@ -673,7 +737,7 @@ class DurableModelCallOrchestrator:
         )
         if identity is not None and identity_state is not None:
             changes.extend(
-                self._restore_safe_instance_state(
+                DurableModelCallOrchestrator._restore_safe_instance_state(
                     identity,
                     identity_state,
                     prefix="journal._store_identity",
@@ -902,6 +966,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, callback_shape
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)
@@ -920,7 +989,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "pricing evidence resolver mutated orchestrator authority:"
@@ -1331,6 +1399,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, callback_shape
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)
@@ -1349,7 +1422,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "observation evidence resolver mutated orchestrator authority:"
@@ -1678,6 +1750,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 descriptor_error = error
         finally:
+            descriptor_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, descriptor_shape
+                )
+            )
             for name, expected in descriptor_refs.items():
                 if getattr(self, name, None) is not expected:
                     descriptor_changes.append(name)
@@ -1696,7 +1773,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     descriptor_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            descriptor_changes.extend(self._restore_callback_shape(descriptor_shape))
         if descriptor_changes:
             raise ModelCallError(
                 "descriptor inventory mutated orchestrator authority:"
@@ -1860,6 +1936,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 cancellation_error = error
         finally:
+            cancellation_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, cancellation_shape
+                )
+            )
             for name, expected in cancellation_refs.items():
                 if getattr(self, name, None) is not expected:
                     cancellation_changes.append(name)
@@ -1878,9 +1959,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     cancellation_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            cancellation_changes.extend(
-                self._restore_callback_shape(cancellation_shape)
-            )
 
         if cancellation_changes:
             error = ModelCallError(
@@ -2002,6 +2080,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 adapter_error = error
         finally:
+            authority_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, adapter_shape
+                )
+            )
             for name, expected in adapter_boundary_refs.items():
                 if getattr(self, name, None) is not expected:
                     authority_changes.append(name)
@@ -2020,7 +2103,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     authority_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            authority_changes.extend(self._restore_callback_shape(adapter_shape))
 
         if authority_changes:
             payload = {
@@ -2275,6 +2357,11 @@ class DurableModelCallOrchestrator:
             except Exception:
                 schema_valid = False
         finally:
+            validation_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, validation_shape
+                )
+            )
             for name, expected in validation_refs.items():
                 if getattr(self, name, None) is not expected:
                     validation_changes.append(name)
@@ -2293,7 +2380,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     validation_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            validation_changes.extend(self._restore_callback_shape(validation_shape))
         if validation_changes or type(schema_valid) is not bool:
             schema_valid = False
         observed_payload["schema_valid"] = schema_valid
@@ -2370,6 +2456,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 recovery_error = error
         finally:
+            authority_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, recovery_shape
+                )
+            )
             for name, expected in recovery_refs.items():
                 if getattr(self, name, None) is not expected:
                     authority_changes.append(name)
@@ -2388,7 +2479,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     authority_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            authority_changes.extend(self._restore_callback_shape(recovery_shape))
         if authority_changes:
             raise ModelCallError(
                 "recovery fence mutated orchestrator authority:"
@@ -2683,6 +2773,11 @@ class DurableModelCallOrchestrator:
             except Exception as error:
                 callback_error = error
         finally:
+            callback_changes.extend(
+                DurableModelCallOrchestrator._restore_callback_shape(
+                    self, callback_shape
+                )
+            )
             for name, expected in callback_refs.items():
                 if getattr(self, name, None) is not expected:
                     callback_changes.append(name)
@@ -2701,7 +2796,6 @@ class DurableModelCallOrchestrator:
                 if type(current) is not type(expected) or current != expected:
                     callback_changes.append("budget." + name)
                 setattr(self.budget, name, expected)
-            callback_changes.extend(self._restore_callback_shape(callback_shape))
         if callback_changes:
             raise ModelCallError(
                 "billing evidence resolver mutated orchestrator authority:"

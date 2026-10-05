@@ -3,6 +3,7 @@ import inspect
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp import bybit_v5 as bybit_module
 from mvp.autotrade_mvp import durable_financial_request_binding as binding_module
 from mvp.autotrade_mvp.bybit_v5 import (
     BybitPreparedSubmission,
@@ -18,6 +19,7 @@ from mvp.autotrade_mvp.durable_financial_request_binding import (
     _require_bybit_prepared_request_origin,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
+from mvp.autotrade_mvp.provider_core import ProviderCoreError
 from mvp.tests.test_bybit_v5 import READ_AT, submission_write_capability
 from mvp.tests.test_financial_send_authority import (
     D8,
@@ -202,6 +204,80 @@ class DurableFinancialBybitPreparedOriginTests(unittest.TestCase):
                 with self.assertRaises(DurableFinancialRequestBindingError):
                     _require_bybit_prepared_request_origin(drifted, prepared)
 
+
+    def test_preparation_class_rebinding_fails_before_forged_constructor(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+        calls = []
+
+        class ForgedPreparedSubmission:
+            def __init__(self, *_args, **_kwargs):
+                calls.append("forged-constructor")
+
+        with patch.object(
+            bybit_module,
+            "BybitPreparedSubmission",
+            ForgedPreparedSubmission,
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "prepared submission authority changed",
+            ):
+                prepare_order_submission(
+                    capability=capability,
+                    at=READ_AT,
+                    provider_environment="TESTNET",
+                    product_family="LINEAR_DERIVATIVES",
+                    symbol="BTCUSDT",
+                    side="BUY",
+                    order_type="LIMIT",
+                    quantity="2",
+                    client_order_id="client-order-1",
+                    time_in_force="GTC",
+                    price="30000",
+                    reduce_only=False,
+                )
+        self.assertEqual(calls, [])
+
+    def test_preparation_class_methods_are_pinned_before_constructor(self):
+        capability = submission_write_capability(
+            account_id="account-1",
+            environment="PAPER",
+            instrument_version="BTCUSDT@v1",
+            provider_environment="TESTNET",
+        )
+
+        for attribute in ("__init__", "__post_init__"):
+            with self.subTest(attribute=attribute):
+                calls = []
+
+                def forged(*_args, **_kwargs):
+                    calls.append(attribute)
+
+                with patch.object(BybitPreparedSubmission, attribute, forged):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError,
+                        "prepared submission authority changed",
+                    ):
+                        prepare_order_submission(
+                            capability=capability,
+                            at=READ_AT,
+                            provider_environment="TESTNET",
+                            product_family="LINEAR_DERIVATIVES",
+                            symbol="BTCUSDT",
+                            side="BUY",
+                            order_type="LIMIT",
+                            quantity="2",
+                            client_order_id="client-order-1",
+                            time_in_force="GTC",
+                            price="30000",
+                            reduce_only=False,
+                        )
+                self.assertEqual(calls, [])
 
     def test_exact_type_clone_without_canonical_issuance_is_rejected(self):
         material, prepared = canonical_case()

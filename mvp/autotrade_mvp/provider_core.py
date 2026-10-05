@@ -930,9 +930,30 @@ def _install_provider_submission_observation_authority(
     binding_projection_code = binding_projection.__code__
     canonical_decode = _decode_exact_json
     decode_code = canonical_decode.__code__
+    canonical_depth_guard = require_provider_json_depth
+    depth_guard_code = canonical_depth_guard.__code__
+    canonical_number_parser = parse_bounded_json_number_token
+    number_parser_code = canonical_number_parser.__code__
+    canonical_integer_parser = parse_bounded_json_integer_token
+    integer_parser_code = canonical_integer_parser.__code__
+    canonical_freeze_json = _freeze_json
+    freeze_json_code = canonical_freeze_json.__code__
     canonical_sha256 = sha256
     canonical_json_module = json
+    canonical_json_loads = json.loads
     canonical_json_dumps = json.dumps
+    canonical_exact_decimal_error = ExactDecimalError
+    canonical_value_error = ValueError
+    canonical_unicode_decode_error = UnicodeDecodeError
+    canonical_recursion_error = RecursionError
+    canonical_bytes = bytes
+    canonical_isinstance = isinstance
+    canonical_dict = dict
+    canonical_list = list
+    canonical_decimal = Decimal
+    canonical_float = float
+    canonical_bool = bool
+    canonical_int = int
     canonical_re_module = re
     digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
     evidence_pattern = re.compile(r"^provider-write:sha256:[0-9a-f]{64}$")
@@ -963,9 +984,30 @@ def _install_provider_submission_observation_authority(
             or canonical_binding_projection.__code__ is not binding_projection_code
             or _decode_exact_json is not canonical_decode
             or canonical_decode.__code__ is not decode_code
+            or require_provider_json_depth is not canonical_depth_guard
+            or canonical_depth_guard.__code__ is not depth_guard_code
+            or parse_bounded_json_number_token is not canonical_number_parser
+            or canonical_number_parser.__code__ is not number_parser_code
+            or parse_bounded_json_integer_token is not canonical_integer_parser
+            or canonical_integer_parser.__code__ is not integer_parser_code
+            or _freeze_json is not canonical_freeze_json
+            or canonical_freeze_json.__code__ is not freeze_json_code
             or sha256 is not canonical_sha256
             or json is not canonical_json_module
+            or json.loads is not canonical_json_loads
             or json.dumps is not canonical_json_dumps
+            or ExactDecimalError is not canonical_exact_decimal_error
+            or ValueError is not canonical_value_error
+            or UnicodeDecodeError is not canonical_unicode_decode_error
+            or RecursionError is not canonical_recursion_error
+            or bytes is not canonical_bytes
+            or isinstance is not canonical_isinstance
+            or dict is not canonical_dict
+            or list is not canonical_list
+            or Decimal is not canonical_decimal
+            or float is not canonical_float
+            or bool is not canonical_bool
+            or int is not canonical_int
             or re is not canonical_re_module
             or weakref is not canonical_weakref_module
             or weakref.ref is not canonical_weakref_ref

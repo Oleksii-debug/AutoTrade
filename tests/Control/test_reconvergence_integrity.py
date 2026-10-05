@@ -8,6 +8,7 @@ import unittest
 from control.tools.reconvergence_integrity import (
     Change,
     PROTECTED_SENTINELS,
+    SELF_PROTECTING_TRUST_ROOTS,
     assess_git_revisions,
     assess_reconvergence,
     parse_name_status,
@@ -158,6 +159,74 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertIn(path, PROTECTED_SENTINELS)
+
+    def test_self_protecting_workflow_plain_modification_fails_closed(self):
+        sentinel = ".github/workflows/reconvergence-integrity.yml"
+        self.assertIn(sentinel, SELF_PROTECTING_TRUST_ROOTS)
+
+        result = assess_reconvergence(
+            base_paths=[sentinel, "control/INDEX.json"],
+            changes=[Change(status="M", path=sentinel)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{sentinel} (content modification)",),
+        )
+        self.assertIn("protected canonical sentinel damage", result.reasons[0])
+
+        ordinary_control = assess_reconvergence(
+            base_paths=[sentinel, "control/INDEX.json"],
+            changes=[Change(status="M", path="control/INDEX.json")],
+        )
+        self.assertTrue(ordinary_control.allowed)
+        self.assertEqual(ordinary_control.protected_violations, ())
+
+    def test_git_guard_rejects_plain_guard_content_modification(self):
+        sentinel = "control/tools/reconvergence_integrity.py"
+        self.assertIn(sentinel, SELF_PROTECTING_TRUST_ROOTS)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "reconvergence-test@example.invalid")
+            git("config", "user.name", "Reconvergence Test")
+            path = root / sentinel
+            path.parent.mkdir(parents=True)
+            path.write_text("VALUE = 1\n", encoding="utf-8")
+            git("add", sentinel)
+            git("commit", "-m", "trusted base")
+            base_sha = git("rev-parse", "HEAD")
+
+            path.write_text("VALUE = 2\n", encoding="utf-8")
+            git("add", sentinel)
+            git("commit", "-m", "modify guard trust root")
+            head_sha = git("rev-parse", "HEAD")
+
+            self.assertEqual(
+                git("diff", "--name-status", base_sha, head_sha),
+                f"M\t{sentinel}",
+            )
+            result = assess_git_revisions(base_sha, head_sha, cwd=root)
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(
+            result.protected_violations,
+            (f"{sentinel} (content modification)",),
+        )
 
     def test_every_checked_in_workflow_is_protected_from_removal(self):
         workflow_dir = Path(".github") / "workflows"

@@ -24,6 +24,14 @@ from uuid import uuid4
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
+if sys.platform != "win32":
+    import fcntl as _fcntl
+
+    _POSIX_LOCK_AUTHORITY = (_fcntl.flock, _fcntl.LOCK_EX, _fcntl.LOCK_UN)
+else:
+    _POSIX_LOCK_AUTHORITY = None
+
+
 class SecretVaultError(ValueError):
     pass
 
@@ -190,7 +198,12 @@ def _assert_posix_lock_binding(descriptor: int, lock_path: Path) -> None:
 
 
 @contextmanager
-def _exclusive_file_lock(path: Path, *, vault_path: Path):
+def _exclusive_file_lock(
+    path: Path,
+    *,
+    vault_path: Path,
+    _posix_lock_authority=_POSIX_LOCK_AUTHORITY,
+):
     """Serialize one canonical vault namespace across cooperating processes."""
     if path.parent != vault_path.parent:
         raise SecretVaultError("credential vault lock must share the vault parent")
@@ -208,6 +221,10 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
             ):
                 yield
         return
+
+    if _posix_lock_authority is None:
+        raise SecretVaultError("credential vault POSIX lock authority is unavailable")
+    posix_flock, posix_lock_ex, posix_lock_un = _posix_lock_authority
 
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT
@@ -233,9 +250,7 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
                 stream.flush()
                 os.fsync(stream.fileno())
             stream.seek(0)
-            import fcntl
-
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            posix_flock(stream.fileno(), posix_lock_ex)
             try:
                 _assert_posix_lock_binding(stream.fileno(), path)
                 try:
@@ -243,7 +258,7 @@ def _exclusive_file_lock(path: Path, *, vault_path: Path):
                 finally:
                     _assert_posix_lock_binding(stream.fileno(), path)
             finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                posix_flock(stream.fileno(), posix_lock_un)
     finally:
         os.close(descriptor)
 

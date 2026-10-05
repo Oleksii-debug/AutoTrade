@@ -349,7 +349,18 @@ def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
 def _build_model_budget_journal_authority_accessors():
     """Retain one exact JournalStore generation outside caller-mutable budget state."""
 
-    bindings: dict[int, tuple[weakref.ReferenceType, weakref.ReferenceType, object]] = {}
+    bindings: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            weakref.ReferenceType,
+            object,
+            str,
+            str,
+            Decimal,
+            object,
+        ],
+    ] = {}
     lock = RLock()
 
     def initialize(value: object, journal: object) -> None:
@@ -368,13 +379,35 @@ def _build_model_budget_journal_authority_accessors():
                 if entry is not None and entry[0] is value_ref:
                     bindings.pop(object_id, None)
 
+        state = object.__getattribute__(value, "__dict__")
+        expected_budget_id = state.get("budget_id")
+        expected_environment = state.get("environment")
+        expected_ceiling = state.get("_ceiling")
+        expected_clock = state.get("_clock")
+        if type(expected_budget_id) is not str or not expected_budget_id:
+            raise ValueError("model budget id authority is invalid")
+        if type(expected_environment) is not str or expected_environment not in _ENVIRONMENTS:
+            raise ValueError("model budget environment authority is invalid")
+        if type(expected_ceiling) is not Decimal or not expected_ceiling.is_finite():
+            raise ValueError("model budget ceiling authority is invalid")
+        if not callable(expected_clock):
+            raise ValueError("model budget clock authority is invalid")
+
         value_ref = weakref.ref(value, cleanup)
         journal_ref = weakref.ref(journal)
         with lock:
             existing = bindings.get(object_id)
             if existing is not None and existing[0]() is value:
                 raise ValueError("model budget journal authority is already established")
-            bindings[object_id] = (value_ref, journal_ref, identity)
+            bindings[object_id] = (
+                value_ref,
+                journal_ref,
+                identity,
+                expected_budget_id,
+                expected_environment,
+                expected_ceiling,
+                expected_clock,
+            )
 
     def require(value: object):
         if type(value) is not DurableModelBudget:
@@ -384,13 +417,31 @@ def _build_model_budget_journal_authority_accessors():
             entry = bindings.get(object_id)
             if entry is None or entry[0]() is not value:
                 raise ValueError("model budget journal authority is not established")
-            _value_ref, journal_ref, expected_identity = entry
+            (
+                _value_ref,
+                journal_ref,
+                expected_identity,
+                expected_budget_id,
+                expected_environment,
+                expected_ceiling,
+                expected_clock,
+            ) = entry
         journal = journal_ref()
         if journal is None:
             raise ValueError("model budget journal authority was released")
         state = object.__getattribute__(value, "__dict__")
         if type(state) is not dict or state.get("journal") is not journal:
             raise ValueError("model budget journal authority changed after construction")
+        if (
+            type(state.get("budget_id")) is not str
+            or state.get("budget_id") != expected_budget_id
+            or type(state.get("environment")) is not str
+            or state.get("environment") != expected_environment
+            or type(state.get("_ceiling")) is not Decimal
+            or state.get("_ceiling") != expected_ceiling
+            or state.get("_clock") is not expected_clock
+        ):
+            raise ValueError("model budget scope authority changed after construction")
         _require_model_budget_journal_authority(journal)
         current_identity = require_exact_journal_store_authority(
             journal,
@@ -427,10 +478,10 @@ class DurableModelBudget:
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
         self._clock = _now if clock is None else clock
-        _initialize_model_budget_journal_authority(self, journal)
 
         candidate = BudgetLedger(ceiling)
         self._ceiling = candidate.snapshot().ceiling
+        _initialize_model_budget_journal_authority(self, journal)
         journal = _require_model_budget_bound_journal(self)
         existing = journal.load_events(_AGGREGATE_TYPE, self.budget_id)
         if not existing:

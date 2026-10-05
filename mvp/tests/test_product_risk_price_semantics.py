@@ -8,6 +8,7 @@ from unittest.mock import patch
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp import bybit_v5 as bybit_module
+from mvp.autotrade_mvp import instruments as instruments_module
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
@@ -492,6 +493,32 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
             ):
                 service._resolve_authoritative_risk_snapshot(request)
             self.assertEqual(calls, [])
+
+    def test_public_price_evidence_rebinding_fails_before_callback(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                raise AssertionError("forged price evidence executed")
+
+            with patch.object(
+                instruments_module,
+                "authenticated_price_semantics_evidence",
+                forged,
+            ):
+                with self.assertRaisesRegex(
+                    ProductRiskPriceSemanticsError,
+                    "instrument price-semantics authority changed",
+                ):
+                    ProductRiskPriceSemanticsComposer(
+                        registry,
+                        artifacts,
+                    ).compose(request, prepared)
+            self.assertEqual(callbacks, [])
 
     def test_executable_rebinding_fails_closed_before_forged_verifier_runs(self):
         with TemporaryDirectory() as directory:

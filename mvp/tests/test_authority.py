@@ -92,6 +92,7 @@ def bound_risk_decision(
             ),
         ),
         arithmetic_policy_id=RISK_ARITHMETIC_POLICY_ID,
+        evaluated_intent_hash="risk-intent:sha256:" + "e" * 64,
     )
     return bind_risk_decision(
         raw,

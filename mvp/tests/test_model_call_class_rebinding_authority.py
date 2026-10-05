@@ -555,5 +555,65 @@ class ModelCallClassRebindingAuthorityTests(unittest.TestCase):
             )
 
 
+    def test_model_call_clock_restores_rebound_recovery_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = _open_budget(directory)
+            orchestrator = None
+            restore_descriptor = vars(DurableModelCallOrchestrator)[
+                "_restore_callback_shape"
+            ]
+            forged_calls = []
+
+            def hostile_clock():
+                DurableModelCallOrchestrator._restore_callback_shape = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged-restore")
+                )
+                return NOW_TEXT
+
+            orchestrator = DurableModelCallOrchestrator(
+                budget=budget,
+                clock=hostile_clock,
+                pricing_evidence_resolver=_pricing,
+                observation_evidence_resolver=lambda *_args: None,
+                billing_evidence_resolver=lambda *_args: None,
+            )
+            call_spec = _spec()
+            attempt_id = orchestrator.attempt_id(call_spec)
+            try:
+                with self.assertRaisesRegex(
+                    ModelCallError,
+                    r"clock mutated orchestrator authority:.*"
+                    r"DurableModelCallOrchestrator\._restore_callback_shape",
+                ):
+                    orchestrator.execute(
+                        spec=call_spec,
+                        policy=_policy(),
+                        request=_request(orchestrator, call_spec),
+                        descriptors=[_descriptor()],
+                        call=lambda *_args: self.fail(
+                            "hostile clock crossed the inference boundary"
+                        ),
+                        validate_result=lambda _value: True,
+                        now_utc=NOW,
+                    )
+
+                self.assertEqual(forged_calls, [])
+                self.assertIs(
+                    vars(DurableModelCallOrchestrator)["_restore_callback_shape"],
+                    restore_descriptor,
+                )
+                self.assertEqual(
+                    budget.active_reservation(attempt_id),
+                    Decimal("1.2"),
+                )
+                self.assertEqual(orchestrator._events(attempt_id), [])
+            finally:
+                type.__setattr__(
+                    DurableModelCallOrchestrator,
+                    "_restore_callback_shape",
+                    restore_descriptor,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

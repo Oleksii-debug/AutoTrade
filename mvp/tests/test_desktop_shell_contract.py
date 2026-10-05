@@ -142,7 +142,10 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         code = CODE.read_text(encoding="utf-8")
         self.assertIn('Content="_Reload application web interface"', xaml)
         self.assertIn('AutomationProperties.Name="Reload application web interface"', xaml)
-        self.assertIn("core.ProcessFailed += WebView_ProcessFailed", code)
+        self.assertIn(
+            "core.ProcessFailed += (_, e) =>\n                WebView_ProcessFailed(webView, generation, e);",
+            code,
+        )
         self.assertIn("CoreWebView2ProcessFailedKind.BrowserProcessExited", code)
         self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessExited", code)
         self.assertIn("CoreWebView2ProcessFailedKind.RenderProcessUnresponsive", code)

@@ -3523,6 +3523,52 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_adapter_restore_does_not_execute_hostile_state_key_callbacks(self):
+        class HostileStateKey:
+            hash_calls = 0
+            str_calls = 0
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return 8675309
+
+            def __str__(self):
+                type(self).str_calls += 1
+                raise AssertionError("state-key string conversion must not execute")
+
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            hostile_key = HostileStateKey()
+
+            def hostile_adapter(*_args):
+                budget.journal.__dict__[hostile_key] = "shadow"
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("budget.journal.<invalid-state-key>", result.reason)
+            self.assertEqual(HostileStateKey.hash_calls, 1)
+            self.assertEqual(HostileStateKey.str_calls, 0)
+            self.assertTrue(
+                all(type(name) is str for name in budget.journal.__dict__)
+            )
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
     def test_cancel_callback_cannot_shadow_budget_release_method(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

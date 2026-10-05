@@ -1400,6 +1400,11 @@ def _install_authenticated_price_semantics_authority():
     canonical_getattr = getattr
     canonical_any = any
     canonical_isinstance = isinstance
+    invalid_operation_type = InvalidOperation
+    value_error_type = ValueError
+    type_error_type = TypeError
+    canonical_bool = bool
+    canonical_float = float
 
     def require_executable_authority() -> None:
         if (
@@ -1475,6 +1480,11 @@ def _install_authenticated_price_semantics_authority():
             or getattr is not canonical_getattr
             or any is not canonical_any
             or isinstance is not canonical_isinstance
+            or InvalidOperation is not invalid_operation_type
+            or ValueError is not value_error_type
+            or TypeError is not type_error_type
+            or bool is not canonical_bool
+            or float is not canonical_float
         ):
             raise registry_error_type(
                 "instrument price-semantics executable authority changed"

@@ -654,9 +654,21 @@ def _autonomous_owned_pending_publications(
 ) -> tuple[dict[str, object], ...]:
     pending: list[dict[str, object]] = []
     financial_scope = _autonomous_run_financial_scope(store, run_id=run_id)
+    loop_event_ids = {
+        event["event_id"]
+        for event in JournalStore.load_events(
+            store,
+            "canonical_autonomous_simulation",
+            run_id,
+        )
+    }
     for event_id in _autonomous_owned_event_ids(store, run_id=run_id):
         state = JournalStore.outbox_delivery_state(store, event_id)
         if state is None:
+            if event_id in loop_event_ids:
+                raise AutonomousRuntimeCheckpointError(
+                    "ZERO loop publication is missing"
+                )
             continue
         if not _autonomous_publication_owned(
             store,

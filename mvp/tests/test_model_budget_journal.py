@@ -110,6 +110,68 @@ class DurableModelBudgetTests(unittest.TestCase):
             self.assertGreaterEqual(Clock.call_count, 1)
             self.assertEqual(budget.snapshot().ceiling, Decimal("1"))
 
+    def test_initialization_clock_cannot_shadow_journal_append(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(Path(directory) / "journal.db")
+            forged_calls = []
+
+            def hostile_clock():
+                journal.append_event = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged")
+                )
+                return NOW
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"model budget clock mutated authority:.*journal\.append_event",
+            ):
+                DurableModelBudget(
+                    journal=journal,
+                    budget_id="policy-hostile-init-clock",
+                    ceiling="1",
+                    environment="SIMULATION",
+                    clock=hostile_clock,
+                )
+
+            self.assertEqual(forged_calls, [])
+            self.assertNotIn("append_event", journal.__dict__)
+            self.assertEqual(
+                journal.load_events(
+                    "model_budget",
+                    "policy-hostile-init-clock",
+                ),
+                [],
+            )
+
+    def test_commit_clock_cannot_redirect_budget_or_journal_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            before = journal.load_events("model_budget", "policy-1")
+            forged_calls = []
+
+            def hostile_clock():
+                budget.environment = "LIVE"
+                budget.journal.commit_command = (
+                    lambda *_args, **_kwargs: forged_calls.append("forged")
+                )
+                return NOW
+
+            budget._clock = hostile_clock
+            with self.assertRaisesRegex(
+                ValueError,
+                "model budget clock mutated authority:",
+            ):
+                budget.reserve("req-hostile-clock", "0.2")
+
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(budget.environment, "SIMULATION")
+            self.assertNotIn("commit_command", journal.__dict__)
+            self.assertEqual(
+                journal.load_events("model_budget", "policy-1"),
+                before,
+            )
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
     def test_non_callable_clock_fails_before_journal_mutation(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(Path(directory) / "journal.db")

@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.financial_send_authority import (
     FinancialSendAuthorityError,
     FinancialSendAuthorityIssuer,
     FinanciallyBoundBybitOrderSender,
+    _require_binding_matches_durable_admission,
     require_exact_bybit_financial_request,
 )
 from mvp.autotrade_mvp.persistence import payload_digest
@@ -579,6 +580,88 @@ class ExactBybitFinancialRequestTests(unittest.TestCase):
                 action="TRADE",
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 _factory_token=module._CAPABILITY_FACTORY_TOKEN,
+            )
+
+
+class DurableRiskIntentFinalFenceTests(unittest.TestCase):
+    @staticmethod
+    def _admission():
+        return {
+            "outcome": "ADMITTED",
+            "intent_hash": "intent-hash-1",
+            "account_id": "account-1",
+            "environment": "PAPER",
+            "instrument": {
+                "instrument_id": "00000000-0000-0000-0000-000000000101",
+                "version": 7,
+            },
+            "action": "TRADE",
+            "risk_decision_id": RD,
+            "reservation_id": "reservation-1",
+            "capability_snapshot_id": "capability-1",
+        }
+
+    def _require(self, material, risk_intent):
+        admission = self._admission()
+        return _require_binding_matches_durable_admission(
+            service=object(),
+            journal=object(),
+            historical_admission=lambda _service, _admission_id: admission,
+            load_events=lambda *_args, **_kwargs: [],
+            risk_payload_function=lambda *_args, **_kwargs: {
+                "journal_sequence_cut": 41,
+                "authoritative_risk_snapshot": {"snapshot_id": RS},
+                "risk_intent": dict(risk_intent),
+            },
+            admission_id="admission-1",
+            intent_hash="intent-hash-1",
+            action="TRADE",
+            binding=material,
+        )
+
+    def test_exact_evaluated_risk_axes_reach_final_financial_send_fence(self):
+        admitted = self._require(
+            binding(),
+            {
+                "side": "BUY",
+                "quantity": "2",
+                "price": "30000",
+                "reduce_only": False,
+                "action": "TRADE",
+            },
+        )
+        self.assertEqual(admitted["outcome"], "ADMITTED")
+
+    def test_reduce_only_substitution_is_rejected_at_final_financial_send_fence(self):
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "reduce-only differs from admitted risk",
+        ):
+            self._require(
+                replace(binding(), reduce_only=True),
+                {
+                    "side": "BUY",
+                    "quantity": "2",
+                    "price": "30000",
+                    "reduce_only": False,
+                    "action": "TRADE",
+                },
+            )
+
+    def test_action_substitution_is_rejected_at_final_financial_send_fence(self):
+        with self.assertRaisesRegex(
+            FinancialSendAuthorityError,
+            "action differs from evaluated admitted risk",
+        ):
+            self._require(
+                binding(),
+                {
+                    "side": "BUY",
+                    "quantity": "2",
+                    "price": "30000",
+                    "reduce_only": False,
+                    "action": "REDUCE",
+                },
             )
 
 

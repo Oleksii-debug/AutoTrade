@@ -3422,6 +3422,103 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(terminal["event_type"], "ModelCallObserved")
             self.assertFalse(terminal["payload"]["schema_valid"])
 
+    def test_adapter_cannot_install_budget_method_shadow(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_adapter(*_args):
+                budget.settle = lambda *_args, **_kwargs: None
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("budget.settle", result.reason)
+            self.assertNotIn("settle", vars(budget))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_validator_cannot_install_orchestrator_method_shadow(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_validator(_value):
+                orchestrator._append = lambda **_kwargs: False
+                return True
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=hostile_validator,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "OBSERVED_INVALID")
+            self.assertNotIn("_append", vars(orchestrator))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
+
+    def test_billing_resolver_cannot_shadow_journal_append(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            orchestrator = None
+
+            def hostile_billing(attempt_id, billing_id, observed_payload):
+                evidence = _billing_evidence(attempt_id, billing_id, observed_payload)
+                journal.append_event = lambda _envelope: None
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                billing_evidence_resolver=hostile_billing,
+            )
+            call_spec = spec()
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(billing_id="invoice-line-7"),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"billing evidence resolver mutated orchestrator authority:journal\.append_event",
+            ):
+                orchestrator.reconcile_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-line-7",
+                    expected_billed="0.25",
+                )
+
+            self.assertNotIn("append_event", vars(journal))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

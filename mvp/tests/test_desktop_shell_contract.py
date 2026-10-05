@@ -44,6 +44,17 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("ProductWebView.Visibility = Visibility.Visible;", code)
         self.assertIn("FocusWebButton.IsEnabled = true;", code)
 
+    def test_default_window_construction_keeps_native_and_web_on_one_connection(self):
+        code = CODE.read_text(encoding="utf-8")
+        constructor = code.split("public MainWindow()", 1)[1].split(
+            "internal MainWindow(", 1
+        )[0]
+        self.assertIn("DesktopHostClientFactory.CreateConnection()", constructor)
+        self.assertIn("private MainWindow(DesktopHostConnection connection)", constructor)
+        self.assertIn("connection.Client", constructor)
+        self.assertIn("connection.SessionProvider", constructor)
+        self.assertNotIn("DesktopHostClientFactory.Create()", constructor)
+
     def test_native_status_refresh_precedes_optional_webview_startup(self):
         code = CODE.read_text(encoding="utf-8")
         loaded = code.split(

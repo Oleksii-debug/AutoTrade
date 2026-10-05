@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.windows_secrets import (
     DpapiCurrentUserProtector,
+    PersistentCredentialHandle,
     ProtectedCredentialVault,
     SecretVaultError,
 )
@@ -140,6 +141,61 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
         for values in cases:
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
+
+    def test_handle_subclass_cannot_forge_current_generation_or_run_equality(self):
+        original = self.register(secret="original-secret")
+        current = self.vault.rotate(
+            original,
+            execution_identity="windows-user-1",
+            new_secret_value="rotated-secret",
+        )
+
+        class ForgedStaleHandle(PersistentCredentialHandle):
+            equality_calls = 0
+
+            def __eq__(self, other):
+                type(self).equality_calls += 1
+                return True
+
+        forged = ForgedStaleHandle(
+            handle_id=original.handle_id,
+            account_id=original.account_id,
+            provider=original.provider,
+            environment=original.environment,
+            provider_environment=original.provider_environment,
+            purpose=original.purpose,
+            generation=original.generation,
+        )
+        common = {
+            "execution_identity": "windows-user-1",
+            "account_id": "paper-1",
+            "provider": "SIMULATED",
+            "environment": "PAPER",
+            "purpose": "TRADE",
+        }
+
+        with self.assertRaisesRegex(TypeError, "PersistentCredentialHandle"):
+            self.vault.resolve(forged, **common)
+        with self.assertRaisesRegex(TypeError, "PersistentCredentialHandle"):
+            with self.vault.lease(forged, **common):
+                self.fail("forged handle lease must not open")
+        with self.assertRaisesRegex(TypeError, "PersistentCredentialHandle"):
+            self.vault.rotate(
+                forged,
+                execution_identity="windows-user-1",
+                new_secret_value="forged-secret",
+            )
+        with self.assertRaisesRegex(TypeError, "PersistentCredentialHandle"):
+            self.vault.revoke(
+                forged,
+                execution_identity="windows-user-1",
+            )
+
+        self.assertEqual(ForgedStaleHandle.equality_calls, 0)
+        self.assertEqual(
+            self.vault.resolve(current, **common),
+            "rotated-secret",
+        )
 
     def test_revoke_cannot_commit_between_resolve_snapshot_and_plaintext_return(self):
         handle = self.register(secret="original-secret")

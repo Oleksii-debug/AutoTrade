@@ -1,5 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
+import gc
 import unittest
+import weakref
 
 import mvp.autotrade_mvp.accounting as accounting_module
 from mvp.autotrade_mvp.accounting import (
@@ -22,6 +24,28 @@ from mvp.autotrade_mvp.exact_decimal import MAX_INTEGER_DIGITS
 
 
 class AccountingFoundationTests(unittest.TestCase):
+    def test_collected_scoped_book_releases_bound_economic_book_without_successor(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-1",
+        )
+        inner = object.__getattribute__(scoped, "__dict__")["_book"]
+        scoped_ref = weakref.ref(scoped)
+        inner_ref = weakref.ref(inner)
+        self.assertTrue(
+            all(ref.__callback__ is None for ref in weakref.getweakrefs(scoped))
+        )
+        self.assertTrue(
+            all(ref.__callback__ is None for ref in weakref.getweakrefs(inner))
+        )
+
+        del scoped
+        del inner
+        gc.collect()
+
+        self.assertIsNone(scoped_ref())
+        self.assertIsNone(inner_ref())
+
     def test_cash_equity_round_trip_matches_independent_oracle(self):
         book = EconomicBook()
         book.append(book_external_cash_flow(

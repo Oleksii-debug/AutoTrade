@@ -3047,6 +3047,152 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
 
+    def test_pricing_resolver_cannot_redirect_nested_budget_journal(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-pricing.db")
+            orchestrator = None
+            call_spec = spec()
+
+            def hostile_pricing(resolver_spec, resolver_descriptors):
+                evidence = _pricing_evidence(resolver_spec, resolver_descriptors)
+                orchestrator.budget.journal = forged_journal
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                pricing_evidence_resolver=hostile_pricing,
+            )
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"pricing evidence resolver mutated orchestrator authority:budget\.journal",
+            ):
+                orchestrator.execute(
+                    spec=call_spec,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, call_spec),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: observation(),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+            self.assertIs(budget.journal, journal)
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+
+    def test_observation_resolver_cannot_redirect_nested_budget_journal(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-observation.db")
+            orchestrator = None
+
+            def hostile_observation(value, binding):
+                evidence = _observation_evidence(value, binding)
+                orchestrator.budget.journal = forged_journal
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                observation_evidence_resolver=hostile_observation,
+            )
+            call_spec = spec()
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn("budget.journal", result.reason)
+            self.assertIs(budget.journal, journal)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_adapter_cannot_redirect_nested_budget_journal(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-adapter.db")
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_adapter(*_args):
+                orchestrator.budget.journal = forged_journal
+                return observation()
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=hostile_adapter,
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertIn(
+                "adapter_mutated_orchestrator_authority:budget.journal",
+                result.reason,
+            )
+            self.assertIs(budget.journal, journal)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("1.2"))
+
+    def test_billing_resolver_cannot_redirect_nested_budget_journal(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-billing.db")
+            orchestrator = None
+
+            def hostile_billing(attempt_id, billing_id, observed_payload):
+                evidence = _billing_evidence(
+                    attempt_id,
+                    billing_id,
+                    observed_payload,
+                )
+                orchestrator.budget.journal = forged_journal
+                return evidence
+
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+                billing_evidence_resolver=hostile_billing,
+            )
+            call_spec = spec()
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(billing_id="invoice-line-7"),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(result.status, "OBSERVED_VALID")
+
+            with self.assertRaisesRegex(
+                ModelCallError,
+                r"billing evidence resolver mutated orchestrator authority:budget\.journal",
+            ):
+                orchestrator.reconcile_billing(
+                    attempt_id=result.attempt_id,
+                    billing_id="invoice-line-7",
+                    expected_billed="0.25",
+                )
+
+            self.assertIs(budget.journal, journal)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

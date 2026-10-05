@@ -106,7 +106,13 @@ class RuntimeLoadCampaignTests(unittest.TestCase):
             self.assertEqual(observation.financial_staleness_us, ())
             self.assertEqual(observation.research_interference_us, ())
             decision = evaluate_runtime_budget(spec, observation)
-            self.assertEqual(decision.status, "INCONCLUSIVE")
+            # The vertical slice leaves its canonical outbox undelivered.  The
+            # hardened collector now derives that backlog from JournalStore
+            # instead of inventing zero, so the campaign must FAIL rather than
+            # merely remain inconclusive.
+            self.assertGreater(observation.reconnect_backlog_remaining, 0)
+            self.assertEqual(decision.status, "FAIL")
+            self.assertIn("reconnect_backlog_not_drained", decision.reasons)
             self.assertIn("insufficient_staleness_samples", decision.reasons)
             self.assertIn("insufficient_research_interference_samples", decision.reasons)
 

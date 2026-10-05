@@ -557,6 +557,201 @@ class RuntimeTargetHostResourceEvidenceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
 
+    def test_wrapper_rejects_preentry_backlog_dependency_replacement(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+        dependencies = (
+            ("_connect", "JournalStore connection"),
+            ("_connect_windows", "JournalStore Windows connection"),
+            (
+                "_append_outbox_backlog_transition",
+                "JournalStore backlog transition writer",
+            ),
+            (
+                "_outbox_transition_sequence_value",
+                "JournalStore outbox transition sequence",
+            ),
+            (
+                "_pending_outbox_count_value",
+                "JournalStore pending outbox count",
+            ),
+        )
+
+        def forged_dependency(*_args, **_kwargs):
+            raise AssertionError("forged backlog dependency executed")
+
+        for attribute_name, dependency_name in dependencies:
+            with self.subTest(attribute_name=attribute_name):
+                with tempfile.TemporaryDirectory() as root:
+                    journal = JournalStore(Path(root) / "journal.sqlite")
+                    store = ArtifactStore(Path(root) / "evidence")
+                    with (
+                        patch.object(
+                            JournalStore,
+                            attribute_name,
+                            forged_dependency,
+                        ),
+                        patch(
+                            "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                            side_effect=(before, after),
+                        ) as capture,
+                        patch(
+                            "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                            return_value=run,
+                        ) as runner,
+                    ):
+                        with self.assertRaisesRegex(
+                            RuntimeTargetHostResourceEvidenceError,
+                            "JournalStore backlog dependency changed "
+                            "before target-host run: "
+                            + dependency_name,
+                        ):
+                            run_declared_target_host_campaign_with_resources(
+                                journal=journal,
+                                evidence_store=store,
+                                spec=object(),
+                                authority_id="resource-authority",
+                                research_plan_id="resource-research-plan",
+                                financial_operations={},
+                                research_operations={},
+                                inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                                measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                                run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                                resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                            )
+                    capture.assert_not_called()
+                    runner.assert_not_called()
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+
+    def test_wrapper_rejects_during_run_backlog_dependency_replacement(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+        dependencies = (
+            ("_connect", "JournalStore connection"),
+            ("_connect_windows", "JournalStore Windows connection"),
+            (
+                "_append_outbox_backlog_transition",
+                "JournalStore backlog transition writer",
+            ),
+            (
+                "_outbox_transition_sequence_value",
+                "JournalStore outbox transition sequence",
+            ),
+            (
+                "_pending_outbox_count_value",
+                "JournalStore pending outbox count",
+            ),
+        )
+
+        def forged_dependency(*_args, **_kwargs):
+            raise AssertionError("forged backlog dependency executed")
+
+        for attribute_name, dependency_name in dependencies:
+            with self.subTest(attribute_name=attribute_name):
+                owned_before = attribute_name in JournalStore.__dict__
+                original_local = JournalStore.__dict__.get(attribute_name)
+                with tempfile.TemporaryDirectory() as root:
+                    journal = JournalStore(Path(root) / "journal.sqlite")
+                    store = ArtifactStore(Path(root) / "evidence")
+
+                    def malicious_runner(**_kwargs):
+                        setattr(JournalStore, attribute_name, forged_dependency)
+                        return run
+
+                    try:
+                        with (
+                            patch(
+                                "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                                side_effect=(before, after),
+                            ) as capture,
+                            patch(
+                                "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                                side_effect=malicious_runner,
+                            ),
+                        ):
+                            with self.assertRaisesRegex(
+                                RuntimeTargetHostResourceEvidenceError,
+                                "JournalStore backlog dependency changed "
+                                "during target-host run: "
+                                + dependency_name,
+                            ):
+                                run_declared_target_host_campaign_with_resources(
+                                    journal=journal,
+                                    evidence_store=store,
+                                    spec=object(),
+                                    authority_id="resource-authority",
+                                    research_plan_id="resource-research-plan",
+                                    financial_operations={},
+                                    research_operations={},
+                                    inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                                    measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                                    run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                                    resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                                )
+                        self.assertEqual(capture.call_count, 1)
+                        with self.assertRaises(FileNotFoundError):
+                            store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+                    finally:
+                        if owned_before:
+                            setattr(JournalStore, attribute_name, original_local)
+                        elif attribute_name in JournalStore.__dict__:
+                            delattr(JournalStore, attribute_name)
+
+    def test_wrapper_rejects_in_place_backlog_helper_code_poisoning(self):
+        run = _run_result()
+        before = _snapshot(monotonic_ns=100, process_cpu_ns=10)
+        after = _snapshot(monotonic_ns=200, process_cpu_ns=20)
+        helper = JournalStore._pending_outbox_count_value
+        original_code = helper.__code__
+
+        def forged_pending_count(_connection):
+            return 0
+
+        def malicious_runner(**_kwargs):
+            helper.__code__ = forged_pending_count.__code__
+            return run
+
+        with tempfile.TemporaryDirectory() as root:
+            journal = JournalStore(Path(root) / "journal.sqlite")
+            store = ArtifactStore(Path(root) / "evidence")
+            try:
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        side_effect=(before, after),
+                    ) as capture,
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "JournalStore executable changed during target-host run: "
+                        "JournalStore pending outbox count",
+                    ):
+                        run_declared_target_host_campaign_with_resources(
+                            journal=journal,
+                            evidence_store=store,
+                            spec=object(),
+                            authority_id="resource-authority",
+                            research_plan_id="resource-research-plan",
+                            financial_operations={},
+                            research_operations={},
+                            inventory_artifact_id=INVENTORY_ARTIFACT_ID,
+                            measurement_artifact_id=MEASUREMENT_ARTIFACT_ID,
+                            run_receipt_artifact_id=RUN_RECEIPT_ARTIFACT_ID,
+                            resource_artifact_id=RESOURCE_ARTIFACT_ID,
+                        )
+                self.assertEqual(capture.call_count, 1)
+                with self.assertRaises(FileNotFoundError):
+                    store.read_authenticated_snapshot(RESOURCE_ARTIFACT_ID)
+            finally:
+                helper.__code__ = original_code
+
     def test_opening_cut_transient_backlog_fails_before_workload(self):
         run = _run_result()
         before = _snapshot(monotonic_ns=100, process_cpu_ns=10)

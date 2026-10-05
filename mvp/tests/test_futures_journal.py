@@ -870,6 +870,64 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             self.assertEqual(len(read_calls), 2)
 
 
+    def test_durable_evidence_boundaries_reject_hostile_subclass_before_reads(self):
+        callbacks = []
+
+        class HostileSettlementEvidence(FuturesSettlementEvidence):
+            def __getattribute__(self, name):
+                if name in {
+                    "evidence_ref",
+                    "scope",
+                    "settlement_id",
+                    "observation_id",
+                    "instrument_id",
+                    "instrument_version",
+                    "effective_at",
+                    "sequence",
+                    "revision",
+                    "settlement_price",
+                    "price_currency",
+                    "settlement_currency",
+                    "supersedes_observation_id",
+                }:
+                    callbacks.append(name)
+                    raise AssertionError("hostile settlement evidence attribute executed")
+                return object.__getattribute__(self, name)
+
+        contract = self._contract()
+        opening = VariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("1"),
+            last_settlement_price=Decimal("100"),
+            settlement_scope=self._scope(),
+        )
+        base = self._settlement(contract, "hostile-evidence", "105", sequence=1)
+        hostile = object.__new__(HostileSettlementEvidence)
+        for name, value in object.__getattribute__(base, "__dict__").items():
+            object.__setattr__(hostile, name, value)
+
+        with self.assertRaisesRegex(TypeError, "exact FuturesSettlementEvidence"):
+            provider_settlement_evidence_receipt(hostile)
+        self.assertEqual(callbacks, [])
+
+        with self.assertRaisesRegex(TypeError, "exact FuturesSettlementEvidence"):
+            provider_settlement_evidence_metadata(hostile)
+        self.assertEqual(callbacks, [])
+
+        with TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifacts"
+            ArtifactStore(artifact_root)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "exact FuturesSettlementEvidence"):
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    hostile,
+                    evidence_artifact_root=artifact_root,
+                )
+        self.assertEqual(callbacks, [])
+
+
     def test_durable_entrypoints_reject_hostile_state_subclasses_before_reads(self):
         callbacks = []
 

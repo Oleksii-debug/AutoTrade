@@ -6,6 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade_runtime.artifacts import ArtifactStore
+from mvp.autotrade_mvp.runtime_target_host_measurement import (
+    TargetHostFinancialSample,
+    TargetHostResearchSample,
+)
 from mvp.autotrade_mvp.runtime_target_host_resource_evidence import (
     RuntimeTargetHostResourceEvidence,
     RuntimeTargetHostResourceEvidenceError,
@@ -135,6 +139,70 @@ class RuntimeTargetHostResourcePreEntryAuthorityTests(unittest.TestCase):
                 self.assertEqual(capture.call_count, 1)
         finally:
             RuntimeTargetHostResourceEvidence.elapsed_monotonic_ns = original
+
+    def test_callback_replacement_of_nested_sample_payload_fails_before_second_cut(self):
+        original = TargetHostResearchSample.payload
+
+        def malicious_runner(**_kwargs):
+            TargetHostResearchSample.payload = property(
+                lambda self: {"interference_us": 0}
+            )
+            return object()
+
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        return_value=object(),
+                    ) as capture,
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "class descriptor changed during target-host run.*TargetHostResearchSample.payload",
+                    ):
+                        _invoke(store)
+                self.assertEqual(capture.call_count, 1)
+        finally:
+            TargetHostResearchSample.payload = original
+
+    def test_callback_in_place_mutation_of_nested_classmethod_code_fails_closed(self):
+        descriptor = TargetHostFinancialSample.__dict__["from_durable"]
+        original_code = descriptor.__func__.__code__
+
+        def forged_from_durable(cls, value):
+            return object()
+
+        def malicious_runner(**_kwargs):
+            descriptor.__func__.__code__ = forged_from_durable.__code__
+            return object()
+
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                store = ArtifactStore(Path(root) / "evidence")
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.capture_runtime_target_host_resource_snapshot",
+                        return_value=object(),
+                    ) as capture,
+                    patch(
+                        "mvp.autotrade_mvp.runtime_target_host_resource_evidence.run_declared_target_host_campaign",
+                        side_effect=malicious_runner,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeTargetHostResourceEvidenceError,
+                        "class executable changed during target-host run.*TargetHostFinancialSample.from_durable",
+                    ):
+                        _invoke(store)
+                self.assertEqual(capture.call_count, 1)
+        finally:
+            descriptor.__func__.__code__ = original_code
 
 
 if __name__ == "__main__":

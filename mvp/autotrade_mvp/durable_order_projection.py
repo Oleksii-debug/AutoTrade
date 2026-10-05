@@ -254,7 +254,22 @@ def _order_projection_binding_operations():
             store = state["store"]
             identity = require_exact_journal_store_authority(store, subject="durable OMS JournalStore")
             scope = tuple(state[name] for name in _ORDER_SCOPE_FIELDS)
-            bindings[id(value)] = (weakref.ref(value), store, identity, scope, state["evidence_artifact_store"])
+            key = id(value)
+
+            def on_collect(reference, *, key=key):
+                with lock:
+                    entry = bindings.get(key)
+                    if entry is not None and entry[0] is reference:
+                        bindings.pop(key, None)
+
+            reference = weakref.ref(value, on_collect)
+            bindings[key] = (
+                reference,
+                store,
+                identity,
+                scope,
+                state["evidence_artifact_store"],
+            )
 
     def require(value):
         if type(value) is not DurableOrderBookProjection:

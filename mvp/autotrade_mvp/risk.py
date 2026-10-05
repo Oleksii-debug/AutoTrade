@@ -570,6 +570,13 @@ def _verify_liquidation_headroom_evidence(
         return False
     if type(evidence_store) is not ArtifactStore:
         return False
+    if (
+        type(evidence) is not LiquidationHeadroomEvidence
+        or type(expected_scope) is not LiquidationScope
+        or type(expected_state_version) is not int
+        or type(decision_time) is not datetime
+    ):
+        return False
     if evidence.scope != expected_scope or evidence.state_version != expected_state_version:
         return False
     point = _utc(decision_time, name="decision_time")

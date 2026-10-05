@@ -261,6 +261,10 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 calls.append("iter")
                 raise AssertionError("caller availability iterator must not execute")
 
+            def __len__(self):
+                calls.append("len")
+                raise AssertionError("caller availability truthiness must not execute")
+
         class HostileIdentity(str):
             def __hash__(self):
                 calls.append("hash")
@@ -279,6 +283,14 @@ class DecisionTraceStoreTests(unittest.TestCase):
                     "trace-availability",
                     available_event_ids=HostileList(),
                     available_evidence_ids=["evidence-1"],
+                )
+
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.accessible_export(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=HostileList(),
                 )
 
             hostile_identity = HostileIdentity("evidence-1")

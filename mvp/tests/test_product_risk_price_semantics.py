@@ -524,6 +524,42 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 service._resolve_authoritative_risk_snapshot(request)
             self.assertEqual(calls, [])
 
+    def test_product_builtin_shadowing_fails_before_forged_execution(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            callbacks = []
+
+            def forged(*_args, **_kwargs):
+                callbacks.append(True)
+                return None
+
+            for name in (
+                "type",
+                "dict",
+                "getattr",
+                "str",
+                "int",
+                "bool",
+                "ValueError",
+                "TypeError",
+            ):
+                with self.subTest(name=name):
+                    with patch.object(
+                        product_module,
+                        name,
+                        forged,
+                        create=True,
+                    ):
+                        with self.assertRaisesRegex(
+                            ProductRiskPriceSemanticsError,
+                            "prepared-request authority changed",
+                        ):
+                            composer.compose(request, prepared)
+                    self.assertEqual(callbacks, [])
+
     def test_retained_product_execution_aliases_are_not_module_writable_authority(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)

@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 from .host_actions import required_roles_for_host_action
 from .windows_secrets import PersistentCredentialHandle, ProtectedCredentialVault
@@ -48,6 +49,7 @@ def _build_execution_lease_authority(
     *,
     validate_session,
     vault_lease,
+    vault_for_boundary,
     credential_text,
     handle_type,
     execution_roles,
@@ -65,12 +67,14 @@ def _build_execution_lease_authority(
     vault_lease_code = getattr(vault_lease, "__code__", None)
     vault_lease_generator = getattr(vault_lease, "__wrapped__", None)
     vault_lease_generator_code = getattr(vault_lease_generator, "__code__", None)
+    vault_for_boundary_code = getattr(vault_for_boundary, "__code__", None)
     if (
         validate_session_code is None
         or credential_text_code is None
         or vault_lease_code is None
         or not callable(vault_lease_generator)
         or vault_lease_generator_code is None
+        or vault_for_boundary_code is None
     ):
         raise TypeError("credential lease authority is not canonical")
     retained_roles = frozenset(execution_roles)
@@ -103,6 +107,8 @@ def _build_execution_lease_authority(
             is not vault_lease_generator_code
         ):
             raise PermissionError("Credential vault lease implementation code changed")
+        if getattr(vault_for_boundary, "__code__", None) is not vault_for_boundary_code:
+            raise PermissionError("Credential vault object authority code changed")
 
         validate_session(
             self,
@@ -112,8 +118,9 @@ def _build_execution_lease_authority(
         )
         if not isinstance(handle, handle_type):
             raise PermissionError("Credential handle is invalid")
+        vault = vault_for_boundary(self)
         with vault_lease(
-            self._credential_vault,
+            vault,
             handle,
             execution_identity=credential_text(
                 execution_identity,
@@ -603,7 +610,7 @@ class SecurityBoundary:
         if isinstance(value, tuple):
             return tuple(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, set):
-            return {SecurityBoundary.redact(item) for item in value}
+            return {SecurityBoundary.redact(item) for item in value]
         if isinstance(value, frozenset):
             return frozenset(SecurityBoundary.redact(item) for item in value)
         if isinstance(value, str) and _REDACT_RE.search(value):
@@ -652,10 +659,51 @@ class SecurityBoundary:
         return scrub(keyed)
 
 
-SecurityBoundary.lease_for_execution = _build_execution_lease_authority(
-    validate_session=SecurityBoundary.validate_session,
-    vault_lease=ProtectedCredentialVault.lease,
-    credential_text=_credential_text,
-    handle_type=PersistentCredentialHandle,
-    execution_roles=SecurityBoundary._EXECUTION_ROLES,
-)
+def _install_security_boundary_execution_authority(boundary_type) -> None:
+    """Bind each initialized boundary to its exact composed credential vault."""
+
+    bound_vaults = WeakKeyDictionary()
+    original_init = boundary_type.__init__
+    original_init_code = getattr(original_init, "__code__", None)
+    if original_init_code is None:
+        raise TypeError("SecurityBoundary constructor authority is not canonical")
+
+    def vault_for_boundary(boundary):
+        try:
+            return bound_vaults[boundary]
+        except KeyError as error:
+            raise PermissionError(
+                "Credential vault object authority is unavailable"
+            ) from error
+
+    def retained_init(
+        self,
+        *,
+        allowed_origins: set[str],
+        credential_vault: ProtectedCredentialVault,
+        session_authorizer: Callable[[str, str, str], bool] | None = None,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        if getattr(original_init, "__code__", None) is not original_init_code:
+            raise PermissionError("SecurityBoundary constructor authority code changed")
+        original_init(
+            self,
+            allowed_origins=allowed_origins,
+            credential_vault=credential_vault,
+            session_authorizer=session_authorizer,
+            now=now,
+        )
+        bound_vaults[self] = credential_vault
+
+    boundary_type.__init__ = retained_init
+    boundary_type.lease_for_execution = _build_execution_lease_authority(
+        validate_session=boundary_type.validate_session,
+        vault_lease=ProtectedCredentialVault.lease,
+        vault_for_boundary=vault_for_boundary,
+        credential_text=_credential_text,
+        handle_type=PersistentCredentialHandle,
+        execution_roles=boundary_type._EXECUTION_ROLES,
+    )
+
+
+_install_security_boundary_execution_authority(SecurityBoundary)

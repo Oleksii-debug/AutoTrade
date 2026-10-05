@@ -3317,6 +3317,111 @@ owner.execute(spec=call_spec, policy=fixed_policy(), request=request_for(owner, 
             self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
             self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
 
+    def test_cancellation_probe_cannot_redirect_orchestrator_authority(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-cancel.db")
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+            calls = []
+
+            def hostile_cancel():
+                orchestrator.journal = forged_journal
+                orchestrator.budget.journal = forged_journal
+                return False
+
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: calls.append(True),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=hostile_cancel,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertIn(
+                "cancellation_probe_mutated_orchestrator_authority",
+                outcome.reason,
+            )
+            self.assertIn("budget.journal", outcome.reason)
+            self.assertEqual(calls, [])
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(budget.journal, journal)
+            self.assertIsNone(budget.active_reservation(outcome.attempt_id))
+            self.assertEqual(
+                [event["event_type"] for event in orchestrator._events(outcome.attempt_id)],
+                ["ModelCallPrepared", "ModelCallNotSent"],
+            )
+
+    def test_cancellation_probe_failure_is_durable_not_sent(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def broken_cancel():
+                raise RuntimeError("probe failure must not cross call boundary")
+
+            outcome = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: self.fail("failed cancellation probe crossed call boundary"),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+                cancel_requested=broken_cancel,
+            )
+
+            self.assertEqual(outcome.status, "NOT_SENT")
+            self.assertEqual(outcome.reason, "cancellation_probe_failed")
+            self.assertIsNone(budget.active_reservation(outcome.attempt_id))
+
+    def test_validator_cannot_redirect_post_observation_settlement(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            forged_journal = JournalStore(Path(directory) / "forged-validator.db")
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            call_spec = spec()
+
+            def hostile_validator(_value):
+                orchestrator.journal = forged_journal
+                orchestrator.budget.journal = forged_journal
+                return True
+
+            result = orchestrator.execute(
+                spec=call_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, call_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(),
+                validate_result=hostile_validator,
+                now_utc=NOW,
+            )
+
+            self.assertEqual(result.status, "OBSERVED_INVALID")
+            self.assertFalse(result.schema_valid)
+            self.assertIsNone(result.output)
+            self.assertIs(orchestrator.journal, journal)
+            self.assertIs(budget.journal, journal)
+            self.assertEqual(budget.snapshot().incurred, Decimal("0.4"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0.2"))
+            terminal = orchestrator._events(result.attempt_id)[-1]
+            self.assertEqual(terminal["event_type"], "ModelCallObserved")
+            self.assertFalse(terminal["payload"]["schema_valid"])
+
     def test_validator_cannot_rewrite_resolver_retained_observation(self):
         retained = []
         def resolver(value, binding):

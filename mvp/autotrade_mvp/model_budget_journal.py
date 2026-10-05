@@ -47,10 +47,48 @@ _MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY = tuple(
 )
 
 
+def _collect_model_budget_journal_executable_authority():
+    """Freeze trusted Python executable state behind JournalStore dispatch."""
+    function_type = type(_collect_model_budget_journal_executable_authority)
+    collected = []
+    for cls, _expected_bases, expected_state in _MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY:
+        class_label = cls.__module__ + "." + cls.__qualname__
+        for member_name, member in expected_state.items():
+            functions = []
+            if type(member) is function_type:
+                functions.append((member_name, member))
+            elif type(member) in (staticmethod, classmethod):
+                functions.append((member_name + ".__func__", member.__func__))
+            elif type(member) is property:
+                for suffix in ("fget", "fset", "fdel"):
+                    function = getattr(member, suffix)
+                    if type(function) is function_type:
+                        functions.append((member_name + "." + suffix, function))
+            for member_label, function in functions:
+                collected.append(
+                    (
+                        class_label,
+                        member_label,
+                        function,
+                        function.__code__,
+                        function.__defaults__,
+                        function.__kwdefaults__,
+                    )
+                )
+    return tuple(collected)
+
+
+_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY = (
+    _collect_model_budget_journal_executable_authority()
+)
+del _collect_model_budget_journal_executable_authority
+
+
 def _model_budget_journal_class_authority_changes(
     *,
     restore: bool,
     authority=_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY,
+    executable_authority=_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY,
 ) -> list[str]:
     """Detect and optionally restore trusted JournalStore class topology."""
     changes: list[str] = []
@@ -115,6 +153,45 @@ def _model_budget_journal_class_authority_changes(
             ):
                 raise ValueError(
                     "model budget journal class authority restore is incomplete"
+                )
+
+    for (
+        class_label,
+        member_label,
+        function,
+        expected_code,
+        expected_defaults,
+        expected_kwdefaults,
+    ) in executable_authority:
+        for attribute, expected in (
+            ("__code__", expected_code),
+            ("__defaults__", expected_defaults),
+            ("__kwdefaults__", expected_kwdefaults),
+        ):
+            current = object.__getattribute__(function, attribute)
+            if current is expected:
+                continue
+            label = (
+                "journal.function."
+                + class_label
+                + "."
+                + member_label
+                + "."
+                + attribute
+            )
+            changes.append(label)
+            if restore:
+                object.__setattr__(function, attribute, expected)
+        if restore:
+            if (
+                object.__getattribute__(function, "__code__") is not expected_code
+                or object.__getattribute__(function, "__defaults__")
+                is not expected_defaults
+                or object.__getattribute__(function, "__kwdefaults__")
+                is not expected_kwdefaults
+            ):
+                raise ValueError(
+                    "model budget journal executable authority restore is incomplete"
                 )
     return changes
 
@@ -702,6 +779,7 @@ class DurableModelBudget:
                     "_rehydrate_committed_event",
                     "_idempotency_key",
                     "_MODEL_BUDGET_JOURNAL_CLASS_AUTHORITY",
+                    "_MODEL_BUDGET_JOURNAL_EXECUTABLE_AUTHORITY",
                     "_model_budget_journal_class_authority_changes",
                     "_require_model_budget_journal_class_authority",
                     *referenced_names(restore_function_state[0][1]),

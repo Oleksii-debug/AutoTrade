@@ -6,6 +6,7 @@ from fractions import Fraction
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import NAMESPACE_URL, uuid5
+import json
 import sqlite3
 import unittest
 from unittest.mock import patch
@@ -354,6 +355,71 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 ).last_settlement_price,
                 Decimal("105"),
             )
+
+    def test_inverse_replay_requires_durable_settlement_convention_identity(self):
+        contract = self._contract(payoff="INVERSE")
+        opening = InverseVariationMarginState(
+            contract=contract,
+            signed_contracts=Decimal("100"),
+            last_settlement_price=Decimal("10000"),
+            settlement_scope=self._scope(),
+        )
+        settlement = self._settlement(contract, "inverse-convention-id", "11000", sequence=1)
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
+            settlement = self._bind_provider_evidence(artifacts, settlement)
+            store = JournalStore(path)
+            commit_inverse_variation_margin(
+                store,
+                opening,
+                settlement,
+                evidence_artifact_store=artifacts,
+                evidence_artifact_root=artifact_root,
+            )
+            aggregate_id = variation_margin_aggregate_id(opening)
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT event_id, payload, payload_hash
+                    FROM events
+                    WHERE aggregate_type = ? AND aggregate_id = ?
+                    ORDER BY aggregate_version
+                    """,
+                    ("FUTURES_VARIATION_MARGIN", aggregate_id),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                payload = json.loads(row[1])
+                payload.pop("settlement_convention_id", None)
+                connection.execute(
+                    """
+                    UPDATE events
+                    SET payload = ?, payload_hash = ?
+                    WHERE event_id = ?
+                    """,
+                    (
+                        canonical_json(payload),
+                        payload_digest(payload),
+                        row[0],
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "durable inverse settlement economics do not reproduce",
+            ):
+                restore_inverse_variation_margin(
+                    JournalStore(path),
+                    opening,
+                    evidence_artifact_store=artifacts,
+                    evidence_artifact_root=artifact_root,
+                )
 
     def test_inverse_restart_retry_and_correction_preserve_exact_fraction(self):
         contract = self._contract(payoff="INVERSE")

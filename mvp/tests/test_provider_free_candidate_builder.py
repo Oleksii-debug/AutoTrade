@@ -82,36 +82,44 @@ class ProviderFreeCandidateInputAuthorityTests(unittest.TestCase):
 
     def test_host_publish_requires_exact_executable_and_exact_head_evidence(self):
         with TemporaryDirectory() as directory:
-            publish = Path(directory)
-            source_sha = 'a' * 40
+            publish = Path(directory); source_sha = 'a' * 40
             evidence = {'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'PASS'}
             (publish / 'host-build-evidence.json').write_text(json.dumps(evidence), encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'Host publish is missing AutoTrade.Host.exe'):
-                candidate._require_publish_evidence(
-                    publish, executable='AutoTrade.Host.exe', evidence_name='host-build-evidence.json',
-                    source_sha=source_sha, label='Host')
-            host_bytes = b'MZ-fake-host-executable'
-            (publish / 'AutoTrade.Host.exe').write_bytes(host_bytes)
-            identity = candidate._require_publish_evidence(
-                publish, executable='AutoTrade.Host.exe', evidence_name='host-build-evidence.json',
-                source_sha=source_sha, label='Host')
+                candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
+                    evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
+            host_bytes = b'MZ-fake-host-executable'; (publish / 'AutoTrade.Host.exe').write_bytes(host_bytes)
+            identity = candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
+                evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
             self.assertEqual(identity['sha256'], 'sha256:' + sha256(host_bytes).hexdigest())
             self.assertEqual(identity['bytes'], len(host_bytes))
 
     def test_host_publish_rejects_stale_or_nonpassing_evidence(self):
         with TemporaryDirectory() as directory:
-            publish = Path(directory)
-            (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-host')
-            source_sha = 'a' * 40
+            publish = Path(directory); (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-host'); source_sha = 'a' * 40
             for evidence in (
                 {'source_sha': 'b' * 40, 'checked_out_sha': 'b' * 40, 'result': 'PASS'},
                 {'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'FAIL'},
             ):
                 (publish / 'host-build-evidence.json').write_text(json.dumps(evidence), encoding='utf-8')
                 with self.assertRaisesRegex(ValueError, 'Host publish evidence differs'):
-                    candidate._require_publish_evidence(
-                        publish, executable='AutoTrade.Host.exe', evidence_name='host-build-evidence.json',
-                        source_sha=source_sha, label='Host')
+                    candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
+                        evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
+
+    def test_host_executable_replacement_between_admission_and_copy_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory); publish = root / 'publish'; publish.mkdir(); destination = root / 'payload'
+            source_sha = 'a' * 40
+            (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-admitted-host')
+            (publish / 'host-build-evidence.json').write_text(json.dumps({
+                'source_sha': source_sha, 'checked_out_sha': source_sha, 'result': 'PASS'}), encoding='utf-8')
+            admitted = candidate._require_publish_evidence(publish, executable='AutoTrade.Host.exe',
+                evidence_name='host-build-evidence.json', source_sha=source_sha, label='Host')
+            (publish / 'AutoTrade.Host.exe').write_bytes(b'MZ-replaced-host')
+            snapshot = candidate._copy_publish(publish, destination)
+            with self.assertRaisesRegex(ValueError, 'Host executable changed between admission and candidate copy'):
+                candidate._require_copied_executable(admitted, snapshot, label='Host')
+            self.assertEqual((destination / 'AutoTrade.Host.exe').read_bytes(), b'MZ-replaced-host')
 
 
 if __name__ == '__main__':

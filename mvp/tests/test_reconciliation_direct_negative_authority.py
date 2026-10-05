@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation_journal import (
     _reconciliation_aggregate_id,
     load_latest_reconciliation_checkpoint,
+    unresolved_provider_activity_ids_from_checkpoint,
 )
 
 
@@ -103,6 +104,30 @@ class ReconciliationDirectNegativeAuthorityTests(unittest.TestCase):
                             provider_id="BYBIT",
                             environment=environment,
                         )
+
+    def test_activity_helper_rejects_legacy_real_provider_proven_absent(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reconciliation_id = "legacy-activity-negative"
+            event_id = self._append_checkpoint(
+                store,
+                reconciliation_id=reconciliation_id,
+                provider_id="BYBIT",
+                environment="PAPER",
+                outcome="PROVEN_ABSENT",
+            )
+            checkpoint = store.get_event(event_id)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "PROVEN_ABSENT|coverage authority",
+            ):
+                unresolved_provider_activity_ids_from_checkpoint(
+                    checkpoint,
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    environment="PAPER",
+                )
 
     def test_direct_loader_keeps_simulated_paper_exception(self):
         with TemporaryDirectory() as directory:

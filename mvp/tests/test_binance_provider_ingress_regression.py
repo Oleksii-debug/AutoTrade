@@ -1,10 +1,17 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 from types import MappingProxyType
 import unittest
 from uuid import uuid4
 
-from mvp.autotrade_mvp.binance_spot import parse_account_trades as parse_spot_account_trades
+from mvp.autotrade_mvp.binance_spot import (
+    BinanceSpotAdapterError,
+    BinanceSpotOrderIntent,
+    BinanceSpotReferencePrice,
+    BinanceSpotSymbolRules,
+    parse_account_trades as parse_spot_account_trades,
+)
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
     parse_order_ack as parse_usdm_order_ack,
@@ -99,6 +106,57 @@ def _spot_trade_observation():
     )
 
 
+def _spot_notional_rules():
+    return BinanceSpotSymbolRules.from_exchange_info(
+        instrument_version="BTCUSDT:v1",
+        symbol_payload={
+            "symbol": "BTCUSDT",
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0",
+                    "maxPrice": "0",
+                    "tickSize": "0",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+                {
+                    "filterType": "MIN_NOTIONAL",
+                    "minNotional": "10",
+                    "applyToMarket": True,
+                    "avgPriceMins": 5,
+                },
+            ],
+        },
+    )
+
+
+def _spot_market_intent():
+    return BinanceSpotOrderIntent.create(
+        instrument_version="BTCUSDT:v1",
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="MARKET",
+        quantity="1",
+    )
+
+
+def _canonical_spot_reference():
+    return BinanceSpotReferencePrice.from_reference_price_payload(
+        instrument_version="BTCUSDT:v1",
+        symbol="BTCUSDT",
+        payload={
+            "symbol": "BTCUSDT",
+            "referencePrice": "60000",
+            "timestamp": 1791187199000,
+        },
+    )
+
+
 class BinanceProviderIngressRegressionTests(unittest.TestCase):
     def test_spot_accepts_canonical_frozen_authenticated_trade_payload(self):
         observation = _spot_trade_observation()
@@ -117,6 +175,68 @@ class BinanceProviderIngressRegressionTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].client_order_id, "spot-client-42")
         self.assertEqual(fills[0].provider_execution_id, "BINANCE-SPOT:BTCUSDT:7")
+
+    def test_spot_market_notional_rejects_forged_reference_subclass_before_callback(self):
+        callbacks = []
+
+        class ForgedReference(BinanceSpotReferencePrice):
+            def __post_init__(self, _verification_token=None):
+                # Bypass the base class private factory-token check. Exact-type
+                # admission must reject this object before any economic field is read.
+                return None
+
+            def __getattribute__(self, name):
+                if name in {
+                    "instrument_version",
+                    "symbol",
+                    "observed_at",
+                    "reference_kind",
+                    "price",
+                }:
+                    callbacks.append(name)
+                return super().__getattribute__(name)
+
+        forged = ForgedReference(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            price=Decimal("60000"),
+            observed_at=NOW - timedelta(seconds=1),
+            source_sha256="sha256:" + "e" * 64,
+            reference_kind="REFERENCE",
+            averaging_window_minutes=None,
+        )
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "provider reference-price observation evidence",
+        ):
+            _spot_notional_rules().validate(
+                _spot_market_intent(),
+                at=NOW,
+                reference_price_observation=forged,
+                maximum_market_reference_age_seconds=30,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_spot_market_notional_rejects_age_int_subclass_before_comparison_callback(self):
+        callbacks = []
+
+        class HostileInt(int):
+            def __lt__(self, other):
+                callbacks.append(("lt", other))
+                raise AssertionError("hostile freshness-window comparison executed")
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "maximum_market_reference_age_seconds",
+        ):
+            _spot_notional_rules().validate(
+                _spot_market_intent(),
+                at=NOW,
+                reference_price_observation=_canonical_spot_reference(),
+                maximum_market_reference_age_seconds=HostileInt(30),
+            )
+        self.assertEqual(callbacks, [])
 
     def test_usdm_ack_rejects_mapping_subclass_before_get_callback(self):
         callbacks = []

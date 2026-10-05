@@ -1196,11 +1196,24 @@ def repair_autonomous_completion_checkpoint(root, store, *, protocol, completed)
         terminal["event_id"],
         topic="autotrade.simulation.events",
     )
+    if state is None:
+        raise AutonomousRuntimeCheckpointError(
+            "completion checkpoint terminal publication is missing"
+        )
     if not state["delivered"]:
         JournalStore.mark_outbox_delivered(
             store,
             state["outbox_id"],
             expected_envelope_hash=state["envelope_hash"],
+        )
+        state = JournalStore.outbox_delivery_state(
+            store,
+            terminal["event_id"],
+            topic="autotrade.simulation.events",
+        )
+    if state is None or not state["delivered"]:
+        raise AutonomousRuntimeCheckpointError(
+            "completion checkpoint terminal publication remains undelivered"
         )
     persist_autonomous_runtime_checkpoint(root, store, protocol=protocol,
         authority_key_identity=key_identity, completed=completed)

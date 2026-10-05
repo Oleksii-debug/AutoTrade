@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
+import mvp.autotrade_mvp.accounting as accounting_module
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
@@ -467,6 +468,32 @@ class AccountingFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "exact list"):
             book.audit_digest()
         self.assertFalse(hostile.iterated)
+
+    def test_audit_digest_cache_cannot_be_retargeted_through_module_state(self):
+        book = EconomicBook((book_external_cash_flow(
+            transaction_id="cash-1",
+            cause_event_id="deposit-1",
+            currency="USD",
+            amount="100",
+        ),))
+        expected = book.audit_digest()
+        transaction = book._transactions[0]
+        fingerprint = accounting_module._transaction_digest_fingerprint(transaction)
+        self.assertIsNotNone(fingerprint)
+        forged = "sha256:" + "0" * 64
+
+        # A module-global memoization dictionary would become a second mutable
+        # authority over the audit result. A same-named hostile module binding
+        # must be irrelevant to the cache selected by product construction.
+        self.assertFalse(hasattr(accounting_module, "_transaction_digest_cache"))
+        accounting_module._transaction_digest_cache = {fingerprint: forged}
+        accounting_module._transaction_digest_cache_lock = object()
+        try:
+            self.assertEqual(book.audit_digest(), expected)
+            self.assertNotEqual(book.audit_digest(), forged)
+        finally:
+            del accounting_module._transaction_digest_cache
+            del accounting_module._transaction_digest_cache_lock
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

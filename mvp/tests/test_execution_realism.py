@@ -167,6 +167,11 @@ class ExecutionRealismTests(unittest.TestCase):
         two = model(price_quantum="0.001")
         self.assertNotEqual(one.fingerprint, two.fingerprint)
 
+    def test_market_price_grid_scope_changes_model_identity(self):
+        one = model(price_grid_instrument_version="ABC@v1")
+        two = model(price_grid_instrument_version="ABC@v2")
+        self.assertNotEqual(one.fingerprint, two.fingerprint)
+
     def test_available_volume_and_participation_create_partial_fill(self):
         result = simulate_execution(
             order(quantity="20"),
@@ -315,6 +320,16 @@ class ExecutionRealismTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FILLED")
         self.assertEqual(result.fill_price, Decimal("103"))
+
+    def test_market_sell_projection_uses_adverse_floor_on_price_grid(self):
+        result = simulate_execution(
+            order(side="SELL"),
+            top(bid="99", ask="101"),
+            model(slippage_bps="5", impact_bps_at_max_participation="4"),
+        )
+        # 10% / 25% = 40% impact participation: 4 bps impact + 5 bps slippage.
+        # 99 * (1 - 9 / 10000) = 98.9109, so adverse SELL projection floors to 98.91.
+        self.assertEqual(result.fill_price, Decimal("98.91"))
 
     def test_bar_market_uses_adverse_extreme_plus_configured_costs(self):
         result = simulate_execution(

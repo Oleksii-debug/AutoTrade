@@ -11,7 +11,7 @@ from datetime import timedelta
 from decimal import Decimal
 from fractions import Fraction
 
-from .exact_decimal import as_fraction, exact_multiply, round_fraction_to_quantum
+from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, round_fraction_to_quantum
 
 from .execution_realism import (
     ExecutionModel,
@@ -146,19 +146,23 @@ def assert_conservative_execution(
                 )
 
             participation = (
-                as_fraction(independent_capacity)
-                / as_fraction(observation.available_volume)
+                bounded_fraction(
+                    as_fraction(independent_capacity)
+                    / as_fraction(observation.available_volume)
+                )
                 if observation.available_volume > 0
                 else Fraction(0, 1)
             )
             max_participation = as_fraction(model.max_participation)
             impact_fraction = (
-                participation / max_participation
+                bounded_fraction(participation / max_participation)
                 if max_participation > 0
                 else Fraction(0, 1)
             )
-            impact_fraction = min(impact_fraction, Fraction(1, 1))
-            impact_bps = (
+            impact_fraction = bounded_fraction(
+                min(impact_fraction, Fraction(1, 1))
+            )
+            impact_bps = bounded_fraction(
                 as_fraction(model.impact_bps_at_max_participation)
                 * impact_fraction
             )
@@ -167,17 +171,20 @@ def assert_conservative_execution(
                 if model.data_fidelity == "BAR"
                 else Decimal("0")
             )
-            total_bps = (
-                as_fraction(additional_spread)
-                + as_fraction(model.slippage_bps)
-                + impact_bps
-            ) * as_fraction(model.scenario_cost_multiplier)
-            target = (
-                as_fraction(reference)
-                + as_fraction(reference) * total_bps / 10000
+            total_bps = bounded_fraction(
+                (
+                    as_fraction(additional_spread)
+                    + as_fraction(model.slippage_bps)
+                    + impact_bps
+                ) * as_fraction(model.scenario_cost_multiplier)
+            )
+            reference_fraction = as_fraction(reference)
+            target = bounded_fraction(
+                reference_fraction
+                + reference_fraction * total_bps / 10000
                 if order.side == "BUY"
-                else as_fraction(reference)
-                - as_fraction(reference) * total_bps / 10000
+                else reference_fraction
+                - reference_fraction * total_bps / 10000
             )
             if target <= 0:
                 raise ExecutionOracleError(

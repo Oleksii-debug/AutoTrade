@@ -420,6 +420,61 @@ class ProductRiskPriceSemanticsCompositionTests(unittest.TestCase):
                 binding.instrument_evidence_binding,
             )
 
+    def test_replaced_binding_cannot_forge_authenticated_digest(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+            forged = replace(
+                binding,
+                price_semantics_digest="sha256:" + "0" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "binding authority changed",
+            ):
+                composer.bind_snapshot(request, base, forged, prepared)
+
+    def test_post_issue_binding_mutation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            composer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = composer.compose(request, prepared)
+            object.__setattr__(
+                binding,
+                "instrument_evidence_binding",
+                "sha256:" + "1" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "binding authority changed",
+            ):
+                composer.bind_snapshot(request, base, binding, prepared)
+
+    def test_binding_is_scoped_to_issuing_composer(self):
+        with TemporaryDirectory() as directory:
+            _, resolved, registry, artifacts = self._authorities(directory)
+            capability, prepared = self._prepared()
+            request = self._request(resolved, capability)
+            base = self._snapshot(request, resolved)
+            issuer = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            other = ProductRiskPriceSemanticsComposer(registry, artifacts)
+            binding = issuer.compose(request, prepared)
+
+            with self.assertRaisesRegex(
+                ProductRiskPriceSemanticsError,
+                "binding authority changed",
+            ):
+                other.bind_snapshot(request, base, binding, prepared)
+
     def test_snapshot_binding_rejects_a_different_canonical_prepared_request(self):
         with TemporaryDirectory() as directory:
             _, resolved, registry, artifacts = self._authorities(directory)

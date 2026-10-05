@@ -1343,6 +1343,14 @@ def _install_authenticated_price_semantics_authority():
     metadata_known_by_code = metadata_known_by.__code__
     validate_price = version_type.validate_price
     validate_price_code = validate_price.__code__
+    decimal_parser = _decimal
+    decimal_parser_code = _decimal.__code__
+    exact_multiple = _is_exact_multiple
+    exact_multiple_code = _is_exact_multiple.__code__
+    bounded_decimal_parser = parse_bounded_exact_decimal
+    bounded_decimal_parser_code = getattr(bounded_decimal_parser, "__code__", None)
+    decimal_multiple = is_exact_decimal_multiple
+    decimal_multiple_code = getattr(decimal_multiple, "__code__", None)
     metadata_binding = version_type.metadata_evidence_binding
     metadata_binding_code = metadata_binding.__code__
     versions_for = _registry_versions_for
@@ -1376,6 +1384,15 @@ def _install_authenticated_price_semantics_authority():
             or registry_type._metadata_known_by.__code__ is not metadata_known_by_code
             or version_type.validate_price is not validate_price
             or version_type.validate_price.__code__ is not validate_price_code
+            or _decimal is not decimal_parser
+            or _decimal.__code__ is not decimal_parser_code
+            or _is_exact_multiple is not exact_multiple
+            or _is_exact_multiple.__code__ is not exact_multiple_code
+            or parse_bounded_exact_decimal is not bounded_decimal_parser
+            or getattr(bounded_decimal_parser, "__code__", None)
+            is not bounded_decimal_parser_code
+            or is_exact_decimal_multiple is not decimal_multiple
+            or getattr(decimal_multiple, "__code__", None) is not decimal_multiple_code
             or version_type.metadata_evidence_binding is not metadata_binding
             or version_type.metadata_evidence_binding.__code__ is not metadata_binding_code
             or _registry_versions_for is not versions_for

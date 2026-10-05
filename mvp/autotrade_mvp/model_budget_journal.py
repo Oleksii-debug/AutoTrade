@@ -667,6 +667,7 @@ class DurableModelBudget:
                     "str",
                     "tuple",
                     "type",
+                    "vars",
                     "zip",
                     # Financial/routing authority consulted after the clock returns.
                     # A caller-owned clock must not leave any of these rebound for

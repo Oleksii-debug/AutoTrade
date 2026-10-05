@@ -89,14 +89,14 @@ def _utc(value: datetime, *, name: str) -> datetime:
 
 
 def _millis(value: object, *, name: str) -> str:
-    if isinstance(value, bool):
-        raise BinanceUsdmAdapterError(f"{name} must be an integer millisecond timestamp")
-    if isinstance(value, int):
+    if type(value) is int:
         raw = value
-    elif isinstance(value, str) and value.isdigit():
+    elif type(value) is str and value.isdigit():
         raw = int(value)
     else:
-        raise BinanceUsdmAdapterError(f"{name} must be an integer millisecond timestamp")
+        raise BinanceUsdmAdapterError(
+            f"{name} must be an integer millisecond timestamp"
+        )
     if raw < 0:
         raise BinanceUsdmAdapterError(f"{name} must be non-negative")
     seconds, remainder = divmod(raw, 1000)
@@ -374,8 +374,8 @@ def parse_account_trades(
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated exact-byte USD-M user-trade read to fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
     observation.require_scope(
         provider_id="BINANCE",
         surface=Surface.AUTHENTICATED_READ,

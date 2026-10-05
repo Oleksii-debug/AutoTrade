@@ -8,7 +8,7 @@ wire claim and then relabel that state as provider execution.
 
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -202,6 +202,63 @@ class ProviderFundingIncomeParserTests(unittest.TestCase):
             self._parse(
                 payload=self._payload(transaction_time="9" * 257)
             )
+
+    def test_authoritative_timestamp_rejects_executable_tzinfo_without_dispatch(self):
+        class HostileTzInfo(tzinfo):
+            calls = 0
+
+            def utcoffset(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile tzinfo utcoffset executed")
+
+            def dst(self, _dt):
+                raise AssertionError("hostile tzinfo dst executed")
+
+            def tzname(self, _dt):
+                raise AssertionError("hostile tzinfo tzname executed")
+
+        hostile_time = datetime(
+            2022,
+            12,
+            27,
+            8,
+            0,
+            tzinfo=HostileTzInfo(),
+        )
+        observation = object.__new__(ProviderFundingIncomeObservation)
+        values = {
+            "provider_id": "BYBIT",
+            "account_id": "acct",
+            "runtime_environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "instrument_id": "XRPUSDT",
+            "product_category": "linear",
+            "settlement_currency": "USDT",
+            "provider_transaction_id": "tx-1",
+            "provider_transaction_at": hostile_time,
+            "side": "Buy",
+            "funding_amount": Decimal("0.1"),
+            "origin_ref": "provider-origin:sha256:" + "0" * 64,
+            "qualified_evidence_ref": (
+                "qualified-provider-read:sha256:" + "1" * 64
+            ),
+            "response_sha256": "sha256:" + "2" * 64,
+            "qualification_id": "qualification-1",
+            "qualified_query_digest": "sha256:" + "3" * 64,
+            "qualified_route_rule_digest": "sha256:" + "4" * 64,
+            "parser_identity": "BYBIT_V5_TRANSACTION_LOG_FUNDING_V1",
+            "origin_journal_sequence": 1,
+            "evidence_ref": "sha256:" + "5" * 64,
+        }
+        for name, value in values.items():
+            object.__setattr__(observation, name, value)
+
+        with self.assertRaisesRegex(
+            ProviderFundingIncomeError,
+            "exact built-in UTC timezone",
+        ):
+            funding_income_module._validate_income(observation)
+        self.assertEqual(HostileTzInfo.calls, 0)
 
     def test_transaction_after_response_observation_fails_closed(self):
         with self.assertRaisesRegex(

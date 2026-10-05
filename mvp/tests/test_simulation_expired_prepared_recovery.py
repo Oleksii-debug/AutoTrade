@@ -84,24 +84,30 @@ class SimulationExpiredPreparedRecoveryTests(unittest.TestCase):
             self.assertTrue(recovered["resumed"])
             self.assertTrue(recovered["reconciled"])
             self.assertEqual(recovered["new_outbound_requests"], 0)
+            attempt_events = store.load_events_by_aggregate_type(
+                "submission_attempt"
+            )
             self.assertEqual(
-                [
-                    event["event_type"]
-                    for event in store.load_events_by_aggregate_type(
-                        "submission_attempt"
-                    )
-                ],
+                [event["event_type"] for event in attempt_events],
                 ["SubmissionPrepared", "SubmissionBlocked"],
             )
             self.assertEqual(
-                [
-                    event["event_type"]
-                    for event in store.load_events(
-                        "canonical_simulation_session",
-                        "single-episode",
-                    )
-                ],
+                attempt_events[-1]["committed_at"],
+                AFTER_LEASE,
+                "lease-expiry BLOCKED evidence must use the recovery instant",
+            )
+            session_events = store.load_events(
+                "canonical_simulation_session",
+                "single-episode",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in session_events],
                 ["SimulationSessionStarted", "SimulationSessionCompleted"],
+            )
+            self.assertEqual(
+                session_events[-1]["committed_at"],
+                AFTER_LEASE,
+                "terminal session cannot predate its authorizing BLOCKED evidence",
             )
             reservations.refresh()
             self.assertEqual(reservations.active(), ())

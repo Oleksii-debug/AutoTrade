@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone
 from decimal import Decimal
+from fractions import Fraction
 
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction,
+    bounded_fraction,
     exact_multiply,
     is_exact_decimal_multiple,
     round_fraction_to_quantum,
@@ -20,6 +22,7 @@ from .exact_decimal import (
 from .execution_realism import (
     ExecutionModel,
     ExecutionRealismError,
+    MARKET_PRICE_PROJECTION_POLICY_V1,
     LiquidityObservation,
     SimulatedExecution,
     SimulatedOrder,
@@ -52,6 +55,113 @@ def _round_down(quantity: Decimal, lot_size: Decimal) -> Decimal:
     except ExactDecimalError as error:
         raise ExecutionOracleError(
             "quantity rounding exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _oracle_bounded_rational(value: Fraction, *, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _oracle_market_fill_price(
+    *,
+    order: SimulatedOrder,
+    observation: LiquidityObservation,
+    model: ExecutionModel,
+    capacity: Decimal,
+) -> Decimal:
+    """Independently reconstruct the declared adverse MARKET grid projection."""
+
+    if (
+        model.price_tick is None
+        or model.price_grid_instrument_version is None
+        or model.price_grid_evidence_sha256 is None
+        or model.price_projection_policy is None
+    ):
+        raise ExecutionOracleError(
+            "MARKET execution lacks authoritative price-grid projection evidence"
+        )
+    if model.price_grid_instrument_version != order.instrument_version:
+        raise ExecutionOracleError(
+            "MARKET price-grid instrument_version does not match order"
+        )
+    if model.price_projection_policy != MARKET_PRICE_PROJECTION_POLICY_V1:
+        raise ExecutionOracleError("unsupported market price projection policy")
+
+    if model.data_fidelity == "BAR":
+        if observation.bar_high is None or observation.bar_low is None:
+            raise ExecutionOracleError("BAR market fill lacks price bounds")
+        base_price = (
+            observation.bar_high if order.side == "BUY" else observation.bar_low
+        )
+        additional_spread_bps = model.bar_half_spread_bps
+    else:
+        if observation.bid is None or observation.ask is None:
+            raise ExecutionOracleError("market fill lacks bid/ask evidence")
+        base_price = observation.ask if order.side == "BUY" else observation.bid
+        additional_spread_bps = Decimal("0")
+
+    try:
+        if observation.available_volume > 0 and model.max_participation > 0:
+            participation = _oracle_bounded_rational(
+                as_fraction(capacity) / as_fraction(observation.available_volume),
+                name="independent market participation",
+            )
+            impact_fraction = _oracle_bounded_rational(
+                participation / as_fraction(model.max_participation),
+                name="independent market impact fraction",
+            )
+        else:
+            impact_fraction = Fraction(0, 1)
+
+        impact_scale = min(impact_fraction, Fraction(1, 1))
+        impact_bps = _oracle_bounded_rational(
+            as_fraction(model.impact_bps_at_max_participation) * impact_scale,
+            name="independent market impact bps",
+        )
+        total_bps = _oracle_bounded_rational(
+            as_fraction(additional_spread_bps) + as_fraction(model.slippage_bps),
+            name="independent market base cost bps",
+        )
+        total_bps = _oracle_bounded_rational(
+            total_bps + impact_bps,
+            name="independent market total cost bps",
+        )
+        total_bps = _oracle_bounded_rational(
+            total_bps * as_fraction(model.scenario_cost_multiplier),
+            name="independent scenario-adjusted market cost bps",
+        )
+        price_delta = _oracle_bounded_rational(
+            as_fraction(base_price) * total_bps,
+            name="independent market price delta numerator",
+        )
+        price_delta = _oracle_bounded_rational(
+            price_delta / Fraction(10000, 1),
+            name="independent market price delta",
+        )
+        base_fraction = as_fraction(base_price)
+        raw_fill = _oracle_bounded_rational(
+            base_fraction + price_delta
+            if order.side == "BUY"
+            else base_fraction - price_delta,
+            name="independent raw market fill price",
+        )
+        if raw_fill <= 0:
+            raise ExecutionOracleError(
+                "configured adverse costs produce non-positive execution price"
+            )
+        return round_fraction_to_quantum(
+            raw_fill,
+            model.price_tick,
+            mode="CEILING" if order.side == "BUY" else "FLOOR",
+        )
+    except ExactDecimalError as error:
+        raise ExecutionOracleError(
+            "MARKET price projection exceeds exact arithmetic resource envelope"
         ) from error
 
 
@@ -227,29 +337,15 @@ def assert_conservative_execution(
             raise ExecutionOracleError("fee cannot be negative")
 
         if order.order_type == "MARKET":
-            if model.data_fidelity == "BAR":
-                if observation.bar_high is None or observation.bar_low is None:
-                    raise ExecutionOracleError("BAR market fill lacks price bounds")
-                reference = (
-                    observation.bar_high
-                    if order.side == "BUY"
-                    else observation.bar_low
-                )
-            else:
-                if observation.bid is None or observation.ask is None:
-                    raise ExecutionOracleError("market fill lacks bid/ask evidence")
-                reference = (
-                    observation.ask
-                    if order.side == "BUY"
-                    else observation.bid
-                )
-            if order.side == "BUY" and result.fill_price < reference:
+            expected_market_price = _oracle_market_fill_price(
+                order=order,
+                observation=observation,
+                model=model,
+                capacity=result.filled_quantity,
+            )
+            if result.fill_price != expected_market_price:
                 raise ExecutionOracleError(
-                    "market buy result is more favorable than executable reference"
-                )
-            if order.side == "SELL" and result.fill_price > reference:
-                raise ExecutionOracleError(
-                    "market sell result is more favorable than executable reference"
+                    "MARKET fill price does not match independent adverse price-grid projection"
                 )
         else:
             if order.limit_price is None:

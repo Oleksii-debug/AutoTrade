@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.accounting import (
     EconomicBook,
     JournalTransaction,
     Posting,
+    ScopedEconomicBook,
     book_equity_fill,
     book_external_cash_flow,
     book_fx_exchange,
@@ -528,6 +529,67 @@ class AccountingFoundationTests(unittest.TestCase):
             del accounting_module._transaction_digest_cache
             del accounting_module._transaction_digest_cache_lock
             del accounting_module._cached_transaction_digest
+
+    def test_scoped_economic_book_rejects_post_construction_owner_retargeting(self):
+        scoped = ScopedEconomicBook(
+            environment="PAPER",
+            account_id="acct-1",
+            transactions=(
+                book_external_cash_flow(
+                    transaction_id="seed",
+                    cause_event_id="seed-cause",
+                    currency="USD",
+                    amount="100",
+                ),
+            ),
+        )
+        expected = scoped.audit_digest()
+
+        original_require = accounting_module._require_scoped_economic_book_owner
+        original_payload_digest = accounting_module.payload_digest
+        accounting_module._require_scoped_economic_book_owner = (
+            lambda _value: ("LIVE", "forged-account", EconomicBook())
+        )
+        accounting_module.payload_digest = lambda _payload: "sha256:" + "0" * 64
+        try:
+            # Facade methods retain the owner verifier and digest primitive
+            # selected during module construction.
+            self.assertEqual(scoped.audit_digest(), expected)
+            self.assertEqual(scoped.cash("USD"), Decimal("100"))
+        finally:
+            accounting_module._require_scoped_economic_book_owner = original_require
+            accounting_module.payload_digest = original_payload_digest
+
+        object.__setattr__(scoped, "environment", "LIVE")
+        with self.assertRaisesRegex(AccountingConflict, "owner changed"):
+            scoped.audit_digest()
+        with self.assertRaisesRegex(AccountingConflict, "owner changed"):
+            scoped.cash("USD")
+        object.__setattr__(scoped, "environment", "PAPER")
+
+        replacement = EconomicBook(
+            (
+                book_external_cash_flow(
+                    transaction_id="replacement",
+                    cause_event_id="replacement-cause",
+                    currency="USD",
+                    amount="999",
+                ),
+            )
+        )
+        object.__setattr__(scoped, "_book", replacement)
+        with self.assertRaisesRegex(AccountingConflict, "owner changed"):
+            scoped.audit_digest()
+        with self.assertRaisesRegex(AccountingConflict, "owner changed"):
+            scoped.append(
+                book_external_cash_flow(
+                    transaction_id="should-not-append",
+                    cause_event_id="should-not-append-cause",
+                    currency="USD",
+                    amount="1",
+                )
+            )
+        self.assertEqual(replacement.cash("USD"), Decimal("999"))
 
     def test_unbalanced_transaction_is_rejected(self):
         transaction = JournalTransaction(

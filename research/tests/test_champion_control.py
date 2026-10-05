@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone, tzinfo
 from hashlib import sha256
 import json
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -204,6 +205,11 @@ def approval(
     record_trial=True,
 ):
     registered = science.register_protocol(protocol())
+    identity = holdout_identity(candidate)
+    science.preregister_locked_holdout(
+        registered.protocol_id,
+        holdout_identity=identity,
+    )
     valid_until = BASE + timedelta(days=valid_days)
     if record_trial:
         science.record_trial(
@@ -231,7 +237,6 @@ def approval(
         "trial_budget": trial_state["trial_budget"],
         "trial_log_hash": trial_state["trial_log_hash"],
     }
-    identity = holdout_identity(candidate)
     if contaminate:
         science.record_holdout_access(
             registered.protocol_id,
@@ -375,6 +380,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(protocol())
             original_candidate = "candidate-original"
             promoted_candidate = "candidate-forged"
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-forged-trial-binding"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -447,7 +456,7 @@ class ChampionRegistryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial payload integrity mismatch",
+                "trial population integrity mismatch",
             ):
                 registry.promote(
                     approval_value,
@@ -458,6 +467,119 @@ class ChampionRegistryTests(unittest.TestCase):
                 )
             self.assertEqual(registry.state().generation, 0)
 
+    def test_nonterminal_trial_status_cannot_authorize_promotion_after_lock(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+            with science._connect() as con:
+                # Model a legacy/manual writer below the append-only SQL guard.
+                # The locked evaluation existed while the trial was terminal;
+                # promotion must revalidate the current durable population.
+                con.execute("DROP TRIGGER trials_no_update")
+                cursor = con.execute(
+                    "UPDATE trials SET status=? WHERE protocol_id=?",
+                    ("RUNNING", candidate.protocol_id),
+                )
+                self.assertEqual(cursor.rowcount, 1)
+
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+            )
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial population integrity mismatch",
+            ):
+                registry.promote(
+                    candidate,
+                    expected_generation=0,
+                    now=BASE,
+                    open_position_count=0,
+                    existing_position_policy=None,
+                )
+            self.assertEqual(registry.state().generation, 0)
+
+    def test_scientific_promotion_guard_holds_writer_reservation(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+
+            with science.candidate_promotion_evidence_guard(
+                evaluation_id=candidate.evaluation_id,
+                protocol_id=candidate.protocol_id,
+                protocol_hash=candidate.protocol_hash,
+                result_hash=candidate.evaluation_result_hash,
+                candidate_id=candidate.candidate_id,
+                artifact_hash=candidate.artifact_hash,
+                evaluation_status=candidate.evaluation_status,
+                retention_passed=candidate.retention_passed,
+                risk_passed=candidate.risk_passed,
+                authority_scope_id=candidate.authority_scope_id,
+                evidence_valid_until=candidate.evidence_valid_until.isoformat(),
+            ):
+                contender = sqlite3.connect(science.path, timeout=0)
+                try:
+                    with self.assertRaises(sqlite3.OperationalError):
+                        contender.execute("BEGIN IMMEDIATE")
+                finally:
+                    contender.close()
+
+            contender = sqlite3.connect(science.path, timeout=0)
+            try:
+                contender.execute("BEGIN IMMEDIATE")
+                contender.rollback()
+            finally:
+                contender.close()
+
+    def test_promotion_keeps_scientific_guard_through_routing_commit(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            candidate = approval(science)
+            guard_active = []
+            commit_observations = []
+
+            original_guard = science.candidate_promotion_evidence_guard
+
+            @contextmanager
+            def observed_guard(**kwargs):
+                with original_guard(**kwargs) as evidence:
+                    guard_active.append(True)
+                    try:
+                        yield evidence
+                    finally:
+                        guard_active.pop()
+
+            science.candidate_promotion_evidence_guard = observed_guard
+            authority = FakeObligationAuthority()
+            original_commit_guard = authority.commit_guard
+
+            @contextmanager
+            def observed_commit_guard(expected):
+                commit_observations.append(tuple(guard_active))
+                self.assertEqual(guard_active, [True])
+                with original_commit_guard(expected) as current:
+                    self.assertEqual(guard_active, [True])
+                    yield current
+
+            authority.commit_guard = observed_commit_guard
+            registry = champion_registry(
+                Path(directory) / "champion.sqlite3",
+                scientific_registry=science,
+                obligation_authority=authority,
+            )
+
+            state = registry.promote(
+                candidate,
+                expected_generation=0,
+                now=BASE,
+                open_position_count=0,
+                existing_position_policy=None,
+            )
+
+            self.assertEqual(state.generation, 1)
+            self.assertEqual(commit_observations, [(True,)])
+            self.assertEqual(guard_active, [])
+
     def test_promotion_with_unused_trial_budget_requires_registered_stop_evidence(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
@@ -467,6 +589,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-early-stop"
             artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-early-stop"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -493,40 +619,99 @@ class ChampionRegistryTests(unittest.TestCase):
                 "trial_budget": trial_state["trial_budget"],
                 "trial_log_hash": trial_state["trial_log_hash"],
             }
-            locked = science.register_evaluation(
-                registered.protocol_id,
-                holdout_id="holdout-early-stop",
-                holdout_identity=holdout_identity("holdout-early-stop"),
-                result=base_result,
-            )
-            approval_value = CandidateApproval.create(
-                candidate_id=candidate,
-                artifact_hash=artifact,
-                evidence_id="evidence:early-stop",
-                evidence_valid_until=valid_until,
-                evaluation_status="PASS",
-                retention_passed=True,
-                risk_passed=True,
-                authority_scope_id="paper-scope",
-                protocol_id=registered.protocol_id,
-                protocol_hash=registered.protocol_hash,
-                evaluation_id=locked["evaluation_id"],
-                evaluation_result_hash=locked["result_hash"],
-            )
-            registry = champion_registry(
-                Path(directory) / "champion.sqlite3",
-                scientific_registry=science,
-            )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial-budget exhaustion",
+                "exact registered trial budget",
             ):
-                registry.promote(
-                    approval_value,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
+                science.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-early-stop",
+                    holdout_identity=holdout_identity("holdout-early-stop"),
+                    result=base_result,
+                )
+            self.assertEqual(
+                science.holdout_access_count(registered.protocol_id, "holdout-early-stop"),
+                0,
+            )
+
+    def test_legacy_early_stop_evaluation_cannot_promote_after_policy_hardening(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 1
+            value["stopping_rules"] = "legacy caller asserted stop"
+            registered = science.register_protocol(value)
+            candidate = "candidate-legacy-early-stop"
+            artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-legacy-early-stop"),
+            )
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": candidate,
+                    "artifact_hash": artifact,
+                },
+            )
+            closed = science.completeness(registered.protocol_id)
+            valid_until = BASE + timedelta(days=1)
+            result = {
+                "candidate_id": candidate,
+                "artifact_hash": artifact,
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": closed["recorded_trials"],
+                "trial_budget": closed["trial_budget"],
+                "trial_log_hash": closed["trial_log_hash"],
+                "stopping_rule_triggered": True,
+                "stopping_rules_hash": closed["stopping_rules_hash"],
+                "stopping_evidence_ref": (
+                    "artifact:00000000-0000-0000-0000-000000000001@sha256:"
+                    + "a" * 64
+                ),
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-legacy-early-stop",
+                holdout_identity=holdout_identity("holdout-legacy-early-stop"),
+                result=result,
+            )
+
+            # Model a legacy/recovered scientific state whose locked evaluation
+            # exists while the current authority reports an unclosed budget.
+            # Old code accepted the caller stopping fields above at promotion.
+            original_completeness = science.completeness
+            def legacy_open_budget(protocol_id):
+                state = dict(original_completeness(protocol_id))
+                state["remaining_trial_budget"] = 1
+                return state
+            science.completeness = legacy_open_budget
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "full registered trial closure",
+            ):
+                science.verify_candidate_promotion_evidence(
+                    evaluation_id=locked["evaluation_id"],
+                    protocol_id=registered.protocol_id,
+                    protocol_hash=registered.protocol_hash,
+                    result_hash=locked["result_hash"],
+                    candidate_id=candidate,
+                    artifact_hash=artifact,
+                    evaluation_status="PASS",
+                    retention_passed=True,
+                    risk_passed=True,
+                    authority_scope_id="paper-scope",
+                    evidence_valid_until=valid_until.isoformat(),
                 )
 
     def test_locked_evaluation_trial_log_hash_detects_trial_log_tampering(self):
@@ -537,6 +722,10 @@ class ChampionRegistryTests(unittest.TestCase):
             registered = science.register_protocol(value)
             candidate = "candidate-log-bound"
             artifact = digest(candidate)
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-log-bound"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",
@@ -878,20 +1067,18 @@ class ChampionRegistryTests(unittest.TestCase):
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
-            candidate = approval(science, record_trial=False)
-            with self.assertRaisesRegex(ProtocolViolation, "registered trial"):
-                registry.promote(
-                    candidate,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
-                )
+            with self.assertRaisesRegex(ProtocolViolation, "exact registered trial budget"):
+                approval(science, record_trial=False)
+            self.assertEqual(registry.state().generation, 0)
 
     def test_completed_trial_must_be_bound_to_exact_candidate_artifact(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = science.register_protocol(protocol())
+            science.preregister_locked_holdout(
+                registered.protocol_id,
+                holdout_identity=holdout_identity("holdout-a"),
+            )
             science.record_trial(
                 registered.protocol_id,
                 status="COMPLETED",

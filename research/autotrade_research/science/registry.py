@@ -247,6 +247,97 @@ def _immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
+_TERMINAL_TRIAL_STATUSES = frozenset(
+    {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
+)
+
+
+def _registered_protocol_payload(row: sqlite3.Row) -> dict[str, Any]:
+    """Decode and revalidate one stored protocol row before using its authority."""
+
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ProtocolViolation("registered protocol payload is corrupt") from error
+    if (
+        not isinstance(payload, dict)
+        or _canonical(payload) != row["payload_json"]
+        or _hash(payload) != row["protocol_hash"]
+    ):
+        raise ProtocolViolation("registered protocol integrity mismatch")
+    return payload
+
+
+def _registered_trial_payload(row: sqlite3.Row) -> dict[str, Any]:
+    """Revalidate one stored trial before it contributes scientific authority."""
+
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ProtocolViolation("registered trial payload is corrupt") from error
+    if (
+        row["status"] not in _TERMINAL_TRIAL_STATUSES
+        or not isinstance(payload, dict)
+        or not payload
+        or _canonical(payload) != row["payload_json"]
+        or _hash(payload) != row["payload_hash"]
+    ):
+        raise ProtocolViolation("registered trial population integrity mismatch")
+    return payload
+
+
+def _registered_locked_holdout(
+    con: sqlite3.Connection,
+    *,
+    protocol_id: str,
+    protocol_payload: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Resolve the physical locked-forward identity frozen before trial 1."""
+
+    row = con.execute(
+        """
+        SELECT b.holdout_identity_hash,h.identity_json
+        FROM protocol_locked_holdouts AS b
+        JOIN holdouts AS h
+          ON h.holdout_identity_hash=b.holdout_identity_hash
+        WHERE b.protocol_id=?
+        """,
+        (protocol_id,),
+    ).fetchone()
+    if row is None:
+        raise ProtocolViolation(
+            "protocol locked holdout must be preregistered before the first trial"
+        )
+    try:
+        identity_payload = json.loads(row["identity_json"])
+        identity_hash, identity_json = _holdout_identity(identity_payload)
+    except (json.JSONDecodeError, ProtocolViolation, ValueError) as error:
+        raise ProtocolViolation(
+            "registered protocol locked holdout identity is corrupt"
+        ) from error
+    if (
+        identity_hash != row["holdout_identity_hash"]
+        or identity_json != row["identity_json"]
+    ):
+        raise ProtocolViolation(
+            "registered protocol locked holdout identity integrity mismatch"
+        )
+    forward_start, forward_end = _period(
+        protocol_payload["forward_period"],
+        "forward_period",
+    )
+    if (
+        identity_payload["role"] != "LOCKED_FORWARD"
+        or identity_payload["segment_start"] != forward_start.isoformat()
+        or identity_payload["segment_end"] != forward_end.isoformat()
+    ):
+        raise ProtocolViolation(
+            "registered protocol locked holdout must match forward_period "
+            "with role LOCKED_FORWARD"
+        )
+    return identity_hash, identity_payload
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -335,6 +426,11 @@ class ScientificRegistry:
                     holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS protocol_locked_holdouts(
+                    protocol_id TEXT PRIMARY KEY REFERENCES protocols(protocol_id),
+                    holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
+                    created_at TEXT NOT NULL
+                );
 
                 CREATE TRIGGER IF NOT EXISTS protocols_no_update
                 BEFORE UPDATE ON protocols BEGIN
@@ -383,6 +479,14 @@ class ScientificRegistry:
                 CREATE TRIGGER IF NOT EXISTS holdout_aliases_no_delete
                 BEFORE DELETE ON holdout_aliases BEGIN
                     SELECT RAISE(ABORT, 'holdout aliases are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocol_locked_holdouts_no_update
+                BEFORE UPDATE ON protocol_locked_holdouts BEGIN
+                    SELECT RAISE(ABORT, 'protocol locked holdout bindings are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS protocol_locked_holdouts_no_delete
+                BEFORE DELETE ON protocol_locked_holdouts BEGIN
+                    SELECT RAISE(ABORT, 'protocol locked holdout bindings are append-only');
                 END;
                 """
             )
@@ -448,21 +552,102 @@ class ScientificRegistry:
             ).fetchone()
         if row is None:
             raise KeyError(protocol)
-        try:
-            payload = json.loads(row["payload_json"])
-        except json.JSONDecodeError as error:
-            raise ProtocolViolation("registered protocol payload is corrupt") from error
-        if (
-            not isinstance(payload, dict)
-            or _canonical(payload) != row["payload_json"]
-            or _hash(payload) != row["protocol_hash"]
-        ):
-            raise ProtocolViolation("registered protocol integrity mismatch")
+        _registered_protocol_payload(row)
         return ProtocolRegistration(
             protocol_id=protocol,
             protocol_hash=row["protocol_hash"],
             created_at=row["created_at"],
         )
+
+    def preregister_locked_holdout(
+        self,
+        protocol_id: str,
+        *,
+        holdout_identity: dict[str, Any],
+    ) -> str:
+        """Freeze one physical/versioned locked-forward holdout before trial 1."""
+
+        protocol = _id(protocol_id)
+        identity_hash, identity_json = _holdout_identity(holdout_identity)
+        identity_payload = json.loads(identity_json)
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if owner is None:
+                raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
+            forward_start, forward_end = _period(
+                protocol_payload["forward_period"],
+                "forward_period",
+            )
+            if (
+                identity_payload["role"] != "LOCKED_FORWARD"
+                or identity_payload["segment_start"] != forward_start.isoformat()
+                or identity_payload["segment_end"] != forward_end.isoformat()
+            ):
+                raise ProtocolViolation(
+                    "protocol locked holdout must match forward_period "
+                    "with role LOCKED_FORWARD"
+                )
+
+            existing = con.execute(
+                "SELECT holdout_identity_hash FROM protocol_locked_holdouts "
+                "WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if existing is not None:
+                if existing["holdout_identity_hash"] != identity_hash:
+                    raise ProtocolConflict(
+                        "protocol locked holdout identity is immutable"
+                    )
+                _registered_locked_holdout(
+                    con,
+                    protocol_id=protocol,
+                    protocol_payload=protocol_payload,
+                )
+                return identity_hash
+
+            prior_activity = sum(
+                int(
+                    con.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE protocol_id=?",
+                        (protocol,),
+                    ).fetchone()[0]
+                )
+                for table in ("trials", "evaluations", "holdout_access")
+            )
+            if prior_activity != 0:
+                raise ProtocolViolation(
+                    "protocol locked holdout must be preregistered before the first "
+                    "trial or holdout access"
+                )
+
+            holdout = con.execute(
+                "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
+                (identity_hash,),
+            ).fetchone()
+            if holdout is None:
+                con.execute(
+                    "INSERT INTO holdouts(holdout_identity_hash,identity_json,created_at) "
+                    "VALUES(?,?,?)",
+                    (identity_hash, identity_json, _now()),
+                )
+            elif holdout["identity_json"] != identity_json:
+                raise ProtocolConflict(
+                    "holdout identity hash was reused inconsistently"
+                )
+
+            con.execute(
+                "INSERT INTO protocol_locked_holdouts("
+                "protocol_id,holdout_identity_hash,created_at"
+                ") VALUES(?,?,?)",
+                (protocol, identity_hash, _now()),
+            )
+            con.commit()
+        return identity_hash
 
     def record_trial(
         self,
@@ -474,7 +659,7 @@ class ScientificRegistry:
     ) -> str:
         protocol = _id(protocol_id)
         normalized = _text(status, "status").upper()
-        if normalized not in {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}:
+        if normalized not in _TERMINAL_TRIAL_STATUSES:
             raise ProtocolViolation("trial status is invalid")
         if not isinstance(payload, dict) or not payload:
             raise ProtocolViolation("trial payload must be a non-empty object")
@@ -483,9 +668,18 @@ class ScientificRegistry:
         digest = _hash(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            owner = con.execute("SELECT payload_json FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
             if owner is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
+            _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
             existing = con.execute("SELECT * FROM trials WHERE trial_id=?", (identifier,)).fetchone()
             if existing is not None:
                 if (
@@ -496,7 +690,7 @@ class ScientificRegistry:
                 ):
                     raise ProtocolConflict("trial identity was reused inconsistently")
                 return identifier
-            budget = json.loads(owner["payload_json"])["trial_budget"]
+            budget = protocol_payload["trial_budget"]
             used = con.execute("SELECT COUNT(*) FROM trials WHERE protocol_id=?", (protocol,)).fetchone()[0]
             if used >= budget:
                 raise ProtocolViolation("registered trial budget exhausted")
@@ -553,11 +747,27 @@ class ScientificRegistry:
         protocol = _id(protocol_id)
         holdout = _text(holdout_id, "holdout_id")
         why = _text(purpose, "purpose")
+        supplied_identity_hash, _ = _holdout_identity(holdout_identity)
         access_id = _id()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
-            if con.execute("SELECT 1 FROM protocols WHERE protocol_id=?", (protocol,)).fetchone() is None:
+            owner = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+            if owner is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(owner)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
+            if supplied_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "holdout access identity does not match the preregistered "
+                    "protocol holdout"
+                )
             identity_hash = self._bind_holdout_identity(
                 con,
                 holdout_id=holdout,
@@ -596,16 +806,6 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         if not isinstance(result, dict) or not result:
             raise ProtocolViolation("evaluation result must be a non-empty object")
-        if result.get("stopping_rule_triggered") is True:
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "triggered stopping rule requires immutable artifact evidence"
-                ) from error
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)
@@ -614,12 +814,48 @@ class ScientificRegistry:
             p = con.execute("SELECT * FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if p is None:
                 raise KeyError(protocol)
+            protocol_payload = _registered_protocol_payload(p)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=protocol,
+                protocol_payload=protocol_payload,
+            )
+            supplied_identity_hash, _ = _holdout_identity(holdout_identity)
+            if supplied_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "locked evaluation identity does not match the preregistered "
+                    "protocol holdout"
+                )
             identity_hash = self._bind_holdout_identity(
                 con,
                 holdout_id=holdout,
                 holdout_identity=holdout_identity,
             )
-            protocol_payload = json.loads(p["payload_json"])
+            trial_budget = protocol_payload["trial_budget"]
+            trial_rows = con.execute(
+                """
+                SELECT trial_id,status,payload_hash,payload_json
+                FROM trials
+                WHERE protocol_id=?
+                ORDER BY trial_id
+                """,
+                (protocol,),
+            ).fetchall()
+            recorded_trials = len(trial_rows)
+            for trial in trial_rows:
+                _registered_trial_payload(trial)
+            if recorded_trials != trial_budget:
+                # The locked holdout is authorized only by the exact
+                # preregistered trial population.  A short population is
+                # incomplete; an oversized population is corrupt/legacy state,
+                # not "more complete" evidence.  AutoTrade also has no
+                # canonical adjudicator for early stopping yet, so neither
+                # condition may grant holdout access.
+                raise ProtocolViolation(
+                    "locked holdout requires the exact registered trial budget; "
+                    "early stopping and oversized trial populations are not "
+                    "admitted holdout-access authorities"
+                )
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],
                 "forward_period",
@@ -756,6 +992,48 @@ class ScientificRegistry:
             created_at=row["created_at"],
         )
 
+    @contextmanager
+    def candidate_promotion_evidence_guard(
+        self,
+        *,
+        evaluation_id: str,
+        protocol_id: str,
+        protocol_hash: str,
+        result_hash: str,
+        candidate_id: str,
+        artifact_hash: str,
+        evaluation_status: str,
+        retention_passed: bool,
+        risk_passed: bool,
+        authority_scope_id: str,
+        evidence_valid_until: str,
+    ):
+        """Hold scientific writer authority through a dependent promotion commit.
+
+        Validation alone is not a commit fence: another process can otherwise
+        append holdout access after the untouched check and before ChampionRegistry
+        commits routing.  BEGIN IMMEDIATE serializes all ScientificRegistry writers
+        while ordinary WAL readers remain available.  The caller must keep this
+        context open until its dependent durable promotion commit is complete.
+        """
+
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            evidence = self.verify_candidate_promotion_evidence(
+                evaluation_id=evaluation_id,
+                protocol_id=protocol_id,
+                protocol_hash=protocol_hash,
+                result_hash=result_hash,
+                candidate_id=candidate_id,
+                artifact_hash=artifact_hash,
+                evaluation_status=evaluation_status,
+                retention_passed=retention_passed,
+                risk_passed=risk_passed,
+                authority_scope_id=authority_scope_id,
+                evidence_valid_until=evidence_valid_until,
+            )
+            yield evidence
+
     def verify_candidate_promotion_evidence(
         self,
         *,
@@ -794,6 +1072,22 @@ class ScientificRegistry:
         # a protocol-local display alias. Legacy alias-only accesses are counted
         # conservatively so a migration cannot manufacture an untouched holdout.
         with self._connect() as con:
+            protocol_row = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (expected_protocol,),
+            ).fetchone()
+            if protocol_row is None:
+                raise KeyError(expected_protocol)
+            protocol_payload = _registered_protocol_payload(protocol_row)
+            registered_identity_hash, _ = _registered_locked_holdout(
+                con,
+                protocol_id=expected_protocol,
+                protocol_payload=protocol_payload,
+            )
+            if evidence.holdout_identity_hash != registered_identity_hash:
+                raise ProtocolViolation(
+                    "locked evaluation is not bound to the preregistered protocol holdout"
+                )
             current_access_count = int(
                 con.execute(
                     "SELECT COUNT(*) FROM holdout_access "
@@ -820,22 +1114,9 @@ class ScientificRegistry:
             ).fetchall()
         candidate_trial_found = False
         for row in trial_rows:
+            payload = _registered_trial_payload(row)
             if row["status"] != "COMPLETED":
                 continue
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError as error:
-                raise ProtocolViolation(
-                    "registered trial payload is corrupt"
-                ) from error
-            if (
-                not isinstance(payload, dict)
-                or _canonical(payload) != row["payload_json"]
-                or _hash(payload) != row["payload_hash"]
-            ):
-                raise ProtocolViolation(
-                    "registered trial payload integrity mismatch"
-                )
             if (
                 payload.get("candidate_id") == candidate_id
                 and payload.get("artifact_hash") == artifact_hash
@@ -888,37 +1169,28 @@ class ScientificRegistry:
                 raise ProtocolViolation(
                     f"locked evaluation does not prove {required_true}"
                 )
-        if trial_state["remaining_trial_budget"] > 0:
-            if result.get("stopping_rule_triggered") is not True:
-                raise ProtocolViolation(
-                    "candidate promotion before trial-budget exhaustion requires "
-                    "an explicitly triggered registered stopping rule"
-                )
-            if result.get("stopping_rules_hash") != trial_state["stopping_rules_hash"]:
-                raise ProtocolViolation(
-                    "early-stop evidence is not bound to the registered stopping rules"
-                )
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "early-stop promotion requires immutable stopping evidence"
-                ) from error
+        if trial_state["remaining_trial_budget"] != 0:
+            # Historical databases may already contain a locked evaluation
+            # created by an older build that treated caller-declared stopping
+            # evidence as authority.  The current scientific contract has no
+            # canonical stopping adjudicator, so restart/migration must not
+            # preserve that obsolete bypass at promotion time.
+            raise ProtocolViolation(
+                "candidate promotion requires full registered trial closure; "
+                "early stopping is not an admitted promotion authority"
+            )
         return evidence
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:
         protocol = _id(protocol_id)
         with self._connect() as con:
             p = con.execute(
-                "SELECT payload_json FROM protocols WHERE protocol_id=?",
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
                 (protocol,),
             ).fetchone()
             if p is None:
                 raise KeyError(protocol)
-            protocol_payload = json.loads(p["payload_json"])
+            protocol_payload = _registered_protocol_payload(p)
             budget = protocol_payload["trial_budget"]
             trial_rows = con.execute(
                 """
@@ -932,20 +1204,7 @@ class ScientificRegistry:
         log: list[dict[str, str]] = []
         counts: dict[str, int] = {}
         for row in trial_rows:
-            try:
-                payload = json.loads(row["payload_json"])
-            except json.JSONDecodeError as error:
-                raise ProtocolViolation(
-                    "registered trial payload is corrupt"
-                ) from error
-            if (
-                not isinstance(payload, dict)
-                or _canonical(payload) != row["payload_json"]
-                or _hash(payload) != row["payload_hash"]
-            ):
-                raise ProtocolViolation(
-                    "registered trial payload integrity mismatch"
-                )
+            _registered_trial_payload(row)
             log.append(
                 {
                     "trial_id": row["trial_id"],
@@ -955,6 +1214,10 @@ class ScientificRegistry:
             )
             counts[row["status"]] = counts.get(row["status"], 0) + 1
         total = len(trial_rows)
+        if total > budget:
+            raise ProtocolViolation(
+                "registered trial population exceeds preregistered trial budget"
+            )
         return {
             "trial_budget": budget,
             "recorded_trials": total,

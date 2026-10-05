@@ -372,6 +372,47 @@ class RiskExactArithmeticTests(unittest.TestCase):
             )
         self.assertEqual(HostileScope.reads, 0)
 
+    def test_liquidation_verifier_rejects_evidence_subclass_before_reads(self):
+        base = LiquidationHeadroomEvidence(
+            headroom="10",
+            state_version=7,
+            provider_id="PROVIDER",
+            account_id="ACCOUNT",
+            environment="PAPER",
+            margin_mode="CROSS",
+            risk_tier_version="v1",
+            observed_at=datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 10, 3, 20, 1, tzinfo=timezone.utc),
+            artifact_id="00000000-0000-0000-0000-000000000001",
+            sha256="sha256:" + "1" * 64,
+        )
+        touched = []
+
+        class HostileEvidence(LiquidationHeadroomEvidence):
+            def __getattribute__(self, name):
+                if name in {"scope", "state_version", "observed_at", "expires_at", "artifact_id"}:
+                    touched.append(name)
+                    raise AssertionError("hostile liquidation evidence read")
+                return object.__getattribute__(self, name)
+
+        hostile = object.__new__(HostileEvidence)
+        for name, value in vars(base).items():
+            object.__setattr__(hostile, name, value)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            verified = risk_module._verify_liquidation_headroom_evidence(
+                evidence=hostile,
+                expected_scope=base.scope,
+                expected_state_version=7,
+                decision_time=datetime(2026, 10, 3, 20, 0, 30, tzinfo=timezone.utc),
+                evidence_store=store,
+            )
+
+        self.assertFalse(verified)
+        self.assertEqual(touched, [])
+
+
     def test_liquidation_evidence_rejects_state_version_subclass_before_comparison(self):
         touched = []
 

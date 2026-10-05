@@ -96,6 +96,22 @@ def _start_event(
     )
 
 
+def _append_start(
+    store: JournalStore,
+    *,
+    run_id: str,
+    account_id: str = "zero-account",
+    provider_id: str = "SIMULATED",
+):
+    event = _start_event(
+        run_id=run_id,
+        account_id=account_id,
+        provider_id=provider_id,
+    )
+    store.append_event(event, outbox_topic="autotrade.simulation.events")
+    return event
+
+
 class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
     def test_foreign_same_component_type_does_not_change_zero_runtime_cut(self):
         with TemporaryDirectory() as directory:
@@ -238,7 +254,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "checkpoint-account-owner"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="owned-economic",
@@ -281,7 +297,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "positive-publication-owner"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             foreign = _event(
                 aggregate_type="economic_book",
                 aggregate_id="other-account-book",
@@ -304,7 +320,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "hostless-owned-economic"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="zero-account-book",
@@ -323,11 +339,38 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
             self.assertIsNotNone(state)
             self.assertTrue(state["delivered"])
 
+    def test_owned_economic_publication_missing_fails_before_partial_ack(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            run_id = "missing-owned-economic"
+            start = _append_start(store, run_id=run_id)
+            owned = _event(
+                aggregate_type="economic_book",
+                aggregate_id="zero-account-book-missing-outbox",
+                event_type="EconomicTransactionBooked",
+                payload={
+                    "provider_id": "SIMULATED",
+                    "account_id": "zero-account",
+                    "environment": "SIMULATION",
+                },
+            )
+            store.append_event(owned)
+
+            with self.assertRaisesRegex(
+                AutonomousRuntimeCheckpointError,
+                "publication.*missing|missing.*publication",
+            ):
+                deliver_autonomous_owned_publications(store, run_id=run_id)
+
+            start_state = store.outbox_delivery_state(start["event_id"])
+            self.assertIsNotNone(start_state)
+            self.assertFalse(start_state["delivered"])
+
     def test_submission_aggregate_inherits_prepared_scope_for_sparse_later_events(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "submission-aggregate-owner"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:owned-test"
             prepared = _event(
                 aggregate_type="submission_attempt",
@@ -375,7 +418,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "foreign-submission-owner"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             aggregate_id = "submission-attempt:foreign-test"
             prepared = _event(
                 aggregate_type="submission_attempt",
@@ -414,7 +457,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "misrouted-economic"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             owned = _event(
                 aggregate_type="economic_book",
                 aggregate_id="zero-account-book",
@@ -441,7 +484,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "risk-outbox-rejected"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             risk = _event(
                 aggregate_type="risk_decision",
                 aggregate_id="risk:sha256:" + "1" * 64,
@@ -467,7 +510,7 @@ class ZeroRuntimeScopeOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             run_id = "admission-publication"
-            store.append_event(_start_event(run_id=run_id))
+            _append_start(store, run_id=run_id)
             admission = _event(
                 aggregate_type="authority_state",
                 aggregate_id="canonical",

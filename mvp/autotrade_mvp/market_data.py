@@ -19,7 +19,11 @@ from .exact_decimal import (
     canonical_decimal_text,
     parse_bounded_exact_decimal,
 )
-from ._market_payload_snapshot import PayloadSnapshotError, snapshot_market_payload
+from ._market_payload_snapshot import (
+    FrozenMarketPayload,
+    PayloadSnapshotError,
+    snapshot_market_payload,
+)
 from .instruments import (
     InstrumentNotFound,
     InstrumentRegistry,
@@ -189,34 +193,35 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
-def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or not value:
+def _evidence(value: object) -> FrozenMarketPayload:
+    """Admit raw-evidence metadata without caller-defined container callbacks."""
+
+    try:
+        detached = snapshot_market_payload(value)
+    except PayloadSnapshotError as error:
+        raise MarketDataError(f"raw_evidence_ref: {error}") from error
+    if not detached:
         raise MarketDataError("raw_evidence_ref is required")
-    detached: dict[str, object] = {}
-    for key, item in value.items():
-        if type(key) is not str:
-            raise MarketDataError("raw_evidence_ref keys must be exact strings")
-        detached[key] = item
+
     required = {"artifact_id", "sha256", "observed_at"}
     allowed = required | {"source_uri", "rights_id"}
     keys = set(detached)
-    value = detached
     if required - keys:
         raise MarketDataError("raw_evidence_ref is missing required fields")
     if keys - allowed:
         raise MarketDataError("raw_evidence_ref contains unknown fields")
 
-    artifact_id = _admission_text(value["artifact_id"], "artifact_id")
+    artifact_id = _admission_text(detached["artifact_id"], "artifact_id")
     try:
         UUID(artifact_id)
     except (ValueError, TypeError, AttributeError) as error:
         raise MarketDataError("raw evidence artifact_id must be a UUID") from error
 
-    digest = _admission_text(value["sha256"], "sha256")
+    digest = _admission_text(detached["sha256"], "sha256")
     if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
         raise MarketDataError("raw evidence sha256 must be a canonical SHA-256 digest")
 
-    observed_at = _admission_text(value["observed_at"], "observed_at")
+    observed_at = _admission_text(detached["observed_at"], "observed_at")
     if not observed_at.endswith("Z"):
         raise MarketDataError("raw evidence observed_at must be UTC and end in Z")
     try:
@@ -231,14 +236,20 @@ def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
         "sha256": digest,
         "observed_at": observed_at,
     }
-    if "source_uri" in value:
-        source_uri = _admission_text(value["source_uri"], "source_uri")
+    if "source_uri" in detached:
+        source_uri = _admission_text(detached["source_uri"], "source_uri")
         if not urlsplit(source_uri).scheme:
             raise MarketDataError("raw evidence source_uri must be an absolute URI")
         normalized["source_uri"] = source_uri
-    if "rights_id" in value:
-        normalized["rights_id"] = _admission_text(value["rights_id"], "rights_id")
-    return MappingProxyType(normalized)
+    if "rights_id" in detached:
+        normalized["rights_id"] = _admission_text(
+            detached["rights_id"],
+            "rights_id",
+        )
+    try:
+        return snapshot_market_payload(normalized)
+    except PayloadSnapshotError as error:  # pragma: no cover - built-in graph
+        raise MarketDataError("raw_evidence_ref could not be frozen") from error
 
 
 @dataclass(frozen=True)

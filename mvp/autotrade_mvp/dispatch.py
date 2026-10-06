@@ -854,6 +854,8 @@ def _install_submission_response_binding_authority(loader):
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
+    canonical_frozenset = frozenset
+    canonical_dict = dict
     canonical_range = range
     canonical_enumerate = enumerate
     canonical_str = str
@@ -916,6 +918,8 @@ def _install_submission_response_binding_authority(loader):
         "_factory_token",
     )
 
+    exact_field_names = canonical_frozenset(field_names)
+
     def authority_changed():
         raise error_type("submission response binding authority is unavailable")
 
@@ -927,6 +931,8 @@ def _install_submission_response_binding_authority(loader):
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
+            or frozenset is not canonical_frozenset
+            or dict is not canonical_dict
             or range is not canonical_range
             or enumerate is not canonical_enumerate
             or str is not canonical_str
@@ -977,10 +983,12 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
 
     def raw_snapshot(value):
-        return canonical_tuple(
-            object_getattribute(value, name)
-            for name in field_names
-        )
+        state = object_getattribute(value, "__dict__")
+        if canonical_type(state) is not canonical_dict:
+            authority_changed()
+        if canonical_frozenset(state) != exact_field_names:
+            authority_changed()
+        return canonical_tuple(state[name] for name in field_names)
 
     def prune():
         for object_id, (value_ref, _snapshot) in canonical_tuple(states.items()):
@@ -1047,11 +1055,10 @@ def _install_submission_response_binding_authority(loader):
             authority_changed()
         if current[18] is not binding_token:
             authority_changed()
-        return value
+        return expected
 
     def submission_response_binding_projection(value):
-        require_canonical_submission_response_binding(value)
-        current = raw_snapshot(value)
+        current = require_canonical_submission_response_binding(value)
         return mapping_proxy_type(
             {
                 name: current[index]

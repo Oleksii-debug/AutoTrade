@@ -84,6 +84,7 @@ class BybitFeeCurrencyAuthority:
 
     provider_id: str
     provider_environment: str
+    account_id: str
     entity_id: str
     product_category: str
     instrument_version: str
@@ -113,6 +114,7 @@ class BybitFeeCurrencyAuthority:
             )
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "provider_environment", environment)
+        object.__setattr__(self, "account_id", _text(self.account_id, name="fee authority account_id"))
         object.__setattr__(self, "entity_id", _text(self.entity_id, name="fee authority entity_id"))
         category = _text(
             self.product_category,
@@ -197,6 +199,7 @@ def _install_bybit_fee_currency_authority() -> object:
             tuple(getattr(value, name) for name in (
                 "provider_id",
                 "provider_environment",
+                "account_id",
                 "entity_id",
                 "product_category",
                 "instrument_version",
@@ -1043,12 +1046,17 @@ def parse_executions(
                 raise ProviderCoreError(
                     "Bybit fee-currency authority environment does not match execution evidence"
                 )
+            query_category = observation.query_binding.query.get("category")
             if (
-                qualified_fee_currency.product_category
-                != result.get("category", "").lower()
+                type(query_category) is not str
+                or query_category != qualified_fee_currency.product_category
             ):
                 raise ProviderCoreError(
-                    "Bybit fee-currency authority product category does not match execution evidence"
+                    "Bybit fee-currency authority product category does not match execution query"
+                )
+            if qualified_fee_currency.account_id != observation.account_id:
+                raise ProviderCoreError(
+                    "Bybit fee-currency authority account does not match execution evidence"
                 )
             if qualified_fee_currency.instrument_version != instrument:
                 raise ProviderCoreError(

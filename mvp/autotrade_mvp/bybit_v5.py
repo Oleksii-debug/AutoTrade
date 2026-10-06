@@ -1180,6 +1180,54 @@ def parse_executions(
 
 
 BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.0.0"
+BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
+    "sha256:"
+    + sha256(
+        json.dumps(
+            {
+                "parser_identity": BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+                "parser_version": BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+                "source_type": "ProviderResponseObservation",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "surface": "ACTIVITIES",
+                    "endpoint": "/v5/asset/delivery-record",
+                    "permission_scope": "ACCOUNT.READ",
+                    "category": "option",
+                    "symbol": "EXACT_INSTRUMENT_SYMBOL",
+                },
+                "query_fields": [
+                    "category",
+                    "symbol",
+                    "startTime",
+                    "endTime",
+                    "expDate",
+                    "limit",
+                    "cursor",
+                ],
+                "row_fields": {
+                    "required": [
+                        "symbol",
+                        "side",
+                        "deliveryTime",
+                        "strike",
+                        "fee",
+                        "position",
+                        "deliveryPrice",
+                        "deliveryRpl",
+                    ],
+                    "optional": ["entryPrice"],
+                },
+                "cursor_rule": "OPAQUE_CANONICAL_PROVIDER_TEXT",
+                "economic_numbers": "BOUNDED_CANONICAL_DECIMAL_TEXT",
+                "lifecycle_classification": "NONE",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+)
 _BYBIT_OPTION_DELIVERY_DECIMAL_RE = re.compile(
     r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"
 )
@@ -1294,6 +1342,9 @@ class BybitOptionDeliveryPage:
     endpoint: str
     permission_scope: str
     query_digest: str
+    parser_identity: str
+    parser_version: str
+    parser_contract_digest: str
     evidence_ref: str
     response_sha256: str
     observed_at: str
@@ -1341,6 +1392,8 @@ def parse_option_delivery_page(
         )
     if (
         type(requested_symbol) is not str
+        or not requested_symbol
+        or len(requested_symbol) > 160
         or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", requested_symbol) is None
     ):
         raise ProviderCoreError(
@@ -1575,6 +1628,9 @@ def parse_option_delivery_page(
         endpoint=binding.endpoint,
         permission_scope=binding.permission_scope,
         query_digest=binding.query_digest,
+        parser_identity=BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+        parser_version=BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+        parser_contract_digest=BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
         evidence_ref=observation.evidence_ref,
         response_sha256=observation.response_sha256,
         observed_at=observation.observed_at,

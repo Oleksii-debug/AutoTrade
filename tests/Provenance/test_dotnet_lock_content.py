@@ -180,6 +180,22 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         )
         self.assertEqual(unscoped_lines, [])
 
+    def test_canonical_restore_rejects_shell_chaining_and_substitution(self):
+        for command in (
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "&& dotnet restore src/App/App.csproj",
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "$(dotnet restore src/App/App.csproj)",
+            "run: dotnet restore src/App/App.csproj --locked-mode "
+            "| tee restore.log",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "shell execution control",
+                ):
+                    dotnet_restore_command_tokens(command)
+
     def test_restore_project_coverage_requires_first_positional_target(self):
         canonical = dotnet_restore_command_tokens(
             'run: dotnet restore src/App/App.csproj --locked-mode'

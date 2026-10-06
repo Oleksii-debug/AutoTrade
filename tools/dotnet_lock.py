@@ -14,6 +14,9 @@ _DOTNET_RESTORE_MULTILINE_TEXT = re.compile(
     r"\bdotnet(?:[ \t]*\\?[ \t]*\r?\n[ \t]+)+restore\b",
     re.IGNORECASE,
 )
+_DOTNET_RESTORE_SHELL_CONTROL = re.compile(
+    r"(?:&&|\|\||[;&|<>\x60]|\$\()"
+)
 
 
 def _strict_json(text: str):
@@ -96,8 +99,11 @@ def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     """Parse one canonical YAML run-line dotnet restore command."""
     if not isinstance(command, str) or not command.startswith('run: dotnet restore '):
         raise ValueError('not a canonical dotnet restore run line')
+    payload = command.removeprefix('run: ')
+    if _DOTNET_RESTORE_SHELL_CONTROL.search(payload) is not None:
+        raise ValueError('dotnet restore command must not contain shell execution control')
     try:
-        tokens = tuple(shlex.split(command.removeprefix('run: '), comments=True))
+        tokens = tuple(shlex.split(payload, comments=True))
     except ValueError as error:
         raise ValueError('malformed dotnet restore command') from error
     if len(tokens) < 3 or tokens[:2] != ('dotnet', 'restore'):

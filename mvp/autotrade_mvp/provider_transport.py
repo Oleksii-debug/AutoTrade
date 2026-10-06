@@ -1914,6 +1914,8 @@ def _install_direct_trading_write_execution_authority():
     proxy_type = ProxyHandler
     redirect_base_type = HTTPRedirectHandler
     redirect_type = _NoRedirectHandler
+    abstract_http_type = AbstractHTTPHandler
+    https_handler_type = HTTPSHandler
 
     canonical_opener_open = OpenerDirector.open
     canonical_opener_dispatch = OpenerDirector._open
@@ -1925,6 +1927,8 @@ def _install_direct_trading_write_execution_authority():
     canonical_request_digest = _direct_trading_write_request_digest
     request_digest_code = canonical_request_digest.__code__
     canonical_sha256 = sha256
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
     transport_identity = _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY
     network_policy_identity = _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY
 
@@ -1968,6 +1972,12 @@ def _install_direct_trading_write_execution_authority():
             or SignedHttpRequest is not request_type
             or TradingWireResponse is not response_type
             or DirectTradingWriteExecutionReceipt is not receipt_type
+            or OpenerDirector is not opener_type
+            or ProxyHandler is not proxy_type
+            or HTTPRedirectHandler is not redirect_base_type
+            or _NoRedirectHandler is not redirect_type
+            or AbstractHTTPHandler is not abstract_http_type
+            or HTTPSHandler is not https_handler_type
             or type is not canonical_type
             or id is not canonical_id
             or tuple is not canonical_tuple
@@ -1988,6 +1998,8 @@ def _install_direct_trading_write_execution_authority():
             or object is not canonical_object
             or weakref_ref is not weakref
             or sha256 is not canonical_sha256
+            or json is not canonical_json_module
+            or canonical_json_module.dumps is not canonical_json_dumps
             or _direct_trading_write_request_digest is not canonical_request_digest
             or canonical_request_digest.__code__ is not request_digest_code
             or _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY != transport_identity
@@ -2010,13 +2022,13 @@ def _install_direct_trading_write_execution_authority():
                 "direct trading-write wire client opener method is shadowed"
             )
         if (
-            OpenerDirector.open is not canonical_opener_open
-            or OpenerDirector._open is not canonical_opener_dispatch
-            or OpenerDirector._call_chain is not canonical_opener_call_chain
-            or AbstractHTTPHandler.do_open is not canonical_http_do_open
-            or HTTPSHandler.https_open is not canonical_https_open
-            or ProxyHandler.proxy_open is not canonical_proxy_open
-            or _NoRedirectHandler.redirect_request is not canonical_redirect_request
+            opener_type.open is not canonical_opener_open
+            or opener_type._open is not canonical_opener_dispatch
+            or opener_type._call_chain is not canonical_opener_call_chain
+            or abstract_http_type.do_open is not canonical_http_do_open
+            or https_handler_type.https_open is not canonical_https_open
+            or proxy_type.proxy_open is not canonical_proxy_open
+            or redirect_type.redirect_request is not canonical_redirect_request
         ):
             raise transport_error(
                 "direct trading-write wire client network implementation changed"

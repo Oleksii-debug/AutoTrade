@@ -950,6 +950,28 @@ class VerticalSliceTests(unittest.TestCase):
                     intents_before,
                 )
 
+    def test_orphan_order_intent_temp_blocks_fresh_run_rebinding(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            intents = root / "order-intents"
+            intents.mkdir(parents=True)
+            orphan = intents / "intent-orphan.json.tmp"
+            orphan.write_text('{"orphan":true}\n', encoding="utf-8")
+            orphan_before = orphan.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Durable state exists without exact financial configuration identity",
+            ):
+                run_vertical_slice([100, 101, 102, 103], directory)
+
+            self.assertEqual(orphan.read_bytes(), orphan_before)
+            self.assertFalse((root / "checkpoint.json").exists())
+            self.assertFalse((root / "learning-evidence.jsonl").exists())
+            self.assertEqual(list(root.glob("journal.sqlite3*")), [])
+            self.assertEqual(list(intents.glob("*.json")), [])
+
+
     def test_missing_checkpoint_cannot_rebind_residual_durable_state(self):
         with TemporaryDirectory() as directory:
             run_vertical_slice([100, 101, 102, 103], directory)

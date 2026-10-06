@@ -463,7 +463,10 @@ def _has_residual_durable_state(root: Path) -> bool:
     if (root / "checkpoint.json.tmp").exists():
         return True
     intents = root / "order-intents"
-    return intents.is_dir() and any(intents.glob("*.json"))
+    return intents.is_dir() and (
+        any(intents.glob("*.json"))
+        or any(intents.glob("*.json.tmp"))
+    )
 
 
 def _initial_checkpoint(financial_configuration: dict[str, object]) -> dict[str, object]:

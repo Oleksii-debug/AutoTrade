@@ -833,6 +833,84 @@ parse_submission_response = _install_submission_response_parser(
 )
 del _install_submission_response_parser
 
+def _install_submission_response_parser_authority(parser):
+    """Fence mutable parser dependencies before financial normalization."""
+
+    parser_code = parser.__code__
+    uuid_text = _uuid_text
+    uuid_text_code = uuid_text.__code__
+    prepared_projection = _prepared_submission_projection
+    prepared_projection_code = prepared_projection.__code__
+    client_order_validator = validate_client_order_id
+    client_order_validator_code = client_order_validator.__code__
+    canonical_text = _text
+    canonical_text_code = canonical_text.__code__
+    submission_projection = _submission_projection
+    submission_projection_code = submission_projection.__code__
+    response_evidence = _response_evidence
+    response_evidence_code = response_evidence.__code__
+    error_type = AlpacaAdapterError
+    type_error = TypeError
+    canonical_type = type
+    canonical_bool = bool
+    canonical_isinstance = isinstance
+    mapping_type = Mapping
+    canonical_getattr = getattr
+
+    def guarded(
+        *,
+        attempt_id: str,
+        prepared_request: AlpacaPreparedRequest,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, object]:
+        if (
+            canonical_getattr(parser, "__code__", None) is not parser_code
+            or _uuid_text is not uuid_text
+            or canonical_getattr(uuid_text, "__code__", None) is not uuid_text_code
+            or _prepared_submission_projection is not prepared_projection
+            or canonical_getattr(prepared_projection, "__code__", None)
+            is not prepared_projection_code
+            or validate_client_order_id is not client_order_validator
+            or canonical_getattr(client_order_validator, "__code__", None)
+            is not client_order_validator_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _submission_projection is not submission_projection
+            or canonical_getattr(submission_projection, "__code__", None)
+            is not submission_projection_code
+            or _response_evidence is not response_evidence
+            or canonical_getattr(response_evidence, "__code__", None)
+            is not response_evidence_code
+            or AlpacaAdapterError is not error_type
+            or TypeError is not type_error
+            or type is not canonical_type
+            or bool is not canonical_bool
+            or isinstance is not canonical_isinstance
+            or Mapping is not mapping_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type(
+                "Alpaca prepared response authority is unavailable"
+            )
+        return parser(
+            attempt_id=attempt_id,
+            prepared_request=prepared_request,
+            observation=observation,
+            transport_ambiguous=transport_ambiguous,
+        )
+
+    return guarded
+
+
+_unsealed_parse_submission_response = parse_submission_response
+parse_submission_response = _install_submission_response_parser_authority(
+    _unsealed_parse_submission_response
+)
+del _unsealed_parse_submission_response
+del _install_submission_response_parser_authority
+
 def parse_trade_activities(
     observation: ProviderResponseObservation,
     *,

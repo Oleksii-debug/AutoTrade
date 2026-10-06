@@ -38,6 +38,13 @@ public sealed class LeanCallbackCharacterizer
                 nameof(orderEvent));
         }
 
+        if (orderEvent.Symbol is null || string.IsNullOrWhiteSpace(orderEvent.Symbol.Value))
+        {
+            throw new ArgumentException(
+                "LEAN callback symbol identity is required.",
+                nameof(orderEvent));
+        }
+
         var identity = (orderEvent.OrderId, orderEvent.Id);
         var fee = NormalizeOrderFee(orderEvent);
         var fingerprint = new CallbackFingerprint(
@@ -181,12 +188,12 @@ public sealed class LeanCallbackCharacterizer
         // integrity hash so malformed state cannot escape as a JsonException
         // or be canonicalized into a different callback identity.
         if (state.Callbacks.Any(entry =>
-                entry.Symbol is null ||
+                string.IsNullOrWhiteSpace(entry.Symbol) ||
                 entry.FillPriceCurrency is null ||
                 entry.FeeCurrency is null))
         {
             throw new InvalidDataException(
-                "LEAN callback restart identity strings must be present and non-null.");
+                "LEAN callback restart symbol must be non-empty and identity strings must be present.");
         }
 
         var payload = new LeanCallbackCharacterizerStatePayload(

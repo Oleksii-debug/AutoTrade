@@ -4614,6 +4614,26 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             ):
                 require_direct_trading_write_client(client)
 
+    def test_signed_request_verifier_rebinding_fails_without_hostile_dispatch(self):
+        client = UrllibJsonWireClient(max_response_bytes=64)
+        calls = 0
+
+        def hostile_verifier(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("hostile signed-request verifier executed")
+
+        with patch(
+            "mvp.autotrade_mvp.provider_transport._require_signed_http_request",
+            new=hostile_verifier,
+        ):
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "network authority changed",
+            ):
+                require_direct_trading_write_client(client)
+        self.assertEqual(calls, 0)
+
     def test_forged_write_receipt_on_local_response_has_no_execution_authority(self):
         response = TradingWireResponse(
             http_status=200,

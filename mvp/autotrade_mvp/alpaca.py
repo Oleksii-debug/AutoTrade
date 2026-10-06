@@ -23,7 +23,7 @@ from .provider_core import (
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
-    submission_observation_projection,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -513,7 +513,7 @@ def _response_evidence(
     *,
     prepared_request: AlpacaPreparedRequest,
 ) -> dict[str, str]:
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if not isinstance(prepared_request, AlpacaPreparedRequest):
         raise TypeError("prepared_request must be AlpacaPreparedRequest")
     cid = validate_client_order_id(
@@ -593,7 +593,7 @@ def parse_submission_response(
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
         }
-    projection = submission_observation_projection(observation)
+    projection = provider_submission_observation_projection(observation)
     if projection["attempt_id"] != aid:
         raise AlpacaAdapterError("submission observation attempt_id mismatch")
     evidence = _response_evidence(

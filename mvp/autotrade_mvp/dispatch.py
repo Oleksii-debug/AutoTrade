@@ -2426,6 +2426,37 @@ class GuardedDispatcher:
             barrier_passed = True
 
         exact_response_snapshot = _snapshot_exact_transport_response
+        snapshot_getattr = getattr
+        snapshot_type = type
+        snapshot_tuple = tuple
+        snapshot_len = len
+        snapshot_code = snapshot_getattr(
+            exact_response_snapshot,
+            "__code__",
+            None,
+        )
+        snapshot_defaults = snapshot_getattr(
+            exact_response_snapshot,
+            "__defaults__",
+            None,
+        )
+        snapshot_kwdefaults = snapshot_getattr(
+            exact_response_snapshot,
+            "__kwdefaults__",
+            None,
+        )
+        if (
+            snapshot_code is None
+            or snapshot_type(snapshot_defaults) is not snapshot_tuple
+            or snapshot_len(snapshot_defaults) != 3
+        ):
+            raise RuntimeError(
+                "exact transport response snapshot authority is unavailable"
+            )
+        snapshot_dependency_codes = snapshot_tuple(
+            snapshot_getattr(dependency, "__code__", None)
+            for dependency in snapshot_defaults
+        )
 
         try:
             response = transport_send(client_order_id, request_frozen, final_guard)
@@ -2661,7 +2692,29 @@ class GuardedDispatcher:
                 # Revalidate raw exact state now. Frozen dataclass construction
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
-                if _snapshot_exact_transport_response is not exact_response_snapshot:
+                if (
+                    _snapshot_exact_transport_response is not exact_response_snapshot
+                    or snapshot_getattr(
+                        exact_response_snapshot,
+                        "__code__",
+                        None,
+                    ) is not snapshot_code
+                    or snapshot_getattr(
+                        exact_response_snapshot,
+                        "__defaults__",
+                        None,
+                    ) is not snapshot_defaults
+                    or snapshot_getattr(
+                        exact_response_snapshot,
+                        "__kwdefaults__",
+                        None,
+                    ) is not snapshot_kwdefaults
+                    or snapshot_tuple(
+                        snapshot_getattr(dependency, "__code__", None)
+                        for dependency in snapshot_defaults
+                    )
+                    != snapshot_dependency_codes
+                ):
                     raise ValueError(
                         "exact transport response authority changed after send"
                     )

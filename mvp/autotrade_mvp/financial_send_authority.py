@@ -914,6 +914,10 @@ class FinancialSendAuthorityIssuer:
                 "environment": binding.runtime_environment,
                 "provider_environment": binding.provider_environment,
                 "capability_snapshot_id": binding.capability_snapshot_id,
+                "endpoint": binding.endpoint,
+                "prepared_request_sha256": binding.request_sha256,
+                "capability_snapshot_ids": [binding.capability_snapshot_id],
+                "instrument_versions": [str(binding.instrument_version)],
             },
         )
         if payload_digest(route_scope) != binding.submission_scope_digest:

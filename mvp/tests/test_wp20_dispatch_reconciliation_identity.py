@@ -8,6 +8,11 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation_journal import (
+    load_account_resource_availability_evidence,
+    load_latest_reconciliation_checkpoint,
+    load_latest_reconciliation_checkpoint_for_scope,
+    load_submission_resolution_evidence,
+    record_reconciliation_checkpoint,
     unknown_submissions_from_dispatch,
 )
 
@@ -142,6 +147,66 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                     forged,
                     attempt_ids=("attempt-a",),
                 )
+
+    def test_reconciliation_journal_authority_boundaries_reject_store_subclass(self):
+        class ForgedStore(JournalStore):
+            def load_events(self, _aggregate_type, _aggregate_id):
+                raise AssertionError("subclass journal read must not execute")
+
+            def append_event(self, _envelope, **_kwargs):
+                raise AssertionError("subclass journal write must not execute")
+
+        with TemporaryDirectory() as directory:
+            forged = ForgedStore(Path(directory) / "journal.sqlite3")
+            cases = (
+                lambda: record_reconciliation_checkpoint(
+                    forged,
+                    reconciliation_id="r",
+                    result=None,
+                    observed_at="not-reached",
+                    host_id="not-reached",
+                    owner_epoch="not-reached",
+                ),
+                lambda: load_latest_reconciliation_checkpoint(
+                    forged,
+                    reconciliation_id="r",
+                    provider_id="P",
+                    account_id="a",
+                    environment="SIMULATION",
+                ),
+                lambda: load_latest_reconciliation_checkpoint_for_scope(
+                    forged,
+                    provider_id="P",
+                    account_id="a",
+                    environment="SIMULATION",
+                ),
+                lambda: load_submission_resolution_evidence(
+                    forged,
+                    checkpoint_event_id="e",
+                    provider_id="P",
+                    account_id="a",
+                    environment="SIMULATION",
+                    attempt_id="attempt",
+                    intent_id="intent",
+                    client_order_id="client",
+                ),
+                lambda: load_account_resource_availability_evidence(
+                    forged,
+                    checkpoint_event_id="e",
+                    provider_id="P",
+                    account_id="a",
+                    environment="SIMULATION",
+                    resources=("CASH:USD",),
+                    now="2026-10-06T14:00:00Z",
+                    max_age_seconds="60",
+                ),
+            )
+            for boundary in cases:
+                with self.subTest(boundary=boundary), self.assertRaisesRegex(
+                    TypeError,
+                    "exact JournalStore",
+                ):
+                    boundary()
 
     def test_instance_shadow_cannot_supply_reconciliation_truth(self):
         with TemporaryDirectory() as directory:

@@ -5,22 +5,31 @@ from tempfile import TemporaryDirectory
 import unittest
 import weakref
 
+import mvp.autotrade_mvp.corporate_action_evidence as corporate_action_evidence_module
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
+    authoritative_corporate_action_projection,
     resolve_authoritative_corporate_action,
+)
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
-from mvp.tests.test_provider_transport import READ_NOW, verified_read_capability
+from mvp.tests.test_provider_transport import READ_NOW
 
 
 ENDPOINT = "/sapi/v1/asset/corporate-action"
@@ -66,6 +75,51 @@ def canonical_instrument(
     )
 
 
+_SIMULATION_SNAPSHOT_ID = "77777777-7777-4777-8777-777777777777"
+_SIMULATION_ARTIFACT_IDS = {
+    "DOCUMENTED": "71111111-1111-4111-8111-111111111111",
+    "API": "72222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "73333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "74444444-4444-4444-8444-444444444444",
+}
+
+
+def simulation_read_capability():
+    observed = READ_NOW - timedelta(minutes=1)
+    expires = READ_NOW + timedelta(minutes=10)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BINANCE",
+            account_id="acct-1",
+            entity_id="entity-1",
+            environment="SIMULATION",
+            instrument_version="BTCUSDT@1",
+            observed_at=observed,
+            expires_at=expires,
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="binance-simulation-v1",
+            data_entitlements=frozenset({"ACCOUNT"}),
+            evidence_ref={
+                "artifact_id": _SIMULATION_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "a" * 64,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=_SIMULATION_SNAPSHOT_ID,
+        claims=claims,
+        observed_at=READ_NOW,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
 def sealed_dividend(
     *,
     external_event_id="corp-1",
@@ -84,7 +138,7 @@ def sealed_dividend(
     pay_at=None,
 ):
     binding = prepare_authenticated_read_query(
-        capability=verified_read_capability(),
+        capability=simulation_read_capability(),
         surface=Surface.ACTIVITIES,
         endpoint=ENDPOINT,
         query={"symbol": "BTCUSDT"},
@@ -140,7 +194,7 @@ def resolve(
     instrument_registry=None,
     expected_provider_id="BINANCE",
     expected_account_id="acct-1",
-    expected_environment="PAPER",
+    expected_environment="SIMULATION",
 ):
     return resolve_authoritative_corporate_action(
         source.evidence_ref,
@@ -165,7 +219,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
 
         self.assertEqual(accepted.provider_id, "BINANCE")
         self.assertEqual(accepted.account_id, "acct-1")
-        self.assertEqual(accepted.environment, "PAPER")
+        self.assertEqual(accepted.environment, "SIMULATION")
         self.assertEqual(
             accepted.provider_instrument_version,
             source.query_binding.instrument_version,
@@ -179,6 +233,8 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(accepted.provenance_digest.startswith("sha256:"))
         self.assertEqual(len(accepted.provenance_digest), 71)
+        self.assertTrue(accepted.provider_fact_digest.startswith("sha256:"))
+        self.assertEqual(len(accepted.provider_fact_digest), 71)
 
         event = accepted.event
         self.assertIsInstance(event, CorporateEvent)
@@ -191,7 +247,8 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             event.payload,
             {"per_share": "1.25", "currency": "USDT"},
         )
-        self.assertIn(accepted.provenance_digest, event.source_revision)
+        self.assertIn(accepted.provider_fact_digest, event.source_revision)
+        self.assertNotIn(accepted.provenance_digest, event.source_revision)
 
     def test_resolution_is_deterministic_for_same_sealed_evidence(self):
         source = sealed_dividend()
@@ -199,6 +256,514 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         second = resolve(source)
         self.assertEqual(first, second)
         self.assertEqual(first.event, second.event)
+
+    def test_same_provider_fact_reobserved_later_keeps_stable_fact_identity(self):
+        first = resolve(sealed_dividend(observed_offset=2))
+        second = resolve(sealed_dividend(observed_offset=5))
+
+        self.assertNotEqual(first.evidence_ref, second.evidence_ref)
+        self.assertNotEqual(first.observed_at, second.observed_at)
+        self.assertNotEqual(first.provenance_digest, second.provenance_digest)
+        self.assertEqual(first.provider_fact_digest, second.provider_fact_digest)
+        self.assertEqual(first.event, second.event)
+
+    def test_same_revision_economic_change_changes_provider_fact_identity(self):
+        first = resolve(sealed_dividend(per_share="1.25"))
+        changed = resolve(sealed_dividend(per_share="2.00"))
+
+        self.assertNotEqual(first.provider_fact_digest, changed.provider_fact_digest)
+        self.assertNotEqual(first.event.source_revision, changed.event.source_revision)
+
+    def test_lifecycle_timestamp_change_changes_provider_fact_identity(self):
+        first = resolve(
+            sealed_dividend(
+                pay_at=READ_NOW + timedelta(days=1),
+            )
+        )
+        changed = resolve(
+            sealed_dividend(
+                pay_at=READ_NOW + timedelta(days=2),
+            )
+        )
+
+        self.assertNotEqual(first.provider_fact_digest, changed.provider_fact_digest)
+        self.assertNotEqual(first.event.source_revision, changed.event.source_revision)
+
+    def test_authoritative_projection_is_inert_and_requires_issuer_authority(self):
+        source = sealed_dividend()
+        accepted = resolve(source)
+
+        projection = authoritative_corporate_action_projection(accepted)
+        self.assertEqual(projection["provider_id"], "BINANCE")
+        self.assertEqual(projection["account_id"], "acct-1")
+        self.assertEqual(projection["external_event_id"], "corp-1")
+        self.assertEqual(
+            projection["provider_revision"],
+            accepted.provider_revision,
+        )
+        self.assertEqual(
+            projection["provenance_digest"],
+            accepted.provenance_digest,
+        )
+        self.assertEqual(
+            projection["provider_fact_digest"],
+            accepted.provider_fact_digest,
+        )
+        self.assertEqual(
+            dict(projection["payload"]),
+            {"per_share": "1.25", "currency": "USDT"},
+        )
+        with self.assertRaises(TypeError):
+            projection["provider_id"] = "FORGED"
+        with self.assertRaises(TypeError):
+            projection["payload"]["per_share"] = "999"
+
+        forged = AuthoritativeCorporateAction(**accepted.__dict__)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "lacks canonical resolver issuance authority",
+        ):
+            authoritative_corporate_action_projection(forged)
+
+    def test_provider_observation_subclass_is_rejected_before_attribute_access(self):
+        class ForgedObservation(ProviderResponseObservation):
+            @property
+            def evidence_ref(self):
+                raise AssertionError("subclass evidence_ref must not execute")
+
+            def require_scope(self, **_kwargs):
+                raise AssertionError("subclass require_scope must not execute")
+
+        forged = object.__new__(ForgedObservation)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "exact sealed ProviderResponseObservation",
+        ):
+            resolve_authoritative_corporate_action(
+                "evidence:forged",
+                evidence_resolver=lambda _reference: forged,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+    def test_provider_observation_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed source require_scope must not execute")
+
+        object.__setattr__(source, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "observation callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_query_binding_instance_scope_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        calls = []
+
+        def forged_scope(**_kwargs):
+            calls.append("called")
+            raise AssertionError("shadowed binding require_scope must not execute")
+
+        object.__setattr__(source.query_binding, "require_scope", forged_scope)
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "binding callback must not be shadowed",
+        ):
+            resolve(source)
+        self.assertEqual(calls, [])
+
+    def test_mutated_provider_payload_fails_before_hostile_mapping_dispatch(self):
+        source = sealed_dividend()
+
+        class HostilePayload(dict):
+            calls = 0
+
+            def _explode(self):
+                type(self).calls += 1
+                raise AssertionError("mutated payload must not be inspected")
+
+            def __iter__(self):
+                self._explode()
+
+            def items(self):
+                self._explode()
+
+            def get(self, *_args, **_kwargs):
+                self._explode()
+
+            def __getitem__(self, _key):
+                self._explode()
+
+        hostile = HostilePayload()
+        object.__setattr__(source, "payload", hostile)
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostilePayload.calls, 0)
+
+    def test_mutated_query_binding_fails_before_polymorphic_text_dispatch(self):
+        source = sealed_dividend()
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("mutated query text must not dispatch")
+
+        object.__setattr__(
+            source.query_binding,
+            "endpoint",
+            HostileText(ENDPOINT),
+        )
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "provider observation authority mismatch",
+        ):
+            resolve(source)
+        self.assertEqual(HostileText.calls, 0)
+
+    def test_late_resolver_authority_globals_do_not_rewrite_resolution(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "text": corporate_action_evidence_module._text,
+            "environments": corporate_action_evidence_module._ENVIRONMENTS,
+            "utc_text": corporate_action_evidence_module._utc_text,
+            "payload_digest": corporate_action_evidence_module.payload_digest,
+            "parser_id": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID,
+            "parser_version": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION,
+            "parser_digest": corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST,
+            "source_type": corporate_action_evidence_module.ProviderResponseObservation,
+            "surface": corporate_action_evidence_module.Surface,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoySource:
+            pass
+
+        class DecoySurface:
+            ACTIVITIES = object()
+
+        corporate_action_evidence_module._text = decoy("text")
+        corporate_action_evidence_module._ENVIRONMENTS = frozenset({"BROKEN"})
+        corporate_action_evidence_module._utc_text = decoy("utc_text")
+        corporate_action_evidence_module.payload_digest = decoy("payload_digest")
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = "forged-parser"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = "999.0.0"
+        corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+            "sha256:" + "f" * 64
+        )
+        corporate_action_evidence_module.ProviderResponseObservation = DecoySource
+        corporate_action_evidence_module.Surface = DecoySurface
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._text = originals["text"]
+            corporate_action_evidence_module._ENVIRONMENTS = originals["environments"]
+            corporate_action_evidence_module._utc_text = originals["utc_text"]
+            corporate_action_evidence_module.payload_digest = originals["payload_digest"]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_ID = originals[
+                "parser_id"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_VERSION = originals[
+                "parser_version"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_PARSER_CONTRACT_DIGEST = (
+                originals["parser_digest"]
+            )
+            corporate_action_evidence_module.ProviderResponseObservation = originals[
+                "source_type"
+            ]
+            corporate_action_evidence_module.Surface = originals["surface"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.provenance_digest, baseline.provenance_digest)
+        self.assertEqual(accepted.event.source_revision, baseline.event.source_revision)
+
+    def test_late_parser_helper_globals_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        baseline = resolve(source)
+        calls = []
+        originals = {
+            "datetime": corporate_action_evidence_module.datetime,
+            "timezone": corporate_action_evidence_module.timezone,
+            "mapping": corporate_action_evidence_module.Mapping,
+            "decimal": corporate_action_evidence_module.Decimal,
+            "mapping_proxy": corporate_action_evidence_module.MappingProxyType,
+            "reserved": corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS,
+            "kinds": corporate_action_evidence_module._KINDS,
+            "digest": corporate_action_evidence_module._DIGEST,
+        }
+
+        class DecoyDateTime:
+            @classmethod
+            def fromisoformat(cls, _value):
+                calls.append("datetime")
+                raise AssertionError("late datetime decoy must not execute")
+
+        class DecoyTimezone:
+            utc = object()
+
+        class DecoyDecimal:
+            pass
+
+        class DecoyDigest:
+            def fullmatch(self, _value):
+                calls.append("digest")
+                raise AssertionError("late digest decoy must not execute")
+
+        def decoy_mapping_proxy(_value):
+            calls.append("mapping_proxy")
+            raise AssertionError("late MappingProxyType decoy must not execute")
+
+        corporate_action_evidence_module.datetime = DecoyDateTime
+        corporate_action_evidence_module.timezone = DecoyTimezone
+        corporate_action_evidence_module.Mapping = object()
+        corporate_action_evidence_module.Decimal = DecoyDecimal
+        corporate_action_evidence_module.MappingProxyType = decoy_mapping_proxy
+        corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = frozenset()
+        corporate_action_evidence_module._KINDS = frozenset()
+        corporate_action_evidence_module._DIGEST = DecoyDigest()
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.datetime = originals["datetime"]
+            corporate_action_evidence_module.timezone = originals["timezone"]
+            corporate_action_evidence_module.Mapping = originals["mapping"]
+            corporate_action_evidence_module.Decimal = originals["decimal"]
+            corporate_action_evidence_module.MappingProxyType = originals[
+                "mapping_proxy"
+            ]
+            corporate_action_evidence_module._CORPORATE_ACTION_RESERVED_FIELDS = originals[
+                "reserved"
+            ]
+            corporate_action_evidence_module._KINDS = originals["kinds"]
+            corporate_action_evidence_module._DIGEST = originals["digest"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted, baseline)
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(
+            accepted.event.effective_at,
+            READ_NOW + timedelta(seconds=1),
+        )
+
+    def test_late_module_global_provider_projection_decoys_do_not_run(self):
+        source = sealed_dividend()
+        calls = []
+        original_projection = (
+            corporate_action_evidence_module.provider_response_observation_projection
+        )
+        original_scope = (
+            corporate_action_evidence_module.provider_response_observation_require_scope
+        )
+
+        def forged_projection(_source):
+            calls.append("projection")
+            raise AssertionError("late projection decoy must not execute")
+
+        def forged_scope(_source, **_kwargs):
+            calls.append("scope")
+            raise AssertionError("late scope decoy must not execute")
+
+        corporate_action_evidence_module.provider_response_observation_projection = (
+            forged_projection
+        )
+        corporate_action_evidence_module.provider_response_observation_require_scope = (
+            forged_scope
+        )
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.provider_response_observation_projection = (
+                original_projection
+            )
+            corporate_action_evidence_module.provider_response_observation_require_scope = (
+                original_scope
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.evidence_ref, source.evidence_ref)
+
+    def test_late_module_global_instrument_registry_cannot_replace_canonical_registry(self):
+        source = sealed_dividend()
+        calls = []
+        instrument = canonical_instrument()
+        original = corporate_action_evidence_module.InstrumentRegistry
+
+        class DecoyRegistry:
+            @staticmethod
+            def exact(_registry, _version_ref):
+                calls.append("exact")
+                return instrument
+
+            @staticmethod
+            def at(_registry, _instrument_id, _instant):
+                calls.append("at")
+                return instrument
+
+        corporate_action_evidence_module.InstrumentRegistry = DecoyRegistry
+        try:
+            with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+                resolve(
+                    source,
+                    instrument_registry=DecoyRegistry(),
+                )
+        finally:
+            corporate_action_evidence_module.InstrumentRegistry = original
+        self.assertEqual(calls, [])
+
+    def test_late_module_global_event_and_action_decoys_do_not_mint_authority(self):
+        source = sealed_dividend()
+        calls = []
+        original_event = corporate_action_evidence_module.CorporateEvent
+        original_action = corporate_action_evidence_module.AuthoritativeCorporateAction
+
+        class DecoyEvent:
+            @classmethod
+            def create(cls, **_kwargs):
+                calls.append("event")
+                raise AssertionError("late CorporateEvent decoy must not execute")
+
+        class DecoyAction:
+            def __init__(self, **_kwargs):
+                calls.append("action")
+                raise AssertionError(
+                    "late AuthoritativeCorporateAction decoy must not execute"
+                )
+
+        corporate_action_evidence_module.CorporateEvent = DecoyEvent
+        corporate_action_evidence_module.AuthoritativeCorporateAction = DecoyAction
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module.CorporateEvent = original_event
+            corporate_action_evidence_module.AuthoritativeCorporateAction = original_action
+
+        self.assertEqual(calls, [])
+        self.assertIs(type(accepted), AuthoritativeCorporateAction)
+        self.assertIs(type(accepted.event), CorporateEvent)
+
+    def test_late_module_global_parser_dependencies_do_not_rewrite_provider_fact(self):
+        source = sealed_dividend()
+        calls = []
+        originals = {
+            "parser": corporate_action_evidence_module._canonical_observation_from_sealed_response,
+            "observation": corporate_action_evidence_module.CorporateActionObservation,
+            "instant": corporate_action_evidence_module._provider_instant,
+            "exact_payload": corporate_action_evidence_module._exact_payload,
+            "utc": corporate_action_evidence_module._utc,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late {name} decoy must not execute")
+            return fail
+
+        class DecoyObservation:
+            def __init__(self, **_kwargs):
+                calls.append("observation")
+                raise AssertionError("late observation decoy must not execute")
+
+        corporate_action_evidence_module._canonical_observation_from_sealed_response = decoy(
+            "parser"
+        )
+        corporate_action_evidence_module.CorporateActionObservation = DecoyObservation
+        corporate_action_evidence_module._provider_instant = decoy("instant")
+        corporate_action_evidence_module._exact_payload = decoy("exact_payload")
+        corporate_action_evidence_module._utc = decoy("utc")
+        try:
+            accepted = resolve(source)
+        finally:
+            corporate_action_evidence_module._canonical_observation_from_sealed_response = (
+                originals["parser"]
+            )
+            corporate_action_evidence_module.CorporateActionObservation = originals[
+                "observation"
+            ]
+            corporate_action_evidence_module._provider_instant = originals["instant"]
+            corporate_action_evidence_module._exact_payload = originals["exact_payload"]
+            corporate_action_evidence_module._utc = originals["utc"]
+
+        self.assertEqual(calls, [])
+        self.assertEqual(accepted.event.payload["per_share"], "1.25")
+        self.assertEqual(accepted.event.effective_at, READ_NOW + timedelta(seconds=1))
+
+    def test_instrument_registry_subclass_is_rejected_before_registry_dispatch(self):
+        class ForgedRegistry(InstrumentRegistry):
+            def exact(self, _version_ref):
+                raise AssertionError("subclass exact must not execute")
+
+            def at(self, _instrument_id, _at):
+                raise AssertionError("subclass at must not execute")
+
+        source = sealed_dividend()
+        forged = ForgedRegistry(versions=(canonical_instrument(),))
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            resolve(
+                source,
+                instrument_registry=forged,
+            )
+
+    def test_instrument_registry_instance_shadow_is_rejected_before_dispatch(self):
+        source = sealed_dividend()
+        registry = canonical_registry()
+        registry.exact = lambda _version_ref: (_ for _ in ()).throw(
+            AssertionError("shadowed exact must not execute")
+        )
+        registry.at = lambda _instrument_id, _at: (_ for _ in ()).throw(
+            AssertionError("shadowed at must not execute")
+        )
+
+        with self.assertRaisesRegex(TypeError, "must not be shadowed"):
+            resolve(
+                source,
+                instrument_registry=registry,
+            )
+
+    def test_allowed_endpoints_subclass_is_rejected_before_iteration(self):
+        class ForgedEndpoints(frozenset):
+            def __iter__(self):
+                raise AssertionError("subclass iteration must not execute")
+
+        source = sealed_dividend()
+        with self.assertRaisesRegex(TypeError, "exact non-empty frozenset"):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver={source.evidence_ref: source}.__getitem__,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="SIMULATION",
+                allowed_endpoints=ForgedEndpoints({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
 
     def test_locally_constructed_event_is_not_provider_evidence(self):
         local = CorporateEvent.create(
@@ -220,7 +785,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_registry=canonical_registry(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -230,12 +795,124 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
         for field, value in (
             ("expected_provider_id", "ALPACA"),
             ("expected_account_id", "other-account"),
-            ("expected_environment", "LIVE"),
+            ("expected_environment", "REPLAY"),
         ):
             with self.subTest(field=field), self.assertRaisesRegex(
                 CorporateActionEvidenceError, "scope mismatch"
             ):
                 resolve(source, **{field: value})
+
+    def test_paper_and_live_require_provider_origin_before_resolver_callback(self):
+        source = sealed_dividend()
+        for environment in ("PAPER", "LIVE"):
+            calls = []
+
+            def resolver(reference):
+                calls.append(reference)
+                return source
+
+            with self.subTest(environment=environment), self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "PAPER/LIVE corporate actions require durable provider-origin authority",
+            ):
+                resolve_authoritative_corporate_action(
+                    source.evidence_ref,
+                    evidence_resolver=resolver,
+                    instrument_registry=canonical_registry(),
+                    expected_provider_id="BINANCE",
+                    expected_account_id="acct-1",
+                    expected_environment=environment,
+                    allowed_endpoints=frozenset({ENDPOINT}),
+                    permission_scope="ORDER.READ",
+                )
+            self.assertEqual(calls, [])
+
+    def test_production_firebreak_rejects_polymorphic_environment_without_callbacks(self):
+        source = sealed_dividend()
+        resolver_calls = []
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile upper dispatched")
+
+        def resolver(reference):
+            resolver_calls.append(reference)
+            return source
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError,
+            "expected_environment must be canonical exact text",
+        ):
+            resolve_authoritative_corporate_action(
+                source.evidence_ref,
+                evidence_resolver=resolver,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment=HostileText("PAPER"),
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(HostileText.calls, 0)
+        self.assertEqual(resolver_calls, [])
+
+    def test_authority_selector_text_subclasses_reject_before_callbacks_and_resolution(self):
+        source = sealed_dividend()
+
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile upper dispatched")
+
+        cases = (
+            ("evidence_ref", HostileText(source.evidence_ref)),
+            ("expected_provider_id", HostileText("BINANCE")),
+            ("expected_account_id", HostileText("acct-1")),
+            ("permission_scope", HostileText("ORDER.READ")),
+        )
+        for field, hostile in cases:
+            resolver_calls = []
+
+            def resolver(reference):
+                resolver_calls.append(reference)
+                return source
+
+            kwargs = {
+                "evidence_resolver": resolver,
+                "instrument_registry": canonical_registry(),
+                "expected_provider_id": "BINANCE",
+                "expected_account_id": "acct-1",
+                "expected_environment": "SIMULATION",
+                "allowed_endpoints": frozenset({ENDPOINT}),
+                "permission_scope": "ORDER.READ",
+            }
+            reference = source.evidence_ref
+            if field == "evidence_ref":
+                reference = hostile
+            else:
+                kwargs[field] = hostile
+
+            before = HostileText.calls
+            with self.subTest(field=field), self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "canonical exact text",
+            ):
+                resolve_authoritative_corporate_action(reference, **kwargs)
+            self.assertEqual(HostileText.calls, before)
+            self.assertEqual(resolver_calls, [])
 
     def test_arbitrary_normalizer_cannot_become_financial_authority(self):
         source = sealed_dividend()
@@ -244,7 +921,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             return CorporateActionObservation(
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -266,7 +943,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 normalizer=forged,
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -309,7 +986,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_resolver=lambda _observation: canonical_instrument(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({ENDPOINT}),
                 permission_scope="ORDER.READ",
             )
@@ -349,7 +1026,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
                 instrument_registry=canonical_registry(),
                 expected_provider_id="BINANCE",
                 expected_account_id="acct-1",
-                expected_environment="PAPER",
+                expected_environment="SIMULATION",
                 allowed_endpoints=frozenset({"/different/activity"}),
                 permission_scope="ORDER.READ",
             )
@@ -369,7 +1046,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             CorporateActionObservation(
                 provider_id="BINANCE",
                 account_id="acct-1",
-                environment="PAPER",
+                environment="SIMULATION",
                 provider_instrument_version=source.query_binding.instrument_version,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
@@ -431,9 +1108,434 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             journal,
             provider_id="BINANCE",
             account_id=account_id,
-            environment="PAPER",
+            environment="SIMULATION",
         )
         return journal, durable
+
+    def test_prepared_mutation_uses_detached_issued_action_snapshot(self):
+        accepted = self._accepted()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            _journal, durable = self._store(path)
+            plan = durable.prepare_record_mutation(accepted)
+
+        self.assertIsNot(plan.accepted, accepted)
+        self.assertIsNot(plan.accepted.event, accepted.event)
+        self.assertEqual(plan.accepted, accepted)
+
+        accepted.event.payload["per_share"] = "999"
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        self.assertEqual(plan.accepted.provider_revision, "1")
+        self.assertEqual(plan.accepted.event.payload["per_share"], "1.25")
+
+    def test_module_global_decoys_cannot_mint_or_verify_corporate_action_authority(self):
+        decoy_calls = []
+        corporate_action_evidence_module._register_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("register")
+        )
+        corporate_action_evidence_module._require_authoritative_corporate_action = (
+            lambda _value: decoy_calls.append("require")
+        )
+        corporate_action_evidence_module._resolve_authoritative_corporate_action_impl = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("decoy resolver implementation must not execute")
+            )
+        )
+        try:
+            issued = self._accepted()
+            self.assertEqual(decoy_calls, [])
+            forged = AuthoritativeCorporateAction(**issued.__dict__)
+            with TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                journal, durable = self._store(path)
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError,
+                    "lacks canonical resolver issuance authority",
+                ):
+                    durable.record(forged)
+                self.assertEqual(decoy_calls, [])
+                self.assertEqual(
+                    journal.load_events(
+                        "corporate_action_evidence",
+                        durable.aggregate_id,
+                    ),
+                    [],
+                )
+        finally:
+            del corporate_action_evidence_module._register_authoritative_corporate_action
+            del corporate_action_evidence_module._require_authoritative_corporate_action
+            del corporate_action_evidence_module._resolve_authoritative_corporate_action_impl
+
+    def test_instance_shadowed_durable_policy_and_helpers_cannot_redirect_record(self):
+        accepted = self._accepted()
+        calls = []
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"instance {name} decoy must not execute")
+            return fail
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            durable._AGGREGATE_TYPE = "forged_aggregate"
+            durable._EVENT_TYPE = "ForgedEvent"
+            durable._ACTOR = "forged-actor"
+            durable._composition = decoy("composition")
+            durable._events = decoy("events")
+            durable._payload = decoy("payload")
+            durable._command_id = decoy("command_id")
+            durable._idempotency_key = decoy("idempotency_key")
+            durable.prepare_record_mutation = decoy("prepare_record_mutation")
+
+            result = DurableCorporateActionEvidenceStore.record(
+                durable,
+                accepted,
+            )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                durable.aggregate_id,
+            )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["event_type"],
+            "CorporateActionEvidenceAccepted",
+        )
+        self.assertEqual(events[0]["aggregate_type"], "corporate_action_evidence")
+
+    def test_late_module_global_store_decoy_cannot_redirect_existing_exact_store(self):
+        accepted = self._accepted()
+        calls = []
+        original = corporate_action_evidence_module.DurableCorporateActionEvidenceStore
+
+        class DecoyStore:
+            _AGGREGATE_TYPE = "forged_aggregate"
+            _EVENT_TYPE = "ForgedEvent"
+            _ACTOR = "forged-actor"
+
+            @staticmethod
+            def _composition(*_args, **_kwargs):
+                calls.append("composition")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _events(*_args, **_kwargs):
+                calls.append("events")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _payload(*_args, **_kwargs):
+                calls.append("payload")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _command_id(*_args, **_kwargs):
+                calls.append("command_id")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def _idempotency_key(*_args, **_kwargs):
+                calls.append("idempotency_key")
+                raise AssertionError("late store decoy must not execute")
+
+            @staticmethod
+            def prepare_record_mutation(*_args, **_kwargs):
+                calls.append("prepare")
+                raise AssertionError("late store decoy must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            corporate_action_evidence_module.DurableCorporateActionEvidenceStore = (
+                DecoyStore
+            )
+            try:
+                result = DurableCorporateActionEvidenceStore.record(
+                    durable,
+                    accepted,
+                )
+            finally:
+                corporate_action_evidence_module.DurableCorporateActionEvidenceStore = (
+                    original
+                )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                durable.aggregate_id,
+            )
+
+        self.assertTrue(result.inserted)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["event_type"],
+            "CorporateActionEvidenceAccepted",
+        )
+
+    def test_late_binding_retarget_cannot_move_existing_store_authority(self):
+        accepted = self._accepted()
+        calls = []
+        self.assertFalse(
+            hasattr(
+                corporate_action_evidence_module,
+                "_durable_corporate_action_store_binding",
+            )
+        )
+
+        with TemporaryDirectory() as first, TemporaryDirectory() as second:
+            first_path = f"{first}/journal.sqlite3"
+            second_path = f"{second}/journal.sqlite3"
+            first_journal, durable = self._store(first_path)
+            second_journal, alternate = self._store(second_path)
+            first_aggregate = DurableCorporateActionEvidenceStore._composition(
+                durable
+            )[5]
+            (
+                alternate_store,
+                alternate_identity,
+                alternate_provider,
+                alternate_account,
+                alternate_environment,
+                alternate_aggregate,
+            ) = DurableCorporateActionEvidenceStore._composition(alternate)
+
+            def forged_binding(_value):
+                calls.append("binding")
+                return (
+                    alternate_store,
+                    alternate_identity,
+                    alternate_provider,
+                    alternate_account,
+                    alternate_environment,
+                    alternate_aggregate,
+                )
+
+            corporate_action_evidence_module._durable_corporate_action_store_binding = (
+                forged_binding
+            )
+            durable.store = alternate_store
+            durable._store_identity = alternate_identity
+            durable.provider_id = alternate_provider
+            durable.account_id = alternate_account
+            durable.environment = alternate_environment
+            durable.aggregate_id = alternate_aggregate
+            try:
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceConflict,
+                    "composition was modified",
+                ):
+                    DurableCorporateActionEvidenceStore.record(
+                        durable,
+                        accepted,
+                    )
+            finally:
+                del corporate_action_evidence_module._durable_corporate_action_store_binding
+
+            first_events = first_journal.load_events(
+                "corporate_action_evidence",
+                first_aggregate,
+            )
+            second_events = second_journal.load_events(
+                "corporate_action_evidence",
+                alternate_aggregate,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(first_events, [])
+        self.assertEqual(second_events, [])
+
+    def test_raw_construction_helpers_are_private_and_object_new_cannot_mint_store(self):
+        accepted = self._accepted()
+        for name in (
+            "_require_unbound_durable_corporate_action_store",
+            "_register_durable_corporate_action_store",
+            "_durable_corporate_action_store_binding",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(corporate_action_evidence_module, name))
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, legitimate = self._store(path)
+            (
+                store,
+                store_identity,
+                provider_id,
+                account_id,
+                environment,
+                aggregate_id,
+            ) = DurableCorporateActionEvidenceStore._composition(legitimate)
+
+            forged = object.__new__(DurableCorporateActionEvidenceStore)
+            forged.store = store
+            forged._store_identity = store_identity
+            forged.provider_id = provider_id
+            forged.account_id = account_id
+            forged.environment = environment
+            forged.aggregate_id = aggregate_id
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceConflict,
+                "process binding is unavailable",
+            ):
+                DurableCorporateActionEvidenceStore.record(
+                    forged,
+                    accepted,
+                )
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                aggregate_id,
+            )
+
+        self.assertEqual(events, [])
+
+    def test_late_durable_identity_globals_do_not_rewrite_event_identity(self):
+        accepted = self._accepted()
+        calls = []
+
+        with TemporaryDirectory() as baseline_dir:
+            baseline_path = f"{baseline_dir}/journal.sqlite3"
+            _baseline_journal, baseline_store = self._store(baseline_path)
+            baseline = DurableCorporateActionEvidenceStore.record(
+                baseline_store,
+                accepted,
+            )
+
+        originals = {
+            "uuid5": corporate_action_evidence_module.uuid5,
+            "namespace": corporate_action_evidence_module.NAMESPACE_URL,
+            "payload_digest": corporate_action_evidence_module.payload_digest,
+            "utc_text": corporate_action_evidence_module._utc_text,
+        }
+
+        def decoy(name):
+            def fail(*_args, **_kwargs):
+                calls.append(name)
+                raise AssertionError(f"late durable {name} decoy must not execute")
+            return fail
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            aggregate_id = durable.aggregate_id
+            corporate_action_evidence_module.uuid5 = decoy("uuid5")
+            corporate_action_evidence_module.NAMESPACE_URL = object()
+            corporate_action_evidence_module.payload_digest = decoy("payload_digest")
+            corporate_action_evidence_module._utc_text = decoy("utc_text")
+            try:
+                result = DurableCorporateActionEvidenceStore.record(
+                    durable,
+                    accepted,
+                )
+            finally:
+                corporate_action_evidence_module.uuid5 = originals["uuid5"]
+                corporate_action_evidence_module.NAMESPACE_URL = originals["namespace"]
+                corporate_action_evidence_module.payload_digest = originals[
+                    "payload_digest"
+                ]
+                corporate_action_evidence_module._utc_text = originals["utc_text"]
+
+            events = journal.load_events(
+                "corporate_action_evidence",
+                aggregate_id,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(result.event_id, baseline.event_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            events[0]["payload"]["effective_at"],
+            accepted.event.effective_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    def test_manually_constructed_authoritative_action_cannot_reach_durable_store(self):
+        issued = self._accepted()
+        forged = AuthoritativeCorporateAction(**issued.__dict__)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "lacks canonical resolver issuance authority",
+            ):
+                durable.record(forged)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_issuance_event_payload_mutation_is_rejected_before_journal_mutation(self):
+        accepted = self._accepted()
+        accepted.event.payload["per_share"] = "999"
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "changed after resolver issuance",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_equal_polymorphic_scalar_cannot_replace_issued_exact_text(self):
+        class EqualText(str):
+            pass
+
+        accepted = self._accepted()
+        object.__setattr__(
+            accepted,
+            "provider_revision",
+            EqualText(accepted.provider_revision),
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "provider_revision must remain exact text",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
+
+    def test_post_issuance_action_mutation_is_rejected_before_journal_mutation(self):
+        accepted = self._accepted()
+        object.__setattr__(accepted, "provider_revision", "forged-revision")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal, durable = self._store(path)
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError,
+                "changed after resolver issuance",
+            ):
+                durable.record(accepted)
+            self.assertEqual(
+                journal.load_events(
+                    "corporate_action_evidence",
+                    durable.aggregate_id,
+                ),
+                [],
+            )
 
     def test_evidence_is_exactly_once_across_restart(self):
         accepted = self._accepted()
@@ -642,7 +1744,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     ForgedJournalStore(path),
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
     def test_construction_time_journal_method_shadow_is_rejected(self):
@@ -655,7 +1757,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     journal,
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
     def test_post_construction_journal_shadow_fails_before_mutation(self):
@@ -805,7 +1907,7 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
                     journal,
                     provider_id="BINANCE",
                     account_id="acct-1",
-                    environment="PAPER",
+                    environment="SIMULATION",
                 )
 
 

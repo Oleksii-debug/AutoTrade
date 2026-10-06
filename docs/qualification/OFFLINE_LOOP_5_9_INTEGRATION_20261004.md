@@ -67,6 +67,14 @@
 13. Початкові гроші отримують детермінований committed_at: start time для
     autonomous loop і одну microsecond перед query для single-episode bootstrap.
     Фізичний час запуску процесу більше не стає часом simulated seed economics.
+14. Post-merge audit виявив, що autonomous policy registration ще читала
+    фізичний час. Вона тепер використовує наявний SIMULATION-only
+    `AuthorityService.register_policy(..., simulation_time=timestamp)`.
+    Регресія забороняє wall-clock read для durable policy registration і вимагає
+    однакових policy event IDs, timestamps та payload hashes після uninterrupted
+    і paused/resumed запусків для обох execution profiles.
+    Це draft continuation: фінальний результат прогону не підтверджено після
+    втрати відповіді execution service; новий PASS не заявлено.
 
 Приклад того самого продуктового CLI, без іншого engine:
 

@@ -161,6 +161,47 @@ class ContractSchemaTests(unittest.TestCase):
     def test_dataset_manifest_fixture(self):
         self.validate("data.schema.json", "DatasetManifest", json.loads((FIXTURES / "dataset-manifest.valid.json").read_text()))
 
+    def test_dataset_manifest_requires_non_empty_source_evidence(self):
+        fixture = json.loads((FIXTURES / "dataset-manifest.valid.json").read_text())
+        schema = self.schemas["data.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/DatasetManifest"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        self.assertTrue(validator.is_valid(fixture))
+        candidate = json.loads(json.dumps(fixture))
+        candidate["source_evidence"] = []
+        self.assertFalse(validator.is_valid(candidate))
+
+    def test_market_event_adapter_version_is_required_and_canonical(self):
+        fixture = json.loads((FIXTURES / "market-event.valid.json").read_text())
+        schema = self.schemas["market.schema.json"]
+        validator = Draft202012Validator(
+            {"$ref": f"{schema['$id']}#/$defs/MarketEvent"},
+            registry=self.registry,
+            format_checker=FormatChecker(),
+        )
+        self.assertTrue(validator.is_valid(fixture))
+
+        missing = dict(fixture)
+        missing.pop("adapter_version")
+        self.assertFalse(validator.is_valid(missing))
+
+        for invalid in (
+            "",
+            " leading",
+            "trailing ",
+            "contains space",
+            r"adapter\build",
+            "x" * 129,
+            "valid-token@1\n",
+        ):
+            candidate = dict(fixture)
+            candidate["adapter_version"] = invalid
+            with self.subTest(adapter_version=repr(invalid)):
+                self.assertFalse(validator.is_valid(candidate))
+
     def test_ui_command_fixture(self):
         self.validate("ui.schema.json", "UiCommand", json.loads((FIXTURES / "ui-command.valid.json").read_text()))
 
@@ -191,6 +232,13 @@ class ContractSchemaTests(unittest.TestCase):
         schema = self.schemas["ui.schema.json"]
         validator = Draft202012Validator({"$ref": f"{schema['$id']}#/$defs/UiCommand"}, registry=self.registry)
         self.assertFalse(validator.is_valid(fixture))
+
+    def test_ui_snapshot_sequences_share_canonical_sequence_contract(self):
+        schema = self.schemas["ui.schema.json"]
+        properties = schema["$defs"]["UiSnapshot"]["properties"]
+        canonical = {"$ref": "common.schema.json#/$defs/Sequence"}
+        self.assertEqual(properties["state_version"], canonical)
+        self.assertEqual(properties["event_cursor"], canonical)
 
     def test_ui_snapshot_and_command_share_public_session_reference_contract(self):
         schema = self.schemas["ui.schema.json"]

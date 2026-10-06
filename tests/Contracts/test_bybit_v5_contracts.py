@@ -118,11 +118,12 @@ def durable_submission(payload, *, intent_id):
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
-                ExactJsonTransportResponse(raw),
+                ExactJsonTransportResponse(raw, http_status=200),
             )[1],
             sender_check=lambda _owner, _epoch: None,
             submission_scope={
                 "endpoint": prepared.endpoint,
+                "provider_environment": prepared.provider_environment,
                 "prepared_request_sha256": prepared.body_sha256,
                 "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
                 "instrument_versions": list(prepared.instrument_versions),

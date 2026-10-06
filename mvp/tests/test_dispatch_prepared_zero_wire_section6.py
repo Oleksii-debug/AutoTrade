@@ -1,0 +1,604 @@
+"""Section-6 zero-wire recovery at the durable Prepared/send boundary."""
+
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.persistence import JournalStore
+
+
+class _ProcessDeath(BaseException):
+    pass
+
+
+class PreparedZeroWireSection6Tests(unittest.TestCase):
+    @staticmethod
+    def authority(_intent_hash, _now):
+        return True, "allowed"
+
+    @staticmethod
+    def _dispatcher(store, *, owner):
+        return GuardedDispatcher(
+            store,
+            environment="SIMULATION",
+            account_id="section6-account",
+            owner_token=owner,
+            prepared_lease_seconds=1,
+        )
+
+    def _leave_prepared(self, dispatcher):
+        def crash_before_guard(_client_order_id, _request, _final_guard):
+            raise _ProcessDeath("crash-before-final-send-guard")
+
+        with self.assertRaisesRegex(
+            _ProcessDeath,
+            "crash-before-final-send-guard",
+        ):
+            dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                authority_check=self.authority,
+                transport_send=crash_before_guard,
+            )
+        events = dispatcher._events("section6-attempt")
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            ["SubmissionPrepared"],
+        )
+
+    def test_prepared_lease_requires_exact_builtin_integer(self):
+        class HostileLease(int):
+            callbacks = 0
+
+            def __lt__(self, other):
+                type(self).callbacks += 1
+                raise AssertionError("hostile lease comparison executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            with self.assertRaisesRegex(
+                ValueError,
+                "prepared_lease_seconds must be a positive exact integer",
+            ):
+                GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="section6-account",
+                    owner_token="owner-a",
+                    prepared_lease_seconds=HostileLease(1),
+                )
+        self.assertEqual(HostileLease.callbacks, 0)
+
+    def test_prepared_lease_large_exact_integer_does_not_overflow(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="section6-account",
+                owner_token="owner-a",
+                prepared_lease_seconds=10**30,
+            )
+            self._leave_prepared(dispatcher)
+
+            recovered = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="9999-12-31T23:59:59.999999Z",
+                authority_check=lambda *_args: self.fail(
+                    "large-lease recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "large-lease recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(recovered.status, "IN_PROGRESS")
+            self.assertEqual(recovered.reason, "prepared_owner_lease_active")
+
+    def test_prepared_lease_exact_microsecond_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="section6-account",
+                owner_token="owner-a",
+                prepared_lease_seconds=60,
+            )
+            self._leave_prepared(dispatcher)
+
+            before = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:59.999999Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "pre-expiry recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(before.status, "IN_PROGRESS")
+            self.assertEqual(before.reason, "prepared_owner_lease_active")
+
+            at_boundary = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:01:00Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "expiry-boundary recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(at_boundary.status, "BLOCKED")
+            self.assertEqual(
+                at_boundary.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+
+    def test_active_prepared_lease_remains_in_progress_and_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="owner-a")
+            self._leave_prepared(dispatcher)
+            result = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                authority_check=lambda *_args: self.fail(
+                    "active Prepared recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "active Prepared recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(result.status, "IN_PROGRESS")
+            self.assertEqual(result.reason, "prepared_owner_lease_active")
+            self.assertEqual(
+                [event["event_type"] for event in dispatcher._events("section6-attempt")],
+                ["SubmissionPrepared"],
+            )
+
+    def test_expired_prepared_terminalizes_blocked_without_wire(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="owner-a")
+            self._leave_prepared(dispatcher)
+            result = dispatcher.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:02Z",
+                authority_check=lambda *_args: self.fail(
+                    "expired Prepared recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "expired Prepared recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            events = dispatcher._events("section6-attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertNotIn(
+                "SubmissionSending",
+                [event["event_type"] for event in events],
+            )
+            self.assertNotIn(
+                "SubmissionUnknown",
+                [event["event_type"] for event in events],
+            )
+
+    def test_multiple_recovery_owners_converge_on_one_blocked_terminal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            first_recovery = self._dispatcher(store, owner="recovery-a")
+            second_recovery = self._dispatcher(store, owner="recovery-b")
+            self._leave_prepared(original)
+
+            first = first_recovery.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:02Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "first recovery reached provider transport"
+                ),
+            )
+            second = second_recovery.dispatch(
+                attempt_id="section6-attempt",
+                intent_id="section6-intent",
+                intent_hash="section6-intent-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:03Z",
+                authority_check=self.authority,
+                transport_send=lambda *_args: self.fail(
+                    "second recovery reached provider transport"
+                ),
+            )
+
+            self.assertEqual(first.status, "BLOCKED")
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertEqual(
+                first.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(second.reason, first.reason)
+            self.assertEqual(
+                [event["event_type"] for event in original._events("section6-attempt")],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+    def test_send_barrier_winning_recovery_cas_converges_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery = self._dispatcher(store, owner="recovery-owner")
+            recovery_results = []
+
+            def transport(_client_order_id, _request, final_guard):
+                recovery_append = recovery._append
+
+                def racing_append(*, attempt_id, event_type, version, payload, now):
+                    if event_type == "SubmissionBlocked":
+                        # Force the opposite race ordering from the BLOCKED-wins
+                        # regression: Sending commits after recovery read Prepared
+                        # but before recovery can commit its version-2 Blocked.
+                        final_guard()
+                    return recovery_append(
+                        attempt_id=attempt_id,
+                        event_type=event_type,
+                        version=version,
+                        payload=payload,
+                        now=now,
+                    )
+
+                with patch.object(recovery, "_append", side_effect=racing_append):
+                    recovered = recovery.dispatch(
+                        attempt_id="section6-send-wins",
+                        intent_id="section6-send-wins-intent",
+                        intent_hash="section6-send-wins-hash",
+                        provider="simulated",
+                        request={"quantity": "1"},
+                        now="2026-10-06T10:00:02Z",
+                        authority_check=self.authority,
+                        transport_send=lambda *_args: self.fail(
+                            "recovery reached provider transport"
+                        ),
+                    )
+                recovery_results.append(recovered)
+                raise _ProcessDeath("crash-after-send-barrier-before-wire")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-send-barrier-before-wire",
+            ):
+                original.dispatch(
+                    attempt_id="section6-send-wins",
+                    intent_id="section6-send-wins-intent",
+                    intent_hash="section6-send-wins-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=transport,
+                )
+
+            self.assertEqual(len(recovery_results), 1)
+            self.assertEqual(recovery_results[0].status, "UNKNOWN")
+            self.assertEqual(
+                recovery_results[0].reason,
+                "recovered_after_send_barrier_without_terminal_result",
+            )
+            events = original._events("section6-send-wins")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertNotIn(
+                "SubmissionBlocked",
+                [event["event_type"] for event in events],
+            )
+
+    def test_sending_recovery_clock_cannot_move_terminal_before_send_barrier(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery = self._dispatcher(store, owner="recovery-owner")
+
+            def crash_after_guard(_client_order_id, _request, final_guard):
+                final_guard()
+                raise _ProcessDeath("crash-after-final-send-guard")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-final-send-guard",
+            ):
+                original.dispatch(
+                    attempt_id="section6-sending-clock",
+                    intent_id="section6-sending-clock-intent",
+                    intent_hash="section6-sending-clock-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=crash_after_guard,
+                )
+
+            recovered = recovery.dispatch(
+                attempt_id="section6-sending-clock",
+                intent_id="section6-sending-clock-intent",
+                intent_hash="section6-sending-clock-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T09:59:00Z",
+                authority_check=lambda *_args: self.fail(
+                    "Sending recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "Sending recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            events = original._events("section6-sending-clock")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[2]["committed_at"],
+                events[1]["committed_at"],
+            )
+            self.assertGreaterEqual(
+                events[2]["journal_sequence"],
+                events[1]["journal_sequence"],
+            )
+
+    def test_concurrent_sending_recoveries_converge_on_one_unknown_terminal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery_a = self._dispatcher(store, owner="recovery-a")
+            recovery_b = self._dispatcher(store, owner="recovery-b")
+
+            def crash_after_guard(_client_order_id, _request, final_guard):
+                final_guard()
+                raise _ProcessDeath("crash-after-final-send-guard")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-final-send-guard",
+            ):
+                original.dispatch(
+                    attempt_id="section6-sending-recovery",
+                    intent_id="section6-sending-recovery-intent",
+                    intent_hash="section6-sending-recovery-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=crash_after_guard,
+                )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in original._events("section6-sending-recovery")
+                ],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+
+            recovery_b_results = []
+            recovery_a_append = recovery_a._append
+
+            def racing_unknown_append(*, attempt_id, event_type, version, payload, now):
+                if event_type == "SubmissionUnknown":
+                    recovery_b_results.append(
+                        recovery_b.dispatch(
+                            attempt_id="section6-sending-recovery",
+                            intent_id="section6-sending-recovery-intent",
+                            intent_hash="section6-sending-recovery-hash",
+                            provider="simulated",
+                            request={"quantity": "1"},
+                            now="2026-10-06T10:00:02Z",
+                            authority_check=lambda *_args: self.fail(
+                                "Sending recovery B repeated authority"
+                            ),
+                            transport_send=lambda *_args: self.fail(
+                                "Sending recovery B reached provider transport"
+                            ),
+                        )
+                    )
+                return recovery_a_append(
+                    attempt_id=attempt_id,
+                    event_type=event_type,
+                    version=version,
+                    payload=payload,
+                    now=now,
+                )
+
+            with patch.object(
+                recovery_a,
+                "_append",
+                side_effect=racing_unknown_append,
+            ):
+                recovered_a = recovery_a.dispatch(
+                    attempt_id="section6-sending-recovery",
+                    intent_id="section6-sending-recovery-intent",
+                    intent_hash="section6-sending-recovery-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:02Z",
+                    authority_check=lambda *_args: self.fail(
+                        "Sending recovery A repeated authority"
+                    ),
+                    transport_send=lambda *_args: self.fail(
+                        "Sending recovery A reached provider transport"
+                    ),
+                )
+
+            self.assertEqual(len(recovery_b_results), 1)
+            self.assertEqual(recovery_b_results[0].status, "UNKNOWN")
+            self.assertEqual(recovered_a.status, "UNKNOWN")
+            self.assertEqual(recovered_a.reason, recovery_b_results[0].reason)
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in original._events("section6-sending-recovery")
+                ],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+
+    def test_original_final_guard_cannot_send_after_prepared_lease_expiry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="original-owner")
+            wire_sends = []
+
+            def transport(client_order_id, _request, final_guard):
+                final_guard()
+                wire_sends.append(client_order_id)
+                return {"provider_order_id": "must-not-exist"}
+
+            result = dispatcher.dispatch(
+                attempt_id="section6-stale-owner",
+                intent_id="section6-stale-owner-intent",
+                intent_hash="section6-stale-owner-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                final_barrier_clock=lambda: "2026-10-06T10:00:01Z",
+                authority_check=self.authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(wire_sends, [])
+            events = dispatcher._events("section6-stale-owner")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            self.assertEqual(
+                events[-1]["committed_at"],
+                "2026-10-06T10:00:01Z",
+            )
+
+    def test_original_final_guard_remains_sendable_immediately_before_lease_expiry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = self._dispatcher(store, owner="original-owner")
+            wire_sends = []
+
+            def transport(client_order_id, _request, final_guard):
+                final_guard()
+                wire_sends.append(client_order_id)
+                return {"provider_order_id": "simulated-1"}
+
+            result = dispatcher.dispatch(
+                attempt_id="section6-live-owner",
+                intent_id="section6-live-owner-intent",
+                intent_hash="section6-live-owner-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                final_barrier_clock=lambda: "2026-10-06T10:00:00.999999Z",
+                authority_check=self.authority,
+                transport_send=transport,
+            )
+
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(len(wire_sends), 1)
+            self.assertEqual(
+                [event["event_type"] for event in dispatcher._events("section6-live-owner")],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+
+    def test_recovery_fence_blocks_late_original_final_guard_before_wire(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery = self._dispatcher(store, owner="recovery-owner")
+            recovery_results = []
+            wire_sends = []
+
+            def transport(client_order_id, _request, final_guard):
+                recovered = recovery.dispatch(
+                    attempt_id="section6-race",
+                    intent_id="section6-race-intent",
+                    intent_hash="section6-race-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:02Z",
+                    authority_check=self.authority,
+                    transport_send=lambda *_args: self.fail(
+                        "recovery reached provider transport"
+                    ),
+                )
+                recovery_results.append(recovered)
+                final_guard()
+                wire_sends.append(client_order_id)
+                return {"provider_order_id": "must-not-exist"}
+
+            result = original.dispatch(
+                attempt_id="section6-race",
+                intent_id="section6-race-intent",
+                intent_hash="section6-race-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T10:00:00Z",
+                authority_check=self.authority,
+                transport_send=transport,
+            )
+            self.assertEqual(len(recovery_results), 1)
+            self.assertEqual(recovery_results[0].status, "BLOCKED")
+            self.assertEqual(
+                recovery_results[0].reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(
+                result.reason,
+                "prepared_owner_lease_expired_before_send",
+            )
+            self.assertEqual(wire_sends, [])
+            events = original._events("section6-race")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

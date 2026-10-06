@@ -2,15 +2,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import mvp.autotrade_mvp._provider_activity_accounting_impl as provider_accounting_impl
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
     book_external_cash_flow,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    _scoped_identity,
     commit_economic_batch_with_reservation_consumption,
 )
 
@@ -42,6 +44,203 @@ def cash_transaction(*, transaction_id: str = "cash-1", amount: str = "10"):
 
 
 class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
+    def test_sealed_scoped_authority_composes_with_durable_book(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+
+            initial_digest = book.audit_digest()
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(str(book.balance("CASH:USD", "USD")), "0")
+            self.assertEqual(str(book.cash("USD")), "0")
+            self.assertEqual(str(book.position("ASSET")), "0")
+            self.assertEqual(str(book.fee_expense("USD")), "0")
+
+            transaction = cash_transaction()
+            self.assertTrue(book.append(transaction))
+            self.assertEqual(book.transactions, (transaction,))
+            self.assertEqual(str(book.cash("USD")), "10")
+            self.assertNotEqual(book.audit_digest(), initial_digest)
+
+            reopened = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertEqual(reopened.transactions, (transaction,))
+            self.assertEqual(reopened.audit_digest(), book.audit_digest())
+
+    def test_durable_audit_digest_ignores_rebound_module_payload_digest(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            self.assertTrue(book.append(cash_transaction()))
+
+            expected = book.audit_digest()
+            forged = "sha256:" + "0" * 64
+            original_payload_digest = provider_accounting_impl.payload_digest
+            provider_accounting_impl.payload_digest = lambda _payload: forged
+            try:
+                self.assertEqual(book.audit_digest(), expected)
+                self.assertNotEqual(book.audit_digest(), forged)
+            finally:
+                provider_accounting_impl.payload_digest = original_payload_digest
+
+    def test_durable_read_facade_retains_original_authority_verifier(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            book = economic_book(JournalStore(path), environment="SIMULATION")
+            original_projection = vars(book)["_book"]
+            original_require = (
+                provider_accounting_impl._require_durable_provider_economic_book_authority
+            )
+            provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                lambda _value: None
+            )
+            vars(book)["_book"] = EconomicBook(
+                (cash_transaction(transaction_id="forged"),)
+            )
+            try:
+                for read in (
+                    lambda: book.transactions,
+                    lambda: book.balance("CASH:USD", "USD"),
+                    lambda: book.cash("USD"),
+                    lambda: book.position("ASSET"),
+                    lambda: book.fee_expense("USD"),
+                    lambda: book.audit_digest(),
+                ):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "projection changed outside canonical reload",
+                    ):
+                        read()
+            finally:
+                vars(book)["_book"] = original_projection
+                provider_accounting_impl._require_durable_provider_economic_book_authority = (
+                    original_require
+                )
+
+    def test_durable_constructor_retains_original_initializer(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            touched = []
+            original = (
+                provider_accounting_impl._initialize_durable_provider_economic_book
+            )
+
+            def hostile(*_args, **_kwargs):
+                touched.append(True)
+                raise AssertionError("rebound constructor issuer executed")
+
+            provider_accounting_impl._initialize_durable_provider_economic_book = hostile
+            try:
+                book = DurableProviderEconomicBook(
+                    JournalStore(path),
+                    provider_id="PROVIDER-A",
+                    account_id="acct-constructor",
+                    environment="SIMULATION",
+                )
+                self.assertEqual(touched, [])
+                self.assertIs(type(vars(book)["_book"]), EconomicBook)
+                self.assertEqual(book.provider_id, "PROVIDER-A")
+                self.assertEqual(book.account_id, "acct-constructor")
+                self.assertEqual(book.environment, "SIMULATION")
+                self.assertEqual(book.transactions, ())
+            finally:
+                provider_accounting_impl._initialize_durable_provider_economic_book = (
+                    original
+                )
+
+    def test_bybit_provider_environment_separates_durable_book_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-authority",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-authority",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+
+            self.assertEqual(testnet.provider_environment, "TESTNET")
+            self.assertEqual(demo.provider_environment, "DEMO")
+            self.assertNotEqual(testnet.book_id, demo.book_id)
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "economic_book",
+                    testnet.book_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "economic_book",
+                    demo.book_id,
+                ),
+                [],
+            )
+
+    def test_bybit_legacy_runtime_only_economic_history_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            legacy_book_id = _scoped_identity(
+                "economic-book",
+                "BYBIT",
+                "acct-authority",
+                "PAPER",
+            )
+            payload = {
+                "provider_id": "BYBIT",
+                "account_id": "acct-authority",
+                "environment": "PAPER",
+                "transaction": {"legacy": "ambiguous-provider-domain"},
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-economic-event",
+                    "event_type": "EconomicTransactionBooked",
+                    "aggregate_type": "economic_book",
+                    "aggregate_id": legacy_book_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-24T18:00:00Z",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                }
+            )
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                with self.subTest(provider_environment=provider_environment):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "ambiguous financial history",
+                    ):
+                        DurableProviderEconomicBook(
+                            store,
+                            provider_id="BYBIT",
+                            account_id="acct-authority",
+                            environment="PAPER",
+                            provider_environment=provider_environment,
+                        )
+
+    def test_bybit_durable_book_requires_explicit_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires explicit provider_environment",
+            ):
+                DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="acct-authority",
+                    environment="PAPER",
+                )
+
     def test_journal_store_subclass_is_rejected_before_replay(self):
         with TemporaryDirectory() as directory:
             class HostileStore(JournalStore):
@@ -146,6 +345,61 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
             reopened = economic_book(reopened_store)
             self.assertEqual(reopened.transactions, (transaction,))
             self.assertEqual(reopened.audit_digest(), first_digest)
+
+    def test_bybit_provider_environment_binds_book_batch_and_restart(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            testnet = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            self.assertNotEqual(testnet.book_id, demo.book_id)
+
+            transaction = cash_transaction()
+            testnet_plan = testnet.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-10-06T08:20:00Z",
+            )
+            demo_plan = demo.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-10-06T08:20:00Z",
+            )
+            self.assertNotEqual(testnet_plan.batch_digest, demo_plan.batch_digest)
+            self.assertEqual(
+                testnet_plan.request["provider_environment"],
+                "TESTNET",
+            )
+            self.assertEqual(
+                demo_plan.request["provider_environment"],
+                "DEMO",
+            )
+
+            self.assertTrue(
+                testnet.append_batch(
+                    (transaction,),
+                    committed_at="2026-10-06T08:20:00Z",
+                )
+            )
+            reopened = DurableProviderEconomicBook(
+                JournalStore(path),
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(reopened.transactions, (transaction,))
+            self.assertEqual(demo.transactions, ())
 
     def test_same_backing_generation_independent_handles_compose_atomically(self):
         with TemporaryDirectory() as directory:

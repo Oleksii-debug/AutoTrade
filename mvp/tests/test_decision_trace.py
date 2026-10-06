@@ -20,6 +20,15 @@ def trace(trace_id: str, *, decision: str = "BUY") -> dict:
     }
 
 
+def exact_trace(trace_id: str, *, decision: str = "BUY") -> dict:
+    item = trace(trace_id, decision=decision)
+    item["source_sha"] = "1" * 40
+    item["build_id"] = "autotrade-test-build-1"
+    item["evidence_digests"] = {"evidence-1": "a" * 64}
+    item["event_digests"] = {}
+    return item
+
+
 class DecisionTraceStoreTests(unittest.TestCase):
     def test_append_is_idempotent_and_chain_is_valid(self):
         with TemporaryDirectory() as directory:
@@ -80,8 +89,14 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client secret": "client-value",
                 "Authorization-Header": "Bearer value",
                 "x-api-key": "key-value",
+                "apiKey": "camel-key-value",
                 "private-key-pem": "pem-value",
+                "credential": "credential-value",
+                "credentialId": "credential-id-value",
+                "proxyAuthorization": "proxy-auth-value",
                 "token_budget": 100,
+                "tokenBudget": 101,
+                "apiSecretRotationCount": 7,
             }
             store.append(item)
             persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -92,10 +107,16 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client secret",
                 "Authorization-Header",
                 "x-api-key",
+                "apiKey",
                 "private-key-pem",
+                "credential",
+                "credentialId",
+                "proxyAuthorization",
             ):
                 self.assertEqual(attributes[key], "[REDACTED]")
             self.assertEqual(attributes["token_budget"], 100)
+            self.assertEqual(attributes["tokenBudget"], 101)
+            self.assertEqual(attributes["apiSecretRotationCount"], 7)
             raw = path.read_text(encoding="utf-8")
             for leaked in (
                 "access-value",
@@ -103,7 +124,11 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "client-value",
                 "Bearer value",
                 "key-value",
+                "camel-key-value",
                 "pem-value",
+                "credential-value",
+                "credential-id-value",
+                "proxy-auth-value",
             ):
                 self.assertNotIn(leaked, raw)
 
@@ -198,6 +223,195 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertIn("[REDACTED]", persisted["digest_header"])
             self.assertIn("[REDACTED]", persisted["json_digest"])
             self.assertIn("[REDACTED]", persisted["quoted_key_with_spaces"])
+
+    def test_polymorphic_trace_inputs_fail_closed_before_callbacks(self):
+        calls = []
+
+        class HostileDict(dict):
+            def items(self):
+                calls.append("items")
+                raise AssertionError("caller mapping callback must not execute")
+
+        class HostileStr(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("caller string callback must not execute")
+
+            def lower(self):
+                calls.append("lower")
+                raise AssertionError("caller string callback must not execute")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(HostileDict(trace("trace-hostile-root")))
+            self.assertFalse(path.exists())
+
+            hostile_attributes = trace("trace-hostile-attributes")
+            hostile_attributes["attributes"] = HostileDict({"safe": "value"})
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_attributes)
+            self.assertFalse(path.exists())
+
+            hostile_text = trace("trace-hostile-text")
+            hostile_text["trace_id"] = HostileStr("trace-hostile-text")
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_text)
+            self.assertFalse(path.exists())
+
+            hostile_source = exact_trace("trace-hostile-source")
+            hostile_source["source_sha"] = HostileStr("1" * 40)
+            with self.assertRaisesRegex(ValueError, "exact built-in"):
+                store.append(hostile_source)
+            self.assertFalse(path.exists())
+
+        self.assertEqual(calls, [])
+
+    def test_reconstruction_rejects_executable_availability_before_callbacks(self):
+        calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                calls.append("iter")
+                raise AssertionError("caller availability iterator must not execute")
+
+            def __len__(self):
+                calls.append("len")
+                raise AssertionError("caller availability truthiness must not execute")
+
+        class HostileIdentity(str):
+            def __hash__(self):
+                calls.append("hash")
+                raise AssertionError("caller identity hash must not execute")
+
+            def __eq__(self, other):
+                calls.append("eq")
+                raise AssertionError("caller identity equality must not execute")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(trace("trace-availability"))
+
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=HostileList(),
+                    available_evidence_ids=["evidence-1"],
+                )
+
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+                store.accessible_export(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=HostileList(),
+                )
+
+            hostile_identity = HostileIdentity("evidence-1")
+            calls.clear()
+            with self.assertRaisesRegex(ValueError, "exact strings"):
+                store.reconstruct(
+                    "trace-availability",
+                    available_event_ids=[],
+                    available_evidence_ids=[hostile_identity],
+                )
+
+        self.assertEqual(calls, [])
+
+    def test_exact_reconstruction_binds_source_build_and_content_digest(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(exact_trace("trace-exact"))
+
+            exact = store.reconstruct_exact(
+                "trace-exact",
+                expected_source_sha="1" * 40,
+                expected_build_id="autotrade-test-build-1",
+                available_event_digests={},
+                available_evidence_digests={"evidence-1": "a" * 64},
+            )
+            self.assertEqual(exact["source_sha"], "1" * 40)
+            self.assertEqual(exact["build_id"], "autotrade-test-build-1")
+
+            with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="2" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+            with self.assertRaisesRegex(ValueError, "build identity mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-2",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "a" * 64},
+                )
+            with self.assertRaisesRegex(ValueError, "evidence digest mismatch"):
+                store.reconstruct_exact(
+                    "trace-exact",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests={"evidence-1": "b" * 64},
+                )
+
+    def test_exact_reconstruction_rejects_polymorphic_digest_keys_before_hash(self):
+        touched = []
+
+        class HostileKey(str):
+            def __hash__(self):
+                touched.append("hash")
+                raise AssertionError("hostile digest-key hash executed")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                raise AssertionError("hostile digest-key equality executed")
+
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(exact_trace("trace-hostile-digest"))
+            hostile = HostileKey("evidence-1")
+            available = {hostile: "a" * 64}
+            touched.clear()
+            with self.assertRaisesRegex(ValueError, "keys must be exact strings"):
+                store.reconstruct_exact(
+                    "trace-hostile-digest",
+                    expected_source_sha="1" * 40,
+                    expected_build_id="autotrade-test-build-1",
+                    available_event_digests={},
+                    available_evidence_digests=available,
+                )
+            self.assertEqual(touched, [])
+
+    def test_exact_provenance_does_not_mint_verified_accessible_status(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            store.append(exact_trace("trace-accessible-exact"))
+
+            rendered = store.accessible_export("trace-accessible-exact")
+            self.assertIn("Evidence status: UNVERIFIED", rendered)
+            self.assertNotIn("Evidence status: VERIFIED", rendered)
+            self.assertIn("Source SHA: " + ("1" * 40), rendered)
+            self.assertIn("Build: autotrade-test-build-1", rendered)
+            self.assertIn("- evidence-1 sha256 " + ("a" * 64), rendered)
+
+    def test_source_and_build_identity_validation_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")
+            bad_source = exact_trace("trace-bad-source")
+            bad_source["source_sha"] = "G" * 40
+            with self.assertRaisesRegex(ValueError, "source_sha"):
+                store.append(bad_source)
+
+            bad_build = exact_trace("trace-bad-build")
+            bad_build["build_id"] = " bad build "
+            with self.assertRaisesRegex(ValueError, "build_id"):
+                store.append(bad_build)
 
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
         with TemporaryDirectory() as directory:

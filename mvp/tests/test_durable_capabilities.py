@@ -11,20 +11,31 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
-from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.durable_capabilities import (
+    DurableCapabilityRegistry,
+    _legacy_identity_id,
+)
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
 
 
-def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
+def claim(
+    source: str,
+    *,
+    observed_at: datetime,
+    provider_id: str = "simulated",
+    provider_environment: str | None = None,
+) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
+        provider_id=provider_id,
         account_id="paper-account",
         entity_id="entity-1",
         environment="PAPER",
+        provider_environment=provider_environment,
         instrument_version="instrument-v1",
         observed_at=observed_at,
         expires_at=observed_at + timedelta(minutes=10),
@@ -53,15 +64,28 @@ def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
     )
 
 
-def verified(snapshot_id: str, observed_at: datetime):
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=tuple(
-            claim(source, observed_at=observed_at)
-            for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-        ),
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+def verified(
+    snapshot_id: str,
+    observed_at: datetime,
+    *,
+    provider_id: str = "simulated",
+    provider_environment: str | None = None,
+):
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=tuple(
+                claim(
+                    source,
+                    observed_at=observed_at,
+                    provider_id=provider_id,
+                    provider_environment=provider_environment,
+                )
+                for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+            ),
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -141,6 +165,140 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     permission_scope="ORDER.WRITE",
                 )
             )
+
+    def test_exact_fresh_replay_rearms_without_duplicate_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            snapshot = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            first = DurableCapabilityRegistry(JournalStore(path))
+            self.assertTrue(first.add(snapshot))
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            self.assertFalse(restarted.add(snapshot))
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+            admitted = restarted.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(admitted, snapshot)
+            self.assertTrue(
+                admitted.admits(
+                    at=NOW + timedelta(seconds=1),
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
+            )
+
+    def test_provider_domains_survive_restart_without_aliasing(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            registry = DurableCapabilityRegistry(JournalStore(path))
+            testnet = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            demo = verified(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="DEMO",
+            )
+            self.assertTrue(registry.add(testnet))
+            self.assertTrue(registry.add(demo))
+            events = registry.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(events), 2)
+            self.assertEqual({event["payload"]["schema_version"] for event in events}, {"2.0.0"})
+            self.assertEqual(
+                {event["payload"]["snapshot"]["provider_environment"] for event in events},
+                {"TESTNET", "DEMO"},
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            common = dict(
+                provider_id="BYBIT",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(
+                restarted.latest(**common, provider_environment="TESTNET").snapshot_id,
+                testnet.snapshot_id,
+            )
+            self.assertEqual(
+                restarted.latest(**common, provider_environment="DEMO").snapshot_id,
+                demo.snapshot_id,
+            )
+            with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+                restarted.latest(**common)
+
+    def test_legacy_bybit_history_without_provider_domain_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            snapshot = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            raw = snapshot.to_contract_dict()
+            raw.pop("provider_environment")
+            payload = {
+                "schema_version": "1.0.0",
+                "snapshot": raw,
+                "sources": sorted(snapshot.sources),
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-capability",
+                    "event_type": "CapabilitySnapshotObserved.v1",
+                    "aggregate_type": "capability_history",
+                    "aggregate_id": _legacy_identity_id(snapshot),
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": NOW.isoformat(),
+                }
+            )
+            registry = DurableCapabilityRegistry(store)
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "legacy BYBIT capability lacks exact provider_environment",
+            ):
+                registry.latest(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
+    def test_journal_store_subclass_is_rejected_before_dispatch(self):
+        class ForgedStore(JournalStore):
+            def load_events_by_aggregate_type(self, *_args, **_kwargs):
+                raise AssertionError("subclass replay must not be trusted")
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableCapabilityRegistry(
+                    ForgedStore(Path(directory) / "journal.sqlite3")
+                )
 
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):
         with TemporaryDirectory() as directory:
@@ -248,6 +406,60 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     instrument_version="instrument-v1",
                     at=NOW + timedelta(seconds=1),
                 )
+
+    def test_concurrent_newer_writer_invalidates_stale_validated_cut(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            seed = DurableCapabilityRegistry(JournalStore(path))
+            seed.add(
+                verified(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    NOW,
+                )
+            )
+            stale = DurableCapabilityRegistry(JournalStore(path))
+            winner = DurableCapabilityRegistry(JournalStore(path))
+            stale_candidate = verified(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                NOW + timedelta(minutes=1),
+            )
+            newer = verified(
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                NOW + timedelta(minutes=2),
+            )
+
+            original_history = stale._history_with_versions
+
+            def interleaved_history():
+                validated_cut = original_history()
+                self.assertTrue(winner.add(newer))
+                return validated_cut
+
+            stale._history_with_versions = interleaved_history
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "history changed concurrently",
+            ):
+                stale.add(stale_candidate)
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            latest = restarted.latest(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(minutes=3),
+            )
+            self.assertEqual(latest.snapshot_id, newer.snapshot_id)
+            events = restarted.store.load_events_by_aggregate_type(
+                "capability_history"
+            )
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                [event["aggregate_version"] for event in events],
+                [1, 2],
+            )
 
     def test_stale_writer_cannot_append_older_snapshot(self):
         with TemporaryDirectory() as directory:

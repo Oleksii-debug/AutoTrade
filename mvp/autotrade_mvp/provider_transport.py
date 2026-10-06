@@ -1924,6 +1924,143 @@ def _install_direct_trading_write_execution_authority():
     canonical_https_open = HTTPSHandler.https_open
     canonical_proxy_open = ProxyHandler.proxy_open
     canonical_redirect_request = _NoRedirectHandler.redirect_request
+
+    # HTTPSHandler.https_open dynamically resolves the lower http.client/TLS
+    # implementation from its module globals. Pin those roots as part of the
+    # same direct-wire authority; otherwise an unchanged urllib handler can be
+    # redirected through a caller-rebound HTTPSConnection or TLS/socket seam.
+    canonical_https_globals = canonical_getattr(
+        canonical_https_open,
+        "__globals__",
+        None,
+    )
+    if canonical_type(canonical_https_globals) is not canonical_dict:
+        raise transport_error(
+            "direct trading-write HTTPS implementation authority is unavailable"
+        )
+    canonical_http_module = canonical_dict.get(canonical_https_globals, "http")
+    canonical_http_client_module = canonical_getattr(
+        canonical_http_module,
+        "client",
+        None,
+    )
+    canonical_https_connection_type = canonical_getattr(
+        canonical_http_client_module,
+        "HTTPSConnection",
+        None,
+    )
+    canonical_socket_module = canonical_getattr(
+        canonical_http_client_module,
+        "socket",
+        None,
+    )
+    canonical_socket_create_connection = canonical_getattr(
+        canonical_socket_module,
+        "create_connection",
+        None,
+    )
+    canonical_socket_getaddrinfo = canonical_getattr(
+        canonical_socket_module,
+        "getaddrinfo",
+        None,
+    )
+    canonical_socket_type = canonical_getattr(
+        canonical_socket_module,
+        "socket",
+        None,
+    )
+    canonical_ssl_module = canonical_getattr(
+        canonical_http_client_module,
+        "ssl",
+        None,
+    )
+    canonical_default_https_context = canonical_getattr(
+        canonical_ssl_module,
+        "_create_default_https_context",
+        None,
+    )
+    canonical_ssl_context_type = canonical_getattr(
+        canonical_ssl_module,
+        "SSLContext",
+        None,
+    )
+    if (
+        canonical_https_connection_type is None
+        or canonical_socket_create_connection is None
+        or canonical_socket_getaddrinfo is None
+        or canonical_socket_type is None
+        or canonical_default_https_context is None
+        or canonical_ssl_context_type is None
+    ):
+        raise transport_error(
+            "direct trading-write lower network authority is unavailable"
+        )
+    canonical_connection_surfaces = canonical_tuple(
+        (base, canonical_tuple(base.__dict__.items()))
+        for base in canonical_https_connection_type.__mro__
+        if base is not canonical_object
+    )
+    canonical_ssl_context_surfaces = canonical_tuple(
+        (base, canonical_tuple(base.__dict__.items()))
+        for base in canonical_ssl_context_type.__mro__
+        if base is not canonical_object
+    )
+
+    def lower_network_implementation_changed() -> bool:
+        if (
+            canonical_dict.get(canonical_https_globals, "http")
+            is not canonical_http_module
+            or canonical_getattr(canonical_http_module, "client", None)
+            is not canonical_http_client_module
+            or canonical_getattr(
+                canonical_http_client_module,
+                "HTTPSConnection",
+                None,
+            )
+            is not canonical_https_connection_type
+            or canonical_getattr(canonical_http_client_module, "socket", None)
+            is not canonical_socket_module
+            or canonical_getattr(
+                canonical_socket_module,
+                "create_connection",
+                None,
+            )
+            is not canonical_socket_create_connection
+            or canonical_getattr(
+                canonical_socket_module,
+                "getaddrinfo",
+                None,
+            )
+            is not canonical_socket_getaddrinfo
+            or canonical_getattr(canonical_socket_module, "socket", None)
+            is not canonical_socket_type
+            or canonical_getattr(canonical_http_client_module, "ssl", None)
+            is not canonical_ssl_module
+            or canonical_getattr(
+                canonical_ssl_module,
+                "_create_default_https_context",
+                None,
+            )
+            is not canonical_default_https_context
+            or canonical_getattr(canonical_ssl_module, "SSLContext", None)
+            is not canonical_ssl_context_type
+        ):
+            return True
+        for base, expected_members in (
+            canonical_connection_surfaces
+            + canonical_ssl_context_surfaces
+        ):
+            current_members = base.__dict__
+            if canonical_len(current_members) != canonical_len(expected_members):
+                return True
+            for member_name, member in expected_members:
+                if (
+                    member_name not in current_members
+                    or current_members[member_name] is not member
+                ):
+                    return True
+        return False
+
     canonical_request_digest = _direct_trading_write_request_digest
     request_digest_code = canonical_request_digest.__code__
     canonical_require_signed_request = _require_signed_http_request
@@ -2008,6 +2145,7 @@ def _install_direct_trading_write_execution_authority():
             or canonical_require_signed_request.__code__ is not require_signed_request_code
             or _DIRECT_TRADING_WRITE_TRANSPORT_IDENTITY != transport_identity
             or _DIRECT_TRADING_WRITE_NETWORK_POLICY_IDENTITY != network_policy_identity
+            or lower_network_implementation_changed()
         )
 
     def client_network_authority(client: UrllibJsonWireClient) -> tuple[object, ...]:

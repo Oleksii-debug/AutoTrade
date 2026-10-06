@@ -244,6 +244,80 @@ class PersistenceSnapshotCutTests(unittest.TestCase):
                         projection_name="portfolio"
                     )
 
+    def test_projection_checkpoint_save_rejects_corrupt_existing_timestamp(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(event("evt-save-2", 2))
+            self.assertTrue(
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET updated_at = CAST(updated_at AS BLOB) "
+                    "WHERE projection_name = ? AND aggregate_type = ? AND aggregate_id = ?",
+                    ("position", "account", "paper-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "projection checkpoint updated_at must be canonical non-empty text",
+            ):
+                store.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state={"net_quantity": "2"},
+                )
+
+    def test_global_checkpoint_save_rejects_corrupt_existing_timestamp(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(event("evt-global-save-2", 2))
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"paper-1": "1"},
+                )
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints "
+                    "SET updated_at = CAST(updated_at AS BLOB) "
+                    "WHERE projection_name = ?",
+                    ("portfolio",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "global projection checkpoint updated_at must be canonical non-empty text",
+            ):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"paper-1": "2"},
+                )
+
     def test_projection_rebuild_from_zero_equals_checkpoint_plus_tail_after_restart(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

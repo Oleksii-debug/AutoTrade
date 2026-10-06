@@ -459,7 +459,10 @@ def _provider_fill_binding_aggregate_id(
     if provider_scope != runtime:
         parts.append(provider_scope)
     parts.append(_text(provider_execution_id, name="provider_execution_id"))
-    return _scoped_identity("provider-fill-financial-binding", *parts)
+    return _scoped_identity(
+        "provider-fill-financial-binding",
+        *parts,
+    )
 
 
 def _projected_fill_binding_payload(
@@ -500,12 +503,12 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
-    provider_scope_payload = _provider_environment_payload(
+    provider_scope = _provider_environment_payload(
         provider_environment=provider_fill.provider_environment,
         environment=provider_fill.environment,
     )
-    if provider_scope_payload is not None:
-        payload["provider_environment"] = provider_scope_payload
+    if provider_scope is not None:
+        payload["provider_environment"] = provider_scope
     return payload
 
 
@@ -570,6 +573,9 @@ _PROVIDER_FILL_BINDING_FIELDS = frozenset({
     "position_effect",
     "evidence_refs",
 })
+_PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT = (
+    _PROVIDER_FILL_BINDING_FIELDS | {"provider_environment"}
+)
 
 
 def _projected_fill_from_binding_payload(
@@ -606,9 +612,13 @@ def _provider_fill_from_binding_payload(
     *,
     name: str,
 ) -> ProviderFillEvidence:
-    if type(payload) is not dict or set(payload) not in (
-        _PROVIDER_FILL_BINDING_FIELDS,
-        _PROVIDER_FILL_BINDING_FIELDS | {"provider_environment"},
+    if (
+        type(payload) is not dict
+        or set(payload)
+        not in {
+            _PROVIDER_FILL_BINDING_FIELDS,
+            _PROVIDER_FILL_BINDING_FIELDS_WITH_PROVIDER_ENVIRONMENT,
+        }
     ):
         raise AccountingConflict(f"{name} shape is invalid")
     raw = dict(payload)
@@ -670,7 +680,7 @@ def _prepare_provider_fill_binding(
         raise AccountingConflict("provider fill binding intent identity changed")
     if provider_fill.provider_environment != economic_book.provider_environment:
         raise AccountingConflict(
-            "provider fill binding provider environment changed"
+            "provider fill binding provider_environment does not match economic book"
         )
 
     aggregate_id = _provider_fill_binding_aggregate_id(
@@ -686,12 +696,8 @@ def _prepare_provider_fill_binding(
     }
     projected_payload = _projected_fill_binding_payload(projected_fill)
     provider_payload = _provider_fill_binding_payload(provider_fill)
-    provider_scope_payload = _provider_environment_payload(
-        provider_environment=economic_book.provider_environment,
-        environment=economic_book.environment,
-    )
     request = {
-        "schema_version": "1.2.0" if provider_scope_payload is not None else "1.1.0",
+        "schema_version": "1.1.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -712,6 +718,10 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    provider_scope_payload = _provider_environment_payload(
+        provider_environment=economic_book.provider_environment,
+        environment=economic_book.environment,
+    )
     if provider_scope_payload is not None:
         request["provider_environment"] = provider_scope_payload
     events = _economic_store_load_events(economic_book,
@@ -732,8 +742,10 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
-            or payload.get("provider_environment", economic_book.environment)
-            != economic_book.provider_environment
+            or payload.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -825,7 +837,7 @@ def _prepare_provider_fill_binding(
         )
     )
     payload = {
-        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
+        "schema_version": "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -972,7 +984,10 @@ def _provider_fill_correction_binding_aggregate_id(
     if provider_scope != runtime:
         parts.append(provider_scope)
     parts.append(_text(provider_execution_id, name="provider_execution_id"))
-    return _scoped_identity("provider-fill-reservation-correction-binding", *parts)
+    return _scoped_identity(
+        "provider-fill-reservation-correction-binding",
+        *parts,
+    )
 
 
 def _prepare_provider_fill_correction_binding(
@@ -1006,7 +1021,7 @@ def _prepare_provider_fill_correction_binding(
     for evidence in (original_provider_fill, corrected_provider_fill):
         if evidence.provider_environment != economic_book.provider_environment:
             raise AccountingConflict(
-                "provider fill correction provider environment changed"
+                "provider fill correction provider_environment does not match economic book"
             )
     _require_same_financial_journal_generation(
         economic_book,
@@ -1603,7 +1618,7 @@ def _prepare_provider_fill_correction_binding(
         environment=economic_book.environment,
     )
     request = {
-        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
+        "schema_version": "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -1635,7 +1650,7 @@ def _prepare_provider_fill_correction_binding(
         )
     )
     payload = {
-        "schema_version": "1.1.0" if provider_scope_payload is not None else "1.0.0",
+        "schema_version": "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,

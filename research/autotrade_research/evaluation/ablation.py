@@ -1161,7 +1161,7 @@ class CanonicalAblationOutcomeEvidence:
             "outcome_available_utc",
             _utc(self.outcome_available_utc, "outcome_available_utc"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         for name in (
             "utility_evidence_digest",
@@ -1198,7 +1198,7 @@ class RegisteredAblationPopulation:
             "stopping_rule_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         registered = _utc(self.registered_at_utc, "registered_at_utc")
         cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
@@ -1600,7 +1600,7 @@ def build_ablation_evidence_bundle(
 ) -> AblationEvidenceBundle:
     """Lock the exact causal population and result into deterministic artifact bytes."""
 
-    if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+    if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
         raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
     protocol = _digest(protocol_digest, "protocol_digest")
     dataset = _digest(dataset_digest, "dataset_digest")

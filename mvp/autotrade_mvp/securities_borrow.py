@@ -76,9 +76,13 @@ def _exact_evidence(evidence: object):
     return replace(evidence)
 
 
-def _environment(value: str) -> str:
-    normalized = _text(value, name="environment").upper()
-    if normalized not in _ENVIRONMENTS:
+def _environment(
+    value: str,
+    _text_fn=_text,
+    _environments=_ENVIRONMENTS,
+) -> str:
+    normalized = _text_fn(value, name="environment").upper()
+    if normalized not in _environments:
         raise ValueError("environment must be LIVE, PAPER, REPLAY, or SIMULATION")
     return normalized
 
@@ -88,21 +92,25 @@ def _provider_environment(
     provider_id: str,
     environment: str,
     provider_environment: str | None,
+    _text_fn=_text,
+    _environment_fn=_environment,
+    _normalize_provider_environment_fn=normalize_provider_environment,
+    _provider_domain_error=ProviderDomainError,
 ) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    runtime = _environment(environment)
+    provider = _text_fn(provider_id, name="provider_id").upper()
+    runtime = _environment_fn(environment)
     domain = (
         None
         if provider_environment is None
-        else _text(provider_environment, name="provider_environment")
+        else _text_fn(provider_environment, name="provider_environment")
     )
     try:
-        return normalize_provider_environment(
+        return _normalize_provider_environment_fn(
             provider_id=provider,
             environment=runtime,
             provider_environment=domain,
         )
-    except ProviderDomainError as error:
+    except _provider_domain_error as error:
         raise ValueError(
             "provider_environment is invalid for securities-borrow scope"
         ) from error
@@ -120,9 +128,13 @@ def _provider_environment_payload(
     )
 
 
-def _instrument_id(value: str) -> str:
+def _instrument_id(
+    value: str,
+    _text_fn=_text,
+    _uuid_type=UUID,
+) -> str:
     try:
-        return str(UUID(_text(value, name="instrument_id")))
+        return str(_uuid_type(_text_fn(value, name="instrument_id")))
     except (ValueError, TypeError, AttributeError) as error:
         raise ValueError("instrument_id must be a UUID") from error
 
@@ -142,12 +154,20 @@ def _exact(operation, *values: Decimal) -> Decimal:
         ) from error
 
 
-def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if type(value) not in {Decimal, str, int}:
+def _decimal(
+    value,
+    *,
+    name: str,
+    positive: bool = False,
+    _decimal_type=Decimal,
+    _parse_fn=parse_bounded_exact_decimal,
+    _exact_error=ExactDecimalError,
+) -> Decimal:
+    if type(value) not in {_decimal_type, str, int}:
         raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        result = parse_bounded_exact_decimal(value)
-    except ExactDecimalError as error:
+        result = _parse_fn(value)
+    except _exact_error as error:
         raise ValueError(
             f"{name} must be a finite decimal within the exact resource envelope"
         ) from error
@@ -157,12 +177,19 @@ def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
     return result
 
 
-def _signed_decimal(value, *, name: str) -> Decimal:
-    if type(value) not in {Decimal, str, int}:
+def _signed_decimal(
+    value,
+    *,
+    name: str,
+    _decimal_type=Decimal,
+    _parse_fn=parse_bounded_exact_decimal,
+    _exact_error=ExactDecimalError,
+) -> Decimal:
+    if type(value) not in {_decimal_type, str, int}:
         raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
-        return parse_bounded_exact_decimal(value)
-    except ExactDecimalError as error:
+        return _parse_fn(value)
+    except _exact_error as error:
         raise ValueError(
             f"{name} must be a finite decimal within the exact resource envelope"
         ) from error
@@ -196,28 +223,46 @@ def incremental_short_borrow_quantity(
     return _exact(exact_subtract, resulting_short, base_short)
 
 
-def _decimal_text(value: Decimal) -> str:
+def _decimal_text(
+    value: Decimal,
+    _canonical_decimal_text_fn=canonical_decimal_text,
+    _exact_error=ExactDecimalError,
+    _error_type=BorrowEvidenceError,
+) -> str:
     try:
-        return canonical_decimal_text(value)
-    except ExactDecimalError as error:
-        raise BorrowEvidenceError(
+        return _canonical_decimal_text_fn(value)
+    except _exact_error as error:
+        raise _error_type(
             "securities-borrow decimal exceeds exact rendering authority"
         ) from error
 
 
-def _instant(value: str, *, name: str) -> str:
-    text = _text(value, name=name)
+def _instant(
+    value: str,
+    *,
+    name: str,
+    _text_fn=_text,
+    _datetime_type=datetime,
+    _timezone_utc=timezone.utc,
+) -> str:
+    text = _text_fn(value, name=name)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = _datetime_type.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as error:
         raise ValueError(f"{name} must be an ISO timestamp") from error
     if parsed.tzinfo is None:
         raise ValueError(f"{name} must include timezone")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(_timezone_utc).isoformat().replace("+00:00", "Z")
 
 
-def _dt(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+def _dt(
+    value: str,
+    _datetime_type=datetime,
+    _timezone_utc=timezone.utc,
+) -> datetime:
+    return _datetime_type.fromisoformat(
+        value.replace("Z", "+00:00")
+    ).astimezone(_timezone_utc)
 
 
 def _immutable_evidence_ref(value: object) -> tuple[str, str, str]:
@@ -548,43 +593,53 @@ class BorrowAvailabilityEvidence:
     indicative_rate: Decimal | None = None
     provider_environment: str | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
-        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        object.__setattr__(self, "environment", _environment(self.environment))
+    def __post_init__(
+        self,
+        _text_fn=_text,
+        _environment_fn=_environment,
+        _provider_environment_fn=_provider_environment,
+        _instrument_id_fn=_instrument_id,
+        _version_fn=_version,
+        _decimal_fn=_decimal,
+        _instant_fn=_instant,
+        _dt_fn=_dt,
+    ) -> None:
+        object.__setattr__(self, "provider_id", _text_fn(self.provider_id, name="provider_id").upper())
+        object.__setattr__(self, "account_id", _text_fn(self.account_id, name="account_id"))
+        object.__setattr__(self, "environment", _environment_fn(self.environment))
         object.__setattr__(
             self,
             "provider_environment",
-            _provider_environment(
+            _provider_environment_fn(
                 provider_id=self.provider_id,
                 environment=self.environment,
                 provider_environment=self.provider_environment,
             ),
         )
-        object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
-        object.__setattr__(self, "instrument_version", _version(self.instrument_version))
-        object.__setattr__(self, "locate_id", _text(self.locate_id, name="locate_id"))
-        object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
-        object.__setattr__(self, "capacity_quantity", _decimal(self.capacity_quantity, name="capacity_quantity"))
-        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
+        object.__setattr__(self, "instrument_id", _instrument_id_fn(self.instrument_id))
+        object.__setattr__(self, "instrument_version", _version_fn(self.instrument_version))
+        object.__setattr__(self, "locate_id", _text_fn(self.locate_id, name="locate_id"))
+        object.__setattr__(self, "provider_revision", _text_fn(self.provider_revision, name="provider_revision"))
+        object.__setattr__(self, "capacity_quantity", _decimal_fn(self.capacity_quantity, name="capacity_quantity"))
+        object.__setattr__(self, "quantity_unit", _text_fn(self.quantity_unit, name="quantity_unit"))
         if not isinstance(self.hard_to_borrow, bool):
             raise TypeError("hard_to_borrow must be boolean")
-        observed = _instant(self.observed_at, name="observed_at")
-        effective = _instant(self.effective_at, name="effective_at")
-        expires = _instant(self.expires_at, name="expires_at")
-        if _dt(effective) > _dt(observed):
+        observed = _instant_fn(self.observed_at, name="observed_at")
+        effective = _instant_fn(self.effective_at, name="effective_at")
+        expires = _instant_fn(self.expires_at, name="expires_at")
+        if _dt_fn(effective) > _dt_fn(observed):
             raise ValueError("effective_at must not be after observed_at")
-        if _dt(expires) <= _dt(observed):
+        if _dt_fn(expires) <= _dt_fn(observed):
             raise ValueError("expires_at must be after observed_at")
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "expires_at", expires)
-        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, name="evidence_ref"))
+        object.__setattr__(self, "evidence_ref", _text_fn(self.evidence_ref, name="evidence_ref"))
         if self.indicative_rate is not None:
             object.__setattr__(
                 self,
                 "indicative_rate",
-                _decimal(self.indicative_rate, name="indicative_rate"),
+                _decimal_fn(self.indicative_rate, name="indicative_rate"),
             )
 
     @property
@@ -598,14 +653,18 @@ class BorrowAvailabilityEvidence:
             instrument_version=self.instrument_version,
         )
 
-    def resource_detail(self) -> dict[str, str]:
+    def resource_detail(
+        self,
+        _provider_environment_payload_fn=_provider_environment_payload,
+        _decimal_text_fn=_decimal_text,
+    ) -> dict[str, str]:
         return {
             "resource_type": "SECURITIES_BORROW",
             "capacity_semantics": "TOTAL_APPROVED_CAPACITY",
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
-            **_provider_environment_payload(
+            **_provider_environment_payload_fn(
                 provider_environment=self.provider_environment,
                 environment=self.environment,
             ),
@@ -613,7 +672,7 @@ class BorrowAvailabilityEvidence:
             "instrument_version": str(self.instrument_version),
             "locate_id": self.locate_id,
             "provider_revision": self.provider_revision,
-            "capacity_quantity": _decimal_text(self.capacity_quantity),
+            "capacity_quantity": _decimal_text_fn(self.capacity_quantity),
             "quantity_unit": self.quantity_unit,
             "hard_to_borrow": "true" if self.hard_to_borrow else "false",
             "observed_at": self.observed_at,
@@ -621,7 +680,7 @@ class BorrowAvailabilityEvidence:
             "expires_at": self.expires_at,
             "evidence_ref": self.evidence_ref,
             "indicative_rate": (
-                "" if self.indicative_rate is None else _decimal_text(self.indicative_rate)
+                "" if self.indicative_rate is None else _decimal_text_fn(self.indicative_rate)
             ),
         }
 
@@ -678,36 +737,46 @@ class BorrowRecallEvidence:
     deadline: str | None = None
     provider_environment: str | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "recall_id", _text(self.recall_id, name="recall_id"))
-        object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
-        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        object.__setattr__(self, "environment", _environment(self.environment))
+    def __post_init__(
+        self,
+        _text_fn=_text,
+        _environment_fn=_environment,
+        _provider_environment_fn=_provider_environment,
+        _instrument_id_fn=_instrument_id,
+        _version_fn=_version,
+        _decimal_fn=_decimal,
+        _instant_fn=_instant,
+        _dt_fn=_dt,
+    ) -> None:
+        object.__setattr__(self, "recall_id", _text_fn(self.recall_id, name="recall_id"))
+        object.__setattr__(self, "provider_id", _text_fn(self.provider_id, name="provider_id").upper())
+        object.__setattr__(self, "account_id", _text_fn(self.account_id, name="account_id"))
+        object.__setattr__(self, "environment", _environment_fn(self.environment))
         object.__setattr__(
             self,
             "provider_environment",
-            _provider_environment(
+            _provider_environment_fn(
                 provider_id=self.provider_id,
                 environment=self.environment,
                 provider_environment=self.provider_environment,
             ),
         )
-        object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
-        object.__setattr__(self, "instrument_version", _version(self.instrument_version))
-        object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
-        object.__setattr__(self, "quantity", _decimal(self.quantity, name="quantity", positive=True))
-        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
-        observed = _instant(self.observed_at, name="observed_at")
-        effective = _instant(self.effective_at, name="effective_at")
-        if _dt(effective) > _dt(observed):
+        object.__setattr__(self, "instrument_id", _instrument_id_fn(self.instrument_id))
+        object.__setattr__(self, "instrument_version", _version_fn(self.instrument_version))
+        object.__setattr__(self, "provider_revision", _text_fn(self.provider_revision, name="provider_revision"))
+        object.__setattr__(self, "quantity", _decimal_fn(self.quantity, name="quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text_fn(self.quantity_unit, name="quantity_unit"))
+        observed = _instant_fn(self.observed_at, name="observed_at")
+        effective = _instant_fn(self.effective_at, name="effective_at")
+        if _dt_fn(effective) > _dt_fn(observed):
             raise ValueError("recall effective_at must not be after observed_at")
-        deadline = None if self.deadline is None else _instant(self.deadline, name="deadline")
-        if deadline is not None and _dt(deadline) < _dt(effective):
+        deadline = None if self.deadline is None else _instant_fn(self.deadline, name="deadline")
+        if deadline is not None and _dt_fn(deadline) < _dt_fn(effective):
             raise ValueError("recall deadline must not precede effective_at")
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "deadline", deadline)
-        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, name="evidence_ref"))
+        object.__setattr__(self, "evidence_ref", _text_fn(self.evidence_ref, name="evidence_ref"))
 
     @property
     def resource_key(self) -> str:
@@ -720,20 +789,24 @@ class BorrowRecallEvidence:
             instrument_version=self.instrument_version,
         )
 
-    def payload(self) -> dict[str, object]:
+    def payload(
+        self,
+        _provider_environment_payload_fn=_provider_environment_payload,
+        _decimal_text_fn=_decimal_text,
+    ) -> dict[str, object]:
         return {
             "recall_id": self.recall_id,
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
-            **_provider_environment_payload(
+            **_provider_environment_payload_fn(
                 provider_environment=self.provider_environment,
                 environment=self.environment,
             ),
             "instrument_id": self.instrument_id,
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
-            "quantity": _decimal_text(self.quantity),
+            "quantity": _decimal_text_fn(self.quantity),
             "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
@@ -763,33 +836,43 @@ class BorrowRecallResolutionEvidence:
     evidence_ref: str
     provider_environment: str | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "resolution_id", _text(self.resolution_id, name="resolution_id"))
-        object.__setattr__(self, "recall_id", _text(self.recall_id, name="recall_id"))
-        object.__setattr__(self, "provider_id", _text(self.provider_id, name="provider_id").upper())
-        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
-        object.__setattr__(self, "environment", _environment(self.environment))
+    def __post_init__(
+        self,
+        _text_fn=_text,
+        _environment_fn=_environment,
+        _provider_environment_fn=_provider_environment,
+        _instrument_id_fn=_instrument_id,
+        _version_fn=_version,
+        _decimal_fn=_decimal,
+        _instant_fn=_instant,
+        _dt_fn=_dt,
+    ) -> None:
+        object.__setattr__(self, "resolution_id", _text_fn(self.resolution_id, name="resolution_id"))
+        object.__setattr__(self, "recall_id", _text_fn(self.recall_id, name="recall_id"))
+        object.__setattr__(self, "provider_id", _text_fn(self.provider_id, name="provider_id").upper())
+        object.__setattr__(self, "account_id", _text_fn(self.account_id, name="account_id"))
+        object.__setattr__(self, "environment", _environment_fn(self.environment))
         object.__setattr__(
             self,
             "provider_environment",
-            _provider_environment(
+            _provider_environment_fn(
                 provider_id=self.provider_id,
                 environment=self.environment,
                 provider_environment=self.provider_environment,
             ),
         )
-        object.__setattr__(self, "instrument_id", _instrument_id(self.instrument_id))
-        object.__setattr__(self, "instrument_version", _version(self.instrument_version))
-        object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
-        object.__setattr__(self, "resolved_quantity", _decimal(self.resolved_quantity, name="resolved_quantity", positive=True))
-        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
-        observed = _instant(self.observed_at, name="observed_at")
-        effective = _instant(self.effective_at, name="effective_at")
-        if _dt(effective) > _dt(observed):
+        object.__setattr__(self, "instrument_id", _instrument_id_fn(self.instrument_id))
+        object.__setattr__(self, "instrument_version", _version_fn(self.instrument_version))
+        object.__setattr__(self, "provider_revision", _text_fn(self.provider_revision, name="provider_revision"))
+        object.__setattr__(self, "resolved_quantity", _decimal_fn(self.resolved_quantity, name="resolved_quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text_fn(self.quantity_unit, name="quantity_unit"))
+        observed = _instant_fn(self.observed_at, name="observed_at")
+        effective = _instant_fn(self.effective_at, name="effective_at")
+        if _dt_fn(effective) > _dt_fn(observed):
             raise ValueError("resolution effective_at must not be after observed_at")
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "effective_at", effective)
-        object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, name="evidence_ref"))
+        object.__setattr__(self, "evidence_ref", _text_fn(self.evidence_ref, name="evidence_ref"))
 
     @property
     def resource_key(self) -> str:
@@ -802,21 +885,25 @@ class BorrowRecallResolutionEvidence:
             instrument_version=self.instrument_version,
         )
 
-    def payload(self) -> dict[str, object]:
+    def payload(
+        self,
+        _provider_environment_payload_fn=_provider_environment_payload,
+        _decimal_text_fn=_decimal_text,
+    ) -> dict[str, object]:
         return {
             "resolution_id": self.resolution_id,
             "recall_id": self.recall_id,
             "provider_id": self.provider_id,
             "account_id": self.account_id,
             "environment": self.environment,
-            **_provider_environment_payload(
+            **_provider_environment_payload_fn(
                 provider_environment=self.provider_environment,
                 environment=self.environment,
             ),
             "instrument_id": self.instrument_id,
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
-            "resolved_quantity": _decimal_text(self.resolved_quantity),
+            "resolved_quantity": _decimal_text_fn(self.resolved_quantity),
             "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,

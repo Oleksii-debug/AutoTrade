@@ -96,9 +96,18 @@ sys.path.insert(0, str(staging))
 from autotrade_foundation.local_filesystem import require_qualified_local_filesystem_path
 from autotrade_numeric.exact_decimal import parse_bounded_exact_decimal
 from mvp.autotrade_mvp.persistence import JournalStore
+import mvp.autotrade_mvp._persistence_impl as persistence_impl
+from mvp.autotrade_mvp._generated_common_scalars import (
+    is_valid_common_scalar as package_is_valid_common_scalar,
+)
 from mvp.autotrade_mvp.store_identity import (
     observe_database_identity,
     same_journal_backing_object,
+)
+assert persistence_impl.is_valid_common_scalar is package_is_valid_common_scalar
+assert not any(
+    name == 'contracts' or name.startswith('contracts.')
+    for name in sys.modules
 )
 assert str(parse_bounded_exact_decimal('1.25')) == '1.25'
 path = Path(os.environ['AUTOTRADE_TEST_DB'])

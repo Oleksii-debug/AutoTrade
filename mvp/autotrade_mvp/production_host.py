@@ -18,11 +18,11 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 from weakref import WeakKeyDictionary
 
-from research.autotrade_research.artifacts.resource_lock import (
+from autotrade_runtime.resource_lock import (
     ResourceLock,
     ResourceLockBusyError,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from .host_network import (
     AuthenticatedHostApplication,

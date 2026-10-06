@@ -22,7 +22,7 @@ from typing import Callable, Mapping
 from urllib.parse import unquote, urlsplit
 from uuid import UUID
 
-from contracts.bindings.python.common_scalars import is_valid_common_scalar
+from ._generated_common_scalars import is_valid_common_scalar
 
 from .durable_host_api import JournalBackedHostCommandStore
 from .host_actions import SUPPORTED_HOST_ACTIONS

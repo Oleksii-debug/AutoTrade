@@ -193,6 +193,7 @@ class ContractSchemaTests(unittest.TestCase):
             " leading",
             "trailing ",
             "contains space",
+            r"adapter\build",
             "x" * 129,
             "valid-token@1\n",
         ):

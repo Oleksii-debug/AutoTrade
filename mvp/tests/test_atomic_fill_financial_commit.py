@@ -11,6 +11,7 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
@@ -949,6 +950,96 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     provider_execution_id="provider-execution-1",
                 ),
             )
+
+    def test_atomic_fill_durable_keys_separate_provider_domains(self):
+        durable_keys = {}
+
+        for provider_environment in ("DOMAIN-A", "DOMAIN-B"):
+            with TemporaryDirectory() as directory:
+                store = JournalStore(Path(directory) / "journal.sqlite3")
+                reservations = reservation_book(store)
+                reserve(reservations)
+                economics = DurableProviderEconomicBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=provider_environment,
+                )
+                provider = ProviderFillEvidence.create(
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    provider_environment=provider_environment,
+                    provider_execution_id="provider-execution-domain",
+                    client_order_id="client-order-1",
+                    instrument="ABC",
+                    quantity="1",
+                    price="100",
+                    fee_amount="0",
+                    fee_currency="USD",
+                    trade_time="2026-09-25T09:00:00Z",
+                    side="BUY",
+                    evidence_refs=("provider-fill:domain-scope",),
+                )
+
+                self.assertTrue(
+                    commit_provider_fill_with_reservation_consumption(
+                        economics,
+                        reservations,
+                        command_id="domain-command",
+                        idempotency_key="domain-idempotency",
+                        reservation_id="reservation-1",
+                        projected_fill=self.projected_fill(
+                            provider_execution_id="provider-execution-domain",
+                        ),
+                        provider_fill=provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        observed_at="2026-09-25T09:00:01Z",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+                )
+
+                reservation_events = store.load_events_by_aggregate_type(
+                    "reservation_book"
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in reservation_events],
+                    [
+                        "ReservationMutationCommitted",
+                        "ReservationMutationCommitted",
+                    ],
+                )
+                with sqlite3.connect(store.path) as connection:
+                    command_rows = connection.execute(
+                        "SELECT command_id, idempotency_key, actor "
+                        "FROM command_dedupe WHERE actor = ?",
+                        ("atomic-fill-financial-integration",),
+                    ).fetchall()
+                self.assertEqual(len(command_rows), 1)
+                durable_keys[provider_environment] = (
+                    reservation_events[-1]["event_id"],
+                    command_rows[0][0],
+                    command_rows[0][1],
+                )
+
+        self.assertNotEqual(
+            durable_keys["DOMAIN-A"],
+            durable_keys["DOMAIN-B"],
+        )
+        self.assertNotEqual(
+            durable_keys["DOMAIN-A"][0],
+            durable_keys["DOMAIN-B"][0],
+        )
+        self.assertNotEqual(
+            durable_keys["DOMAIN-A"][1],
+            durable_keys["DOMAIN-B"][1],
+        )
+        self.assertNotEqual(
+            durable_keys["DOMAIN-A"][2],
+            durable_keys["DOMAIN-B"][2],
+        )
 
     def test_financial_plan_usage_and_digest_ignore_ambient_decimal_context(self):
         with TemporaryDirectory() as directory:

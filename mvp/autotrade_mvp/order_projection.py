@@ -11,12 +11,17 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from .exact_decimal import (parse_bounded_exact_decimal, ExactDecimalError, exact_sum, exact_multiply, exact_subtract, as_fraction, terminating_decimal, round_fraction_to_quantum)
 from typing import Mapping
+from threading import RLock
+import weakref
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    normalized = value.strip()
+    if not normalized:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
@@ -81,6 +86,177 @@ class OrderSnapshot:
 
 class OrderProjectionConflict(ValueError):
     """Raised when immutable provider facts conflict."""
+
+
+# Keep aggregate registration cuts outside caller-held aggregate attributes.
+# Use callback-free weakrefs rather than WeakKeyDictionary. Same-process code
+# must not be able to invoke a weakref removal callback and erase a live OMS
+# authority binding.
+def _install_aggregate_seal_registry():
+    bindings = {}
+    lock = RLock()
+
+    def registered(aggregate):
+        object_id = id(aggregate)
+        entry = bindings.get(object_id)
+        if entry is None:
+            return None
+        aggregate_ref, binding = entry
+        current = aggregate_ref()
+        if current is aggregate:
+            return binding
+        if current is None:
+            bindings.pop(object_id, None)
+            return None
+        raise OrderProjectionConflict("aggregate registration seal identity collision")
+
+    def initialize(aggregate, scope) -> None:
+        with lock:
+            if registered(aggregate) is not None:
+                raise OrderProjectionConflict("aggregate registration seal is already bound")
+            bindings[id(aggregate)] = (weakref.ref(aggregate), (scope, ()))
+
+    def bound(aggregate):
+        with lock:
+            binding = registered(aggregate)
+        if binding is None:
+            raise OrderProjectionConflict("aggregate registration seal is unavailable")
+        return binding
+
+    def publish(aggregate, scope, entries) -> None:
+        with lock:
+            if registered(aggregate) is None:
+                raise OrderProjectionConflict("aggregate registration seal is unavailable")
+            bindings[id(aggregate)] = (weakref.ref(aggregate), (scope, entries))
+
+    def discard(aggregate) -> None:
+        with lock:
+            object_id = id(aggregate)
+            entry = bindings.get(object_id)
+            if entry is None:
+                return
+            aggregate_ref, _binding = entry
+            current = aggregate_ref()
+            if current is aggregate or current is None:
+                bindings.pop(object_id, None)
+                return
+            raise OrderProjectionConflict("aggregate registration seal identity collision")
+
+    return initialize, bound, publish, discard
+
+
+(
+    _initialize_book_seal,
+    _bound_book_seal,
+    _publish_book_seal,
+    _discard_book_seal,
+) = _install_aggregate_seal_registry()
+(
+    _initialize_oco_seal,
+    _bound_oco_seal,
+    _publish_oco_seal,
+    _discard_oco_seal,
+) = _install_aggregate_seal_registry()
+del _install_aggregate_seal_registry
+
+
+def _exact_registration_identity_shape(value) -> bool:
+    if type(value) is not tuple or len(value) != 9:
+        return False
+    (
+        provider_id,
+        account_id,
+        environment,
+        client_order_id,
+        instrument,
+        side,
+        requested_quantity,
+        oco_group_id,
+        parent_intent_id,
+    ) = value
+    if any(
+        type(item) is not str
+        for item in (
+            provider_id,
+            account_id,
+            environment,
+            client_order_id,
+            instrument,
+            side,
+        )
+    ):
+        return False
+    if type(requested_quantity) is not Decimal or not requested_quantity.is_finite():
+        return False
+    if oco_group_id is not None and type(oco_group_id) is not str:
+        return False
+    if parent_intent_id is not None and type(parent_intent_id) is not str:
+        return False
+    return True
+
+
+def _exact_aggregate_scope_shape(scope) -> bool:
+    """Validate aggregate scope without invoking caller-defined equality."""
+
+    if type(scope) is not tuple:
+        return False
+    if len(scope) == 3:
+        return all(type(item) is str for item in scope)
+    if len(scope) != 2:
+        return False
+    group_id, peer_scope = scope
+    if type(group_id) is not str:
+        return False
+    if peer_scope is None:
+        return True
+    return (
+        type(peer_scope) is tuple
+        and len(peer_scope) == 3
+        and all(type(item) is str for item in peer_scope)
+    )
+
+
+def _assert_aggregate_seal(aggregate, bound_seal, scope) -> None:
+    sealed_scope, entries = bound_seal(aggregate)
+    try:
+        orders = object.__getattribute__(aggregate, "_orders")
+        identities = object.__getattribute__(aggregate, "_registered_identities")
+    except AttributeError as error:
+        raise OrderProjectionConflict("aggregate registration seal changed") from error
+
+    if (
+        not _exact_aggregate_scope_shape(scope)
+        or not _exact_aggregate_scope_shape(sealed_scope)
+        or type(entries) is not tuple
+        or type(orders) is not dict
+        or type(identities) is not dict
+        or len(orders) != len(entries)
+        or len(identities) != len(entries)
+        or any(
+            type(key) is not str or type(order) is not OrderProjection
+            for key, order in orders.items()
+        )
+        or any(
+            type(key) is not str or not _exact_registration_identity_shape(identity)
+            for key, identity in identities.items()
+        )
+        or any(
+            type(entry) is not tuple
+            or len(entry) != 3
+            or type(entry[0]) is not str
+            or type(entry[1]) is not weakref.ReferenceType
+            or type(entry[1]()) is not OrderProjection
+            or not _exact_registration_identity_shape(entry[2])
+            for entry in entries
+        )
+        or scope != sealed_scope
+        or any(
+            orders.get(key) is not order_ref()
+            or identities.get(key) != identity
+            for key, order_ref, identity in entries
+        )
+    ):
+        raise OrderProjectionConflict("aggregate registration seal changed")
 
 
 class OrderProjection:
@@ -572,11 +748,9 @@ class OrderProjection:
         return self._state_without_oco()
 
     def snapshot(self, *, oco_violation: bool | None = None) -> OrderSnapshot:
-        violation = (
-            self._oco_violation
-            if oco_violation is None
-            else bool(oco_violation)
-        )
+        if oco_violation is not None and type(oco_violation) is not bool:
+            raise TypeError("oco_violation must be exact bool when provided")
+        violation = self._oco_violation if oco_violation is None else oco_violation
         return OrderSnapshot(
             provider_id=self.provider_id,
             account_id=self.account_id,
@@ -613,6 +787,65 @@ class OrderProjection:
         )
 
 
+def _registration_identity(
+    order: OrderProjection,
+) -> tuple[str, str, str, str, str, str, Decimal, str | None, str | None] | None:
+    """Return exact registration identity without virtual/coercive dispatch.
+
+    Registered aggregates keep this value outside the caller-owned order
+    object.  A later object.__setattr__ mutation therefore cannot silently
+    re-key provider/account/environment, economics, amendment or OCO scope.
+    """
+
+    if type(order) is not OrderProjection:
+        return None
+    try:
+        provider_id = object.__getattribute__(order, "provider_id")
+        account_id = object.__getattribute__(order, "account_id")
+        environment = object.__getattribute__(order, "environment")
+        client_order_id = object.__getattribute__(order, "client_order_id")
+        instrument = object.__getattribute__(order, "instrument")
+        side = object.__getattribute__(order, "side")
+        requested_quantity = object.__getattribute__(order, "requested_quantity")
+        oco_group_id = object.__getattribute__(order, "oco_group_id")
+        parent_intent_id = object.__getattribute__(order, "parent_intent_id")
+    except AttributeError:
+        return None
+
+    if any(
+        type(value) is not str
+        for value in (
+            provider_id,
+            account_id,
+            environment,
+            client_order_id,
+            instrument,
+            side,
+        )
+    ):
+        return None
+    if (
+        type(requested_quantity) is not Decimal
+        or not requested_quantity.is_finite()
+    ):
+        return None
+    if oco_group_id is not None and type(oco_group_id) is not str:
+        return None
+    if parent_intent_id is not None and type(parent_intent_id) is not str:
+        return None
+    return (
+        provider_id,
+        account_id,
+        environment,
+        client_order_id,
+        instrument,
+        side,
+        requested_quantity,
+        oco_group_id,
+        parent_intent_id,
+    )
+
+
 class OrderBookProjection:
     """Aggregate multiple canonical orders without creating a second order authority."""
 
@@ -623,52 +856,152 @@ class OrderBookProjection:
         account_id: str,
         environment: str,
     ) -> None:
-        self.provider_id = _text(provider_id, name="provider_id").upper()
-        self.account_id = _text(account_id, name="account_id")
-        self.environment = _environment(environment)
-        self._orders: dict[str, OrderProjection] = {}
-        self._amend_children: dict[str, str] = {}
+        provider = _text(provider_id, name="provider_id").upper()
+        account = _text(account_id, name="account_id")
+        runtime_environment = _environment(environment)
+        _initialize_book_seal(self, (provider, account, runtime_environment))
+        try:
+            self.provider_id = provider
+            self.account_id = account
+            self.environment = runtime_environment
+            self._orders: dict[str, OrderProjection] = {}
+            self._registered_identities: dict[
+                str,
+                tuple[str, str, str, str, str, str, Decimal, str | None, str | None],
+            ] = {}
+            self._amend_children: dict[str, str] = {}
+        except BaseException:
+            _discard_book_seal(self)
+            raise
+
+    def _assert_aggregate_seal(self) -> None:
+        _assert_aggregate_seal(
+            self,
+            _bound_book_seal,
+            (self.provider_id, self.account_id, self.environment),
+        )
+
+        # Amendment ownership is authority-bearing aggregate state.  Keep the
+        # caller-held lookup table as a derived index only: the retained
+        # registration cut already freezes every order's parent_intent_id, so
+        # the live index must exactly reconstruct from those sealed identities.
+        # This prevents clearing or retargeting _amend_children from silently
+        # authorizing a second child for the same parent.
+        _sealed_scope, entries = _bound_book_seal(self)
+        amend_children = object.__getattribute__(self, "_amend_children")
+        expected_pairs = tuple(
+            (identity[8], registered_id)
+            for registered_id, _order, identity in entries
+            if identity[8] is not None
+        )
+        if (
+            type(amend_children) is not dict
+            or len(amend_children) != len(expected_pairs)
+            or any(
+                type(parent_id) is not str or type(child_id) is not str
+                for parent_id, child_id in amend_children.items()
+            )
+            or any(
+                amend_children.get(parent_id) != child_id
+                for parent_id, child_id in expected_pairs
+            )
+        ):
+            raise OrderProjectionConflict("amendment registration seal changed")
+
+    def _assert_registered_identity(
+        self,
+        registered_id: str,
+        order: OrderProjection,
+    ) -> None:
+        self._assert_aggregate_seal()
+        expected = self._registered_identities.get(registered_id)
+        current = _registration_identity(order)
+        if expected is None or current != expected:
+            raise OrderProjectionConflict("registered order identity changed")
+
+    def _checked_orders(self) -> tuple[tuple[str, OrderProjection], ...]:
+        self._assert_aggregate_seal()
+        checked: list[tuple[str, OrderProjection]] = []
+        for registered_id, order in self._orders.items():
+            self._assert_registered_identity(registered_id, order)
+            checked.append((registered_id, order))
+        return tuple(checked)
 
     def register(self, order: OrderProjection) -> bool:
-        if not isinstance(order, OrderProjection):
-            raise TypeError("order must be OrderProjection")
+        self._assert_aggregate_seal()
+        if type(order) is not OrderProjection:
+            raise TypeError("order must be exact OrderProjection")
+        identity = _registration_identity(order)
+        if identity is None:
+            raise OrderProjectionConflict("order registration identity is invalid")
+        (
+            provider_id,
+            account_id,
+            environment,
+            client_order_id,
+            instrument,
+            side,
+            _requested_quantity,
+            oco_group_id,
+            parent,
+        ) = identity
+
+        # Never mutate an aggregate that already contains a registration whose
+        # identity no longer matches its sealed registration cut.
+        self._checked_orders()
+
+        # Detect an already-registered object before consulting its current
+        # caller-mutable key.  Otherwise object.__setattr__(client_order_id=...)
+        # could make the same object appear to be a new registration.
+        for registered_id, existing_order in self._orders.items():
+            if existing_order is order:
+                self._assert_registered_identity(registered_id, existing_order)
+                return False
+
         if (
-            order.provider_id != self.provider_id
-            or order.account_id != self.account_id
-            or order.environment != self.environment
+            provider_id != self.provider_id
+            or account_id != self.account_id
+            or environment != self.environment
         ):
             raise OrderProjectionConflict(
                 "order provider/account/environment scope differs from book"
             )
-        existing = self._orders.get(order.client_order_id)
+        existing = self._orders.get(client_order_id)
         if existing is not None:
-            if existing is order:
-                return False
+            self._assert_registered_identity(client_order_id, existing)
             raise OrderProjectionConflict("client_order_id already registered")
-        parent = order.parent_intent_id
+
         if parent is not None:
             if parent not in self._orders:
                 raise KeyError(parent)
-            parent_order = self._orders[parent]
-            if order.instrument != parent_order.instrument:
+            parent_order = self.order(parent)
+            if instrument != parent_order.instrument:
                 raise OrderProjectionConflict(
                     "amendment child instrument differs from parent"
                 )
-            if order.side != parent_order.side:
+            if side != parent_order.side:
                 raise OrderProjectionConflict(
                     "amendment child side differs from parent"
                 )
-            if order.oco_group_id != parent_order.oco_group_id:
+            if oco_group_id != parent_order.oco_group_id:
                 raise OrderProjectionConflict(
                     "amendment child OCO group differs from parent"
                 )
             child = self._amend_children.get(parent)
-            if child is not None and child != order.client_order_id:
+            if child is not None and child != client_order_id:
                 raise OrderProjectionConflict(
                     "parent intent already has another amendment child"
                 )
-            self._amend_children[parent] = order.client_order_id
-        self._orders[order.client_order_id] = order
+            self._amend_children[parent] = client_order_id
+
+        self._orders[client_order_id] = order
+        self._registered_identities[client_order_id] = identity
+        scope, entries = _bound_book_seal(self)
+        _publish_book_seal(
+            self,
+            scope,
+            entries + ((client_order_id, weakref.ref(order), identity),),
+        )
         return True
 
     def create(
@@ -681,6 +1014,7 @@ class OrderBookProjection:
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
     ) -> OrderProjection:
+        self._assert_aggregate_seal()
         order = OrderProjection(
             provider_id=self.provider_id,
             account_id=self.account_id,
@@ -696,19 +1030,29 @@ class OrderBookProjection:
         return order
 
     def order(self, client_order_id: str) -> OrderProjection:
+        self._assert_aggregate_seal()
         order_id = _text(client_order_id, name="client_order_id")
         try:
-            return self._orders[order_id]
+            order = self._orders[order_id]
         except KeyError as error:
             raise KeyError(f"Unknown order: {order_id}") from error
+        self._assert_registered_identity(order_id, order)
+        return order
 
     def amendment_child(self, parent_intent_id: str) -> str | None:
-        return self._amend_children.get(_text(parent_intent_id, name="parent_intent_id"))
+        self._assert_aggregate_seal()
+        parent_id = _text(parent_intent_id, name="parent_intent_id")
+        if parent_id in self._orders:
+            self._assert_registered_identity(parent_id, self._orders[parent_id])
+        child_id = self._amend_children.get(parent_id)
+        if child_id is not None:
+            self._assert_registered_identity(child_id, self._orders[child_id])
+        return child_id
 
     def effective_fills(self) -> tuple[FillRecord, ...]:
         fills: list[FillRecord] = []
         execution_owner: dict[str, str] = {}
-        for order in self._orders.values():
+        for registered_id, order in self._checked_orders():
             # Provider execution identity is immutable historical truth, not
             # merely an index over currently active economics. A bust or
             # correction may change whether a fill contributes to position,
@@ -720,14 +1064,14 @@ class OrderBookProjection:
                 )
                 if (
                     prior_order_id is not None
-                    and prior_order_id != order.client_order_id
+                    and prior_order_id != registered_id
                 ):
                     raise OrderProjectionConflict(
                         "provider_execution_id appears in multiple orders"
                     )
                 execution_owner[
                     observation.provider_execution_id
-                ] = order.client_order_id
+                ] = registered_id
             fills.extend(order.active_fills)
         return tuple(fills)
 
@@ -736,8 +1080,8 @@ class OrderBookProjection:
         *,
         historical: bool,
     ) -> dict[str, tuple[str, ...]]:
-        groups: dict[str, list[OrderProjection]] = {}
-        for order in self._orders.values():
+        groups: dict[str, list[tuple[str, OrderProjection]]] = {}
+        for registered_id, order in self._checked_orders():
             if order.oco_group_id is None:
                 continue
             observed = (
@@ -747,11 +1091,11 @@ class OrderBookProjection:
             )
             if not observed:
                 continue
-            groups.setdefault(order.oco_group_id, []).append(order)
+            groups.setdefault(order.oco_group_id, []).append((registered_id, order))
 
         return {
             group: tuple(
-                sorted(order.client_order_id for order in orders)
+                sorted(registered_id for registered_id, _order in orders)
             )
             for group, orders in groups.items()
             if len(orders) > 1
@@ -770,9 +1114,9 @@ class OrderBookProjection:
         }
         return tuple(
             order.snapshot(
-                oco_violation=order.client_order_id in violated
+                oco_violation=registered_id in violated
             )
-            for order in self._orders.values()
+            for registered_id, order in self._checked_orders()
         )
 
     def oco_breaches(self) -> Mapping[str, tuple[str, ...]]:
@@ -788,32 +1132,98 @@ class OrderBookProjection:
 
 class OcoGroupProjection:
     def __init__(self, group_id: str):
-        self.group_id = _text(group_id, name="group_id")
-        self._orders: dict[str, OrderProjection] = {}
-        self._scope: tuple[str, str, str] | None = None
+        group = _text(group_id, name="group_id")
+        _initialize_oco_seal(self, (group, None))
+        try:
+            self.group_id = group
+            self._orders: dict[str, OrderProjection] = {}
+            self._registered_identities: dict[
+                str,
+                tuple[str, str, str, str, str, str, Decimal, str | None, str | None],
+            ] = {}
+            self._scope: tuple[str, str, str] | None = None
+        except BaseException:
+            _discard_oco_seal(self)
+            raise
+
+    def _assert_aggregate_seal(self) -> None:
+        _assert_aggregate_seal(self, _bound_oco_seal, (self.group_id, self._scope))
+
+    def _assert_registered_identity(
+        self,
+        registered_id: str,
+        order: OrderProjection,
+    ) -> None:
+        self._assert_aggregate_seal()
+        expected = self._registered_identities.get(registered_id)
+        current = _registration_identity(order)
+        if expected is None or current != expected:
+            raise OrderProjectionConflict("registered OCO order identity changed")
+
+    def _checked_orders(self) -> tuple[OrderProjection, ...]:
+        self._assert_aggregate_seal()
+        checked: list[OrderProjection] = []
+        for registered_id, order in self._orders.items():
+            self._assert_registered_identity(registered_id, order)
+            checked.append(order)
+        return tuple(checked)
 
     def add(self, order: OrderProjection) -> None:
-        if not isinstance(order, OrderProjection):
-            raise TypeError("order must be OrderProjection")
-        if order.oco_group_id != self.group_id:
+        self._assert_aggregate_seal()
+        if type(order) is not OrderProjection:
+            raise TypeError("order must be exact OrderProjection")
+        identity = _registration_identity(order)
+        if identity is None:
+            raise OrderProjectionConflict("OCO order registration identity is invalid")
+        (
+            provider_id,
+            account_id,
+            environment,
+            client_order_id,
+            _instrument,
+            _side,
+            _requested_quantity,
+            oco_group_id,
+            _parent_intent_id,
+        ) = identity
+
+        # Admission is also an authority-bearing aggregate mutation: existing
+        # registrations must still match their sealed identity before adding
+        # another peer.
+        self._checked_orders()
+
+        for registered_id, existing_order in self._orders.items():
+            if existing_order is order:
+                self._assert_registered_identity(registered_id, existing_order)
+                return
+
+        if oco_group_id != self.group_id:
             raise ValueError("order belongs to another OCO group")
-        scope = (order.provider_id, order.account_id, order.environment)
+        scope = (provider_id, account_id, environment)
         if self._scope is None:
             self._scope = scope
         elif self._scope != scope:
             raise OrderProjectionConflict(
                 "OCO peers must share provider/account/environment scope"
             )
-        existing = self._orders.get(order.client_order_id)
-        if existing is not None and existing is not order:
+        existing = self._orders.get(client_order_id)
+        if existing is not None:
+            self._assert_registered_identity(client_order_id, existing)
             raise OrderProjectionConflict("client_order_id already registered")
-        self._orders[order.client_order_id] = order
+        self._orders[client_order_id] = order
+        self._registered_identities[client_order_id] = identity
+        _sealed_scope, entries = _bound_oco_seal(self)
+        _publish_oco_seal(
+            self,
+            (self.group_id, self._scope),
+            entries + ((client_order_id, weakref.ref(order), identity),),
+        )
 
     def refresh(self) -> bool:
         # Legacy compatibility query only. OCO truth is derived from immutable
         # observation history and reads must not mutate order state.
         observed_orders = [
-            order for order in self._orders.values()
+            order for order in self._checked_orders()
             if order.historical_execution_observed
         ]
         return len(observed_orders) > 1

@@ -718,6 +718,35 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
         self.assertFalse(ExecutableSession.readiness_called)
 
+    def test_order_preparation_does_not_delegate_admission_to_mutable_capability_class_method(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        cap = capability(order_types=("LIMIT",))
+        original = CapabilitySnapshot.admits
+        CapabilitySnapshot.admits = lambda *_args, **_kwargs: True
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "exact capability evidence does not admit this order",
+            ):
+                prepare_normalized_order(
+                    intent,
+                    client_order_id="at-class-capability-rebind",
+                    capability=cap,
+                    session=ready_session(),
+                    at=NOW,
+                    maximum_session_age_seconds=30,
+                )
+        finally:
+            CapabilitySnapshot.admits = original
+
     def test_order_preparation_uses_class_owned_capability_and_session_checks(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",

@@ -19,6 +19,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -586,6 +587,29 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 source_uri="https://api.kraken.com/0/private/AddOrder",
                 observation={"error": [], "result": {"txid": ["forged"]}},
             )
+
+    def test_submission_observation_subclass_is_rejected_without_virtual_access(self):
+        calls = 0
+
+        class TrapObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, name):
+                nonlocal calls
+                calls += 1
+                raise AssertionError(f"virtual observation access executed: {name}")
+
+        prepared = self._prepared_submission_request()
+        forged = object.__new__(TrapObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=forged,
+            )
+        self.assertEqual(calls, 0)
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction id"):

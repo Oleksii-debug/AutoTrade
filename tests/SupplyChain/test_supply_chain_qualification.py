@@ -535,6 +535,47 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(value.release_commit_sha, "2" * 40)
         self.assertNotEqual(value.release_commit_sha, original_release_sha)
 
+    def test_verifier_cannot_mutate_caller_receipt_between_requirement_checks(self):
+        value = evidence()
+        receipt, _ = _signed_review(value)
+        caller_attestation = receipt.attestation
+        real_verify = (
+            supply_chain_module.verify_canonical_qualification_attestation
+        )
+        calls = 0
+
+        def mutate_caller_then_verify(detached_receipt, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                object.__setattr__(
+                    caller_attestation,
+                    "requirement_ids",
+                    ("independent-supply-chain-review",),
+                )
+                object.__setattr__(
+                    caller_attestation,
+                    "evidence_refs",
+                    (),
+                )
+            return real_verify(detached_receipt, **kwargs)
+
+        with patch.object(
+            supply_chain_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=mutate_caller_then_verify,
+        ):
+            result = qualify_signed(value, receipt=receipt)
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.reason_codes, ())
+        self.assertEqual(
+            caller_attestation.requirement_ids,
+            ("independent-supply-chain-review",),
+        )
+        self.assertEqual(caller_attestation.evidence_refs, ())
+
     def test_valid_independent_signed_review_can_close_wp64_trust_gate(self):
         result = qualify_signed(evidence())
         self.assertEqual(result.status, "PASS")

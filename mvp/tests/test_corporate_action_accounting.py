@@ -47,6 +47,9 @@ def sealed_action(
     revision="1",
     kind="CASH_DIVIDEND",
     per_share="1.25",
+    numerator="2",
+    denominator="1",
+    cash_per_share="100",
     observed_offset=2,
     effective_offset=1,
     corrects=None,
@@ -75,8 +78,14 @@ def sealed_action(
         payload["corrects_external_event_id"] = corrects
     if kind == "CASH_DIVIDEND":
         payload.update({"per_share": per_share, "currency": "USDT"})
-    else:
-        payload.update({"numerator": "2", "denominator": "1"})
+    elif kind == "SPLIT":
+        payload.update(
+            {"numerator": numerator, "denominator": denominator}
+        )
+    elif kind in {"MERGER_CASH", "DELIST"}:
+        payload.update(
+            {"cash_per_share": cash_per_share, "currency": "USDT"}
+        )
     return observe_authenticated_json_response(
         query_binding=binding,
         http_status=200,
@@ -575,13 +584,179 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertFalse(exact_retry.inserted)
             self.assertEqual(len(restarted_economics.transactions), 2)
 
-    def test_unsupported_split_has_no_source_or_financial_side_effect(self):
+    def test_split_books_canonical_quantity_adjustment_and_restarts_idempotently(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            split = resolve_action(
+                sealed_action(
+                    kind="SPLIT",
+                    numerator="2",
+                    denominator="1",
+                )
+            )
+
+            applied = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=split,
+            )
+            self.assertTrue(applied.inserted)
+            self.assertTrue(applied.economically_active)
+            self.assertEqual(applied.next_state.quantity, Decimal("20"))
+            self.assertEqual(applied.next_state.total_basis, Decimal("1000"))
+            self.assertEqual(applied.next_state.unsettled_cash, Decimal("0"))
+            self.assertEqual(
+                economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("20"),
+            )
+            self.assertEqual(len(economics.transactions), 2)
+            split_transaction = economics.transactions[-1]
+            self.assertEqual(
+                split_transaction.economic_effective_at,
+                split.event.effective_at.isoformat().replace("+00:00", "Z"),
+            )
+            self.assertTrue(
+                any(
+                    posting.ledger_account.startswith(
+                        "CORPORATE_ACTION_SPLIT_CLEARING:BTCUSDT:2:1"
+                    )
+                    for posting in split_transaction.postings
+                )
+            )
+
+            reopened = JournalStore(path)
+            restarted_economics = economic_book(reopened)
+            retry = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=restarted_economics,
+                corporate_book=pure_book(),
+                accepted=split,
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(
+                restarted_economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("20"),
+            )
+            self.assertEqual(len(restarted_economics.transactions), 2)
+
+    def test_split_revision_reverses_original_and_replaces_same_economic_cut(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            first = resolve_action(
+                sealed_action(
+                    external_event_id="corp-split-1",
+                    revision="1",
+                    kind="SPLIT",
+                    numerator="2",
+                    denominator="1",
+                )
+            )
+            first_result = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=first,
+            )
+            self.assertEqual(first_result.next_state.quantity, Decimal("20"))
+
+            current_book = pure_book()
+            current_book.apply(first.event)
+            correction = resolve_action(
+                sealed_action(
+                    external_event_id="corp-split-2",
+                    revision="2",
+                    kind="SPLIT",
+                    numerator="3",
+                    denominator="1",
+                    observed_offset=4,
+                    corrects="corp-split-1",
+                ),
+                corrects="corp-split-1",
+            )
+            corrected = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=current_book,
+                accepted=correction,
+            )
+            self.assertEqual(corrected.next_state.quantity, Decimal("30"))
+            self.assertEqual(corrected.next_state.total_basis, Decimal("1000"))
+            self.assertEqual(
+                economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("30"),
+            )
+            self.assertEqual(len(economics.transactions), 4)
+            original, reversal, replacement = economics.transactions[-3:]
+            self.assertEqual(reversal.reverses_transaction_id, original.transaction_id)
+            self.assertEqual(
+                replacement.corrects_transaction_id,
+                original.transaction_id,
+            )
+            self.assertEqual(
+                replacement.economic_effective_at,
+                original.economic_effective_at,
+            )
+            self.assertEqual(replacement.observed_at, reversal.observed_at)
+
+            retry = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=current_book,
+                accepted=correction,
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(len(economics.transactions), 4)
+
+    def test_non_integer_split_ratio_fails_before_source_or_financial_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             durable_evidence = evidence_store(store)
             economics = economic_book(store)
             split = resolve_action(
-                sealed_action(kind="SPLIT"),
+                sealed_action(
+                    kind="SPLIT",
+                    numerator="1.5",
+                    denominator="1",
+                )
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "canonical durable quantity adjustment",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=split,
+                )
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            self.assertEqual(len(economics.transactions), 1)
+
+    def test_unsupported_merger_has_no_source_or_financial_side_effect(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            merger = resolve_action(
+                sealed_action(kind="MERGER_CASH"),
             )
             with self.assertRaisesRegex(
                 AccountingConflict,
@@ -592,7 +767,7 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                     evidence_store=durable_evidence,
                     economic_book=economics,
                     corporate_book=pure_book(),
-                    accepted=split,
+                    accepted=merger,
                 )
             self.assertEqual(
                 store.load_events(

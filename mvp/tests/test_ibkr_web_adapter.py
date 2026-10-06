@@ -1,5 +1,5 @@
 from functools import partial
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 import unittest
@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -34,6 +35,50 @@ from mvp.autotrade_mvp.ibkr_web import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+
+
+class _HostileText(str):
+    strip_called = False
+
+    def strip(self, *args, **kwargs):
+        type(self).strip_called = True
+        raise AssertionError("hostile text callback executed")
+
+
+class _HostileInt(int):
+    comparison_called = False
+
+    def __le__(self, other):
+        type(self).comparison_called = True
+        raise AssertionError("hostile integer comparison executed")
+
+    def __lt__(self, other):
+        type(self).comparison_called = True
+        raise AssertionError("hostile integer comparison executed")
+
+
+class _HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal callback executed")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal callback executed")
+
+
+class _HostileDatetime(datetime):
+    def utcoffset(self):
+        raise AssertionError("hostile datetime callback executed")
+
+    def astimezone(self, *args, **kwargs):
+        raise AssertionError("hostile datetime callback executed")
+
+
+class _HostileTimezone(tzinfo):
+    def utcoffset(self, dt):
+        raise AssertionError("hostile timezone callback executed")
+
+    def dst(self, dt):
+        return None
 
 
 def capability(*, account_id="U1234567", order_types=("MARKET", "LIMIT", "STOP", "STOP_LIMIT")):
@@ -136,6 +181,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
         with self.assertRaises(IbkrWebAdapterError):
             IbkrContractIdentity(conid=265598, conidex="265598@SMART")
 
+    def test_contract_conid_rejects_integer_subclass_before_comparison(self):
+        _HostileInt.comparison_called = False
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "positive exact integer"
+        ):
+            IbkrContractIdentity(conid=_HostileInt(265598))
+        self.assertFalse(_HostileInt.comparison_called)
+
     def test_direct_intent_cannot_bypass_exact_or_regulatory_invariants(self):
         contract = IbkrContractIdentity(conid=265598)
         with self.assertRaisesRegex(IbkrWebAdapterError, "exact decimal"):
@@ -173,6 +226,164 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(normalized.order_type, "LIMIT")
         self.assertEqual(normalized.quantity, Decimal("1.25"))
         self.assertEqual(normalized.limit_price, Decimal("220.10"))
+
+    def test_intent_text_ingress_rejects_string_subclass_before_callbacks(self):
+        _HostileText.strip_called = False
+        with self.assertRaisesRegex(IbkrWebAdapterError, "side is required"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side=_HostileText("BUY"),
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            )
+        self.assertFalse(_HostileText.strip_called)
+
+    def test_financial_numeric_ingress_rejects_decimal_subclass_before_callbacks(self):
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "bounded exact decimal",
+        ):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=IbkrContractIdentity(conid=265598),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity=_HostileDecimal("1"),
+            )
+
+    def test_session_time_rejects_datetime_subclass_before_callbacks(self):
+        hostile = _HostileDatetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            IbkrBrokerageSessionStatus(
+                connected=True,
+                authenticated=True,
+                established=True,
+                competing=False,
+                observed_at=hostile,
+            )
+
+    def test_session_time_rejects_custom_timezone_before_callbacks(self):
+        hostile = datetime(2026, 9, 24, 20, tzinfo=_HostileTimezone())
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            IbkrBrokerageSessionStatus(
+                connected=True,
+                authenticated=True,
+                established=True,
+                competing=False,
+                observed_at=hostile,
+            )
+
+    def test_order_preparation_rejects_datetime_subclass_before_callbacks(self):
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        hostile = _HostileDatetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "exact timezone-aware datetime",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-time",
+                capability=capability(),
+                session=ready_session(),
+                at=hostile,
+                maximum_session_age_seconds=30,
+            )
+
+    def test_normalized_order_rejects_polymorphic_admission_authorities(self):
+        class ExecutableIntent(IbkrWebOrderIntent):
+            pass
+
+        class ExecutableCapability(CapabilitySnapshot):
+            admits_called = False
+
+            def admits(self, **kwargs):
+                type(self).admits_called = True
+                raise AssertionError("capability callback executed")
+
+        class ExecutableSession(IbkrBrokerageSessionStatus):
+            readiness_called = False
+
+            def require_trade_ready(self):
+                type(self).readiness_called = True
+                raise AssertionError("session callback executed")
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        cap = capability()
+        session = ready_session()
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrWebOrderIntent"):
+            prepare_normalized_order(
+                object.__new__(ExecutableIntent),
+                client_order_id="at-polymorphic-intent",
+                capability=cap,
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-polymorphic-capability",
+                capability=object.__new__(ExecutableCapability),
+                session=session,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(ExecutableCapability.admits_called)
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrBrokerageSessionStatus"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-polymorphic-session",
+                capability=cap,
+                session=object.__new__(ExecutableSession),
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+        self.assertFalse(ExecutableSession.readiness_called)
+
+    def test_order_intent_rejects_contract_subclass_before_polymorphic_state(self):
+        class ExecutableContract(IbkrContractIdentity):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrContractIdentity"):
+            IbkrWebOrderIntent.create(
+                instrument_version="AAPL-CONID-265598:v1",
+                account_id="U1234567",
+                contract=object.__new__(ExecutableContract),
+                side="BUY",
+                order_type="MARKET",
+                time_in_force="DAY",
+                quantity="1",
+            )
 
     def test_normalized_limit_order_preserves_exact_decimal_outside_provider_double(self):
         intent = IbkrWebOrderIntent.create(
@@ -296,6 +507,28 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
 
 
+    def test_session_freshness_rejects_integer_subclass_before_comparison(self):
+        _HostileInt.comparison_called = False
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "non-negative integer"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-session-age",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=_HostileInt(30),
+            )
+        self.assertFalse(_HostileInt.comparison_called)
+
     def test_account_capability_must_match_exact_account(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",
@@ -329,7 +562,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(execution.quantity, Decimal("0.5"))
 
     def test_execution_permanent_order_id_must_be_positive_integer(self):
-        for invalid in (None, True, 0, -1, "778899"):
+        for invalid in (None, True, 0, -1, "778899", _HostileInt(778899)):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(IbkrWebAdapterError):
                     IbkrExecutionEvidence.create(
@@ -417,7 +650,12 @@ class IbkrWebAdapterTests(unittest.TestCase):
     def test_cancel_acknowledgement_never_proves_terminal_cancel(self):
         outcome = parse_cancel_response(
             provider_order_id="123456789",
-            payload={"msg": "Request was submitted"},
+            payload={
+                "msg": "Request was submitted",
+                "order_id": 123456789,
+                "conid": 265598,
+                "account": "U1234567",
+            },
         )
         self.assertTrue(outcome.acknowledged)
         self.assertFalse(outcome.terminal_cancel_proven)
@@ -800,6 +1038,87 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={},
             )
 
+    def test_web_api_trade_rejects_conflicting_account_aliases(self):
+        row = {
+            "execution_id": "exec-account-alias",
+            "order_ref": "at-ibkr-account-alias",
+            "account": "U1234567",
+            "accountCode": "OTHER",
+            "side": "B",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        with self.assertRaisesRegex(IbkrWebAdapterError, "identifiers conflict"):
+            parse_web_api_trades(
+                ibkr_trade_observation([row]),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-account-alias": "USD"},
+            )
+
+    def test_web_api_trade_lookup_authorities_require_inert_exact_content(self):
+        row = {
+            "execution_id": "exec-lookup",
+            "order_ref": "at-ibkr-lookup",
+            "account": "U1234567",
+            "accountCode": "U1234567",
+            "side": "B",
+            "conid": 265598,
+            "size": "1",
+            "price": "100",
+            "commission": "0.25",
+            "trade_time": "2026-09-24T20:00:01Z",
+        }
+        observation = ibkr_trade_observation([row])
+        invalid_cases = (
+            (
+                {True: "AAPL:v1"},
+                {"exec-lookup": "USD"},
+                "positive exact integers",
+            ),
+            (
+                {265598: 123},
+                {"exec-lookup": "USD"},
+                "values must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {1: "USD"},
+                "keys must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {"exec-lookup": 123},
+                "values must be exact text",
+            ),
+            (
+                {265598: " AAPL:v1"},
+                {"exec-lookup": "USD"},
+                "values must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {" exec-lookup": "USD"},
+                "keys must be exact text",
+            ),
+            (
+                {265598: "AAPL:v1"},
+                {"exec-lookup": " USD"},
+                "values must be exact text",
+            ),
+        )
+        for instruments, currencies, message in invalid_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                IbkrWebAdapterError, message
+            ):
+                parse_web_api_trades(
+                    observation,
+                    instrument_versions_by_conid=instruments,
+                    fee_currency_by_execution_id=currencies,
+                )
+
     def test_web_api_trade_preserves_exact_json_number_economics_and_conflicting_execution_id(self):
         base = {
             "execution_id": "exec-1",
@@ -907,6 +1226,22 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 execution,
                 client_order_id="at-ibkr-account",
                 expected_account_id="OTHER",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+
+    def test_reconciliation_execution_requires_exact_evidence_type(self):
+        class ExecutableExecution(IbkrExecutionEvidence):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrExecutionEvidence"):
+            execution_to_reconciliation_fill(
+                object.__new__(ExecutableExecution),
+                environment="PAPER",
+                client_order_id="at-forged-execution",
+                expected_account_id="U1234567",
                 instrument="AAPL-CONID-265598:v1",
                 fee_amount="0",
                 fee_currency="USD",

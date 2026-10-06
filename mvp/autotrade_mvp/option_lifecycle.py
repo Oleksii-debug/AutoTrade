@@ -25,6 +25,7 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     exact_abs,
+    exact_add,
     exact_multiply,
     exact_subtract,
     parse_bounded_exact_decimal,
@@ -607,6 +608,81 @@ def _require_consumable_option_position(
         )
 
 
+def _project_delivery_asset_position_after_reversal(
+    *,
+    economic_cut: EconomicBookCut,
+    instrument: str,
+    old_active_transactions: tuple[JournalTransaction, ...],
+) -> Decimal:
+    """Project deliverable inventory after reversing prior lifecycle economics.
+
+    A prior EXPIRY legitimately has no underlying posting, while an
+    EXERCISE/ASSIGNMENT can have one or more deliverable postings.  Borrow safety
+    therefore cannot reuse the option-retirement projection, which intentionally
+    requires exactly one option-position posting per prior transaction.
+    """
+
+    projected = economic_cut.position(instrument)
+    for transaction in old_active_transactions:
+        matching = tuple(
+            item
+            for item in transaction.postings
+            if item.ledger_account == f"POSITION:{instrument}"
+            and item.asset_or_currency == instrument
+        )
+        for item in matching:
+            try:
+                projected = exact_subtract(projected, item.signed_amount)
+            except ExactDecimalError as error:
+                raise OptionLifecycleConflict(
+                    "physical delivery correction exceeds exact-decimal resource authority"
+                ) from error
+    return projected
+
+
+def _require_physical_delivery_borrow_safety(
+    *,
+    economic_cut: EconomicBookCut,
+    observation: OptionLifecycleObservation,
+    version: InstrumentVersion,
+    old_active_transactions: tuple[JournalTransaction, ...],
+) -> None:
+    """Fail closed before physical delivery widens an unqualified short asset.
+
+    WP-30 does not yet own an atomic prepared borrow mutation.  Until that
+    canonical authority is composed, a lifecycle event may consume already-held
+    deliverable inventory but must not create or deepen a short underlying
+    position and only then attempt to obtain borrow capacity afterward.
+    """
+
+    contract = _contract_from_version(version)
+    if contract.settlement_method != "PHYSICAL" or observation.event_kind == "EXPIRY":
+        return
+    obligation = physical_exercise_obligation(
+        contract,
+        signed_contracts=observation.signed_contracts,
+    )
+    for asset_id, delivery_delta in obligation.asset_quantities:
+        if delivery_delta >= 0:
+            continue
+        current = _project_delivery_asset_position_after_reversal(
+            economic_cut=economic_cut,
+            instrument=asset_id,
+            old_active_transactions=old_active_transactions,
+        )
+        try:
+            resulting = exact_add(current, delivery_delta)
+        except ExactDecimalError as error:
+            raise OptionLifecycleConflict(
+                "physical delivery position exceeds exact-decimal resource authority"
+            ) from error
+        if resulting < 0 and resulting < current:
+            raise OptionLifecycleConflict(
+                "physical option delivery would widen short underlying exposure "
+                "without atomic borrow authority"
+            )
+
+
 class DurableOptionLifecycleAuthority:
     """Exactly-once lifecycle-to-economics bridge over canonical authorities."""
 
@@ -716,18 +792,89 @@ class DurableOptionLifecycleAuthority:
         evidence_ref: str,
     ) -> tuple[OptionLifecycleObservation, ProviderResponseObservation]:
         reference = _text(evidence_ref, "evidence_ref")
+        # Neutral sealed response bytes are content evidence, not provider-origin
+        # authority. Until a canonical qualified option-lifecycle issuer exists,
+        # PAPER/LIVE economics must fail before a caller-supplied resolver can
+        # execute arbitrary code or mutate the shared financial store.
+        self._require_canonical_authorities()
+        if self.economic_book.environment in {"PAPER", "LIVE"}:
+            raise OptionLifecycleError(
+                "PAPER/LIVE option lifecycle economics require durable PROVIDER_ORIGIN evidence"
+            )
+
+        # The resolver is an arbitrary callback even in provider-free modes.
+        # Pin the exact sealed-response scope validator and normalization helper
+        # before crossing it so callback-time class/module mutation cannot turn
+        # neutral evidence into a different lifecycle fact.
+        require_scope = ProviderResponseObservation.require_scope
+        require_scope_code = getattr(require_scope, "__code__", None)
+        observation_parser = _canonical_observation_from_sealed_response
+        observation_parser_code = getattr(observation_parser, "__code__", None)
+
+        # Snapshot every caller-reachable lifecycle owner/config value locally.
+        # Instance-level "_expected_*" fields are not sufficient across an
+        # arbitrary callback because the callback could rewrite both the live
+        # value and its instance-stored expectation.
+        expected_store = self.store
+        expected_registry = self.registry
+        expected_economic_book = self.economic_book
+        expected_economic_scope = (
+            expected_economic_book.provider_id,
+            expected_economic_book.account_id,
+            expected_economic_book.environment,
+            expected_economic_book.book_id,
+        )
+        expected_endpoints = self.lifecycle_endpoints
+        expected_permission_scope = self.permission_scope
+        expected_resolver = self.evidence_resolver
         try:
-            source = self.evidence_resolver(reference)
+            source = expected_resolver(reference)
         except Exception as error:
             raise OptionLifecycleError(
                 "provider lifecycle evidence could not be resolved"
             ) from error
-        # Validate captured financial scope immediately after the callback,
-        # before the source is interpreted using any caller-retargeted owner.
-        self._require_canonical_authorities()
-        if not isinstance(source, ProviderResponseObservation):
+        # Validate captured lifecycle/financial scope immediately after the
+        # callback, before the source is interpreted using caller-retargeted
+        # owners or configuration.
+        current_economic_scope = (
+            self.economic_book.provider_id,
+            self.economic_book.account_id,
+            self.economic_book.environment,
+            self.economic_book.book_id,
+        )
+        if (
+            self.store is not expected_store
+            or self.registry is not expected_registry
+            or self.economic_book is not expected_economic_book
+            or current_economic_scope != expected_economic_scope
+            or self.lifecycle_endpoints != expected_endpoints
+            or self.permission_scope != expected_permission_scope
+            or self.evidence_resolver is not expected_resolver
+            or "_require_canonical_authorities" in vars(self)
+        ):
             raise OptionLifecycleError(
-                "provider lifecycle evidence must be a sealed ProviderResponseObservation"
+                "option lifecycle authority changed during evidence resolution"
+            )
+        self._require_canonical_authorities()
+        if (
+            ProviderResponseObservation.require_scope is not require_scope
+            or _canonical_observation_from_sealed_response is not observation_parser
+            or (
+                require_scope_code is not None
+                and getattr(require_scope, "__code__", None) is not require_scope_code
+            )
+            or (
+                observation_parser_code is not None
+                and getattr(observation_parser, "__code__", None)
+                is not observation_parser_code
+            )
+        ):
+            raise OptionLifecycleError(
+                "provider lifecycle evidence authority changed during resolution"
+            )
+        if type(source) is not ProviderResponseObservation:
+            raise OptionLifecycleError(
+                "provider lifecycle evidence must be an exact sealed ProviderResponseObservation"
             )
         if source.evidence_ref != reference:
             raise OptionLifecycleError(
@@ -739,7 +886,8 @@ class DurableOptionLifecycleAuthority:
                 "provider lifecycle evidence endpoint is not allowed"
             )
         try:
-            source.require_scope(
+            require_scope(
+                source,
                 provider_id=self.economic_book.provider_id,
                 surface=Surface.ACTIVITIES,
                 endpoint=endpoint,
@@ -754,7 +902,7 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError(
                 "provider lifecycle evidence permission scope mismatch"
             )
-        observation = _canonical_observation_from_sealed_response(source)
+        observation = observation_parser(source)
         observed_at = datetime.fromisoformat(
             source.observed_at.replace("Z", "+00:00")
         ).astimezone(timezone.utc)
@@ -920,6 +1068,12 @@ class DurableOptionLifecycleAuthority:
                 )
 
         _require_consumable_option_position(
+            economic_cut=economic_cut,
+            observation=observation,
+            version=version,
+            old_active_transactions=old_active_transactions,
+        )
+        _require_physical_delivery_borrow_safety(
             economic_cut=economic_cut,
             observation=observation,
             version=version,

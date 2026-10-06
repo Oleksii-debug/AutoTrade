@@ -36,6 +36,19 @@ _SUPPORTED_BACKUP_SCHEMA_VERSIONS = frozenset({1, BACKUP_SCHEMA_VERSION})
 _RUNTIME_CHECKPOINT_EVIDENCE_PATH = (
     "restore-evidence/autonomous-runtime-checkpoint.json"
 )
+_RESTORE_PROVENANCE_EVENT_TYPE = "BackupRestoreStaged"
+_RESTORE_PROVENANCE_AGGREGATE_TYPE = "backup_restore"
+_RESTORE_PROVENANCE_AGGREGATE_ID = "restore-authority"
+_RESTORE_PROVENANCE_FIELDS = (
+    "backup_manifest_sha256",
+    "restored_at",
+    "runtime_checkpoint_evidence",
+    "runtime_checkpoint_reconstitution_required",
+    "runtime_checkpoint_evidence_sha256",
+    "source_owner_scope",
+    "source_owner_id",
+    "source_owner_epoch",
+)
 MANIFEST_NAME = "backup-manifest.json"
 MANIFEST_DIGEST_NAME = "backup-manifest.sha256"
 RESTORE_MARKER_NAME = "RESTORE_RECONCILIATION_REQUIRED.json"
@@ -313,6 +326,133 @@ def _recovery_owner_chain_from_journal(
     return tuple(chain)
 
 
+def _restore_provenance_payload(value: object) -> dict[str, Any]:
+    """Validate the journal-bound facts that define one restore generation."""
+
+    if type(value) is not dict or set(value) != set(_RESTORE_PROVENANCE_FIELDS):
+        raise BackupIntegrityError("Restore provenance payload is invalid")
+    payload = dict(value)
+    _canonical_sha256_ref(
+        payload["backup_manifest_sha256"],
+        name="backup_manifest_sha256",
+    )
+    _utc_text(payload["restored_at"], name="restored_at")
+    _nonempty_text(payload["source_owner_scope"], name="source_owner_scope")
+    owner_id = payload["source_owner_id"]
+    owner_epoch = payload["source_owner_epoch"]
+    if owner_id is None or owner_epoch is None:
+        if owner_id is not None or owner_epoch is not None:
+            raise BackupIntegrityError(
+                "Restore provenance source owner identity is partially bound"
+            )
+    else:
+        _nonempty_text(owner_id, name="source_owner_id")
+        if (
+            isinstance(owner_epoch, bool)
+            or not isinstance(owner_epoch, int)
+            or owner_epoch < 1
+        ):
+            raise BackupIntegrityError(
+                "Restore provenance source_owner_epoch is invalid"
+            )
+
+    runtime_evidence = payload["runtime_checkpoint_evidence"]
+    reconstitution_required = payload[
+        "runtime_checkpoint_reconstitution_required"
+    ]
+    runtime_digest = payload["runtime_checkpoint_evidence_sha256"]
+    if runtime_evidence == "QUARANTINED":
+        if reconstitution_required is not True:
+            raise BackupIntegrityError(
+                "Restore provenance checkpoint evidence must require reconstitution"
+            )
+        _canonical_sha256_ref(
+            runtime_digest,
+            name="runtime_checkpoint_evidence_sha256",
+        )
+    elif runtime_evidence in {"ABSENT", "UNAVAILABLE_LEGACY_BACKUP"}:
+        if reconstitution_required is not False or runtime_digest is not None:
+            raise BackupIntegrityError(
+                "Restore provenance checkpoint absence claim is inconsistent"
+            )
+    else:
+        raise BackupIntegrityError(
+            "Restore provenance checkpoint evidence status is invalid"
+        )
+    return payload
+
+
+def _append_restore_provenance(root: Path, marker: dict[str, Any]) -> None:
+    """Bind restore/checkpoint claims into the canonical durable journal."""
+
+    payload = _restore_provenance_payload(
+        {key: marker.get(key) for key in _RESTORE_PROVENANCE_FIELDS}
+    )
+    store = JournalStore(root / "state" / "journal.sqlite3")
+    aggregate_version = store.next_aggregate_version(
+        _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+        _RESTORE_PROVENANCE_AGGREGATE_ID,
+    )
+    journal_cut = store.current_journal_sequence()
+    manifest_digest = payload["backup_manifest_sha256"]
+    event_id = (
+        f"restore-stage:{manifest_digest.removeprefix('sha256:')}:"
+        f"{aggregate_version}"
+    )
+    envelope = {
+        "event_id": event_id,
+        "event_type": _RESTORE_PROVENANCE_EVENT_TYPE,
+        "aggregate_type": _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+        "aggregate_id": _RESTORE_PROVENANCE_AGGREGATE_ID,
+        "aggregate_version": str(aggregate_version),
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "committed_at": payload["restored_at"],
+    }
+    try:
+        store.append_event(
+            envelope,
+            expected_journal_sequence=journal_cut,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        raise BackupIntegrityError(
+            "Restore provenance could not be bound to the durable journal"
+        ) from error
+
+
+def _load_restore_provenance(root: Path) -> dict[str, Any] | None:
+    """Read the latest restore generation from canonical journal authority."""
+
+    try:
+        store = JournalStore(root / "state" / "journal.sqlite3")
+        events = store.load_events(
+            _RESTORE_PROVENANCE_AGGREGATE_TYPE,
+            _RESTORE_PROVENANCE_AGGREGATE_ID,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as error:
+        raise BackupIntegrityError(
+            "Restore provenance journal authority is unavailable"
+        ) from error
+    if not events:
+        return None
+    event = events[-1]
+    if (
+        event.get("event_type") != _RESTORE_PROVENANCE_EVENT_TYPE
+        or event.get("aggregate_type") != _RESTORE_PROVENANCE_AGGREGATE_TYPE
+        or event.get("aggregate_id") != _RESTORE_PROVENANCE_AGGREGATE_ID
+    ):
+        raise BackupIntegrityError("Restore provenance journal event is invalid")
+    payload = _restore_provenance_payload(event.get("payload"))
+    if (
+        event.get("payload_hash") != payload_digest(payload)
+        or event.get("committed_at") != payload["restored_at"]
+    ):
+        raise BackupIntegrityError(
+            "Restore provenance journal event binding is invalid"
+        )
+    return payload
+
+
 def _read_restore_marker(root: Path) -> dict[str, Any]:
     marker_path = root / RESTORE_MARKER_NAME
     if not marker_path.is_file() or marker_path.is_symlink():
@@ -355,6 +495,7 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
         ):
             raise BackupIntegrityError("source_owner_epoch is invalid")
 
+    provenance = _load_restore_provenance(root)
     runtime_evidence_fields = {
         "runtime_checkpoint_evidence",
         "runtime_checkpoint_reconstitution_required",
@@ -370,6 +511,10 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
         _RUNTIME_CHECKPOINT_EVIDENCE_PATH
     )
     if not runtime_fields_present:
+        if provenance is not None:
+            raise BackupIntegrityError(
+                "Restore marker cannot downgrade journal-bound restore provenance"
+            )
         # Restore markers emitted before portable checkpoint schema v2 did not
         # carry this binding. They are safe to continue only when no
         # quarantined checkpoint evidence exists at the now-reserved path.
@@ -424,6 +569,18 @@ def _read_restore_marker(root: Path) -> dict[str, Any]:
         raise BackupIntegrityError(
             "Restore runtime checkpoint evidence status is invalid"
         )
+
+    if provenance is None:
+        if runtime_fields_present:
+            raise BackupIntegrityError(
+                "Restore runtime checkpoint binding lacks durable journal provenance"
+            )
+    else:
+        for field in _RESTORE_PROVENANCE_FIELDS:
+            if marker.get(field) != provenance[field]:
+                raise BackupIntegrityError(
+                    "Restore marker conflicts with durable journal provenance"
+                )
     return marker
 
 
@@ -1623,6 +1780,7 @@ def restore_backup(backup_root: str | Path, destination_root: str | Path) -> Pat
                 source_owner.epoch if source_owner is not None else None
             ),
         }
+        _append_restore_provenance(stage, marker)
         _write_bytes_durable(stage / RESTORE_MARKER_NAME, _canonical_json(marker))
         _fsync_directory_tree(stage)
         os.replace(stage, destination)

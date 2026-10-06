@@ -564,10 +564,7 @@ def _economic_transaction(
         cause_event_id=cause_event_id,
         postings=tuple(postings),
         economic_effective_at=_utc_text(observation.effective_at),
-        economic_order_key=(
-            f"OPTION_LIFECYCLE:{observation.provider_environment or 'UNSPECIFIED'}:"
-            f"{order_root_external_id}"
-        ),
+        economic_order_key=f"OPTION_LIFECYCLE:{order_root_external_id}",
         observed_at=_utc_text(observation.observed_at),
         corrects_transaction_id=corrects_transaction_id,
     )

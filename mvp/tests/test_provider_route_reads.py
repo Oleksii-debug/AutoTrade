@@ -16,6 +16,8 @@ from mvp.autotrade_mvp.bybit_v5 import (
 from mvp.autotrade_mvp.ibkr_web import (
     IBKR_BROKERAGE_ACCOUNTS_PARSER_CONTRACT_DIGEST,
     IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY,
+    IBKR_BROKERAGE_STATUS_PARSER_CONTRACT_DIGEST,
+    IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
@@ -409,6 +411,88 @@ class ProviderRouteReadTests(unittest.TestCase):
         self.assertEqual(
             parser_identity,
             IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY,
+        )
+
+    def test_ibkr_status_read_requires_source_owned_parser_q_claim(self):
+        rule_key, rule_digest = qualified_read_route_semantic_claim(
+            provider_id="IBKR",
+            endpoint="/iserver/auth/status",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        parser_key, parser_contract_digest = qualified_read_parser_semantic_claim(
+            provider_id="IBKR",
+            endpoint="/iserver/auth/status",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        self.assertTrue(rule_key.startswith("READ_RULE:"))
+        self.assertTrue(parser_key.startswith("READ_PARSER:"))
+        self.assertNotEqual(rule_key, parser_key)
+        self.assertEqual(
+            parser_contract_digest,
+            IBKR_BROKERAGE_STATUS_PARSER_CONTRACT_DIGEST,
+        )
+
+        missing_parser = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=missing_parser,
+                provider_id="IBKR",
+                endpoint="/iserver/auth/status",
+                surface=Surface.AUTHENTICATED_READ,
+                permission_scope="ORDER.READ",
+            )
+
+        stale_parser = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,
+            parser_key: "sha256:" + "0" * 64,
+            rule_key: rule_digest,
+        })
+        with self.assertRaisesRegex(
+            ProviderRouteReadError,
+            "does not cover exact authenticated-read parser contract",
+        ):
+            provider_route_reads_module._qualified_read_rule(
+                qualification=stale_parser,
+                provider_id="IBKR",
+                endpoint="/iserver/auth/status",
+                surface=Surface.AUTHENTICATED_READ,
+                permission_scope="ORDER.READ",
+            )
+
+        exact = _qualification_with_route_semantics({
+            "PARSER_IDENTITY": IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,
+            parser_key: parser_contract_digest,
+            rule_key: rule_digest,
+        })
+        (
+            _semantics_digest,
+            returned_rule_digest,
+            qualified_rule_digest,
+            entitlement,
+            success_statuses,
+            parser_identity,
+        ) = provider_route_reads_module._qualified_read_rule(
+            qualification=exact,
+            provider_id="IBKR",
+            endpoint="/iserver/auth/status",
+            surface=Surface.AUTHENTICATED_READ,
+            permission_scope="ORDER.READ",
+        )
+        self.assertEqual(returned_rule_digest, rule_digest)
+        self.assertTrue(qualified_rule_digest.startswith("sha256:"))
+        self.assertEqual(entitlement, "SESSION")
+        self.assertEqual(success_statuses, (200,))
+        self.assertEqual(
+            parser_identity,
+            IBKR_BROKERAGE_STATUS_PARSER_IDENTITY,
         )
 
     def test_parser_claim_helper_rejects_legacy_endpoint_without_source_parser(self):

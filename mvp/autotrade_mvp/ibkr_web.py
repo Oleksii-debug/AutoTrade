@@ -41,6 +41,46 @@ IBKR_WEB_BROKERAGE_STATUS_ENDPOINT = "/iserver/auth/status"
 IBKR_WEB_BROKERAGE_ACCOUNTS_ENDPOINT = "/iserver/accounts"
 
 # Source-owned parser identity for the exact provider response used by
+# brokerage-session readiness. This is a semantic Q/C contract only; it grants
+# no provider qualification, wire/session-generation authority or send right.
+IBKR_BROKERAGE_STATUS_PARSER_IDENTITY = "IBKR_BROKERAGE_STATUS_V1_JSON_V1"
+IBKR_BROKERAGE_STATUS_PARSER_VERSION = "1.0.0"
+_IBKR_BROKERAGE_STATUS_PARSER_CONTRACT = {
+    "endpoint": IBKR_WEB_BROKERAGE_STATUS_ENDPOINT,
+    "surface": "AUTHENTICATED_READ",
+    "permission_scope": "ORDER.READ",
+    "query": {},
+    "payload": {
+        "envelope": "success.value",
+        "required_exact_booleans": [
+            "connected",
+            "authenticated",
+            "established",
+            "competing",
+        ],
+        "fail": "optional_null_or_empty_canonical_text",
+        "additional_provider_fields": "ignored_for_readiness",
+    },
+    "authority": {
+        "account_environment_scope_bound": True,
+        "observation_time_from_provider_response": True,
+        "post_mint_mutation_rejected": True,
+    },
+}
+IBKR_BROKERAGE_STATUS_PARSER_CONTRACT_DIGEST = (
+    "sha256:" + hashlib.sha256(
+        json.dumps(
+            _IBKR_BROKERAGE_STATUS_PARSER_CONTRACT,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+)
+
+
+# Source-owned parser identity for the exact provider response used by
 # brokerage-account membership. This is a semantic Q/C contract only; it
 # grants no provider qualification or network authority.
 IBKR_BROKERAGE_ACCOUNTS_PARSER_IDENTITY = "IBKR_BROKERAGE_ACCOUNTS_V1_JSON_V1"

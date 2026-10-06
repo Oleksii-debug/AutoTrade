@@ -147,6 +147,56 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertIs(type(observation.payload["sequence"]), int)
             self.assertEqual(observation.response_sha256, binding.response_sha256)
 
+    def test_submission_observation_is_issuer_bound_and_payload_frozen(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory,
+                raw=b'{"orderId":"provider-1","price":65000.10}',
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            provider_core_module._require_provider_submission_observation_authority(
+                observation
+            )
+            with self.assertRaises(TypeError):
+                observation.payload["orderId"] = "tampered"
+            with self.assertRaisesRegex(
+                ProviderCoreError, "changed after exact issuance"
+            ):
+                object.__setattr__(observation, "endpoint", "/evil")
+            object.__setattr__(observation, "endpoint", "/v5/order/create")
+            provider_core_module._require_provider_submission_observation_authority(
+                observation
+            )
+
+    def test_submission_observation_forged_exact_clone_and_subclass_are_rejected(self):
+        forged = object.__new__(ProviderSubmissionObservation)
+        with self.assertRaisesRegex(
+            ProviderCoreError, "authority is unavailable"
+        ):
+            provider_core_module._require_provider_submission_observation_authority(
+                forged
+            )
+
+        class Impostor(ProviderSubmissionObservation):
+            @property
+            def response_binding(self):
+                raise AssertionError("virtual property must never execute")
+
+        impostor = object.__new__(Impostor)
+        with self.assertRaisesRegex(
+            ProviderCoreError, "canonical exact type"
+        ):
+            provider_core_module._require_provider_submission_observation_authority(
+                impostor
+            )
+
     def test_invalid_response_cannot_become_authenticated_submission_observation(self):
         with TemporaryDirectory() as directory:
             # Simulate a previously accepted response created by the

@@ -2517,6 +2517,7 @@ class GuardedDispatcher:
         snapshot_getattr = getattr
         snapshot_setattr = setattr
         snapshot_type = type
+        snapshot_id = id
         snapshot_isinstance = isinstance
         snapshot_str = str
         snapshot_int = int
@@ -2535,14 +2536,30 @@ class GuardedDispatcher:
         snapshot_builtin_missing = object()
         snapshot_postsend_global_names = (
             "type",
+            "id",
+            "tuple",
+            "frozenset",
+            "dict",
+            "set",
+            "len",
+            "any",
+            "all",
+            "vars",
+            "getattr",
+            "setattr",
+            "delattr",
             "isinstance",
             "str",
             "int",
+            "bool",
+            "max",
+            "range",
+            "enumerate",
             "Exception",
             "ValueError",
             "TypeError",
-            "DispatchBlocked",
-            "_DispatchAuthorityChanged",
+            "RuntimeError",
+            "PermissionError",
         )
         snapshot_postsend_global_state = snapshot_tuple(
             (
@@ -2553,6 +2570,66 @@ class GuardedDispatcher:
                 ),
             )
             for name in snapshot_postsend_global_names
+        )
+        snapshot_postsend_helper_names = (
+            "_canonical_journal_authority_snapshot",
+            "_journal_store_call",
+            "_envelope",
+            "_detach_submission_json",
+            "submission_attempt_aggregate_id",
+            "_event_id",
+            "_identity_digest",
+            "_instant",
+            "payload_digest",
+            "canonical_json",
+            "_canonical_submission_event_instant",
+            "_exact_response_terminal_semantics_are_canonical",
+            "_has_exact_response_markers",
+            "uuid5",
+            "NAMESPACE_URL",
+            "DispatchOutcome",
+        )
+        snapshot_postsend_helper_authority = []
+        for helper_name in snapshot_postsend_helper_names:
+            helper = snapshot_module_globals_get(helper_name)
+            helper_kwdefaults = snapshot_getattr(
+                helper,
+                "__kwdefaults__",
+                None,
+            )
+            if (
+                helper_kwdefaults is not None
+                and snapshot_type(helper_kwdefaults) is not snapshot_dict
+            ):
+                raise RuntimeError(
+                    "post-send helper keyword defaults are unavailable"
+                )
+            helper_kwdefaults_copy = (
+                snapshot_dict(helper_kwdefaults)
+                if snapshot_type(helper_kwdefaults) is snapshot_dict
+                else None
+            )
+            helper_kwdefaults_fingerprint = (
+                snapshot_tuple(
+                    (snapshot_id(key), snapshot_id(value))
+                    for key, value in snapshot_dict.items(helper_kwdefaults)
+                )
+                if snapshot_type(helper_kwdefaults) is snapshot_dict
+                else None
+            )
+            snapshot_postsend_helper_authority.append(
+                (
+                    helper_name,
+                    helper,
+                    snapshot_getattr(helper, "__code__", None),
+                    snapshot_getattr(helper, "__defaults__", None),
+                    helper_kwdefaults,
+                    helper_kwdefaults_copy,
+                    helper_kwdefaults_fingerprint,
+                )
+            )
+        snapshot_postsend_helper_authority = snapshot_tuple(
+            snapshot_postsend_helper_authority
         )
         snapshot_code = snapshot_getattr(
             exact_response_snapshot,
@@ -3018,6 +3095,66 @@ class GuardedDispatcher:
                 changed = True
             return changed
 
+        def restore_postsend_helper_authority() -> bool:
+            changed = False
+            for (
+                name,
+                expected,
+                expected_code,
+                expected_defaults,
+                expected_kwdefaults,
+                expected_kwdefaults_copy,
+                expected_kwdefaults_fingerprint,
+            ) in snapshot_postsend_helper_authority:
+                if snapshot_module_globals_get(name) is not expected:
+                    snapshot_module_globals_set(name, expected)
+                    changed = True
+                if (
+                    expected_code is not None
+                    and snapshot_getattr(expected, "__code__", None)
+                    is not expected_code
+                ):
+                    snapshot_setattr(expected, "__code__", expected_code)
+                    changed = True
+                if (
+                    snapshot_getattr(expected, "__defaults__", None)
+                    is not expected_defaults
+                ):
+                    snapshot_setattr(
+                        expected,
+                        "__defaults__",
+                        expected_defaults,
+                    )
+                    changed = True
+                if (
+                    snapshot_getattr(expected, "__kwdefaults__", None)
+                    is not expected_kwdefaults
+                ):
+                    snapshot_setattr(
+                        expected,
+                        "__kwdefaults__",
+                        expected_kwdefaults,
+                    )
+                    changed = True
+                if (
+                    expected_kwdefaults_fingerprint is not None
+                    and snapshot_type(expected_kwdefaults) is snapshot_dict
+                ):
+                    current_fingerprint = snapshot_tuple(
+                        (snapshot_id(key), snapshot_id(value))
+                        for key, value in snapshot_dict.items(
+                            expected_kwdefaults
+                        )
+                    )
+                    if current_fingerprint != expected_kwdefaults_fingerprint:
+                        snapshot_dict.clear(expected_kwdefaults)
+                        snapshot_dict.update(
+                            expected_kwdefaults,
+                            expected_kwdefaults_copy,
+                        )
+                        changed = True
+            return changed
+
         def restore_postsend_builtin_globals() -> None:
             for name, expected in snapshot_postsend_global_state:
                 current = snapshot_module_globals_get(
@@ -3030,6 +3167,7 @@ class GuardedDispatcher:
                 elif current is not expected:
                     snapshot_module_globals_set(name, expected)
 
+        postsend_helper_authority_changed = False
         exact_response_authority_changed = False
         try:
             try:
@@ -3039,11 +3177,21 @@ class GuardedDispatcher:
                     final_guard,
                 )
             finally:
+                postsend_helper_authority_changed = (
+                    restore_postsend_helper_authority()
+                    or postsend_helper_authority_changed
+                )
                 exact_response_authority_changed = (
                     restore_exact_response_authority()
                     or exact_response_authority_changed
                 )
                 restore_postsend_builtin_globals()
+            if postsend_helper_authority_changed:
+                if barrier_passed:
+                    return authority_change_after_send_outcome()
+                raise snapshot_dispatch_authority_changed(
+                    "dispatcher module authority changed during dispatch"
+                )
             try:
                 require_dispatch_call_authority()
             except snapshot_dispatch_authority_changed:
@@ -3059,6 +3207,12 @@ class GuardedDispatcher:
                 return authority_change_after_send_outcome()
             raise
         except snapshot_dispatch_blocked as error:
+            if postsend_helper_authority_changed:
+                if barrier_passed:
+                    return authority_change_after_send_outcome()
+                raise snapshot_dispatch_authority_changed(
+                    "dispatcher module authority changed during dispatch"
+                ) from error
             try:
                 require_dispatch_call_authority()
             except snapshot_dispatch_authority_changed:
@@ -3088,6 +3242,12 @@ class GuardedDispatcher:
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, snapshot_str(error))
         except snapshot_exception as error:
+            if postsend_helper_authority_changed:
+                if barrier_passed:
+                    return authority_change_after_send_outcome()
+                raise snapshot_dispatch_authority_changed(
+                    "dispatcher module authority changed during dispatch"
+                ) from error
             try:
                 require_dispatch_call_authority()
             except snapshot_dispatch_authority_changed:

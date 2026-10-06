@@ -33,7 +33,12 @@
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
     }
   ],
-  "dotnet_package_dependencies": [],
+  "dotnet_package_dependencies": [
+    {
+      "name": "Microsoft.Web.WebView2",
+      "version": "1.0.4258.31"
+    }
+  ],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {

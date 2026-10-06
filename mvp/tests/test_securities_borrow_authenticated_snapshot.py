@@ -215,6 +215,137 @@ class SecuritiesBorrowAuthenticatedSnapshotTests(unittest.TestCase):
 
             self.assertEqual(reference, bound.evidence_ref)
 
+    def test_verifier_ignores_late_revalidation_helper_retargets(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+
+            with (
+                patch.object(
+                    securities_borrow_module,
+                    "_text",
+                    side_effect=AssertionError(
+                        "late text helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_environment",
+                    side_effect=AssertionError(
+                        "late environment helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_provider_environment",
+                    side_effect=AssertionError(
+                        "late provider-domain helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_instrument_id",
+                    side_effect=AssertionError(
+                        "late instrument helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_version",
+                    side_effect=AssertionError(
+                        "late version helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_decimal",
+                    side_effect=AssertionError(
+                        "late decimal helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_instant",
+                    side_effect=AssertionError(
+                        "late instant helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_dt",
+                    side_effect=AssertionError(
+                        "late chronology helper must not reinterpret authenticated evidence"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_provider_environment_payload",
+                    side_effect=AssertionError(
+                        "late provider-domain renderer must not rewrite authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "_decimal_text",
+                    side_effect=AssertionError(
+                        "late decimal renderer must not rewrite authenticated bytes"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "normalize_provider_environment",
+                    side_effect=AssertionError(
+                        "late provider-domain normalizer must not execute"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "parse_bounded_exact_decimal",
+                    side_effect=AssertionError(
+                        "late exact-decimal parser must not execute"
+                    ),
+                ),
+                patch.object(
+                    securities_borrow_module,
+                    "canonical_decimal_text",
+                    side_effect=AssertionError(
+                        "late exact-decimal renderer must not execute"
+                    ),
+                ),
+                patch.object(securities_borrow_module, "datetime", new=object),
+                patch.object(securities_borrow_module, "timezone", new=object),
+                patch.object(securities_borrow_module, "Decimal", new=object),
+                patch.object(securities_borrow_module, "UUID", new=object),
+            ):
+                reference = verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(reference, bound.evidence_ref)
+
+    def test_verifier_fails_closed_before_retargeted_post_init_dispatch(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(directory)
+            bound = bind_provider_evidence(artifacts, recall())
+            calls = []
+
+            def forged_post_init(_self):
+                calls.append("called")
+                raise AssertionError(
+                    "retargeted evidence post-init must not execute"
+                )
+
+            with patch.object(
+                BorrowRecallEvidence,
+                "__post_init__",
+                new=forged_post_init,
+            ):
+                with self.assertRaisesRegex(
+                    BorrowEvidenceError,
+                    "implementation changed after verifier binding",
+                ):
+                    verify_provider_borrow_evidence(bound, artifacts)
+
+            self.assertEqual(calls, [])
+
     def test_malformed_snapshot_representation_fails_closed(self):
         with TemporaryDirectory() as directory:
             artifacts = ArtifactStore(directory)

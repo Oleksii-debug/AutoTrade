@@ -104,9 +104,9 @@ def _sha256(value, *, name: str) -> str:
     return text
 
 
-def _mapping(value, *, name: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise AllocationValuationError(f"{name} must be a mapping")
+def _mapping(value, *, name: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise AllocationValuationError(f"{name} must be an exact built-in dict")
     return value
 
 

@@ -1199,6 +1199,7 @@ def _trading_response_evidence(
             raw = require_provider_response_bytes(
                 value,
                 max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
             )
         except (TypeError, ValueError) as error:
             raise ProviderTransportError(
@@ -1254,6 +1255,13 @@ def _bybit_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="bybit_http_non_2xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="bybit_empty_response_execution_unknown",
+        )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
     if (
@@ -1289,6 +1297,13 @@ def _kraken_spot_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="kraken_spot_http_5xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="kraken_spot_empty_response_execution_unknown",
+        )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     if spot_submission_requires_reconciliation(exact.payload):
         return ExactJsonTransportResponse(
@@ -1319,6 +1334,13 @@ def _alpaca_exact_trading_response(
             requires_reconciliation=True,
             ambiguity_reason="alpaca_http_5xx_execution_unknown",
         )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="alpaca_empty_response_execution_unknown",
+        )
     return ExactJsonTransportResponse(raw, http_status=status)
 
 
@@ -1348,6 +1370,13 @@ def _binance_exact_trading_response(
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+        )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_empty_response_execution_unknown",
         )
     exact = ExactJsonTransportResponse(raw, http_status=status)
     parsed = exact.payload
@@ -1393,6 +1422,13 @@ def _whitebit_exact_trading_response(
             http_status=status,
             requires_reconciliation=True,
             ambiguity_reason="whitebit_" + decision.classification.lower(),
+        )
+    if not raw:
+        return ExactJsonTransportResponse(
+            raw,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="whitebit_empty_response_execution_unknown",
         )
     return ExactJsonTransportResponse(raw, http_status=status)
 

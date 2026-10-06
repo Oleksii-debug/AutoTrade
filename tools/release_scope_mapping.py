@@ -203,6 +203,15 @@ def _validate_autotrade_sbom_subject(
 
     if type(sbom) is not dict:
         raise ReleaseScopeMappingError("SBOM must be object")
+    if sbom.get("dataLicense") != "CC0-1.0":
+        raise ReleaseScopeMappingError(
+            "SBOM document data license must be CC0-1.0"
+        )
+    expected_namespace = "https://autotrade.invalid/spdx/" + source_sha
+    if sbom.get("documentNamespace") != expected_namespace:
+        raise ReleaseScopeMappingError(
+            "SBOM document namespace differs from composition source"
+        )
     packages = sbom.get("packages")
     relationships = sbom.get("relationships")
     if type(packages) is not list:
@@ -325,6 +334,10 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
             if type(ref) is not dict:
                 raise ReleaseScopeMappingError("SBOM externalRef must be object")
             if ref.get("referenceType") == "purl":
+                if ref.get("referenceCategory") != "PACKAGE_MANAGER":
+                    raise ReleaseScopeMappingError(
+                        "SBOM purl reference category must be PACKAGE_MANAGER"
+                    )
                 purls.append(
                     _text(ref.get("referenceLocator"), name="SBOM purl")
                 )

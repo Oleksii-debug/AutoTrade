@@ -28,6 +28,7 @@ def _sbom(*, extra=False, wrong_hash=False):
         "versionInfo": "1.0.4258.31",
         "licenseConcluded": "BSD-3-Clause",
         "externalRefs": [{
+            "referenceCategory": "PACKAGE_MANAGER",
             "referenceType": "purl",
             "referenceLocator":
                 "pkg:nuget/Microsoft.Web.WebView2@1.0.4258.31",
@@ -44,6 +45,7 @@ def _sbom(*, extra=False, wrong_hash=False):
             "versionInfo": "1.0",
             "licenseConcluded": "NOASSERTION",
             "externalRefs": [{
+                "referenceCategory": "PACKAGE_MANAGER",
                 "referenceType": "purl",
                 "referenceLocator": "pkg:nuget/Unknown@1.0",
             }],
@@ -55,6 +57,10 @@ def _sbom(*, extra=False, wrong_hash=False):
     document = {
         "spdxVersion": "SPDX-2.3",
         "SPDXID": "SPDXRef-DOCUMENT",
+        "dataLicense": "CC0-1.0",
+        "documentNamespace": (
+            "https://autotrade.invalid/spdx/" + SOURCE_SHA
+        ),
         "packages": packages,
         "relationships": [
             {
@@ -245,6 +251,39 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             self._build(extra=True)
 
 
+
+
+    def test_sbom_document_namespace_must_bind_composition_source(self):
+        document, _ = _sbom()
+        document["documentNamespace"] = (
+            "https://autotrade.invalid/spdx/" + "f" * 40
+        )
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "namespace differs from composition source",
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_sbom_purl_requires_package_manager_category(self):
+        document, _ = _sbom()
+        webview = next(
+            item for item in document["packages"]
+            if item["name"] == "Microsoft.Web.WebView2"
+        )
+        webview["externalRefs"][0]["referenceCategory"] = "OTHER"
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError,
+            "reference category must be PACKAGE_MANAGER",
+        ):
+            self._build(sbom_override=(document, raw))
 
     def test_sbom_application_source_must_match_composition(self):
         document, _ = _sbom()
@@ -452,6 +491,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             "versionInfo": "3.12.10",
             "licenseConcluded": "PSF-2.0",
             "externalRefs": [{
+                "referenceCategory": "PACKAGE_MANAGER",
                 "referenceType": "purl",
                 "referenceLocator":
                     "pkg:generic/cpython-embed@3.12.10",
@@ -493,6 +533,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             "versionInfo": "3.12.10",
             "licenseConcluded": "MIT",
             "externalRefs": [{
+                "referenceCategory": "PACKAGE_MANAGER",
                 "referenceType": "purl",
                 "referenceLocator":
                     "pkg:generic/cpython-embed@3.12.10",
@@ -527,6 +568,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             "versionInfo": "3.12.10",
             "licenseConcluded": "PSF-2.0",
             "externalRefs": [{
+                "referenceCategory": "PACKAGE_MANAGER",
                 "referenceType": "purl",
                 "referenceLocator":
                     "pkg:generic/cpython-embed@3.12.10",

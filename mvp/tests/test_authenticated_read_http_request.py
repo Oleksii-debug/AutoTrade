@@ -1,5 +1,6 @@
 import unittest
 from io import BytesIO
+from types import MappingProxyType
 
 from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadHttpRequest,
@@ -132,6 +133,56 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         ):
             client.send(request)
 
+        self.assertEqual(opener.calls, 0)
+
+    def test_wire_client_rejects_hostile_replacement_headers_without_callbacks(self):
+        class HostileHeaders(dict):
+            callbacks = 0
+
+            def _executed(self):
+                type(self).callbacks += 1
+                raise AssertionError("replacement header mapping executed")
+
+            def __iter__(self):
+                return self._executed()
+
+            def __getitem__(self, _key):
+                return self._executed()
+
+            def items(self):
+                return self._executed()
+
+            def keys(self):
+                return self._executed()
+
+        class Opener:
+            def __init__(self):
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise AssertionError("wire must not be reached")
+
+        request = AuthenticatedReadHttpRequest(
+            url="https://localhost/iserver/accounts",
+            headers={"Accept": "application/json"},
+            timeout_seconds=5,
+            method="GET",
+            body=b"",
+        )
+        hostile = HostileHeaders({"X-Synthetic": "secret"})
+        object.__setattr__(request, "headers", MappingProxyType(hostile))
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+        opener = Opener()
+        client._opener = opener
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "changed after construction",
+        ):
+            client.send(request)
+
+        self.assertEqual(HostileHeaders.callbacks, 0)
         self.assertEqual(opener.calls, 0)
 
     def test_wire_client_preserves_queryless_get_method(self):

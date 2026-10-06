@@ -280,12 +280,8 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             json_module = dispatch_module.json
             loads = json_module.loads
             original_code = loads.__code__
-            forged_calls = 0
-
             def forged_loads(_text, **_kwargs):
-                nonlocal forged_calls
-                forged_calls += 1
-                return {"forged": True}
+                raise AssertionError("forged json.loads executed")
 
             def transport(_client_order_id, _request, final_guard):
                 final_guard()
@@ -303,7 +299,6 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
                     transport,
                 )
                 self.assertIs(loads.__code__, original_code)
-                self.assertEqual(forged_calls, 0)
             finally:
                 loads.__code__ = original_code
 

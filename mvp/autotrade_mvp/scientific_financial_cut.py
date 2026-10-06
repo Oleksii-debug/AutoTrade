@@ -261,6 +261,11 @@ def capture_current_scientific_financial_cut(
         raise FinancialCutConflict(
             "reconciliation checkpoint crossed the frozen financial cut"
         )
+    population_checkpoint = journal_population[reconciliation_sequence - 1]
+    if population_checkpoint != checkpoint:
+        raise FinancialCutConflict(
+            "reconciliation checkpoint does not match the frozen journal population"
+        )
 
     population_digest = payload_digest(journal_population)
     reconciliation_digest = payload_digest(checkpoint)

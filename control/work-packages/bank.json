@@ -855,7 +855,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Guarded durable dispatch is present on main with persist-before-send, final authority recheck, deterministic client identity, timeout/crash UNKNOWN handling and no blind resend. Remaining work: qualified real-provider transport seams, quota interception and crash-at-every-send-point qualification."
+      "status_note": "Provider-neutral guarded execution foundation is converged in current integration #2305: persist-before-send, final authority/sender barrier, deterministic provider-compatible client identity, duplicate-attempt/outbox fencing, crash/timeout/429/5xx/empty/opaque UNKNOWN handling, quota-wait expiry/revoke zero-wire behavior, post-barrier reconcile-first semantics, exact durable response evidence, direct-wire provenance hardening and canonical WP-19/WP-20 handoff are implemented. Remaining blocker is terminal exact-head hosted qualification; real credential/provider campaign and provider-specific positive origin issuance remain separate downstream qualification."
     },
     {
       "id": "WP-19",
@@ -903,7 +903,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Order lifecycle projection is integrated on main at d412fde8c64f22595142c646c524449b70d4dc28, including ACK != fill, partial fill/cancel, correction/bust and overfill/OCO violation handling. Remaining work: provider-normalized event integration, restart projection rebuild and broader lifecycle qualification."
+      "status_note": "Order lifecycle projection and durable restart replay are integrated, including ACK != fill, partial fill/cancel, correction/bust, overfill/OCO violation handling, constructor-time journal replay, UNKNOWN/cancel/fill restoration, tamper fail-closed behavior and stale-process reload. #2305 additionally keeps exact WP-18 transport responses provider-neutral UNKNOWN until authenticated provider-specific lifecycle normalization. Remaining work is broader provider/reconciliation lifecycle qualification and exact release evidence."
     },
     {
       "id": "WP-20",

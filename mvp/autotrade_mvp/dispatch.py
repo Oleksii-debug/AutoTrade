@@ -2053,10 +2053,23 @@ class GuardedDispatcher:
         dispatcher_class_executable_states = []
         for _base, members in dispatcher_class_surfaces:
             for _name, member in members:
-                member_code = getattr(member, "__code__", None)
+                # Class dictionaries expose staticmethod/classmethod descriptors
+                # rather than their underlying function. Their descriptor
+                # identity can remain unchanged while __func__.__code__ is
+                # mutated in place, so seal the executable function itself.
+                executable_member = (
+                    member.__func__
+                    if type(member) in (staticmethod, classmethod)
+                    else member
+                )
+                member_code = getattr(executable_member, "__code__", None)
                 if member_code is None:
                     continue
-                member_kwdefaults = getattr(member, "__kwdefaults__", None)
+                member_kwdefaults = getattr(
+                    executable_member,
+                    "__kwdefaults__",
+                    None,
+                )
                 if (
                     member_kwdefaults is not None
                     and type(member_kwdefaults) is not dict
@@ -2079,9 +2092,9 @@ class GuardedDispatcher:
                 )
                 dispatcher_class_executable_states.append(
                     (
-                        member,
+                        executable_member,
                         member_code,
-                        getattr(member, "__defaults__", None),
+                        getattr(executable_member, "__defaults__", None),
                         member_kwdefaults,
                         member_kwdefaults_copy,
                         member_kwdefaults_fingerprint,

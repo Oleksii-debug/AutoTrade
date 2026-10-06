@@ -376,12 +376,36 @@ def assert_conservative_execution(
             observation.interval_start,
             name="interval_start",
         )
+        interval_overlaps_arrival = interval_start_for_status < arrival
+        same_bar_stop_limit_ambiguity = False
         if (
-            interval_start_for_status < arrival
-            and result.status != "AMBIGUOUS_NO_FILL"
+            not interval_overlaps_arrival
+            and order.order_type == "STOP_LIMIT"
+            and not order.already_triggered
+            and independent_capacity > zero
         ):
+            same_bar_stop_limit_ambiguity = (
+                _oracle_stop_touched(
+                    order=order,
+                    observation=observation,
+                    model=model,
+                )
+                and _oracle_limit_touched(
+                    order=order,
+                    observation=observation,
+                    model=model,
+                )
+            )
+        expected_bar_ambiguity = (
+            interval_overlaps_arrival or same_bar_stop_limit_ambiguity
+        )
+        if expected_bar_ambiguity and result.status != "AMBIGUOUS_NO_FILL":
             raise ExecutionOracleError(
-                "BAR interval overlapping arrival must remain AMBIGUOUS_NO_FILL"
+                "BAR causal ambiguity must remain AMBIGUOUS_NO_FILL"
+            )
+        if not expected_bar_ambiguity and result.status == "AMBIGUOUS_NO_FILL":
+            raise ExecutionOracleError(
+                "AMBIGUOUS_NO_FILL lacks BAR causal ambiguity"
             )
 
     if (

@@ -1268,7 +1268,9 @@ def _install_signed_http_request_integrity():
             (method, url, headers, body, timeout_seconds),
         )
 
-    def require(value: SignedHttpRequest) -> None:
+    def require(
+        value: SignedHttpRequest,
+    ) -> tuple[str, str, Mapping[str, str], bytes, int]:
         if canonical_type(value) is not request_type:
             raise TypeError("request must be exact SignedHttpRequest")
         prune()
@@ -1529,7 +1531,9 @@ def _install_authenticated_read_http_request_integrity():
             (method, url, headers, body, timeout_seconds),
         )
 
-    def require(value: AuthenticatedReadHttpRequest) -> None:
+    def require(
+        value: AuthenticatedReadHttpRequest,
+    ) -> tuple[str, str, Mapping[str, str], bytes, int]:
         if canonical_type(value) is not request_type:
             raise TypeError(
                 "request must be exact AuthenticatedReadHttpRequest"
@@ -1722,13 +1726,19 @@ class UrllibJsonWireClient:
                 # implicit __context__/explicit __cause__ would expose it later.
                 try:
                     observed_status = error.code
-                    if canonical_type(observed_status) is canonical_int and 100 <= observed_status <= 599:
+                    if (
+                        canonical_type(observed_status) is canonical_int
+                        and 100 <= observed_status <= 599
+                    ):
                         http_error_status = observed_status
                     else:
                         http_error_invalid_status = True
                 except base_exception:
                     http_error_invalid_status = True
-                if http_error_status is not None and not 300 <= http_error_status < 400:
+                if (
+                    http_error_status is not None
+                    and not 300 <= http_error_status < 400
+                ):
                     try:
                         raw = error.read(response_budget + 1)
                     except base_exception:
@@ -1742,14 +1752,18 @@ class UrllibJsonWireClient:
             # boundary. New failures are generated OUTSIDE urllib exception scope,
             # so their public context chain cannot contain the signed HTTPError.
             if transport_unavailable:
-                raise provider_transport_error("provider HTTP transport response unavailable")
+                raise provider_transport_error(
+                    "provider HTTP transport response unavailable"
+                )
             if http_error_invalid_status:
                 raise provider_transport_error("provider HTTP error status invalid")
             if http_error_status is not None:
                 if 300 <= http_error_status < 400:
                     raise provider_transport_error("provider redirect is prohibited")
                 if http_error_read_failed:
-                    raise provider_transport_error("provider HTTP error body unavailable")
+                    raise provider_transport_error(
+                        "provider HTTP error body unavailable"
+                    )
                 raw = self._bounded_body(raw, max_bytes=response_budget)
                 if is_authenticated_read:
                     return authenticated_response_type(

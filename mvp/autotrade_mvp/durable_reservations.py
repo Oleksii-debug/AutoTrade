@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 import weakref
@@ -111,17 +110,12 @@ def _decimal_text(value: Decimal) -> str:
 
 def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
     # Financial reservation identity must never enumerate an executable Mapping
-    # implementation. Exact dict and MappingProxyType are the inert mapping
-    # surfaces used by the product; snapshot their entries once before any
-    # amount parsing or durable hashing.
-    if type(values) is dict:
-        items = tuple(dict.items(values))
-    elif type(values) is MappingProxyType:
-        items = tuple(values.items())
-    else:
-        raise TypeError(
-            "resource amounts must use exact dict or MappingProxyType"
-        )
+    # implementation. MappingProxyType is not sufficient here because it can
+    # proxy a caller-owned mapping and dispatch that object's virtual methods.
+    # Snapshot only an exact built-in dict before amount parsing or hashing.
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
     if not items:
         raise ValueError("resource amounts are required")
 

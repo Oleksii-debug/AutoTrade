@@ -173,8 +173,8 @@ def _validate_strict_json_value(root: object) -> None:
 
 def strict_json_loads(text: str) -> Any:
     """Decode one JSON value and reject ambiguous/non-canonical decoded domains."""
-    if not isinstance(text, str):
-        raise TypeError("text must be str; decode bytes explicitly at the boundary")
+    if type(text) is not str:
+        raise TypeError("text must be exact str; decode bytes explicitly at the boundary")
     if len(text) > _JSON_MAX_DOCUMENT_CHARS:
         raise InvalidJsonDomainError(
             f"JSON document exceeds {_JSON_MAX_DOCUMENT_CHARS} characters"
@@ -193,4 +193,6 @@ def strict_json_loads(text: str) -> Any:
 
 def jsonl_bytes_are_blank(payload: bytes) -> bool:
     """Return true only for whitespace bytes permitted by the JSON grammar."""
+    if type(payload) is not bytes:
+        raise TypeError("payload must be exact bytes")
     return not payload.strip(_JSON_WHITESPACE_BYTES)

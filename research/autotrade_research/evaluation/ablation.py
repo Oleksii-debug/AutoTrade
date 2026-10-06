@@ -246,12 +246,7 @@ class AblationOutcome:
         )
         if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be exact FULL or ABLATED text")
-        if (
-            not isinstance(self.elapsed_ms, int)
-            or isinstance(self.elapsed_ms, bool)
-            or not isinstance(self.deadline_ms, int)
-            or isinstance(self.deadline_ms, bool)
-        ):
+        if type(self.elapsed_ms) is not int or type(self.deadline_ms) is not int:
             raise TypeError("elapsed_ms and deadline_ms must be integers")
         if self.elapsed_ms < 0 or self.deadline_ms <= 0:
             raise ValueError("elapsed_ms must be non-negative and deadline_ms positive")
@@ -287,7 +282,7 @@ class AblationOutcome:
         object.__setattr__(self, "decision_utc", decision)
         object.__setattr__(self, "outcome_available_utc", outcome)
 
-        if not isinstance(self.input_evidence, tuple):
+        if type(self.input_evidence) is not tuple:
             raise TypeError("input_evidence must be an immutable tuple")
         if any(
             type(item) is not CausalInputEvidence
@@ -457,11 +452,7 @@ class ExactAblationDecision:
     status: str
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.pair_count, int)
-            or isinstance(self.pair_count, bool)
-            or self.pair_count < 2
-        ):
+        if type(self.pair_count) is not int or self.pair_count < 2:
             raise ValueError("exact decision pair_count must be an integer >= 2")
         for field_name in (
             "mean",
@@ -472,7 +463,7 @@ class ExactAblationDecision:
             "rhs",
         ):
             value = getattr(self, field_name)
-            if not isinstance(value, Fraction):
+            if type(value) is not Fraction:
                 raise TypeError(f"{field_name} must be Fraction")
             bounded_fraction(value)
         if self.sample_variance < 0:
@@ -504,6 +495,8 @@ class ExactAblationDecision:
                 else "FAIL"
             )
         )
+        if type(self.status) is not str:
+            raise TypeError("exact decision status must be text")
         if self.status != expected_status:
             raise ValueError("exact decision status is inconsistent with operands")
 
@@ -523,6 +516,24 @@ class AblationEvaluation:
     reporting_status: str = _REPORTING_NOT_APPLICABLE
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "target_component",
+            _identity_text(self.target_component, "target_component"),
+        )
+        if type(self.pair_count) is not int or self.pair_count < 0:
+            raise ValueError("evaluation pair_count must be a non-negative integer")
+        if type(self.status) is not str:
+            raise TypeError("evaluation status must be text")
+        if type(self.reason) is not str or not self.reason:
+            raise ValueError("evaluation reason must be non-empty text")
+        if type(self.reporting_status) is not str:
+            raise TypeError("reporting_status must be text")
+        if (
+            self.decision_exact is not None
+            and type(self.decision_exact) is not ExactAblationDecision
+        ):
+            raise TypeError("decision_exact must be ExactAblationDecision or None")
         if self.reporting_status not in {
             _REPORTING_AVAILABLE,
             _REPORTING_UNAVAILABLE,
@@ -763,7 +774,7 @@ def evaluate_incremental_value(
 ) -> AblationEvaluation:
     """Measure conservative net marginal value with an exact rational verdict."""
 
-    if not isinstance(minimum_pairs, int) or isinstance(minimum_pairs, bool) or minimum_pairs < 2:
+    if type(minimum_pairs) is not int or minimum_pairs < 2:
         raise ValueError("minimum_pairs must be an integer >= 2")
     required = _decimal(required_lower_bound, "required_lower_bound")
     multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
@@ -893,7 +904,7 @@ class AblationEvidenceBundle:
             "target_component",
             _identity_text(self.target_component, "target_component"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         object.__setattr__(
             self,
@@ -905,11 +916,7 @@ class AblationEvidenceBundle:
             "dataset_digest",
             _digest(self.dataset_digest, "dataset_digest"),
         )
-        if (
-            not isinstance(self.minimum_pairs, int)
-            or isinstance(self.minimum_pairs, bool)
-            or self.minimum_pairs < 2
-        ):
+        if type(self.minimum_pairs) is not int or self.minimum_pairs < 2:
             raise ValueError("minimum_pairs must be an integer >= 2")
         required = _decimal(self.required_lower_bound, "required_lower_bound")
         multiplier = _decimal(self.uncertainty_multiplier, "uncertainty_multiplier")
@@ -917,13 +924,9 @@ class AblationEvidenceBundle:
             raise ValueError("uncertainty_multiplier must be non-negative")
         object.__setattr__(self, "required_lower_bound", required)
         object.__setattr__(self, "uncertainty_multiplier", multiplier)
-        if (
-            not isinstance(self.pair_count, int)
-            or isinstance(self.pair_count, bool)
-            or self.pair_count < 0
-        ):
+        if type(self.pair_count) is not int or self.pair_count < 0:
             raise ValueError("pair_count must be a non-negative integer")
-        if not isinstance(self.evaluation, AblationEvaluation):
+        if type(self.evaluation) is not AblationEvaluation:
             raise TypeError("evaluation must be AblationEvaluation")
         if self.evaluation.target_component != self.target_component:
             raise ValueError("evaluation target_component must match the bundle")
@@ -955,7 +958,7 @@ class AblationEvidenceBundle:
                 )
         elif decision is not None:
             raise ValueError("inconclusive evaluation cannot carry terminal exact decision")
-        if not isinstance(self.payload, str) or not self.payload:
+        if type(self.payload) is not str or not self.payload:
             raise ValueError("payload must be non-empty canonical JSON")
         object.__setattr__(
             self,
@@ -1108,6 +1111,8 @@ class AblationOutcomeArtifactRef:
     def __post_init__(self) -> None:
         from uuid import UUID
 
+        if type(self.artifact_id) is not str:
+            raise ValueError("artifact_id must be a canonical UUID")
         try:
             canonical_id = str(UUID(self.artifact_id))
         except (ValueError, AttributeError, TypeError) as error:
@@ -1121,7 +1126,7 @@ _ABLATION_OUTCOME_MEDIA_TYPE = "application/vnd.autotrade.ablation-outcome+json"
 
 
 def _parse_utc_text(value: object, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
+    if type(value) is not str or not value.endswith("Z"):
         raise ValueError(f"{field} must be canonical UTC text")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
@@ -1152,13 +1157,11 @@ class CanonicalAblationOutcomeEvidence:
     def __post_init__(self) -> None:
         for name in ("case_id", "population_unit_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{name} is required")
-            canonical = value.strip()
+            canonical = _identity_text(value, name)
             if canonical != value:
                 raise ValueError(f"{name} must use canonical text")
             object.__setattr__(self, name, canonical)
-        if self.variant not in {"FULL", "ABLATED"}:
+        if type(self.variant) is not str or self.variant not in {"FULL", "ABLATED"}:
             raise ValueError("variant must be FULL or ABLATED")
         object.__setattr__(self, "utility", _decimal(self.utility, "utility"))
         cost = _decimal(self.cost, "cost")
@@ -1170,7 +1173,7 @@ class CanonicalAblationOutcomeEvidence:
             "outcome_available_utc",
             _utc(self.outcome_available_utc, "outcome_available_utc"),
         )
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         for name in (
             "utility_evidence_digest",
@@ -1207,7 +1210,7 @@ class RegisteredAblationPopulation:
             "stopping_rule_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
-        if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
+        if type(self.source_revision) is not str or _GIT_SHA.fullmatch(self.source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
         registered = _utc(self.registered_at_utc, "registered_at_utc")
         cutoff = _utc(self.evaluation_cutoff_utc, "evaluation_cutoff_utc")
@@ -1215,14 +1218,13 @@ class RegisteredAblationPopulation:
             raise ValueError("evaluation cutoff cannot precede population registration")
         object.__setattr__(self, "registered_at_utc", registered)
         object.__setattr__(self, "evaluation_cutoff_utc", cutoff)
-        if not isinstance(self.population_unit_ids, tuple) or not self.population_unit_ids:
+        if type(self.population_unit_ids) is not tuple or not self.population_unit_ids:
             raise ValueError("population_unit_ids must be a non-empty immutable tuple")
         normalized = tuple(
-            value.strip()
+            _identity_text(value, "population_unit_id")
             for value in self.population_unit_ids
-            if isinstance(value, str) and value.strip()
         )
-        if len(normalized) != len(self.population_unit_ids):
+        if normalized != self.population_unit_ids:
             raise ValueError("population_unit_ids must contain canonical non-empty strings")
         if tuple(sorted(normalized)) != normalized:
             raise ValueError("population_unit_ids must be sorted canonically")
@@ -1262,14 +1264,16 @@ class AblationQualificationAuthority:
             raise TypeError("experience_memory must be ExperienceMemory")
         if not isinstance(artifact_store, ArtifactStore):
             raise TypeError("artifact_store must be ArtifactStore")
-        if not isinstance(protocol_id, str) or not protocol_id.strip():
+        if type(protocol_id) is not str or not protocol_id.strip():
             raise ValueError("protocol_id is required")
-        if not isinstance(protocol_hash, str):
+        if type(protocol_hash) is not str:
             raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+        if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
             raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
-        if not isinstance(granted_permissions, set) or not granted_permissions:
+        if type(granted_permissions) is not set or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty set")
+        if any(type(value) is not str or not value for value in granted_permissions):
+            raise ValueError("granted_permissions must contain non-empty text")
         self.scientific_registry = scientific_registry
         self.experience_memory = experience_memory
         self.artifact_store = artifact_store
@@ -1287,7 +1291,7 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
-        if not isinstance(reference, AblationOutcomeArtifactRef):
+        if type(reference) is not AblationOutcomeArtifactRef:
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
         manifest = self.artifact_store.load_manifest(reference.artifact_id)
         if manifest.get("sha256") != reference.sha256:
@@ -1478,11 +1482,7 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "outcome_refs must contain canonical AblationOutcomeArtifactRef values"
             )
-        if (
-            not isinstance(minimum_pairs, int)
-            or isinstance(minimum_pairs, bool)
-            or minimum_pairs < 2
-        ):
+        if type(minimum_pairs) is not int or minimum_pairs < 2:
             raise ValueError("minimum_pairs must be an integer >= 2")
         required = _decimal(required_lower_bound, "required_lower_bound")
         multiplier = _decimal(
@@ -1508,7 +1508,7 @@ def evaluate_qualified_incremental_value(
     else:
         if tuple(outcome_refs):
             raise ValueError("outcome_refs require AblationQualificationAuthority")
-        if not isinstance(population, RegisteredAblationPopulation):
+        if type(population) is not RegisteredAblationPopulation:
             raise TypeError(
                 "population must be RegisteredAblationPopulation for diagnostic evaluation"
             )
@@ -1542,7 +1542,7 @@ def evaluate_qualified_incremental_value(
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:
-        if not isinstance(evidence, CanonicalAblationOutcomeEvidence):
+        if type(evidence) is not CanonicalAblationOutcomeEvidence:
             raise TypeError(
                 "canonical_outcomes must contain CanonicalAblationOutcomeEvidence"
             )
@@ -1591,7 +1591,7 @@ def build_ablation_evidence_bundle(
 ) -> AblationEvidenceBundle:
     """Lock the exact causal population and result into deterministic artifact bytes."""
 
-    if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
+    if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
         raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
     protocol = _digest(protocol_digest, "protocol_digest")
     dataset = _digest(dataset_digest, "dataset_digest")
@@ -1665,7 +1665,7 @@ def verify_ablation_evidence_bundle(
 ) -> bool:
     """Rebuild a locked bundle and fail closed on any source/population/result drift."""
 
-    if not isinstance(bundle, AblationEvidenceBundle):
+    if type(bundle) is not AblationEvidenceBundle:
         raise TypeError("bundle must be AblationEvidenceBundle")
     rebuilt = build_ablation_evidence_bundle(
         bundle.target_component,

@@ -188,6 +188,23 @@ class IbkrWebAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertNotIn("Content-Length", request.headers)
         self.assertNotIn("Content-Type", request.headers)
 
+    def test_bearer_accepts_rfc6750_b64token_alphabet_and_trailing_padding(self):
+        request = IbkrWebAuthenticatedReadSigner.sign(
+            policy=IBKR_WEB_ENDPOINT_POLICIES["PAPER"],
+            query_binding=_binding(
+                self.snapshot,
+                "/iserver/accounts",
+                self.at,
+            ),
+            credential_plaintext="abc.DEF_123-opaque+/==",
+        )
+
+        self.assertEqual(
+            request.headers["Authorization"],
+            "Bearer abc.DEF_123-opaque+/==",
+        )
+        self.assertEqual(request.method, "GET")
+
     def test_bearer_prefix_whitespace_and_wrong_environment_fail_closed(self):
         binding = _binding(
             self.snapshot,

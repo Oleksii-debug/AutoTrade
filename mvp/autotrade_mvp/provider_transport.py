@@ -2849,6 +2849,150 @@ del _bind_direct_authenticated_read_receipt_access
 del _direct_authenticated_read_execution_receipt_state
 
 
+def _install_direct_authenticated_read_observation_authority(
+    receipt_reader,
+    receipt_snapshot_reader,
+):
+    """Carry direct-wire authority onto the exact parsed read observation."""
+
+    states: dict[int, tuple[object, object, tuple[object, ...]]] = {}
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_object = object
+    canonical_weakref = weakref_ref
+    canonical_reader = receipt_reader
+    canonical_snapshot_reader = receipt_snapshot_reader
+    canonical_sha256 = sha256
+
+    client_type = UrllibJsonWireClient
+    response_type = AuthenticatedReadWireResponse
+    observation_type = ProviderResponseObservation
+    receipt_type = DirectAuthenticatedReadExecutionReceipt
+    transport_error = ProviderTransportError
+
+    def prune() -> None:
+        for object_id, state in canonical_tuple(states.items()):
+            if state[0]() is None:
+                states.pop(object_id, None)
+
+    def bind(
+        client: object,
+        response: object,
+        observation: object,
+    ) -> ProviderResponseObservation:
+        if canonical_type(observation) is not observation_type:
+            raise transport_error(
+                "exact provider response observation is required"
+            )
+        # Custom/injected clients remain useful test seams but receive no
+        # production direct-wire provenance.
+        if canonical_type(client) is not client_type:
+            return observation
+        if canonical_type(response) is not response_type:
+            raise transport_error(
+                "exact authenticated-read wire response is required"
+            )
+
+        receipt = canonical_reader(response)
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "canonical direct authenticated-read execution receipt is required"
+            )
+        snapshot = canonical_snapshot_reader(receipt)
+        values = (
+            snapshot["transport_identity"],
+            snapshot["network_policy_identity"],
+            snapshot["request_sha256"],
+            snapshot["http_status"],
+            snapshot["response_sha256"],
+        )
+        status = canonical_object.__getattribute__(observation, "http_status")
+        response_sha256 = canonical_object.__getattribute__(
+            observation,
+            "response_sha256",
+        )
+        raw = canonical_object.__getattribute__(response, "body")
+        if (
+            values[3] != status
+            or values[4] != response_sha256
+            or values[4] != "sha256:" + canonical_sha256(raw).hexdigest()
+        ):
+            raise transport_error(
+                "direct authenticated-read receipt conflicts with parsed "
+                "provider response"
+            )
+        prune()
+        object_id = canonical_id(observation)
+        current = states.get(object_id)
+        if current is not None and current[0]() is not None:
+            raise transport_error(
+                "direct authenticated-read observation authority collision"
+            )
+        states[object_id] = (
+            canonical_weakref(observation),
+            receipt,
+            values,
+        )
+        return observation
+
+    def require(
+        observation: object,
+    ) -> DirectAuthenticatedReadExecutionReceipt:
+        if canonical_type(observation) is not observation_type:
+            raise transport_error(
+                "exact provider response observation is required"
+            )
+        prune()
+        state = states.get(canonical_id(observation))
+        if state is None or state[0]() is not observation:
+            raise transport_error(
+                "provider response lacks direct authenticated-read wire authority"
+            )
+        receipt = state[1]
+        if canonical_type(receipt) is not receipt_type:
+            raise transport_error(
+                "direct authenticated-read observation receipt changed"
+            )
+        snapshot = canonical_snapshot_reader(receipt)
+        current = (
+            snapshot["transport_identity"],
+            snapshot["network_policy_identity"],
+            snapshot["request_sha256"],
+            snapshot["http_status"],
+            snapshot["response_sha256"],
+        )
+        if current != state[2]:
+            raise transport_error(
+                "direct authenticated-read observation receipt changed"
+            )
+        if (
+            canonical_object.__getattribute__(observation, "http_status")
+            != current[3]
+            or canonical_object.__getattribute__(
+                observation,
+                "response_sha256",
+            )
+            != current[4]
+        ):
+            raise transport_error(
+                "provider response changed after direct-wire binding"
+            )
+        return receipt
+
+    return bind, require
+
+
+(
+    _bind_direct_authenticated_read_observation,
+    direct_authenticated_read_observation_receipt,
+) = _install_direct_authenticated_read_observation_authority(
+    direct_authenticated_read_execution_receipt,
+    direct_authenticated_read_execution_receipt_snapshot,
+)
+del _install_direct_authenticated_read_observation_authority
+
+
 def _install_direct_trading_exact_response_authority(
     receipt_reader,
     receipt_snapshot,
@@ -6166,11 +6310,16 @@ class BybitV5AuthenticatedReadTransport:
                     "Bybit authenticated read returned unexpected HTTP status "
                     + str(wire_response.http_status)
                 )
-            return observe_authenticated_json_response(
+            observation = observe_authenticated_json_response(
                 query_binding=query_binding,
                 http_status=wire_response.http_status,
                 response_bytes=wire_response.body,
                 observed_at=self.clock_utc(),
+            )
+            return _bind_direct_authenticated_read_observation(
+                self.wire_client,
+                wire_response,
+                observation,
             )
 
 

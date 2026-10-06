@@ -1249,8 +1249,9 @@ def unknown_submissions_from_dispatch(
     SubmissionSending is ambiguous after a crash because the external request may
     already have crossed the final send barrier. SubmissionUnknown is explicitly
     ambiguous. Neither state is converted to retry authority here. `aggregate_ids`
-    lets callers bind a logical attempt id to the exact durable aggregate identity
-    used by a scoped dispatcher, without duplicating dispatch identity logic.
+    is only a locator for a durable aggregate; it cannot bind or relabel logical
+    attempt identity. Current rows prove that identity with SubmissionPrepared
+    attempt_id, while legacy rows may only use their original aggregate identity.
     """
 
     store_identity = require_exact_journal_store_authority(
@@ -1296,12 +1297,13 @@ def unknown_submissions_from_dispatch(
     recovered: list[UnknownSubmission] = []
     for attempt_id in normalized:
         aggregate_id = durable_ids.get(attempt_id, attempt_id)
-        with journal_store_authority_scope(store, store_identity):
-            events = JournalStore.load_events(
-                store,
-                "submission_attempt",
-                aggregate_id,
-            )
+        events = _canonical_journal_call(
+            store,
+            store_identity,
+            JournalStore.load_events,
+            "submission_attempt",
+            aggregate_id,
+        )
         if not events:
             raise KeyError(f"Unknown submission attempt: {attempt_id}")
         first = events[0]

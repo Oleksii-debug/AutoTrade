@@ -16,7 +16,7 @@ import json
 import re
 from types import MappingProxyType
 import weakref
-from typing import Mapping
+from typing import Callable, Mapping
 
 from .bybit_v5 import (
     BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
@@ -785,6 +785,66 @@ def _observe_qualified_provider_json_response_impl(
     object.__setattr__(qualified, "query_binding", query_binding)
     _register_authority(qualified)
     return qualified
+
+def qualify_provider_response_observation(
+    *,
+    query_binding: QualifiedProviderReadQueryBinding,
+    observation: ProviderResponseObservation,
+) -> QualifiedProviderResponseObservation:
+    """Attach exact current Q/rule provenance to one canonical wire observation.
+
+    The neutral provider transport owns credential use and exact response-byte
+    observation. This function proves that it executed the exact base binding
+    sealed inside the qualified route binding before adding the historical Q
+    identity. It does not reparse or copy provider bytes.
+    """
+
+    if type(query_binding) is not QualifiedProviderReadQueryBinding:
+        raise TypeError(
+            "query_binding must be exact QualifiedProviderReadQueryBinding"
+        )
+    _require_qualified_provider_read_binding_authority(query_binding)
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    _require_provider_response_observation_authority(observation)
+    if observation.query_binding is not query_binding.query_binding:
+        raise ProviderRouteReadError(
+            "provider response was not produced from exact qualified read binding"
+        )
+    if (
+        type(observation.http_status) is not int
+        or observation.http_status not in query_binding.accepted_success_statuses
+    ):
+        raise ProviderRouteReadError(
+            "provider response status is outside qualified endpoint contract"
+        )
+    qualified = object.__new__(QualifiedProviderResponseObservation)
+    object.__setattr__(qualified, "observation", observation)
+    object.__setattr__(qualified, "query_binding", query_binding)
+    _register_qualified_provider_response_authority(qualified)
+    return qualified
+
+
+def execute_qualified_provider_read(
+    *,
+    query_binding: QualifiedProviderReadQueryBinding,
+    transport: Callable[[AuthenticatedReadQueryBinding], ProviderResponseObservation],
+) -> QualifiedProviderResponseObservation:
+    """Execute one sealed qualified read through a neutral provider transport."""
+
+    if type(query_binding) is not QualifiedProviderReadQueryBinding:
+        raise TypeError(
+            "query_binding must be exact QualifiedProviderReadQueryBinding"
+        )
+    _require_qualified_provider_read_binding_authority(query_binding)
+    if not callable(transport):
+        raise TypeError("transport must be callable")
+    observation = transport(query_binding.query_binding)
+    return qualify_provider_response_observation(
+        query_binding=query_binding,
+        observation=observation,
+    )
+
 
 def _bind_qualified_provider_read_minting(
     prepare_impl,

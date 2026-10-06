@@ -34,6 +34,12 @@ from .exact_decimal import (
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
+# Freeze the canonical storage reader when this financial module is imported.
+# Later class-level monkey-patching must not be able to replace the reader used
+# at the immutable margin-evidence authority boundary.
+_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT = ArtifactStore.read_authenticated_snapshot
+
+
 class PerpetualMarginError(ValueError):
     pass
 
@@ -83,9 +89,14 @@ def _instant(value: str, *, name: str) -> datetime:
 def _artifact_id(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     try:
-        return str(UUID(text))
+        canonical = str(UUID(text))
     except (ValueError, TypeError, AttributeError) as error:
         raise PerpetualMarginError(f"{name} must be an artifact UUID") from error
+    if canonical != text:
+        raise PerpetualMarginError(
+            f"{name} must be a canonical lowercase artifact UUID"
+        )
+    return text
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -119,7 +130,7 @@ def _verify_immutable_artifact(
             "canonical ArtifactStore is required for immutable margin evidence"
         )
     try:
-        manifest, payload = ArtifactStore.read_authenticated_snapshot(
+        manifest, payload = _READ_AUTHENTICATED_ARTIFACT_SNAPSHOT(
             store,
             artifact_id,
         )
@@ -137,14 +148,16 @@ def _verify_immutable_artifact(
         raise PerpetualMarginError(
             "immutable margin evidence artifact has unsupported representation"
         )
-    if manifest.get("artifact_id") != artifact_id:
+    manifest_artifact_id = manifest.get("artifact_id")
+    if type(manifest_artifact_id) is not str or manifest_artifact_id != artifact_id:
         raise PerpetualMarginError("margin evidence artifact identity mismatch")
     actual_digest = "sha256:" + sha256(payload).hexdigest()
-    if manifest.get("sha256") != actual_digest:
+    manifest_digest = manifest.get("sha256")
+    if type(manifest_digest) is not str or manifest_digest != actual_digest:
         raise PerpetualMarginError("margin evidence artifact digest mismatch")
     manifest_hash = manifest.get("manifest_hash")
     if (
-        not isinstance(manifest_hash, str)
+        type(manifest_hash) is not str
         or len(manifest_hash) != 71
         or not manifest_hash.startswith("sha256:")
         or any(ch not in "0123456789abcdef" for ch in manifest_hash[7:])
@@ -153,7 +166,7 @@ def _verify_immutable_artifact(
             "margin evidence artifact manifest integrity binding is required"
         )
     rights = manifest.get("rights")
-    if not isinstance(rights, dict) or rights.get("storage") is not True:
+    if type(rights) is not dict or rights.get("storage") is not True:
         raise PerpetualMarginError(
             "margin evidence artifact must preserve storage provenance"
         )
@@ -571,19 +584,19 @@ def evaluate_perpetual_margin(
             "PAPER/LIVE perpetual margin requires canonical provider-origin evidence"
         )
 
-    PerpetualMarginEvidence.verify_immutable_artifacts(evidence, artifact_store)
-
-    now = _instant(evaluated_at, name="evaluated_at")
-    if not (capability.observed_at <= now < capability.expires_at):
-        raise PerpetualMarginError("capability snapshot is stale at evaluation time")
     if (
-        isinstance(maximum_evidence_age_seconds, bool)
-        or not isinstance(maximum_evidence_age_seconds, int)
+        type(maximum_evidence_age_seconds) is not int
         or maximum_evidence_age_seconds < 0
     ):
         raise PerpetualMarginError(
             "maximum_evidence_age_seconds must be a non-negative integer"
         )
+
+    PerpetualMarginEvidence.verify_immutable_artifacts(evidence, artifact_store)
+
+    now = _instant(evaluated_at, name="evaluated_at")
+    if not (capability.observed_at <= now < capability.expires_at):
+        raise PerpetualMarginError("capability snapshot is stale at evaluation time")
 
     signed_notional = _decimal(
         signed_notional_settlement,

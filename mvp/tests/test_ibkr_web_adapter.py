@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -368,10 +369,31 @@ class IbkrWebAdapterTests(unittest.TestCase):
             endpoint="/iserver/accounts",
         )
         with self.assertRaisesRegex(
-            ProviderCoreError,
-            "endpoint mismatch",
+            IbkrWebAdapterError,
+            "observation scope mismatch",
         ):
             brokerage_session_status_from_observation(observation)
+
+    def test_brokerage_status_scope_does_not_delegate_to_mutable_observation_method(self):
+        observation = ibkr_session_observation(
+            {
+                "connected": True,
+                "authenticated": True,
+                "established": True,
+                "competing": False,
+            },
+            endpoint="/iserver/accounts",
+        )
+        original = ProviderResponseObservation.require_scope
+        ProviderResponseObservation.require_scope = lambda *_args, **_kwargs: None
+        try:
+            with self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                "observation scope mismatch",
+            ):
+                brokerage_session_status_from_observation(observation)
+        finally:
+            ProviderResponseObservation.require_scope = original
 
     def test_brokerage_status_requires_documented_success_value_envelope(self):
         payload = {

@@ -771,6 +771,14 @@ def observe_submission_json_response(
 
     if not isinstance(response_binding, SubmissionResponseBinding):
         raise TypeError("response_binding must be SubmissionResponseBinding")
+    if response_binding.terminal_state != "SENT":
+        raise ProviderCoreError(
+            "provider submission observation requires definitive SENT response"
+        )
+    if response_binding.response_encoding != "utf-8-json":
+        raise ProviderCoreError(
+            "provider-write JSON observation requires durable utf-8-json response bytes"
+        )
     provider = _text(provider_id, "provider_id").upper()
     if provider not in PROVIDERS:
         raise ProviderCoreError("unknown provider")
@@ -1133,6 +1141,14 @@ def _install_provider_submission_observation_authority(
     ) -> ProviderSubmissionObservation:
         implementation_changed()
         binding = canonical_binding_projection(response_binding)
+        if binding["terminal_state"] != "SENT":
+            raise error_type(
+                "provider submission observation requires definitive SENT response"
+            )
+        if binding["response_encoding"] != "utf-8-json":
+            raise error_type(
+                "provider-write JSON observation requires durable utf-8-json response bytes"
+            )
 
         provider = canonical_text(provider_id, "provider_id").upper()
         if provider not in provider_ids:

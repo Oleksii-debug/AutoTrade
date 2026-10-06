@@ -18,6 +18,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .provider_core import (
@@ -174,7 +175,7 @@ class BybitFeeCurrencyAuthority:
 
 
 def _install_bybit_fee_currency_authority() -> object:
-    states: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+    states: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def prune() -> None:
         for object_id, (value_ref, _snapshot) in tuple(states.items()):
@@ -192,7 +193,7 @@ def _install_bybit_fee_currency_authority() -> object:
         if current is not None and current[0]() is not None:
             raise ProviderCoreError("fee-currency authority identity collision")
         states[object_id] = (
-            weakref.ref(value),
+            weakref_ref(value),
             tuple(getattr(value, name) for name in (
                 "provider_id",
                 "provider_environment",
@@ -1035,16 +1036,12 @@ def parse_executions(
                     "Bybit execution fee currency is unresolved; canonical "
                     "typed fee-currency authority is required"
                 )
-            if (
-                qualified_fee_currency.provider_environment
-                != observation.provider_environment
-            ):
+            expected_runtime_environment = (
+                "LIVE" if qualified_fee_currency.provider_environment == "MAINNET" else "PAPER"
+            )
+            if expected_runtime_environment != environment:
                 raise ProviderCoreError(
                     "Bybit fee-currency authority environment does not match execution evidence"
-                )
-            if qualified_fee_currency.entity_id != observation.entity_id:
-                raise ProviderCoreError(
-                    "Bybit fee-currency authority entity does not match execution evidence"
                 )
             if (
                 qualified_fee_currency.product_category

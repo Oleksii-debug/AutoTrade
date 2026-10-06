@@ -1,12 +1,22 @@
-# Section 10 provider-free asset lifecycle closure candidate — 2026-10-06
+# Section 10 provider-free asset lifecycle closure — 2026-10-06
 
-## Purpose
+## Canonical result
 
-Close the remaining provider-free FUTURE lifecycle authorization gap without creating a second instrument registry, risk engine or financial authority.
+Section 10 provider-free asset lifecycle authority is closed on `main`.
+
+- Final closure PR: #2286
+- Accepted head: `ef7925ba3460d3ce684f6ed5dcadf4c071f6afb3`
+- Accepted base: `e27dd1a3a27bee1084d19912b974d0112930f9a4`
+- Merge commit: `4d5ad9f94fee81622b88257f3e1ac931fff1575d`
+- Accepted candidate tree: `19def0fcad934a0036646218c9e8f856eaf7ff69`
+- Post-merge main tree: `19def0fcad934a0036646218c9e8f856eaf7ff69`
+- Post-merge tree equality: PASS
+
+This closes the remaining provider-free FUTURE lifecycle authorization gap without creating a second instrument registry, risk engine or financial authority.
 
 ## Current-main convergence
 
-This candidate preserves the current Section-5 instrument/settlement authority and adds the reviewed Section-10 safety lineage from #1622 without replaying its stale ancestry.
+The merged result preserves the current Section-5 instrument/settlement authority and adds the reviewed Section-10 safety lineage from #1622 without replaying its stale ancestry.
 
 Closed boundaries:
 - the caller-authored `physical_delivery_authorized` boolean is removed;
@@ -29,7 +39,7 @@ The missing positive composition is now owned by the existing financial writer:
 
 ## Regressions
 
-The candidate includes regressions for:
+The accepted result includes regressions for:
 - legacy physical-delivery boolean removal;
 - forged/mutated/unbound contract state;
 - wrong, stale, inactive, subclassed and caller-minted registry selections;
@@ -40,4 +50,9 @@ The candidate includes regressions for:
 
 ## Qualification boundary
 
-This closes provider-free source/integration lifecycle authority only after merge/readback. It does not enable physical delivery and does not claim provider/PAPER/LIVE/real-money/profitability/release/NVDA qualification. Queued/pending/cancelled hosted CI is never represented as PASS.
+Provider-free source/integration lifecycle authority is merged and read back closed. It does not enable physical delivery and does not claim provider/PAPER/LIVE/real-money/profitability/release/NVDA qualification. Queued/pending/cancelled hosted CI is never represented as PASS.
+
+
+## Residual WP-28 boundary
+
+Broader WP-28 provider contract metadata, exchange-calendar/roll and provider qualification remains separately IN_PROGRESS. That provider-specific work does not reopen the closed provider-free Section-10 source/integration lifecycle authority.

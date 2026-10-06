@@ -86,7 +86,6 @@ class AccessibleStatusTests(unittest.TestCase):
             self.assertIn("Economic edge: unproven", text)
             self.assertNotIn("{", text)
 
-
     def test_malformed_nested_state_is_reported_without_crashing(self):
         text = format_accessible_status(
             {
@@ -165,7 +164,6 @@ class AccessibleStatusTests(unittest.TestCase):
         )
         self.assertIn("Economic edge: unproven", text)
 
-
     def test_unknown_state_fails_closed_as_corrupt(self):
         text = format_accessible_status(
             {
@@ -209,7 +207,6 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("Portfolio valuation and profit or loss: unavailable", running)
         self.assertIn("Economic edge: unproven", running)
 
-
     def test_control_text_cannot_break_plain_text_status_contract(self):
         text = format_accessible_status(
             {
@@ -236,7 +233,6 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("\x1b", text)
         self.assertNotIn("forged status", text)
         self.assertNotIn("\t", text)
-
 
     def test_accessible_cli_returns_failure_for_unknown_state(self):
         output = io.StringIO()
@@ -274,7 +270,6 @@ class AccessibleStatusTests(unittest.TestCase):
                 )
         self.assertIn("System state: Not started", output.getvalue())
 
-
     def test_accessible_cli_preserves_status_when_optional_economics_are_malformed(self):
         output = io.StringIO()
         with patch(
@@ -306,7 +301,6 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertIn("Replay verification: passed", text)
         self.assertNotIn("Final equity:", text)
         self.assertIn("Economic edge: unproven", text)
-
 
     def test_hostile_mapping_keys_do_not_execute_equality_during_status_read(self):
         class TrapKey:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -227,11 +227,49 @@ class WeeklySession:
 
 
 @dataclass(frozen=True)
+class CalendarDateOverride:
+    """One local calendar date replacing the recurring weekly schedule.
+
+    An empty sessions tuple means the venue is closed for the entire local date.
+    Non-empty sessions represent special/early/late sessions and must use the
+    same local weekday as the override date.
+    """
+
+    local_date: date
+    sessions: tuple[WeeklySession, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.local_date) is not date:
+            raise InstrumentRegistryError("calendar override local_date must be exact date")
+        if type(self.sessions) is not tuple:
+            raise InstrumentRegistryError("calendar override sessions must be exact tuple")
+        canonical = []
+        for session in self.sessions:
+            if type(session) is not WeeklySession:
+                raise InstrumentRegistryError(
+                    "calendar override sessions must be exact WeeklySession"
+                )
+            if session.weekday != self.local_date.weekday():
+                raise InstrumentRegistryError(
+                    "calendar override session weekday must match local_date"
+                )
+            canonical.append(
+                WeeklySession(
+                    weekday=session.weekday,
+                    open_minute=session.open_minute,
+                    close_minute=session.close_minute,
+                )
+            )
+        object.__setattr__(self, "sessions", tuple(canonical))
+
+
+@dataclass(frozen=True)
 class TradingCalendar:
     calendar_id: str
     timezone_id: str
     sessions: tuple[WeeklySession, ...] = ()
     transitions: tuple[OffsetTransition, ...] = ()
+    date_overrides: tuple[CalendarDateOverride, ...] = ()
     continuous: bool = False
 
     def __post_init__(self) -> None:
@@ -242,6 +280,14 @@ class TradingCalendar:
         if len({item.effective_from for item in ordered}) != len(ordered):
             raise InstrumentRegistryError("calendar transition instants must be unique")
         object.__setattr__(self, "transitions", ordered)
+        overrides = tuple(sorted(tuple(self.date_overrides), key=lambda item: item.local_date))
+        if any(type(item) is not CalendarDateOverride for item in overrides):
+            raise InstrumentRegistryError(
+                "date_overrides must contain exact CalendarDateOverride values"
+            )
+        if len({item.local_date for item in overrides}) != len(overrides):
+            raise InstrumentRegistryError("calendar override local dates must be unique")
+        object.__setattr__(self, "date_overrides", overrides)
         if not self.continuous and not self.sessions:
             raise InstrumentRegistryError("non-continuous calendar requires sessions")
 
@@ -263,6 +309,22 @@ class TradingCalendar:
 
     def is_open(self, instant: datetime) -> bool:
         point = _utc(instant, "instant")
+        if self.date_overrides:
+            local = point + timedelta(minutes=self._offset_minutes(point))
+            override = next(
+                (
+                    item
+                    for item in self.date_overrides
+                    if item.local_date == local.date()
+                ),
+                None,
+            )
+            if override is not None:
+                minute = local.hour * 60 + local.minute
+                return any(
+                    session.open_minute <= minute < session.close_minute
+                    for session in override.sessions
+                )
         if self.continuous:
             return True
         local = point + timedelta(minutes=self._offset_minutes(point))
@@ -809,6 +871,8 @@ def _detached_trading_calendar(calendar: TradingCalendar) -> TradingCalendar:
         raise TypeError("calendar.sessions must be exact tuple")
     if type(calendar.transitions) is not tuple:
         raise TypeError("calendar.transitions must be exact tuple")
+    if type(calendar.date_overrides) is not tuple:
+        raise TypeError("calendar.date_overrides must be exact tuple")
 
     sessions = []
     for session in calendar.sessions:
@@ -843,11 +907,38 @@ def _detached_trading_calendar(calendar: TradingCalendar) -> TradingCalendar:
             )
         )
 
+    overrides = []
+    for override in calendar.date_overrides:
+        if type(override) is not CalendarDateOverride:
+            raise TypeError("calendar overrides must be exact CalendarDateOverride")
+        if type(override.local_date) is not date:
+            raise TypeError("calendar override local_date must be exact date")
+        if type(override.sessions) is not tuple:
+            raise TypeError("calendar override sessions must be exact tuple")
+        override_sessions = []
+        for session in override.sessions:
+            if type(session) is not WeeklySession:
+                raise TypeError("calendar override sessions must be exact WeeklySession")
+            override_sessions.append(
+                WeeklySession(
+                    weekday=session.weekday,
+                    open_minute=session.open_minute,
+                    close_minute=session.close_minute,
+                )
+            )
+        overrides.append(
+            CalendarDateOverride(
+                local_date=override.local_date,
+                sessions=tuple(override_sessions),
+            )
+        )
+
     return TradingCalendar(
         calendar_id=calendar.calendar_id,
         timezone_id=calendar.timezone_id,
         sessions=tuple(sessions),
         transitions=tuple(transitions),
+        date_overrides=tuple(overrides),
         continuous=calendar.continuous,
     )
 

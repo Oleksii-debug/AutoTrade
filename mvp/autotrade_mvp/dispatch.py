@@ -348,19 +348,25 @@ del _install_exact_transport_response_authority
 
 def _snapshot_exact_transport_response(
     response: ExactJsonTransportResponse,
+    _authority=_require_canonical_exact_transport_response,
+    _decoder=_decode_exact_json_bytes,
+    _digest=sha256,
 ) -> tuple[str, str, Any, int | None, bool, str | None]:
     """Return one sealed, revalidated exact-response snapshot."""
 
+    # Transport executes after the irreversible send barrier and is caller/
+    # provider controlled.  Use the preinstalled authority functions captured at
+    # definition time; their own closure rejects public-name rebinding.
     (
         raw,
         http_status,
         requires_reconciliation,
         ambiguity_reason,
-    ) = _require_canonical_exact_transport_response(response)
+    ) = _authority(response)
     return (
         raw.decode("utf-8"),
-        "sha256:" + sha256(raw).hexdigest(),
-        _decode_exact_json_bytes(raw),
+        "sha256:" + _digest(raw).hexdigest(),
+        _decoder(raw),
         http_status,
         requires_reconciliation,
         ambiguity_reason,

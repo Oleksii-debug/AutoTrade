@@ -234,6 +234,97 @@ class BybitOptionDeliveryRawParserTests(unittest.TestCase):
         ):
             parse_option_delivery_page(observation(payload))
 
+    def test_parser_binds_rows_to_requested_symbol(self):
+        payload = response()
+        payload["result"]["list"][0]["symbol"] = "ETH-29DEC22-1600-P"
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "violates requested symbol filter",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    payload,
+                    query={
+                        "category": "option",
+                        "symbol": "BTC-29DEC22-16000-P",
+                    },
+                )
+            )
+
+    def test_parser_binds_rows_to_requested_time_window(self):
+        delivery_time = response()["result"]["list"][0]["deliveryTime"]
+        cases = (
+            (
+                {
+                    "category": "option",
+                    "startTime": str(delivery_time + 1),
+                },
+                "violates requested time range",
+            ),
+            (
+                {
+                    "category": "option",
+                    "endTime": str(delivery_time - 1),
+                },
+                "violates requested time range",
+            ),
+            (
+                {
+                    "category": "option",
+                    "startTime": str(delivery_time - 1),
+                    "endTime": str(delivery_time + 1),
+                },
+                None,
+            ),
+        )
+        for query, message in cases:
+            with self.subTest(query=query):
+                if message is None:
+                    parsed = parse_option_delivery_page(
+                        observation(response(), query=query)
+                    )
+                    self.assertEqual(
+                        parsed.records[0].delivery_time_ms,
+                        delivery_time,
+                    )
+                else:
+                    with self.assertRaisesRegex(ProviderCoreError, message):
+                        parse_option_delivery_page(
+                            observation(response(), query=query)
+                        )
+
+    def test_parser_binds_rows_to_requested_expiry(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "violates requested expiry filter",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    response(),
+                    query={"category": "option", "expDate": "28DEC22"},
+                )
+            )
+
+        parsed = parse_option_delivery_page(
+            observation(
+                response(),
+                query={"category": "option", "expDate": "29DEC22"},
+            )
+        )
+        self.assertEqual(parsed.records[0].symbol, "BTC-29DEC22-16000-P")
+
+    def test_parser_rejects_unqualified_query_shape(self):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "unsupported query fields",
+        ):
+            parse_option_delivery_page(
+                observation(
+                    response(),
+                    query={"category": "option", "accountType": "UNIFIED"},
+                )
+            )
+
     def test_parser_rejects_non_string_economic_fields(self):
         for field, value in (
             ("position", 0.01),

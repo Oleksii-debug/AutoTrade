@@ -2319,6 +2319,7 @@ class GuardedDispatcher:
 
         def final_guard() -> None:
             nonlocal guard_called, barrier_passed, barrier_now
+            require_transport_module_authority()
             if guard_called:
                 raise RuntimeError("final send guard may be consumed only once")
             guard_called = True
@@ -2580,6 +2581,8 @@ class GuardedDispatcher:
             "_event_id",
             "_identity_digest",
             "_instant",
+            "_prepared_lease_state",
+            "_validated_authority_result",
             "payload_digest",
             "canonical_json",
             "_canonical_submission_event_instant",
@@ -2587,6 +2590,10 @@ class GuardedDispatcher:
             "_has_exact_response_markers",
             "uuid5",
             "NAMESPACE_URL",
+            "sha256",
+            "datetime",
+            "timezone",
+            "timedelta",
             "DispatchOutcome",
         )
         snapshot_postsend_helper_authority = []
@@ -3155,7 +3162,8 @@ class GuardedDispatcher:
                         changed = True
             return changed
 
-        def restore_postsend_builtin_globals() -> None:
+        def restore_postsend_builtin_globals() -> bool:
+            changed = False
             for name, expected in snapshot_postsend_global_state:
                 current = snapshot_module_globals_get(
                     name,
@@ -3164,8 +3172,19 @@ class GuardedDispatcher:
                 if expected is snapshot_builtin_missing:
                     if current is not snapshot_builtin_missing:
                         snapshot_module_globals_pop(name, None)
+                        changed = True
                 elif current is not expected:
                     snapshot_module_globals_set(name, expected)
+                    changed = True
+            return changed
+
+        def require_transport_module_authority() -> None:
+            helper_changed = restore_postsend_helper_authority()
+            restore_postsend_builtin_globals()
+            if helper_changed:
+                raise snapshot_dispatch_authority_changed(
+                    "dispatcher module authority changed before final send barrier"
+                )
 
         postsend_helper_authority_changed = False
         exact_response_authority_changed = False

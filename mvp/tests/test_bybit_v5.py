@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -2086,6 +2087,45 @@ class BybitV5AdapterTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(callbacks, [])
+
+        immutable_instruments = MappingProxyType(
+            {"BTCUSDT": "BTCUSDT@v1"}
+        )
+        immutable_fee_currencies = MappingProxyType(
+            {"BTCUSDT@v1": "USDT"}
+        )
+        fills = parse_executions(
+            observation,
+            instrument_versions=immutable_instruments,
+            qualified_fee_currencies=immutable_fee_currencies,
+        )
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].instrument, "BTCUSDT@v1")
+        self.assertEqual(fills[0].fee_currency, "USDT")
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "instrument_versions keys and values must be exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=MappingProxyType(
+                    {1: "BTCUSDT@v1"}
+                ),
+                qualified_fee_currencies=immutable_fee_currencies,
+            )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "qualified_fee_currencies keys and values must be exact text",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions=immutable_instruments,
+                qualified_fee_currencies=MappingProxyType(
+                    {"BTCUSDT@v1": 1}
+                ),
+            )
 
         with self.assertRaisesRegex(
             ProviderCoreError,

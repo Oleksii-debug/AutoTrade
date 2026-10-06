@@ -453,6 +453,18 @@ class EconomicLedger:
         )
 
 
+def _require_no_pending_atomic_writes(root: Path) -> None:
+    """Fail closed when a prior atomic replacement stopped before commit."""
+
+    checkpoint_temp = root / "checkpoint.json.tmp"
+    intents = root / "order-intents"
+    pending_intent = intents.is_dir() and any(intents.glob("*.json.tmp"))
+    if checkpoint_temp.exists() or pending_intent:
+        raise ValueError(
+            "Interrupted durable atomic write requires explicit recovery"
+        )
+
+
 def _has_residual_durable_state(root: Path) -> bool:
     """Reject rebinding an existing run directory after its checkpoint is lost."""
 
@@ -1304,6 +1316,7 @@ def run_vertical_slice(
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
+    _require_no_pending_atomic_writes(root)
     financial_configuration = _financial_configuration(
         symbol=symbol,
         initial_cash=starting_cash,

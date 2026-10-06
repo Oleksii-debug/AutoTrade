@@ -961,7 +961,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "Durable state exists without exact financial configuration identity",
+                "Interrupted durable atomic write requires explicit recovery",
             ):
                 run_vertical_slice([100, 101, 102, 103], directory)
 
@@ -970,6 +970,52 @@ class VerticalSliceTests(unittest.TestCase):
             self.assertFalse((root / "learning-evidence.jsonl").exists())
             self.assertEqual(list(root.glob("journal.sqlite3*")), [])
             self.assertEqual(list(intents.glob("*.json")), [])
+
+
+    def test_pending_atomic_temp_blocks_existing_checkpoint_resume(self):
+        for pending_relative in (
+            "checkpoint.json.tmp",
+            "order-intents/intent-pending.json.tmp",
+        ):
+            with self.subTest(pending_relative=pending_relative), TemporaryDirectory() as directory:
+                run_vertical_slice([100, 101, 102, 103], directory)
+                root = Path(directory)
+                pending = root / pending_relative
+                pending.parent.mkdir(parents=True, exist_ok=True)
+                pending.write_bytes(b"pending-atomic-replacement")
+                pending_before = pending.read_bytes()
+
+                checkpoint_before = (root / "checkpoint.json").read_bytes()
+                evidence_before = (root / "learning-evidence.jsonl").read_bytes()
+                journal_before = (root / "journal.sqlite3").read_bytes()
+                intents_before = {
+                    path.name: path.read_bytes()
+                    for path in (root / "order-intents").glob("*.json")
+                }
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Interrupted durable atomic write requires explicit recovery",
+                ):
+                    run_vertical_slice([103, 102, 101, 100], directory)
+
+                self.assertEqual(pending.read_bytes(), pending_before)
+                self.assertEqual(
+                    (root / "checkpoint.json").read_bytes(),
+                    checkpoint_before,
+                )
+                self.assertEqual(
+                    (root / "learning-evidence.jsonl").read_bytes(),
+                    evidence_before,
+                )
+                self.assertEqual((root / "journal.sqlite3").read_bytes(), journal_before)
+                self.assertEqual(
+                    {
+                        path.name: path.read_bytes()
+                        for path in (root / "order-intents").glob("*.json")
+                    },
+                    intents_before,
+                )
 
 
     def test_missing_checkpoint_cannot_rebind_residual_durable_state(self):

@@ -21,7 +21,12 @@ from types import MappingProxyType
 from typing import Mapping
 from uuid import uuid4
 
-from .persistence import JournalStore, payload_digest
+from .persistence import (
+    JournalStore,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderCoreError,
@@ -85,6 +90,50 @@ _OBSERVED_PAYLOAD_KEYS = frozenset(
         "observed_at",
     }
 )
+
+
+def _require_origin_journal_authority(
+    store: object,
+    _require=require_exact_journal_store_authority,
+):
+    try:
+        return _require(store, subject="provider-origin JournalStore")
+    except (TypeError, RuntimeError, ValueError) as error:
+        raise ProviderOriginError(
+            "provider-origin JournalStore authority is unavailable"
+        ) from error
+
+
+def _load_origin_events(
+    store: JournalStore,
+    identity: object,
+    attempt_id: str,
+    _scope=journal_store_authority_scope,
+    _load=JournalStore.load_events,
+):
+    try:
+        with _scope(store, identity):
+            return _load(store, _AGGREGATE_TYPE, attempt_id)
+    except (TypeError, RuntimeError, ValueError) as error:
+        raise ProviderOriginError(
+            "provider-origin JournalStore authority changed during read"
+        ) from error
+
+
+def _append_origin_event(
+    store: JournalStore,
+    identity: object,
+    event: dict[str, object],
+    _scope=journal_store_authority_scope,
+    _append=JournalStore.append_event,
+) -> None:
+    try:
+        with _scope(store, identity):
+            _append(store, event)
+    except (TypeError, RuntimeError, ValueError) as error:
+        raise ProviderOriginError(
+            "provider-origin JournalStore authority changed during append"
+        ) from error
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -488,21 +537,15 @@ class ProviderOriginJournal:
     """Durable authority for one canonical JournalStore generation."""
 
     def __init__(self, store: JournalStore) -> None:
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact canonical JournalStore")
         self._store = store
-        self._store_identity = JournalStore.store_identity.__get__(
-            store, JournalStore
-        )
+        self._store_identity = _require_origin_journal_authority(store)
 
-    def _require_store(self) -> JournalStore:
+    def _require_store(self) -> tuple[JournalStore, object]:
         store = self._store
-        if type(store) is not JournalStore:
-            raise ProviderOriginError("provider-origin JournalStore authority changed")
-        current = JournalStore.store_identity.__get__(store, JournalStore)
+        current = _require_origin_journal_authority(store)
         if current != self._store_identity:
             raise ProviderOriginError("provider-origin JournalStore generation changed")
-        return store
+        return store, current
 
     @staticmethod
     def _event(
@@ -555,9 +598,10 @@ class ProviderOriginJournal:
             "transport_identity": transport,
             "network_policy_identity": policy,
         }
-        store = self._require_store()
-        JournalStore.append_event(
+        store, identity = self._require_store()
+        _append_origin_event(
             store,
+            identity,
             self._event(
                 event_id=event_id,
                 event_type=_PREPARED_EVENT,
@@ -610,8 +654,8 @@ class ProviderOriginJournal:
                 "response_bytes exceed provider response authority budget"
             ) from error
         observed_text = _utc_text(observed_at, name="observed_at")
-        store = self._require_store()
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
+        store, identity = self._require_store()
+        events = _load_origin_events(store, identity, attempt)
         if len(events) != 1:
             raise ProviderOriginError(
                 "provider-origin response requires one exact durable Prepared event"
@@ -646,8 +690,9 @@ class ProviderOriginJournal:
             "response_base64": base64.b64encode(raw).decode("ascii"),
             "observed_at": observed_text,
         }
-        JournalStore.append_event(
+        _append_origin_event(
             store,
+            identity,
             self._event(
                 event_id=observed_event_id,
                 event_type=_OBSERVED_EVENT,
@@ -666,8 +711,8 @@ class ProviderOriginJournal:
     ) -> AuthenticatedReadResponseBinding:
         attempt = _exact_text(attempt_id, name="attempt_id")
         expected = _query_snapshot(query_binding)
-        store = self._require_store()
-        events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
+        store, identity = self._require_store()
+        events = _load_origin_events(store, identity, attempt)
         if len(events) != 2:
             raise ProviderOriginError(
                 "provider-origin response is incomplete; Prepared and Observed are required"

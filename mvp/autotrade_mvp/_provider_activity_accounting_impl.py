@@ -2151,11 +2151,11 @@ def _install_durable_provider_economic_book_authority():
             "provider_id",
             _text(provider_id, name="provider_id").upper(),
         )
-        ScopedEconomicBook.__init__(
-            value,
-            environment=environment,
-            account_id=account_id,
-        )
+        normalized_environment = _environment(environment)
+        normalized_account_id = _text(account_id, name="account_id")
+        object.__setattr__(value, "environment", normalized_environment)
+        object.__setattr__(value, "account_id", normalized_account_id)
+        object.__setattr__(value, "_book", EconomicBook())
         provider_environment_value = _provider_environment(
             provider_id=object.__getattribute__(value, "provider_id"),
             environment=object.__getattribute__(value, "environment"),
@@ -2285,6 +2285,34 @@ def _require_same_financial_journal_generation(
     return other_store
 
 
+def _make_durable_provider_economic_audit_digest(
+    *,
+    _digest_payload=payload_digest,
+    _getattribute=object.__getattribute__,
+):
+    """Bind the durable facade digest primitive selected at module import."""
+
+    def audit_digest(self) -> str:
+        authority = _require_durable_provider_economic_book_authority(self)
+        projection = _getattribute(self, "_book")
+        return _digest_payload(
+            {
+                "schema_version": "1.0.0",
+                "environment": authority.environment,
+                "account_id": authority.account_id,
+                "economic_book_digest": projection.audit_digest(),
+            }
+        )
+
+    return audit_digest
+
+
+_durable_provider_economic_audit_digest = (
+    _make_durable_provider_economic_audit_digest()
+)
+del _make_durable_provider_economic_audit_digest
+
+
 class DurableProviderEconomicBook(ScopedEconomicBook):
     """JournalStore-backed provider/account economic book.
 
@@ -2355,6 +2383,34 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             environment=environment,
             provider_environment=provider_environment,
         )
+
+    @property
+    def transactions(self) -> tuple[JournalTransaction, ...]:
+        _require_durable_provider_economic_book_authority(self)
+        projection = object.__getattribute__(self, "_book")
+        return projection.transactions
+
+    def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
+        _require_durable_provider_economic_book_authority(self)
+        projection = object.__getattribute__(self, "_book")
+        return projection.balance(ledger_account, asset_or_currency)
+
+    def cash(self, currency: str) -> Decimal:
+        _require_durable_provider_economic_book_authority(self)
+        projection = object.__getattribute__(self, "_book")
+        return projection.cash(currency)
+
+    def position(self, instrument: str) -> Decimal:
+        _require_durable_provider_economic_book_authority(self)
+        projection = object.__getattribute__(self, "_book")
+        return projection.position(instrument)
+
+    def fee_expense(self, currency: str) -> Decimal:
+        _require_durable_provider_economic_book_authority(self)
+        projection = object.__getattribute__(self, "_book")
+        return projection.fee_expense(currency)
+
+    audit_digest = _durable_provider_economic_audit_digest
 
     def _events(self) -> list[dict[str, Any]]:
         authority = _require_durable_provider_economic_book_authority(self)
@@ -2904,6 +2960,9 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
             raise
         DurableProviderEconomicBook._reload(self)
         return inserted
+
+
+del _durable_provider_economic_audit_digest
 
 
 (

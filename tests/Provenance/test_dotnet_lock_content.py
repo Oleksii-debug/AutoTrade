@@ -108,6 +108,24 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             )
         )
 
+    def test_comma_separated_properties_cannot_hide_restore_override(self):
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj --locked-mode "
+                    "-p:Other=x,RestoreForceEvaluate=true"
+                )
+            )
+        )
+        self.assertFalse(
+            dotnet_restore_tokens_are_locked(
+                dotnet_restore_command_tokens(
+                    "run: dotnet restore src/App/App.csproj --locked-mode "
+                    "-property:Other=x,NuGetLockFilePath=artifacts/other.lock.json"
+                )
+            )
+        )
+
     def test_custom_lock_path_defeats_committed_lock_authority(self):
         self.assertFalse(
             dotnet_restore_tokens_are_locked(

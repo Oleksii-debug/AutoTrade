@@ -45,6 +45,18 @@ class _HostileText(str):
         raise AssertionError("hostile text callback executed")
 
 
+class _HostileInt(int):
+    comparison_called = False
+
+    def __le__(self, other):
+        type(self).comparison_called = True
+        raise AssertionError("hostile integer comparison executed")
+
+    def __lt__(self, other):
+        type(self).comparison_called = True
+        raise AssertionError("hostile integer comparison executed")
+
+
 class _HostileDecimal(Decimal):
     def is_finite(self):
         raise AssertionError("hostile Decimal callback executed")
@@ -168,6 +180,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
             IbkrContractIdentity()
         with self.assertRaises(IbkrWebAdapterError):
             IbkrContractIdentity(conid=265598, conidex="265598@SMART")
+
+    def test_contract_conid_rejects_integer_subclass_before_comparison(self):
+        _HostileInt.comparison_called = False
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "positive exact integer"
+        ):
+            IbkrContractIdentity(conid=_HostileInt(265598))
+        self.assertFalse(_HostileInt.comparison_called)
 
     def test_direct_intent_cannot_bypass_exact_or_regulatory_invariants(self):
         contract = IbkrContractIdentity(conid=265598)
@@ -487,6 +507,28 @@ class IbkrWebAdapterTests(unittest.TestCase):
             )
 
 
+    def test_session_freshness_rejects_integer_subclass_before_comparison(self):
+        _HostileInt.comparison_called = False
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(IbkrWebAdapterError, "non-negative integer"):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-hostile-session-age",
+                capability=capability(),
+                session=ready_session(),
+                at=NOW,
+                maximum_session_age_seconds=_HostileInt(30),
+            )
+        self.assertFalse(_HostileInt.comparison_called)
+
     def test_account_capability_must_match_exact_account(self):
         intent = IbkrWebOrderIntent.create(
             instrument_version="AAPL-CONID-265598:v1",
@@ -520,7 +562,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(execution.quantity, Decimal("0.5"))
 
     def test_execution_permanent_order_id_must_be_positive_integer(self):
-        for invalid in (None, True, 0, -1, "778899"):
+        for invalid in (None, True, 0, -1, "778899", _HostileInt(778899)):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(IbkrWebAdapterError):
                     IbkrExecutionEvidence.create(
@@ -1184,6 +1226,22 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 execution,
                 client_order_id="at-ibkr-account",
                 expected_account_id="OTHER",
+                instrument="AAPL-CONID-265598:v1",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T20:00:01Z",
+            )
+
+    def test_reconciliation_execution_requires_exact_evidence_type(self):
+        class ExecutableExecution(IbkrExecutionEvidence):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IbkrExecutionEvidence"):
+            execution_to_reconciliation_fill(
+                object.__new__(ExecutableExecution),
+                environment="PAPER",
+                client_order_id="at-forged-execution",
+                expected_account_id="U1234567",
                 instrument="AAPL-CONID-265598:v1",
                 fee_amount="0",
                 fee_currency="USD",

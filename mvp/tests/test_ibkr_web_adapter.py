@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -1035,7 +1036,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             response_bytes=b"[]",
             observed_at=NOW,
         )
-        with self.assertRaisesRegex(Exception, "surface mismatch"):
+        with self.assertRaisesRegex(ProviderCoreError, "surface mismatch"):
             parse_web_api_trades(
                 observation,
                 instrument_versions_by_conid={},
@@ -1110,14 +1111,16 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 fee_currency_by_execution_id={"exec-time-1": "USD"},
             )
 
-        combo = parse_web_api_trades(
-            ibkr_trade_observation(
-                [dict(base, conidEx="265598;;;43645865/1,9408/-1")]
-            ),
-            instrument_versions_by_conid={265598: "AAPL:v1"},
-            fee_currency_by_execution_id={"exec-time-1": "USD"},
-        )
-        self.assertEqual(combo[0].instrument, "AAPL:v1")
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError, "combo/spread trade reconciliation is not qualified"
+        ):
+            parse_web_api_trades(
+                ibkr_trade_observation(
+                    [dict(base, conidEx="265598;;;43645865/1,9408/-1")]
+                ),
+                instrument_versions_by_conid={265598: "AAPL:v1"},
+                fee_currency_by_execution_id={"exec-time-1": "USD"},
+            )
 
         with self.assertRaisesRegex(IbkrWebAdapterError, "trade_time_r conflict"):
             parse_web_api_trades(
@@ -1144,7 +1147,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(IbkrWebAdapterError, "conidEx"):
             parse_web_api_trades(
                 ibkr_trade_observation(
-                    [dict(base, conidEx="999999;;;43645865/1,9408/-1")]
+                    [dict(base, conidEx="999999@SMART")]
                 ),
                 instrument_versions_by_conid={265598: "AAPL:v1"},
                 fee_currency_by_execution_id={"exec-time-1": "USD"},
@@ -1331,6 +1334,30 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 self.assertEqual(fills[0].quantity, Decimal("2"))
                 self.assertEqual(fills[0].price, Decimal("99"))
                 self.assertEqual(fills[0].fee_amount, Decimal("0.30"))
+
+        other = dict(
+            base,
+            execution_id="0000e0d5.6576fd38.02.01",
+            order_ref="at-ibkr-other",
+            trade_time="20260924-19:59:59",
+            trade_time_r=1790279999000,
+        )
+        three_fees = {**fees, "0000e0d5.6576fd38.02.01": "USD"}
+        forward = parse_web_api_trades(
+            ibkr_trade_observation([corrected, other]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id=three_fees,
+        )
+        reverse = parse_web_api_trades(
+            ibkr_trade_observation([other, corrected]),
+            instrument_versions_by_conid={265598: "AAPL:v1"},
+            fee_currency_by_execution_id=three_fees,
+        )
+        self.assertEqual(
+            tuple(fill.provider_execution_id for fill in forward),
+            tuple(fill.provider_execution_id for fill in reverse),
+        )
+        self.assertEqual(forward[0].provider_execution_id, "0000e0d5.6576fd38.02.01")
 
         ambiguous = dict(
             corrected,

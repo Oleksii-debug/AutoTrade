@@ -52,7 +52,7 @@ _TIFS = frozenset({"DAY", "GTC", "IOC"})
 _SIDES = frozenset({"BUY", "SELL"})
 _PERMANENT_ORDER_ID = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _IBKR_WEB_TRADE_TIME = re.compile(r"^[0-9]{8}-[0-9]{2}:[0-9]{2}:[0-9]{2}$")
-_TRADE_CONIDEX_PREFIX = re.compile(r"^(?P<conid>[1-9][0-9]*)(?=$|@|;;;)")
+_TRADE_CONIDEX = re.compile(r"^(?P<conid>[1-9][0-9]*)(?:@[A-Za-z0-9._-]+)?$")
 
 
 def _text(value: str, *, name: str) -> str:
@@ -1278,7 +1278,11 @@ def parse_web_api_trades(
         raw_conidex = raw.get("conidEx")
         if raw_conidex is not None:
             conidex = _provider_text(raw_conidex, name="trade.conidEx")
-            conidex_match = _TRADE_CONIDEX_PREFIX.match(conidex)
+            if ";;;" in conidex:
+                raise IbkrWebAdapterError(
+                    "IBKR combo/spread trade reconciliation is not qualified"
+                )
+            conidex_match = _TRADE_CONIDEX.fullmatch(conidex)
             if conidex_match is None or conidex_match.group("conid") != str(conid):
                 raise IbkrWebAdapterError(
                     "trade conidEx does not match trade conid"
@@ -1371,9 +1375,14 @@ def parse_web_api_trades(
             )
 
     return tuple(
-        selected_fill
-        for _revision, _execution_id, selected_fill
-        in selected_by_execution_family.values()
+        sorted(
+            (
+                selected_fill
+                for _revision, _execution_id, selected_fill
+                in selected_by_execution_family.values()
+            ),
+            key=lambda fill: (fill.trade_time, fill.provider_execution_id),
+        )
     )
 
 

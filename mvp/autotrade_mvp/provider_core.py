@@ -1526,35 +1526,6 @@ def _install_provider_submission_observation_authority(binding_projection):
             raise error_type(
                 "durable submission scope does not match prepared provider request"
             )
-        financial_route_keys = canonical_frozenset(
-            (
-                "provider_id",
-                "account_id",
-                "environment",
-                "provider_environment",
-                "capability_snapshot_id",
-                "provider_route_qualification_id",
-                "provider_route_capability_snapshot_id",
-                "provider_route_decision_journal_sequence_cut",
-                "provider_route_provider_environment",
-                "provider_route_adapter_code_sha",
-                "provider_route_packaged_artifact_digest",
-                "provider_route_protocol_id",
-                "provider_route_protocol_version",
-                "provider_route_entity_policy_id",
-                "provider_route_entity_id",
-            )
-        )
-        extension_keys = scope_keys.difference(required_keys)
-        if extension_keys:
-            if not extension_keys.issubset(financial_route_keys):
-                raise error_type(
-                    "durable submission scope contains unknown authority axes"
-                )
-            if not financial_route_keys.issubset(scope_keys):
-                raise error_type(
-                    "financial route submission scope is incomplete"
-                )
         if "provider_environment" in scope:
             raw_provider_environment = scope["provider_environment"]
             scoped_provider_environment = canonical_text(

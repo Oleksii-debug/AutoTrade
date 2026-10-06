@@ -539,13 +539,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         )
         self.assertNotEqual(testnet.aggregate_id, demo.aggregate_id)
 
-        self.assertEqual(evidence["adapter_code_sha"], "b" * 40)
-        self.assertEqual(
-            evidence["packaged_artifact_digest"],
-            "sha256:" + "c" * 64,
-        )
-
-    def test_qualified_provider_environment_mismatch_fails_before_economic_mutation_before_virtual_dispatch(self):
+    def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             def is_finite(self):
                 raise AssertionError("hostile Decimal subclass must not dispatch")

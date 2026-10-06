@@ -65,6 +65,29 @@ documented POST status call, session expiry/re-auth/reconnect qualification,
 numeric wire serialization, pacing, restart recovery, or any PAPER/LIVE
 provider qualification.
 
+## Provider-origin brokerage account membership — 2026-10-06
+
+Order preparation now also requires an exact provider-neutral authenticated
+response observation for `GET /iserver/accounts`. The bounded parser requires
+a non-empty canonical `accounts` array, a selected account contained in that
+array, canonical `sessionId`, and exact boolean `isPaper`. The authenticated
+query's account and environment are bound to the issued in-process observation;
+`isPaper` must agree with PAPER/LIVE, and order preparation rejects locally
+constructed or post-mint-mutated account observations, cross-environment reuse,
+provider account sets that omit the order account, observations predating the
+current authenticated status observation, future observations, and stale
+observations.
+
+This follows the current provider contract that `/iserver/accounts` returns
+accounts the user can trade and must be called before modifying an order. It is
+still a source-binding gate rather than terminal provider qualification:
+`sessionId` is retained as observed evidence but is not treated as proof of
+the exact `/iserver/auth/ssodh/init` generation because current
+`/iserver/auth/status` does not expose the same session identifier. Exact
+qualified-read Q/C binding, HTTP method/build routing, init generation,
+credential lifetime, restart recovery and PAPER/LIVE provider qualification
+remain open.
+
 ## What remains unqualified
 
 WP-26 remains incomplete. Required future evidence includes exact API/SDK

@@ -915,7 +915,6 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 )
 
     def projected_fill(
-    def projected_fill(
         self,
         *,
         side="BUY",

@@ -21,7 +21,7 @@ class CapitalAvailabilityEvidence(Protocol):
 
     blocks_new_risk: bool
 
-    def reservation_resources(self) -> Mapping[str, Decimal]:
+    def reservation_resources(self) -> dict[str, Decimal]:
         ...
 
 
@@ -33,10 +33,10 @@ class InsufficientAvailable(ValueError):
     """Raised when current availability cannot cover all outstanding reservations."""
 
 
-TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"}
-ACTIVE_STATES = {"WORKING", "UNKNOWN"}
+TERMINAL_STATES = frozenset({"FILLED", "CANCELED", "REJECTED", "PROVEN_ABSENT"})
+ACTIVE_STATES = frozenset({"WORKING", "UNKNOWN"})
 POST_BUST_HOLD_STATE = "BUSTED_PENDING_RECONCILIATION"
-HELD_STATES = ACTIVE_STATES | {POST_BUST_HOLD_STATE}
+HELD_STATES = ACTIVE_STATES | frozenset({POST_BUST_HOLD_STATE})
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -62,11 +62,17 @@ def _text(value: str, *, name: str) -> str:
     return normalized
 
 
-def _amounts(values: Mapping[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:
-    if not isinstance(values, Mapping) or not values:
+def _amounts(values: dict[str, Decimal | str | int], *, allow_zero: bool = False) -> dict[str, Decimal]:
+    # Reservation admission is hard financial authority. Arbitrary Mapping
+    # implementations (including MappingProxyType over an executable backing
+    # mapping) must not run callbacks while capacity is being normalized.
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
+    if not items:
         raise ValueError("resource amounts are required")
     normalized: dict[str, Decimal] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in normalized:
             raise ValueError("resource names must be unique after normalization")
@@ -136,8 +142,8 @@ class ReservationBook:
         *,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, Decimal | str | int],
-        available: Mapping[str, Decimal | str | int],
+        requirements: dict[str, Decimal | str | int],
+        available: dict[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         rid = _text(reservation_id, name="reservation_id")
         iid = _text(intent_id, name="intent_id")
@@ -191,7 +197,7 @@ class ReservationBook:
         *,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, Decimal | str | int],
+        requirements: dict[str, Decimal | str | int],
         capital: CapitalAvailabilityEvidence,
     ) -> ReservationSnapshot:
         """Reserve only from an explicit, non-blocking capital projection."""
@@ -205,9 +211,9 @@ class ReservationBook:
                 "capital projection is unresolved and blocks new risk"
             )
         available = capital.reservation_resources()
-        if not isinstance(available, Mapping):
+        if type(available) is not dict:
             raise TypeError(
-                "capital reservation_resources() must return a mapping"
+                "capital reservation_resources() must return an exact dict"
             )
         return self.reserve(
             reservation_id=reservation_id,
@@ -219,7 +225,7 @@ class ReservationBook:
     def consume(
         self,
         reservation_id: str,
-        usage: Mapping[str, Decimal | str | int],
+        usage: dict[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         current = self._get_record(reservation_id)
         if current.state not in HELD_STATES:
@@ -258,7 +264,7 @@ class ReservationBook:
     def consume_and_mark_filled(
         self,
         reservation_id: str,
-        usage: Mapping[str, Decimal | str | int],
+        usage: dict[str, Decimal | str | int],
         *,
         resolution_evidence: str,
     ) -> ReservationSnapshot:
@@ -313,7 +319,7 @@ class ReservationBook:
     def restore_consumption(
         self,
         reservation_id: str,
-        usage: Mapping[str, Decimal | str | int],
+        usage: dict[str, Decimal | str | int],
     ) -> ReservationSnapshot:
         """Apply a fill reversal without inventing or releasing capacity.
 

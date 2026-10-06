@@ -41,6 +41,7 @@ from .futures import (
     book_variation_margin,
     settle_and_book_inverse_variation_margin,
     inverse_settlement_convention,
+    _revalidated_futures_contract,
     settlement_identity_digest,
 )
 from .instruments import _detached_instrument_version
@@ -413,24 +414,17 @@ def _detached_durable_contract(contract: FuturesContract) -> FuturesContract:
 
     if type(contract) is not FuturesContract:
         raise FuturesError("durable settlement requires exact FuturesContract")
-    if type(contract.multiplier) is not Decimal:
-        raise FuturesError("durable futures multiplier must be exact Decimal")
-    version = contract.canonical_instrument
-    if version is None:
-        raise FuturesError("durable settlement requires canonical InstrumentVersion")
-    if contract.payoff == "INVERSE":
-        inverse_settlement_convention(contract)
     try:
-        detached_version = _detached_instrument_version(version)
-        detached = FuturesContract.from_instrument_version(detached_version)
+        detached, _version = _revalidated_futures_contract(contract)
     except (TypeError, ValueError) as error:
         raise FuturesError(
             "durable settlement contract conflicts with canonical InstrumentVersion"
         ) from error
-    if detached != contract:
-        raise FuturesError(
-            "durable settlement contract conflicts with canonical InstrumentVersion"
-        )
+    if object.__getattribute__(detached, "payoff") == "INVERSE":
+        # Preserve the original admission-time settlement-policy binding.  The
+        # reconstructed object proves canonical field identity; this call proves
+        # the retained contract still matches the sealed terminal-policy tuple.
+        inverse_settlement_convention(contract)
     return detached
 
 

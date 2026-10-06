@@ -65,6 +65,26 @@ from .provider_response_limits import (
     require_provider_response_bytes,
 )
 
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES = require_provider_response_bytes
+_CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE = (
+    require_provider_response_bytes.__code__
+)
+_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES = HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+
+def _require_canonical_response_resource_authority() -> None:
+    if (
+        require_provider_response_bytes is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES
+        or require_provider_response_bytes.__code__
+        is not _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES_CODE
+        or HARD_MAX_PROVIDER_RESPONSE_BYTES
+        != _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
+    ):
+        raise ProviderTransportScopeError(
+            "provider response resource authority changed"
+        )
+
+
 
 class ProviderTransportError(RuntimeError):
     """Base error for the shared provider I/O seam."""
@@ -985,9 +1005,10 @@ class TradingWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(
+            _require_canonical_response_resource_authority()
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 self.body,
-                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES,
                 allow_empty=True,
             )
         except (TypeError, ValueError) as error:
@@ -1007,7 +1028,8 @@ class AuthenticatedReadWireResponse:
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
         try:
-            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+            _require_canonical_response_resource_authority()
+            _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(self.body, max_bytes=_CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES)
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized authenticated-read response") from error
 
@@ -1021,7 +1043,8 @@ class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
     def __init__(self, *, max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> None:
-        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
+        _require_canonical_response_resource_authority()
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES:
             raise ProviderTransportScopeError("provider response byte budget is invalid")
         self.max_response_bytes = max_response_bytes
         # urllib otherwise discovers process/OS proxies implicitly. The
@@ -1033,7 +1056,7 @@ class UrllibJsonWireClient:
         budget = self.max_response_bytes
         if (
             type(budget) is not int
-            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+            or not 1 <= budget <= _CANONICAL_HARD_MAX_PROVIDER_RESPONSE_BYTES
         ):
             raise ProviderTransportScopeError(
                 "provider response byte budget is invalid"
@@ -1041,8 +1064,9 @@ class UrllibJsonWireClient:
         return budget
 
     def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        _require_canonical_response_resource_authority()
         try:
-            return require_provider_response_bytes(
+            return _CANONICAL_REQUIRE_PROVIDER_RESPONSE_BYTES(
                 raw,
                 max_bytes=max_bytes,
                 allow_empty=True,

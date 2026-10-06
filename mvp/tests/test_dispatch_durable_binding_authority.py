@@ -88,6 +88,7 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
 
     def test_restart_rejects_coerced_identity_fields_in_durable_prepared_event(self):
         for field, bad_value in (
+            ("attempt_id", ["attempt"]),
             ("provider", 7),
             ("request_hash", {"digest": "forged"}),
             ("client_order_id", ["client"]),

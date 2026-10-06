@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 import weakref
 
@@ -54,9 +53,12 @@ _RESOLUTION_SCHEMA_VERSION = 2
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 
@@ -102,11 +104,14 @@ def _decimal_text(value: Decimal) -> str:
         ) from error
 
 
-def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:
-    if not isinstance(values, Mapping) or not values:
+def _amount_map(values: dict[str, object], *, allow_zero: bool) -> dict[str, str]:
+    if type(values) is not dict:
+        raise TypeError("resource amounts must use an exact dict")
+    items = tuple(dict.items(values))
+    if not items:
         raise ValueError("resource amounts are required")
     result: dict[str, str] = {}
-    for resource, raw in values.items():
+    for resource, raw in items:
         key = _text(resource, name="resource")
         if key in result:
             raise ValueError("resource names must be unique after normalization")
@@ -631,8 +636,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
         committed_at: str,
     ) -> PreparedReservationMutation:
         """Prepare, but do not commit, a worst-case reservation.
@@ -708,7 +713,7 @@ class DurableReservationBook:
         event_key: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
         committed_at: str,
         expected_snapshot_digest: str | None = None,
     ) -> PreparedReservationMutation:
@@ -969,8 +974,8 @@ class DurableReservationBook:
         idempotency_key: str,
         reservation_id: str,
         intent_id: str,
-        requirements: Mapping[str, object],
-        available: Mapping[str, object],
+        requirements: dict[str, object],
+        available: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),
@@ -991,7 +996,7 @@ class DurableReservationBook:
         command_id: str,
         idempotency_key: str,
         reservation_id: str,
-        usage: Mapping[str, object],
+        usage: dict[str, object],
     ) -> ReservationSnapshot:
         request = {
             "reservation_id": _text(reservation_id, name="reservation_id"),

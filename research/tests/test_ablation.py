@@ -28,7 +28,7 @@ from autotrade_research.evaluation.ablation import (
 )
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
@@ -2547,6 +2547,55 @@ class AblationTests(unittest.TestCase):
             )
             self.assertEqual(calls, [])
 
+
+    def test_bound_database_path_retarget_fails_before_replacement_touch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                protocol_id="database-path-binding",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            cases = [
+                pair(
+                    "database-path-a",
+                    "2",
+                    population_unit="database-path-unit-a",
+                ),
+                pair(
+                    "database-path-b",
+                    "2",
+                    population_unit="database-path-unit-b",
+                ),
+            ]
+
+            canonical_memory_path = memory.path
+            attacker_memory_path = root / "attacker-memory.sqlite3"
+            memory.path = attacker_memory_path
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "memory database path changed after issuance",
+            ):
+                authority.resolve_population(cases)
+            self.assertFalse(attacker_memory_path.exists())
+            memory.path = canonical_memory_path
+
+            attacker_registry_path = root / "attacker-science.sqlite3"
+            science.path = attacker_registry_path
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "registry database path changed after issuance",
+            ):
+                authority.resolve_population(cases)
+            self.assertFalse(attacker_registry_path.exists())
 
     def test_bound_store_method_shadows_fail_before_callbacks(self):
         with TemporaryDirectory() as directory:

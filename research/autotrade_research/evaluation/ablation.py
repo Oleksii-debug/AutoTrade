@@ -18,6 +18,8 @@ from decimal import (
 from fractions import Fraction
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
 import re
 from threading import RLock
 from typing import Iterable
@@ -1451,7 +1453,40 @@ def _ablation_population_candidate_hash(
     return "sha256:" + sha256(raw).hexdigest()
 
 
-def _make_ablation_authority_policy_binding():
+def _canonical_database_path_binding(
+    value: object,
+    label: str,
+    *,
+    _path_type: type = type(Path()),
+) -> tuple[str, str | None]:
+    """Bind one exact SQLite pathname without claiming physical-file identity."""
+
+    state = object.__getattribute__(value, "__dict__")
+    if type(state) is not dict:
+        raise ProtocolViolation(
+            f"ablation qualification {label} state is not canonical"
+        )
+    if "path" not in state:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is unavailable"
+        )
+    path = state["path"]
+    if type(path) is not _path_type:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    path_text = os.fspath(path)
+    if type(path_text) is not str or not path_text:
+        raise ProtocolViolation(
+            f"ablation qualification {label} database path is not canonical"
+        )
+    cwd = None if os.path.isabs(path_text) else os.getcwd()
+    return path_text, cwd
+
+
+def _make_ablation_authority_policy_binding(
+    path_binding=_canonical_database_path_binding,
+):
     """Create one process-local issuance ledger hidden behind closure-owned state."""
 
     lock = RLock()
@@ -1471,6 +1506,10 @@ def _make_ablation_authority_policy_binding():
             str | None,
         ],
     ] = {}
+    backing_paths: dict[
+        int,
+        tuple[tuple[str, str | None], tuple[str, str | None]],
+    ] = {}
 
     def register(
         authority: object,
@@ -1489,6 +1528,8 @@ def _make_ablation_authority_policy_binding():
         if type(authority) is not AblationQualificationAuthority:
             return
         authority_id = id(authority)
+        registry_path_binding = path_binding(scientific_registry, "registry")
+        memory_path_binding = path_binding(experience_memory, "memory")
 
         def release(
             reference: object,
@@ -1510,12 +1551,17 @@ def _make_ablation_authority_policy_binding():
                     str | None,
                 ],
             ] = bindings,
+            backing_paths: dict[
+                int,
+                tuple[tuple[str, str | None], tuple[str, str | None]],
+            ] = backing_paths,
             lock: RLock = lock,
         ) -> None:
             with lock:
                 current = bindings.get(authority_id)
                 if current is not None and current[0] is reference:
                     bindings.pop(authority_id, None)
+                    backing_paths.pop(authority_id, None)
 
         reference = weakref_ref(authority, release)
         with lock:
@@ -1540,6 +1586,10 @@ def _make_ablation_authority_policy_binding():
                 permission_classes,
                 task,
                 instrument_family,
+            )
+            backing_paths[authority_id] = (
+                registry_path_binding,
+                memory_path_binding,
             )
 
     def resolve(
@@ -1567,6 +1617,19 @@ def _make_ablation_authority_policy_binding():
                 raise ProtocolViolation(
                     "ablation qualification authority was not issued by "
                     "the canonical constructor"
+                )
+            bound_paths = backing_paths.get(authority_id)
+            if bound_paths is None:
+                raise ProtocolViolation(
+                    "ablation qualification database path binding is unavailable"
+                )
+            if path_binding(bound[1], "registry") != bound_paths[0]:
+                raise ProtocolViolation(
+                    "ablation qualification registry database path changed after issuance"
+                )
+            if path_binding(bound[2], "memory") != bound_paths[1]:
+                raise ProtocolViolation(
+                    "ablation qualification memory database path changed after issuance"
                 )
             return (
                 bound[1],
@@ -2161,6 +2224,7 @@ _registered_policy_context = _make_registered_policy_context(
 )
 del _issued_ablation_authority_policy_binding
 del _make_registered_policy_context
+del _canonical_database_path_binding
 
 def _registered_decision_policy(authority: object):
     registry, _memory, _artifacts, protocol_id, protocol_hash, *_rest = (

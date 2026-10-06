@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -15,8 +16,10 @@ from mvp.autotrade_mvp.execution_qualification import (
     simulate_qualified_execution,
     validate_execution_qualification,
 )
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.execution_realism import (
     ExecutionModel,
+    ExecutionPriceGrid,
     LiquidityObservation,
     SimulatedOrder,
 )
@@ -27,6 +30,47 @@ PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
+INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
+INSTRUMENT_REF = f"{INSTRUMENT_ID}@1"
+
+
+def instrument():
+    return InstrumentVersion(
+        instrument_id=INSTRUMENT_ID,
+        version=1,
+        provider_id="simulated",
+        venue_id="simulated-venue",
+        provider_symbol="ABC",
+        asset_class="CASH_EQUITY",
+        base_currency="ABC",
+        quote_currency="USD",
+        settlement_currency="USD",
+        quantity_unit="ABC",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("0.001"),
+        minimum_quantity=Decimal("0.001"),
+        maximum_quantity=Decimal("10"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        metadata_evidence=(
+            {
+                "artifact_id": "33333333-3333-4333-8333-333333333333",
+                "sha256": "sha256:" + "b" * 64,
+                "observed_at": "2026-09-24T09:00:00Z",
+            },
+        ),
+    )
+
+
+def price_grid():
+    bound = instrument()
+    registry = InstrumentRegistry(versions=(bound,))
+    return ExecutionPriceGrid.from_registry(
+        registry,
+        INSTRUMENT_REF,
+    )
 
 
 def model(**overrides):
@@ -43,6 +87,11 @@ def model(**overrides):
         impact_bps_at_max_participation="10",
         bar_half_spread_bps="0",
         scenario_cost_multiplier="1",
+        price_quantum="0.01",
+        price_projection_policy_id="ADVERSE_PRICE_GRID",
+        price_projection_policy_version=1,
+        price_grid_instrument_version=INSTRUMENT_REF,
+        price_grid=price_grid(),
     )
     values.update(overrides)
     return ExecutionModel.create(**values)
@@ -51,7 +100,7 @@ def model(**overrides):
 def order(**overrides):
     values = dict(
         order_id="sim-1",
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         side="BUY",
         order_type="MARKET",
         quantity="10",
@@ -64,7 +113,7 @@ def order(**overrides):
 
 def observation(**overrides):
     values = dict(
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
         market_time="2026-09-24T10:00:00.200000Z",
         available_at="2026-09-24T10:00:00.250000Z",
         available_volume="100",
@@ -87,7 +136,7 @@ def qualification(exec_model, **overrides):
         protocol_sha256=PROTOCOL,
         evidence_artifact_id=ARTIFACT_ID,
         evidence_sha256=EVIDENCE,
-        instrument_version="ABC@v1",
+        instrument_version=INSTRUMENT_REF,
     )
     values.update(overrides)
     return ExecutionModelQualification(**values)
@@ -114,7 +163,7 @@ class ExecutionQualificationTests(unittest.TestCase):
             model=exec_model,
             qualification=qualification(exec_model),
             asset_class="EQUITY",
-            instrument_version="ABC@v1",
+            instrument_version=INSTRUMENT_REF,
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
@@ -276,7 +325,7 @@ class ExecutionQualificationTests(unittest.TestCase):
                     exec_model,
                     qualification=qualification(
                         exec_model,
-                        instrument_version="ABC@v1",
+                        instrument_version=INSTRUMENT_REF,
                     ),
                     instrument_version="XYZ@v2",
                 )

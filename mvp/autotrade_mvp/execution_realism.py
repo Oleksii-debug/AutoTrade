@@ -16,7 +16,8 @@ from hashlib import sha256
 import json
 from typing import Literal
 
-from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, round_fraction_to_quantum
+from .exact_decimal import as_fraction, bounded_fraction, exact_multiply, is_exact_decimal_multiple, round_fraction_to_quantum
+from .instruments import InstrumentVersion
 
 
 class ExecutionRealismError(ValueError):
@@ -92,6 +93,148 @@ def _digest(value: str, *, name: str) -> str:
     return text
 
 
+MARKET_PRICE_PROJECTION_POLICY_ID = "ADVERSE_PRICE_GRID"
+MARKET_PRICE_PROJECTION_POLICY_VERSION = 1
+
+_PRICE_GRID_AUTHORITY_TOKEN = object()
+_PRICE_GRID_REGISTRY_TOKEN = object()
+
+@dataclass(frozen=True, init=False)
+class ExecutionPriceGrid:
+    """Immutable MARKET price-grid authority issued from canonical instrument evidence."""
+
+    instrument_version: str
+    price_quantum: Decimal
+    projection_policy_id: str
+    projection_policy_version: int
+    source_sha256: str
+    instrument_metadata_binding: str
+    _authority_token: object
+
+    def __init__(
+        self,
+        *,
+        instrument_version: str,
+        price_quantum: Decimal,
+        projection_policy_id: str,
+        projection_policy_version: int,
+        source_sha256: str,
+        instrument_metadata_binding: str,
+        _authority_token: object | None = None,
+    ) -> None:
+        if _authority_token is not _PRICE_GRID_AUTHORITY_TOKEN:
+            raise TypeError(
+                "ExecutionPriceGrid must be issued by the canonical instrument registry"
+            )
+        object.__setattr__(self,"instrument_version",_text(instrument_version,name="price_grid_instrument_version"))
+        object.__setattr__(self,"price_quantum",_positive(price_quantum,name="price_quantum"))
+        normalized_policy_id = _text(
+            projection_policy_id,
+            name="price_projection_policy_id",
+        )
+        if (
+            normalized_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+            or type(projection_policy_version) is not int
+            or projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
+        ):
+            raise ExecutionRealismError(
+                "unsupported MARKET price projection policy identity"
+            )
+        object.__setattr__(self,"projection_policy_id",normalized_policy_id)
+        object.__setattr__(self,"projection_policy_version",projection_policy_version)
+        object.__setattr__(self,"source_sha256",_digest(source_sha256,name="price_grid source_sha256"))
+        object.__setattr__(self,"instrument_metadata_binding",_digest(instrument_metadata_binding,name="price_grid instrument_metadata_binding"))
+        object.__setattr__(self,"_authority_token",_PRICE_GRID_AUTHORITY_TOKEN)
+
+    @classmethod
+    def from_registry(
+        cls,
+        registry,
+        instrument_version: str,
+        *,
+        projection_policy_id: str = "ADVERSE_PRICE_GRID",
+        projection_policy_version: int = 1,
+    ) -> "ExecutionPriceGrid":
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        instrument = registry.exact(instrument_version)
+        return cls._from_instrument(
+            instrument,
+            projection_policy_id=projection_policy_id,
+            projection_policy_version=projection_policy_version,
+            _registry_token=_PRICE_GRID_REGISTRY_TOKEN,
+        )
+
+    @classmethod
+    def _from_instrument(
+        cls,
+        instrument: InstrumentVersion,
+        *,
+        projection_policy_id: str,
+        projection_policy_version: int,
+        _registry_token: object | None = None,
+    ) -> "ExecutionPriceGrid":
+        if _registry_token is not _PRICE_GRID_REGISTRY_TOKEN:
+            raise TypeError("instrument price grid issuance requires InstrumentRegistry")
+        if type(instrument) is not InstrumentVersion:
+            raise TypeError("instrument must be exact InstrumentVersion")
+        if not instrument.metadata_evidence:
+            raise ExecutionRealismError("canonical instrument price grid requires metadata evidence")
+        source = instrument.metadata_evidence[0]
+        try:
+            source_sha256 = source["sha256"]
+        except (KeyError, TypeError) as error:
+            raise ExecutionRealismError("instrument metadata evidence lacks sha256") from error
+        return cls(
+            instrument_version=f"{instrument.instrument_id}@{instrument.version}",
+            price_quantum=instrument.price_tick,
+            projection_policy_id=projection_policy_id,
+            projection_policy_version=projection_policy_version,
+            source_sha256=source_sha256,
+            instrument_metadata_binding=instrument.metadata_evidence_binding(),
+            _authority_token=_PRICE_GRID_AUTHORITY_TOKEN,
+        )
+
+    def validate(self) -> None:
+        if self._authority_token is not _PRICE_GRID_AUTHORITY_TOKEN:
+            raise ExecutionRealismError("price grid authority token is invalid")
+        if type(self.instrument_version) is not str:
+            raise TypeError("price_grid instrument_version must be exact text")
+        if type(self.price_quantum) is not Decimal:
+            raise TypeError("price_grid price_quantum must be exact Decimal")
+        if type(self.projection_policy_id) is not str:
+            raise TypeError("price_grid projection_policy_id must be exact text")
+        if type(self.projection_policy_version) is not int:
+            raise TypeError("price_grid projection_policy_version must be exact int")
+        if type(self.source_sha256) is not str:
+            raise TypeError("price_grid source_sha256 must be exact text")
+        if type(self.instrument_metadata_binding) is not str:
+            raise TypeError("price_grid instrument_metadata_binding must be exact text")
+        if type(self._authority_token) is not object:
+            raise TypeError("price grid authority token is not canonical")
+        _text(self.instrument_version,name="price_grid_instrument_version")
+        _positive(self.price_quantum,name="price_quantum")
+        policy_id = _text(
+            self.projection_policy_id,
+            name="price_projection_policy_id",
+        )
+        _digest(self.source_sha256,name="price_grid source_sha256")
+        _digest(self.instrument_metadata_binding,name="price_grid instrument_metadata_binding")
+        if (
+            policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+            or self.projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
+        ):
+            raise ExecutionRealismError(
+                "unsupported MARKET price projection policy identity"
+            )
+
+    @property
+    def fingerprint(self) -> str:
+        self.validate()
+        payload={"instrument_version":self.instrument_version,"price_quantum":_decimal_text(self.price_quantum),"projection_policy_id":self.projection_policy_id,"projection_policy_version":self.projection_policy_version,"source_sha256":self.source_sha256,"instrument_metadata_binding":self.instrument_metadata_binding,"rounding":{"BUY":"CEILING","SELL":"FLOOR"}}
+        return sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ExecutionModel:
     model_version: str
@@ -110,6 +253,7 @@ class ExecutionModel:
     price_projection_policy_id: str | None = None
     price_projection_policy_version: int | None = None
     price_grid_instrument_version: str | None = None
+    price_grid: ExecutionPriceGrid | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -190,13 +334,32 @@ class ExecutionModel:
             )
         if self.price_projection_policy_version is not None:
             if (
-                isinstance(self.price_projection_policy_version, bool)
-                or not isinstance(self.price_projection_policy_version, int)
-                or self.price_projection_policy_version < 1
+                type(self.price_projection_policy_version) is not int
+                or self.price_projection_policy_version != MARKET_PRICE_PROJECTION_POLICY_VERSION
             ):
                 raise ExecutionRealismError(
-                    "price_projection_policy_version must be a positive integer"
+                    "unsupported MARKET price projection policy identity"
                 )
+        if (
+            self.price_projection_policy_id is not None
+            and self.price_projection_policy_id != MARKET_PRICE_PROJECTION_POLICY_ID
+        ):
+            raise ExecutionRealismError(
+                "unsupported MARKET price projection policy identity"
+            )
+
+        if self.price_grid is not None:
+            if type(self.price_grid) is not ExecutionPriceGrid:
+                raise TypeError("price_grid must be exact ExecutionPriceGrid")
+            self.price_grid.validate()
+            if self.price_grid.instrument_version != self.price_grid_instrument_version:
+                raise ExecutionRealismError("price grid instrument_version must match model price-grid instrument_version")
+            if self.price_grid.price_quantum != self.price_quantum:
+                raise ExecutionRealismError("price grid quantum must match model price_quantum")
+            if self.price_grid.projection_policy_id != self.price_projection_policy_id:
+                raise ExecutionRealismError("price grid policy id must match model projection policy")
+            if self.price_grid.projection_policy_version != self.price_projection_policy_version:
+                raise ExecutionRealismError("price grid policy version must match model projection policy")
 
     @classmethod
     def create(
@@ -218,6 +381,7 @@ class ExecutionModel:
         price_projection_policy_id=None,
         price_projection_policy_version=None,
         price_grid_instrument_version=None,
+        price_grid=None,
     ) -> "ExecutionModel":
         if isinstance(latency_ms, bool) or not isinstance(latency_ms, int) or latency_ms < 0:
             raise ExecutionRealismError("latency_ms must be a non-negative integer")
@@ -282,6 +446,7 @@ class ExecutionModel:
                     name="price_grid_instrument_version",
                 )
             ),
+            price_grid=price_grid,
         )
 
     @property
@@ -312,6 +477,8 @@ class ExecutionModel:
             payload["price_projection_policy_version"] = self.price_projection_policy_version
         if self.price_grid_instrument_version is not None:
             payload["price_grid_instrument_version"] = self.price_grid_instrument_version
+        if self.price_grid is not None:
+            payload["price_grid_fingerprint"] = self.price_grid.fingerprint
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -709,7 +876,8 @@ def simulate_execution(
         )
 
     if order.order_type == "MARKET" and (
-        model.price_quantum is None
+        model.price_grid is None
+        or model.price_quantum is None
         or model.price_projection_policy_id is None
         or model.price_projection_policy_version is None
         or model.price_grid_instrument_version is None
@@ -717,13 +885,22 @@ def simulate_execution(
         raise ExecutionRealismError(
             "MARKET execution requires complete price projection policy evidence"
         )
-    if (
-        order.order_type == "MARKET"
-        and model.price_grid_instrument_version != order.instrument_version
-    ):
-        raise ExecutionRealismError(
-            "MARKET price grid is not bound to the order instrument_version"
-        )
+    if order.order_type == "MARKET":
+        assert model.price_grid is not None
+        model.price_grid.validate()
+        if model.price_grid.instrument_version != order.instrument_version:
+            raise ExecutionRealismError(
+                "MARKET price grid is not bound to the order instrument_version"
+            )
+        if (
+            model.price_grid.instrument_version != model.price_grid_instrument_version
+            or model.price_grid.price_quantum != model.price_quantum
+            or model.price_grid.projection_policy_id != model.price_projection_policy_id
+            or model.price_grid.projection_policy_version != model.price_projection_policy_version
+        ):
+            raise ExecutionRealismError(
+                "MARKET model/grid authority mismatch"
+            )
 
     submitted = _instant(order.submitted_at, name="submitted_at")
     arrival = submitted + timedelta(milliseconds=model.latency_ms)
@@ -936,7 +1113,7 @@ def simulate_execution(
             )
         fill_price = round_fraction_to_quantum(
             target,
-            model.price_quantum,
+            model.price_grid.price_quantum,
             mode="CEILING" if order.side == "BUY" else "FLOOR",
         )
         if fill_price <= 0:

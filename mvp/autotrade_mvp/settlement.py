@@ -262,6 +262,81 @@ class SettlementCheckpoint:
     settled_cash: tuple[tuple[str, Decimal], ...]
     settled_obligation_evidence: tuple[SettlementEvidence, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "checkpoint_id",
+            _text(self.checkpoint_id, name="checkpoint_id"),
+        )
+        if type(self.settled_cash) is not tuple:
+            raise TypeError("checkpoint settled_cash must use an exact tuple")
+        normalized_cash: list[tuple[str, Decimal]] = []
+        seen_currencies: set[str] = set()
+        for entry in self.settled_cash:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise TypeError(
+                    "checkpoint settled_cash entries must use exact pairs"
+                )
+            raw_currency, raw_amount = entry
+            if type(raw_currency) is not str:
+                raise TypeError("checkpoint currency must use exact text")
+            currency = _text(
+                raw_currency,
+                name="checkpoint currency",
+            ).upper()
+            if currency != raw_currency:
+                raise ValueError(
+                    "checkpoint currency must use canonical uppercase text"
+                )
+            if type(raw_amount) is not Decimal:
+                raise TypeError(
+                    "checkpoint settled_cash amount must use exact Decimal"
+                )
+            amount = _decimal(
+                raw_amount,
+                name="checkpoint settled_cash",
+            )
+            if currency in seen_currencies:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate currency identities"
+                )
+            seen_currencies.add(currency)
+            normalized_cash.append((currency, amount))
+        if tuple(sorted(normalized_cash)) != self.settled_cash:
+            raise SettlementConflict(
+                "checkpoint settled_cash must use canonical sorted ordering"
+            )
+
+        if type(self.settled_obligation_evidence) is not tuple:
+            raise TypeError(
+                "checkpoint settlement evidence must use an exact tuple"
+            )
+        seen_obligations: set[str] = set()
+        normalized_evidence: list[SettlementEvidence] = []
+        for record in self.settled_obligation_evidence:
+            if type(record) is not SettlementEvidence:
+                raise TypeError(
+                    "checkpoint settlement evidence must be exact SettlementEvidence"
+                )
+            if record.obligation_id in seen_obligations:
+                raise SettlementConflict(
+                    "checkpoint contains duplicate settlement evidence identities"
+                )
+            seen_obligations.add(record.obligation_id)
+            normalized_evidence.append(record)
+        if (
+            tuple(
+                sorted(
+                    normalized_evidence,
+                    key=lambda record: record.obligation_id,
+                )
+            )
+            != self.settled_obligation_evidence
+        ):
+            raise SettlementConflict(
+                "checkpoint settlement evidence must use canonical sorted ordering"
+            )
+
     @classmethod
     def create(
         cls,

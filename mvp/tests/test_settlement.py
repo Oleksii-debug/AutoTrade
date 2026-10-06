@@ -120,6 +120,45 @@ class SettlementBookTests(unittest.TestCase):
                 evidence_refs=("provider:rule",),
             )
 
+    def test_direct_checkpoint_constructor_cannot_bypass_canonical_identity(self):
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate currency identities",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="duplicate-cash",
+                settled_cash=(
+                    ("USD", Decimal("100")),
+                    ("USD", Decimal("999")),
+                ),
+                settled_obligation_evidence=(),
+            )
+
+        settled = evidence(
+            "cash-1",
+            "provider:settlement:cash-1",
+            day=25,
+        )
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate settlement evidence identities",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="duplicate-evidence",
+                settled_cash=(("USD", Decimal("100")),),
+                settled_obligation_evidence=(settled, settled),
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical uppercase",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="noncanonical-currency",
+                settled_cash=((" usd ", Decimal("100")),),
+                settled_obligation_evidence=(),
+            )
+
     def test_recovery_containers_reject_polymorphic_mappings_before_callbacks(self):
         class HostileDict(dict):
             calls = 0

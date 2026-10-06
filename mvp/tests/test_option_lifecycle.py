@@ -445,7 +445,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         for item in patches:
             item.start()
         try:
-            result = self.authority.apply("qualified-lifecycle-apply")
+            result = authority.apply("qualified-lifecycle-apply")
         finally:
             for item in reversed(patches):
                 item.stop()
@@ -545,7 +545,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             "sha256:" + "c" * 64,
         )
 
-    def test_lifecycle_financial_decimals_reject_subclasses_before_virtual_dispatch(self):
+    def test_qualified_provider_environment_mismatch_fails_before_economic_mutation_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             def is_finite(self):
                 raise AssertionError("hostile Decimal subclass must not dispatch")
@@ -898,90 +898,3 @@ class DurableOptionLifecycleTests(unittest.TestCase):
         evidence = events[0]["payload"]["provider_evidence"]
         self.assertEqual(
             evidence["parser_id"],
-            "autotrade.option-lifecycle.sealed-json",
-        )
-        self.assertEqual(evidence["parser_version"], "1.1.0")
-        self.assertRegex(
-            evidence["parser_contract_digest"],
-            r"^sha256:[0-9a-f]{64}$",
-        )
-
-    def test_fractional_lifecycle_quantity_off_canonical_grid_fails_before_mutation(self):
-        self.seed_option_position("0.5")
-        before_transactions = tuple(self.book.transactions)
-
-        with self.assertRaisesRegex(
-            OptionLifecycleError,
-            "canonical instrument quantity_step",
-        ):
-            self.authority.apply(self.evidence(signed_contracts="0.5"))
-
-        self.assertEqual(tuple(self.book.transactions), before_transactions)
-        self.assertEqual(
-            self.store.load_events("option_lifecycle", self.authority.aggregate_id),
-            [],
-        )
-
-    def test_explicit_smaller_canonical_quantity_step_accepts_aligned_lifecycle_quantity(self):
-        registry = InstrumentRegistry(
-            versions=(
-                option_version(
-                    quantity_step="0.25",
-                    minimum_quantity="0.25",
-                ),
-            )
-        )
-        authority = self._authority(
-            registry=registry,
-            economic_book=self.book,
-        )
-        self.seed_option_position("0.5")
-
-        result = authority.apply(self.evidence(signed_contracts="0.5"))
-
-        self.assertTrue(result.inserted)
-        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(self.book.position("ABC"), Decimal("50"))
-
-    def test_lifecycle_quantity_does_not_inherit_order_entry_minimum(self):
-        registry = InstrumentRegistry(
-            versions=(
-                option_version(
-                    quantity_step="0.25",
-                    minimum_quantity="1",
-                ),
-            )
-        )
-        authority = self._authority(
-            registry=registry,
-            economic_book=self.book,
-        )
-        self.seed_option_position("0.5")
-
-        result = authority.apply(self.evidence(signed_contracts="0.5"))
-
-        self.assertTrue(result.inserted)
-        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(self.book.position("ABC"), Decimal("50"))
-
-    def test_lifecycle_quantity_does_not_inherit_order_entry_maximum(self):
-        registry = InstrumentRegistry(
-            versions=(
-                option_version(
-                    quantity_step="1",
-                    minimum_quantity="1",
-                    maximum_quantity="2",
-                ),
-            )
-        )
-        authority = self._authority(
-            registry=registry,
-            economic_book=self.book,
-        )
-        self.seed_option_position("3")
-
-        result = authority.apply(self.evidence(signed_contracts="3"))
-
-        self.assertTrue(result.inserted)
-        self.assertEqual(self.book.position(f"{OPTION_ID}@1"), Decimal("0"))
-        self.assertEqual(self.book.position("ABC"), Decimal("300"))

@@ -1142,6 +1142,7 @@ class SignedHttpRequest:
                 "signed request headers must be an exact inert mapping"
             )
         normalized_headers: dict[str, str] = {}
+        normalized_header_names: set[str] = set()
         for raw_key, raw_value in self.headers.items():
             if (
                 type(raw_key) is not str
@@ -1168,6 +1169,36 @@ class SignedHttpRequest:
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
+            if (
+                not raw_key.isascii()
+                or any(
+                    not (
+                        character.isalnum()
+                        or character in "!#$%&'*+-.^_|~"
+                        or character == "\x60"
+                    )
+                    for character in raw_key
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header names must be canonical text"
+                )
+            if (
+                not raw_value.isascii()
+                or any(
+                    character < " " or character == "\x7f"
+                    for character in raw_value
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "signed request header values must be canonical text"
+                )
+            canonical_name = raw_key.lower()
+            if canonical_name in normalized_header_names:
+                raise ProviderTransportScopeError(
+                    "signed request header names must be unique case-insensitively"
+                )
+            normalized_header_names.add(canonical_name)
             normalized_headers[raw_key] = raw_value
 
         if (
@@ -1360,6 +1391,7 @@ class AuthenticatedReadHttpRequest:
                 "authenticated-read headers must be an exact inert mapping"
             )
         normalized_headers: dict[str, str] = {}
+        normalized_header_names: set[str] = set()
         for raw_key, raw_value in self.headers.items():
             if (
                 type(raw_key) is not str
@@ -1386,6 +1418,36 @@ class AuthenticatedReadHttpRequest:
                 raise ProviderTransportScopeError(
                     "header values must not contain line breaks"
                 )
+            if (
+                not raw_key.isascii()
+                or any(
+                    not (
+                        character.isalnum()
+                        or character in "!#$%&'*+-.^_|~"
+                        or character == "\x60"
+                    )
+                    for character in raw_key
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be canonical text"
+                )
+            if (
+                not raw_value.isascii()
+                or any(
+                    character < " " or character == "\x7f"
+                    for character in raw_value
+                )
+            ):
+                raise ProviderTransportScopeError(
+                    "authenticated-read header values must be canonical text"
+                )
+            canonical_name = raw_key.lower()
+            if canonical_name in normalized_header_names:
+                raise ProviderTransportScopeError(
+                    "authenticated-read header names must be unique case-insensitively"
+                )
+            normalized_header_names.add(canonical_name)
             normalized_headers[raw_key] = raw_value
 
         if (

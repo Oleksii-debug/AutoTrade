@@ -740,6 +740,61 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             with self.subTest(helper=helper.__name__):
                 self.assertIsNone(helper.__kwdefaults__)
 
+    def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-post-mint-digest-retarget",
+        )
+        object.__setattr__(
+            prepared,
+            "body_sha256",
+            "sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_consumer_rejects_exact_unissued_prepared_clone(self):
+        issued = self._prepared_submission_request(
+            intent_id="kraken-spot-exact-unissued-clone",
+        )
+        forged = object.__new__(KrakenSpotPreparedRequest)
+        for field_name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "capability_snapshot_id",
+            "documentation_refs",
+            "instrument_version",
+            "body_sha256",
+            "_factory_token",
+        ):
+            object.__setattr__(
+                forged,
+                field_name,
+                object.__getattribute__(issued, field_name),
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+
     def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
         callbacks = []
 

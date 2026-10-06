@@ -302,10 +302,18 @@ class JournalStore(_JournalStoreImpl):
                         )
 
                     raw_outbox_payload = row["outbox_payload_json"]
-                    if not isinstance(raw_outbox_payload, str):
-                        raise ValueError("outbox payload authority is missing")
+                    if type(raw_outbox_payload) is not str:
+                        raise ValueError("outbox payload authority is not exact text")
+                    stored_topic = _impl._require_canonical_durable_text(
+                        row["topic"],
+                        name="outbox topic",
+                    )
+                    if stored_topic != topic:
+                        raise ValueError(
+                            "outbox topic does not match requested recovery route"
+                        )
                     actual_outbox_hash = _impl._outbox_envelope_digest(
-                        str(row["topic"]),
+                        stored_topic,
                         raw_outbox_payload,
                     )
                     if row["envelope_hash"] != actual_outbox_hash:

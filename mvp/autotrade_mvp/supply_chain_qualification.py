@@ -18,11 +18,15 @@ from autotrade_runtime.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
+from autotrade_runtime.strict_json import strict_json_loads
 
 from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationAttestation,
     QualificationTrustError,
     QualificationTrustUnavailable,
     SignedQualificationAttestation,
+    parse_signed_qualification_attestation,
     verify_canonical_qualification_attestation,
 )
 
@@ -38,6 +42,10 @@ _DEPENDENCY_LOCK_MEDIA_TYPE = "application/vnd.autotrade.dependency-lock"
 _COMPONENT_MEDIA_TYPE = "application/vnd.autotrade.distributed-component"
 _RIGHTS_MEDIA_TYPE = "application/vnd.autotrade.rights-evidence"
 _ADVISORY_EXCEPTION_MEDIA_TYPE = "application/vnd.autotrade.advisory-exception"
+SUPPLY_CHAIN_PROOF_MEDIA_TYPE = "application/vnd.autotrade.supply-chain-proof+json"
+SUPPLY_CHAIN_PROOF_EVIDENCE_KIND = "AUTOTRADE_WP64_SUPPLY_CHAIN_PROOF_V1"
+_SUPPLY_CHAIN_PROOF_SCHEMA_VERSION = "1.0.0"
+_QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "supply-chain-subject-sha256:"
 
 
 def _required_text(value: str, name: str) -> str:
@@ -273,6 +281,466 @@ class SupplyChainEvidence:
             )
 
 
+def _exact_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must use exact str")
+    return value
+
+
+def _snapshot_component_evidence(
+    item: ComponentEvidence,
+) -> ComponentEvidence:
+    if type(item) is not ComponentEvidence:
+        raise TypeError(
+            "components must contain exact ComponentEvidence values"
+        )
+    values = {
+        "component_id": object.__getattribute__(item, "component_id"),
+        "artifact_id": object.__getattribute__(item, "artifact_id"),
+        "version": object.__getattribute__(item, "version"),
+        "declared_artifact_hash": object.__getattribute__(
+            item, "declared_artifact_hash"
+        ),
+        "observed_artifact_hash": object.__getattribute__(
+            item, "observed_artifact_hash"
+        ),
+        "source_revision": object.__getattribute__(item, "source_revision"),
+        "license_status": object.__getattribute__(item, "license_status"),
+        "distribution_rights": object.__getattribute__(
+            item, "distribution_rights"
+        ),
+        "advisory_status": object.__getattribute__(item, "advisory_status"),
+        "notice_required": object.__getattribute__(item, "notice_required"),
+        "notice_present": object.__getattribute__(item, "notice_present"),
+        "reviewed_for_release_sha": object.__getattribute__(
+            item, "reviewed_for_release_sha"
+        ),
+        "advisory_exception_id": object.__getattribute__(
+            item, "advisory_exception_id"
+        ),
+        "advisory_exception_hash": object.__getattribute__(
+            item, "advisory_exception_hash"
+        ),
+    }
+    for field in (
+        "component_id",
+        "artifact_id",
+        "version",
+        "declared_artifact_hash",
+        "observed_artifact_hash",
+        "source_revision",
+        "license_status",
+        "distribution_rights",
+        "advisory_status",
+        "reviewed_for_release_sha",
+    ):
+        values[field] = _exact_text(values[field], name=f"component.{field}")
+    for field in ("notice_required", "notice_present"):
+        if type(values[field]) is not bool:
+            raise TypeError(f"component.{field} must use exact bool")
+    for field in ("advisory_exception_id", "advisory_exception_hash"):
+        if values[field] is not None and type(values[field]) is not str:
+            raise TypeError(
+                f"component.{field} must be None or exact str"
+            )
+    return ComponentEvidence(**values)
+
+
+def _snapshot_model_data_rights_evidence(
+    item: ModelDataRightsEvidence,
+) -> ModelDataRightsEvidence:
+    if type(item) is not ModelDataRightsEvidence:
+        raise TypeError(
+            "model_data_rights must contain exact ModelDataRightsEvidence values"
+        )
+    values = {
+        "artifact_id": object.__getattribute__(item, "artifact_id"),
+        "artifact_hash": object.__getattribute__(item, "artifact_hash"),
+        "use_scope": object.__getattribute__(item, "use_scope"),
+        "rights_status": object.__getattribute__(item, "rights_status"),
+        "reviewed_for_release_sha": object.__getattribute__(
+            item, "reviewed_for_release_sha"
+        ),
+    }
+    for field in tuple(values):
+        values[field] = _exact_text(
+            values[field],
+            name=f"model_data_rights.{field}",
+        )
+    return ModelDataRightsEvidence(**values)
+
+
+def _snapshot_supply_chain_evidence(
+    evidence: SupplyChainEvidence,
+) -> SupplyChainEvidence:
+    """Detach one complete release evidence graph before trust callbacks."""
+
+    if type(evidence) is not SupplyChainEvidence:
+        raise TypeError("evidence must be exact SupplyChainEvidence")
+    scalar_fields = (
+        "release_commit_sha",
+        "built_from_commit_sha",
+        "sbom_artifact_id",
+        "sbom_hash",
+        "provenance_artifact_id",
+        "provenance_hash",
+        "dependency_lock_artifact_id",
+        "dependency_lock_hash",
+        "sbom_reviewed_for_release_sha",
+        "provenance_reviewed_for_release_sha",
+        "dependency_lock_reviewed_for_release_sha",
+    )
+    values: dict[str, object] = {}
+    for field in scalar_fields:
+        values[field] = _exact_text(
+            object.__getattribute__(evidence, field),
+            name=f"supply_chain.{field}",
+        )
+    for field in ("release_artifact_id", "release_artifact_sha256"):
+        current = object.__getattribute__(evidence, field)
+        if current is not None and type(current) is not str:
+            raise TypeError(
+                f"supply_chain.{field} must be None or exact str"
+            )
+        values[field] = current
+
+    distributed = object.__getattribute__(
+        evidence, "distributed_component_ids"
+    )
+    sbom = object.__getattribute__(evidence, "sbom_component_ids")
+    components = object.__getattribute__(evidence, "components")
+    rights = object.__getattribute__(evidence, "model_data_rights")
+    for current, name in (
+        (distributed, "distributed_component_ids"),
+        (sbom, "sbom_component_ids"),
+    ):
+        if type(current) is not tuple or any(
+            type(value) is not str for value in current
+        ):
+            raise TypeError(
+                f"supply_chain.{name} must use exact tuple[str]"
+            )
+    if type(components) is not tuple:
+        raise TypeError(
+            "supply_chain.components must use exact tuple"
+        )
+    if type(rights) is not tuple:
+        raise TypeError(
+            "supply_chain.model_data_rights must use exact tuple"
+        )
+
+    values["distributed_component_ids"] = tuple(distributed)
+    values["sbom_component_ids"] = tuple(sbom)
+    values["components"] = tuple(
+        _snapshot_component_evidence(item)
+        for item in components
+    )
+    values["model_data_rights"] = tuple(
+        _snapshot_model_data_rights_evidence(item)
+        for item in rights
+    )
+    return SupplyChainEvidence(**values)
+
+
+def _supply_chain_evidence_payload(
+    evidence: SupplyChainEvidence,
+) -> dict[str, object]:
+    evidence = _snapshot_supply_chain_evidence(evidence)
+    return {
+        "release_commit_sha": evidence.release_commit_sha,
+        "built_from_commit_sha": evidence.built_from_commit_sha,
+        "sbom_artifact_id": evidence.sbom_artifact_id,
+        "sbom_hash": evidence.sbom_hash,
+        "provenance_artifact_id": evidence.provenance_artifact_id,
+        "provenance_hash": evidence.provenance_hash,
+        "dependency_lock_artifact_id": evidence.dependency_lock_artifact_id,
+        "dependency_lock_hash": evidence.dependency_lock_hash,
+        "sbom_reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
+        "provenance_reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
+        "dependency_lock_reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
+        "distributed_component_ids": sorted(evidence.distributed_component_ids),
+        "sbom_component_ids": sorted(evidence.sbom_component_ids),
+        "components": [
+            {
+                "component_id": item.component_id,
+                "artifact_id": item.artifact_id,
+                "version": item.version,
+                "declared_artifact_hash": item.declared_artifact_hash,
+                "observed_artifact_hash": item.observed_artifact_hash,
+                "source_revision": item.source_revision,
+                "license_status": item.license_status,
+                "distribution_rights": item.distribution_rights,
+                "advisory_status": item.advisory_status,
+                "notice_required": item.notice_required,
+                "notice_present": item.notice_present,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+                "advisory_exception_id": item.advisory_exception_id,
+                "advisory_exception_hash": item.advisory_exception_hash,
+            }
+            for item in sorted(
+                evidence.components,
+                key=lambda value: value.component_id,
+            )
+        ],
+        "model_data_rights": [
+            {
+                "artifact_id": item.artifact_id,
+                "artifact_hash": item.artifact_hash,
+                "use_scope": item.use_scope,
+                "rights_status": item.rights_status,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.model_data_rights,
+                key=lambda value: value.artifact_id,
+            )
+        ],
+        "release_artifact_id": evidence.release_artifact_id,
+        "release_artifact_sha256": evidence.release_artifact_sha256,
+    }
+
+
+def _parse_supply_chain_evidence_payload(
+    payload: object,
+) -> SupplyChainEvidence:
+    if type(payload) is not dict:
+        raise ValueError("supply-chain proof evidence must be an object")
+    expected = {
+        "release_commit_sha",
+        "built_from_commit_sha",
+        "sbom_artifact_id",
+        "sbom_hash",
+        "provenance_artifact_id",
+        "provenance_hash",
+        "dependency_lock_artifact_id",
+        "dependency_lock_hash",
+        "sbom_reviewed_for_release_sha",
+        "provenance_reviewed_for_release_sha",
+        "dependency_lock_reviewed_for_release_sha",
+        "distributed_component_ids",
+        "sbom_component_ids",
+        "components",
+        "model_data_rights",
+        "release_artifact_id",
+        "release_artifact_sha256",
+    }
+    if set(payload) != expected:
+        raise ValueError("supply-chain proof evidence has unsupported structure")
+    distributed = payload["distributed_component_ids"]
+    sbom_ids = payload["sbom_component_ids"]
+    components_raw = payload["components"]
+    rights_raw = payload["model_data_rights"]
+    if type(distributed) is not list or type(sbom_ids) is not list:
+        raise ValueError("supply-chain proof inventories must be lists")
+    if type(components_raw) is not list or type(rights_raw) is not list:
+        raise ValueError("supply-chain proof evidence collections must be lists")
+    component_fields = {
+        "component_id",
+        "artifact_id",
+        "version",
+        "declared_artifact_hash",
+        "observed_artifact_hash",
+        "source_revision",
+        "license_status",
+        "distribution_rights",
+        "advisory_status",
+        "notice_required",
+        "notice_present",
+        "reviewed_for_release_sha",
+        "advisory_exception_id",
+        "advisory_exception_hash",
+    }
+    rights_fields = {
+        "artifact_id",
+        "artifact_hash",
+        "use_scope",
+        "rights_status",
+        "reviewed_for_release_sha",
+    }
+    components = []
+    for raw in components_raw:
+        if type(raw) is not dict or set(raw) != component_fields:
+            raise ValueError(
+                "supply-chain proof component has unsupported structure"
+            )
+        components.append(ComponentEvidence(**raw))
+    rights = []
+    for raw in rights_raw:
+        if type(raw) is not dict or set(raw) != rights_fields:
+            raise ValueError(
+                "supply-chain proof rights evidence has unsupported structure"
+            )
+        rights.append(ModelDataRightsEvidence(**raw))
+    return SupplyChainEvidence(
+        release_commit_sha=payload["release_commit_sha"],
+        built_from_commit_sha=payload["built_from_commit_sha"],
+        sbom_artifact_id=payload["sbom_artifact_id"],
+        sbom_hash=payload["sbom_hash"],
+        provenance_artifact_id=payload["provenance_artifact_id"],
+        provenance_hash=payload["provenance_hash"],
+        dependency_lock_artifact_id=payload["dependency_lock_artifact_id"],
+        dependency_lock_hash=payload["dependency_lock_hash"],
+        sbom_reviewed_for_release_sha=payload["sbom_reviewed_for_release_sha"],
+        provenance_reviewed_for_release_sha=payload[
+            "provenance_reviewed_for_release_sha"
+        ],
+        dependency_lock_reviewed_for_release_sha=payload[
+            "dependency_lock_reviewed_for_release_sha"
+        ],
+        distributed_component_ids=tuple(distributed),
+        sbom_component_ids=tuple(sbom_ids),
+        components=tuple(components),
+        model_data_rights=tuple(rights),
+        release_artifact_id=payload["release_artifact_id"],
+        release_artifact_sha256=payload["release_artifact_sha256"],
+    )
+
+
+def canonical_supply_chain_proof_bytes(
+    evidence: SupplyChainEvidence,
+    receipt: SignedQualificationAttestation,
+) -> bytes:
+    """Serialize exact WP-64 evidence + signed receipt as durable proof bytes."""
+
+    evidence = _snapshot_supply_chain_evidence(evidence)
+    if type(receipt) is not SignedQualificationAttestation:
+        raise TypeError("receipt must be exact SignedQualificationAttestation")
+    canonical_receipt = parse_signed_qualification_attestation(
+        {
+            "attestation": receipt.attestation.canonical_payload(),
+            "signature_b64": receipt.signature_b64,
+        }
+    )
+    payload = {
+        "schema_version": _SUPPLY_CHAIN_PROOF_SCHEMA_VERSION,
+        "evidence": _supply_chain_evidence_payload(evidence),
+        "receipt": {
+            "attestation": canonical_receipt.attestation.canonical_payload(),
+            "signature_b64": canonical_receipt.signature_b64,
+        },
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def parse_supply_chain_proof_bytes(
+    raw: bytes,
+) -> tuple[SupplyChainEvidence, SignedQualificationAttestation]:
+    """Parse only canonical, resource-bounded durable WP-64 proof bytes."""
+
+    if type(raw) is not bytes or not raw:
+        raise ValueError("supply-chain proof bytes are required")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("supply-chain proof is not valid UTF-8") from error
+    try:
+        payload = strict_json_loads(text)
+    except ValueError as error:
+        raise ValueError(f"supply-chain proof JSON rejected: {error}") from error
+    if type(payload) is not dict or set(payload) != {
+        "schema_version",
+        "evidence",
+        "receipt",
+    }:
+        raise ValueError("supply-chain proof has unsupported structure")
+    if payload["schema_version"] != _SUPPLY_CHAIN_PROOF_SCHEMA_VERSION:
+        raise ValueError("supply-chain proof schema version is unsupported")
+    evidence = _parse_supply_chain_evidence_payload(payload["evidence"])
+    receipt = parse_signed_qualification_attestation(payload["receipt"])
+    canonical = canonical_supply_chain_proof_bytes(evidence, receipt)
+    if canonical != raw:
+        raise ValueError("supply-chain proof is not canonical")
+    return evidence, receipt
+
+
+def supply_chain_subject_requirement(evidence: SupplyChainEvidence) -> str:
+    """Bind signed WP-64 review authority to the exact detached semantic subject."""
+
+    if type(evidence) is not SupplyChainEvidence:
+        raise TypeError("evidence must be exact SupplyChainEvidence")
+    subject = {
+        "release_commit_sha": evidence.release_commit_sha,
+        "built_from_commit_sha": evidence.built_from_commit_sha,
+        "release_artifact": (
+            None
+            if evidence.release_artifact_id is None
+            else {
+                "artifact_id": evidence.release_artifact_id,
+                "sha256": evidence.release_artifact_sha256,
+            }
+        ),
+        "sbom": {
+            "artifact_id": evidence.sbom_artifact_id,
+            "sha256": evidence.sbom_hash,
+            "reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
+        },
+        "provenance": {
+            "artifact_id": evidence.provenance_artifact_id,
+            "sha256": evidence.provenance_hash,
+            "reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
+        },
+        "dependency_lock": {
+            "artifact_id": evidence.dependency_lock_artifact_id,
+            "sha256": evidence.dependency_lock_hash,
+            "reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
+        },
+        "distributed_component_ids": sorted(evidence.distributed_component_ids),
+        "sbom_component_ids": sorted(evidence.sbom_component_ids),
+        "components": [
+            {
+                "component_id": item.component_id,
+                "artifact_id": item.artifact_id,
+                "version": item.version,
+                "declared_artifact_hash": item.declared_artifact_hash,
+                "observed_artifact_hash": item.observed_artifact_hash,
+                "source_revision": item.source_revision,
+                "license_status": item.license_status,
+                "distribution_rights": item.distribution_rights,
+                "advisory_status": item.advisory_status,
+                "advisory_exception_id": item.advisory_exception_id,
+                "advisory_exception_hash": item.advisory_exception_hash,
+                "notice_required": item.notice_required,
+                "notice_present": item.notice_present,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.components,
+                key=lambda value: value.component_id,
+            )
+        ],
+        "model_data_rights": [
+            {
+                "artifact_id": item.artifact_id,
+                "artifact_hash": item.artifact_hash,
+                "use_scope": item.use_scope,
+                "rights_status": item.rights_status,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.model_data_rights,
+                key=lambda value: value.artifact_id,
+            )
+        ],
+    }
+    canonical = json.dumps(
+        subject,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return (
+        _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX
+        + sha256(canonical).hexdigest()
+    )
+
+
 @dataclass(frozen=True)
 class SupplyChainQualification:
     qualification_id: str
@@ -280,6 +748,13 @@ class SupplyChainQualification:
     checks: tuple[tuple[str, str], ...]
     reason_codes: tuple[str, ...]
     release_authority: bool = False
+    accepted_attestation_id: str | None = None
+    accepted_attestation_digest: str | None = None
+    accepted_policy_id: str | None = None
+    accepted_trust_root_id: str | None = None
+    subject_requirement: str | None = None
+    release_artifact_id: str | None = None
+    release_artifact_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _required_text(self.qualification_id, "qualification_id")
@@ -306,6 +781,18 @@ class SupplyChainQualification:
             raise ValueError(
                 "supply-chain qualification never grants release authority"
             )
+        for field in (
+            "accepted_attestation_id",
+            "accepted_attestation_digest",
+            "accepted_policy_id",
+            "accepted_trust_root_id",
+            "subject_requirement",
+            "release_artifact_id",
+            "release_artifact_sha256",
+        ):
+            value = object.__getattribute__(self, field)
+            if value is not None and type(value) is not str:
+                raise TypeError(f"{field} must be None or exact str")
 
 
 def _store_artifact_matches(
@@ -333,6 +820,8 @@ def _store_artifact_matches(
             return False
         if manifest.get("sha256") != artifact_hash:
             return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_hash:
+            return False
         if manifest.get("media_type") != media_type:
             return False
         if manifest.get("source_refs") != [f"git:{release_sha}"]:
@@ -359,8 +848,8 @@ def qualify_supply_chain(
     evidence_root: str | Path | None = None,
     trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
-    if type(evidence) is not SupplyChainEvidence:
-        raise TypeError("evidence must be SupplyChainEvidence")
+    evidence = _snapshot_supply_chain_evidence(evidence)
+    subject_requirement = supply_chain_subject_requirement(evidence)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -372,6 +861,14 @@ def qualify_supply_chain(
         raise TypeError(
             "trust_receipt must be SignedQualificationAttestation"
         )
+    if trust_receipt is not None and (
+        type(trust_receipt.attestation) is not QualificationAttestation
+        or any(
+            type(ref) is not EvidenceArtifactRef
+            for ref in trust_receipt.attestation.evidence_refs
+        )
+    ):
+        raise TypeError("trust_receipt must contain canonical attestation evidence")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
     trusted_read = None
@@ -551,10 +1048,22 @@ def qualify_supply_chain(
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
         )
+    elif evidence.release_artifact_id is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.DELIVERED_RELEASE_IDENTITY_MISSING",
+        )
     else:
         try:
+            receipt = parse_signed_qualification_attestation(
+                {
+                    "attestation": trust_receipt.attestation.canonical_payload(),
+                    "signature_b64": trust_receipt.signature_b64,
+                }
+            )
             accepted_trust = verify_canonical_qualification_attestation(
-                trust_receipt,
+                receipt,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
                 expected_source_sha=evidence.release_commit_sha,
@@ -564,7 +1073,37 @@ def qualify_supply_chain(
                 expected_protocol_id="supply-chain-review-v1",
                 expected_protocol_version="1.0.0",
                 expected_requirement_id="independent-supply-chain-review",
+                expected_release_artifact_id=evidence.release_artifact_id,
+                expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
+            review_identity = (
+                accepted_trust.attestation_id,
+                accepted_trust.attestation_digest,
+                accepted_trust.policy_id,
+                accepted_trust.trust_root_id,
+            )
+            subject_identity = None
+            if subject_requirement in receipt.attestation.requirement_ids:
+                accepted_subject = verify_canonical_qualification_attestation(
+                    receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    expected_source_sha=evidence.release_commit_sha,
+                    expected_domain="SUPPLY_CHAIN",
+                    expected_gate="RELEASE",
+                    expected_package_id="WP-64",
+                    expected_protocol_id="supply-chain-review-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id=subject_requirement,
+                    expected_release_artifact_id=evidence.release_artifact_id,
+                    expected_release_artifact_sha256=evidence.release_artifact_sha256,
+                )
+                subject_identity = (
+                    accepted_subject.attestation_id,
+                    accepted_subject.attestation_digest,
+                    accepted_subject.policy_id,
+                    accepted_subject.trust_root_id,
+                )
 
             expected_refs = {
                 (
@@ -623,9 +1162,15 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in accepted_trust.evidence_refs
+                for ref in receipt.attestation.evidence_refs
             }
-            if attested_refs != expected_refs:
+            if subject_identity is None or review_identity != subject_identity:
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
+                )
+            elif attested_refs != expected_refs:
                 record(
                     "independent_evidence_trust",
                     _FAIL,
@@ -651,7 +1196,7 @@ def qualify_supply_chain(
                 _INCONCLUSIVE,
                 "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
             )
-        except QualificationTrustError:
+        except (QualificationTrustError, TypeError, ValueError):
             record(
                 "independent_evidence_trust",
                 _FAIL,
@@ -813,6 +1358,8 @@ def qualify_supply_chain(
         {
             "release": evidence.release_commit_sha,
             "built_from": evidence.built_from_commit_sha,
+            "release_artifact_id": evidence.release_artifact_id,
+            "release_artifact_sha256": evidence.release_artifact_sha256,
             "sbom_artifact_id": evidence.sbom_artifact_id,
             "sbom": evidence.sbom_hash,
             "provenance_artifact_id": evidence.provenance_artifact_id,
@@ -907,9 +1454,27 @@ def qualify_supply_chain(
         sort_keys=True,
         separators=(",", ":"),
     )
+    accepted_identity = (
+        None
+        if accepted_trust is None
+        else (
+            accepted_trust.attestation_id,
+            accepted_trust.attestation_digest,
+            accepted_trust.policy_id,
+            accepted_trust.trust_root_id,
+        )
+    )
     return SupplyChainQualification(
         "supply-" + sha256(canonical.encode("utf-8")).hexdigest()[:32],
         status,
         tuple(checks),
         tuple(dict.fromkeys(reasons)),
+        False,
+        None if accepted_identity is None else accepted_identity[0],
+        None if accepted_identity is None else accepted_identity[1],
+        None if accepted_identity is None else accepted_identity[2],
+        None if accepted_identity is None else accepted_identity[3],
+        subject_requirement if accepted_identity is not None else None,
+        evidence.release_artifact_id,
+        evidence.release_artifact_sha256,
     )

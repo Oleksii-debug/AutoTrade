@@ -2518,6 +2518,7 @@ class GuardedDispatcher:
         snapshot_setattr = setattr
         snapshot_type = type
         snapshot_isinstance = isinstance
+        snapshot_str = str
         snapshot_tuple = tuple
         snapshot_dict = dict
         snapshot_len = len
@@ -2535,6 +2536,10 @@ class GuardedDispatcher:
         )
         snapshot_isinstance_global = snapshot_module_globals_get(
             "isinstance",
+            snapshot_builtin_missing,
+        )
+        snapshot_str_global = snapshot_module_globals_get(
+            "str",
             snapshot_builtin_missing,
         )
         snapshot_code = snapshot_getattr(
@@ -2597,7 +2602,7 @@ class GuardedDispatcher:
             decoder_json_loads_kwdefaults.items()
         )
         if any(
-            snapshot_type(key) is not str
+            snapshot_type(key) is not snapshot_str
             for key, _value in decoder_json_loads_kwdefault_items
         ):
             raise RuntimeError(
@@ -2788,7 +2793,7 @@ class GuardedDispatcher:
                         function_kwdefaults.items()
                     )
                     if any(
-                        snapshot_type(key) is not str
+                        snapshot_type(key) is not snapshot_str
                         for key, _value in function_kwdefault_items
                     ):
                         raise RuntimeError(
@@ -2981,7 +2986,7 @@ class GuardedDispatcher:
                     dependency_kwdefaults.items()
                 )
                 if any(
-                    snapshot_type(key) is not str
+                    snapshot_type(key) is not snapshot_str
                     for key, _value in dependency_kwdefault_items
                 ):
                     raise RuntimeError(
@@ -3104,7 +3109,7 @@ class GuardedDispatcher:
                 )
                 if not callable_kwdefaults_changed:
                     for current_key in current_kwdefaults:
-                        if snapshot_type(current_key) is not str:
+                        if snapshot_type(current_key) is not snapshot_str:
                             callable_kwdefaults_changed = True
                             break
                 if not callable_kwdefaults_changed:
@@ -3174,7 +3179,7 @@ class GuardedDispatcher:
                     )
                     if not kwdefaults_changed:
                         for current_key in current_kwdefaults:
-                            if snapshot_type(current_key) is not str:
+                            if snapshot_type(current_key) is not snapshot_str:
                                 kwdefaults_changed = True
                                 break
                     if not kwdefaults_changed:
@@ -3253,7 +3258,7 @@ class GuardedDispatcher:
             )
             if not kwdefaults_changed:
                 for current_key in current_json_loads_kwdefaults:
-                    if snapshot_type(current_key) is not str:
+                    if snapshot_type(current_key) is not snapshot_str:
                         kwdefaults_changed = True
                         break
             if not kwdefaults_changed:
@@ -3336,6 +3341,7 @@ class GuardedDispatcher:
             for name, expected in (
                 ("type", snapshot_type_global),
                 ("isinstance", snapshot_isinstance_global),
+                ("str", snapshot_str_global),
             ):
                 current = snapshot_module_globals_get(
                     name,
@@ -3403,7 +3409,7 @@ class GuardedDispatcher:
                         client_order_id=client_order_id,
                         expected_prepared=expected_prepared,
                     )
-            return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
+            return DispatchOutcome("BLOCKED", client_order_id, None, snapshot_str(error))
         except Exception as error:
             try:
                 require_dispatch_call_authority()

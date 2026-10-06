@@ -206,6 +206,9 @@ def handle_journal_event(
     financial_configuration_hash: str,
 ) -> None:
     timestamp = _utc_z(evidence["recorded_at"])
+    episode_sequence = evidence.get("episode_sequence")
+    if type(episode_sequence) is not int or episode_sequence < 1:
+        raise ValueError("Simulation episode sequence must be a positive exact integer")
     store = JournalStore(root / "journal.sqlite3")
     event_id = _event_uuid("simulation-episode", evidence["evidence_id"])
     existing = store.get_event(event_id)
@@ -214,9 +217,13 @@ def handle_journal_event(
         if existing is not None
         else store.next_aggregate_version("simulation_portfolio", symbol)
     )
+    if aggregate_version != episode_sequence:
+        raise ValueError(
+            "Simulation journal aggregate version conflicts with episode sequence"
+        )
     payload = {
         "evidence_id": evidence["evidence_id"],
-        "episode_sequence": evidence["episode_sequence"],
+        "episode_sequence": episode_sequence,
         "input_hash": evidence["input_hash"],
         "decision": evidence["decision"],
         "decision_reason": evidence["decision_reason"],

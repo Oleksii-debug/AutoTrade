@@ -176,6 +176,31 @@ class VerticalSliceTests(unittest.TestCase):
                 )
             self.assertFalse((root / "journal.sqlite3").exists())
 
+    def test_journal_rejects_episode_sequence_outside_aggregate_order(self):
+        import mvp.autotrade_mvp.pipeline as pipeline_module
+
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            root = Path(directory)
+            evidence = json.loads(
+                (root / "learning-evidence.jsonl").read_text(encoding="utf-8")
+            )
+            evidence["evidence_id"] = "evidence-out-of-order"
+            evidence["episode_sequence"] = 3
+
+            before = JournalStore(root / "journal.sqlite3").whole_store_state_cut()
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate version conflicts with episode sequence",
+            ):
+                pipeline_module.handle_journal_event(
+                    root,
+                    "SIM",
+                    evidence,
+                    evidence["financial_configuration_hash"],
+                )
+            after = JournalStore(root / "journal.sqlite3").whole_store_state_cut()
+            self.assertEqual(after, before)
 
     def test_missing_evidence_after_checkpoint_is_repaired(self):
         with TemporaryDirectory() as directory:

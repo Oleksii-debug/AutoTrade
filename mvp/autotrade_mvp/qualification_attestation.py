@@ -1311,6 +1311,49 @@ def verify_qualification_attestation(
             "signature_b64 is not canonical base64"
         )
 
+    # Reconstruct a fresh exact canonical signed graph from scalar/ref fields.
+    # The RSA signature is verified over this detached graph, never over a
+    # caller-overridable canonical_bytes() method.
+    attestation = QualificationAttestation(
+        attestation_id=attestation_input.attestation_id,
+        source_sha=attestation_input.source_sha,
+        domain=attestation_input.domain,
+        gate=attestation_input.gate,
+        package_id=attestation_input.package_id,
+        protocol_id=attestation_input.protocol_id,
+        protocol_version=attestation_input.protocol_version,
+        requirement_ids=tuple(attestation_input.requirement_ids),
+        evidence_refs=tuple(
+            EvidenceArtifactRef(
+                artifact_id=item.artifact_id,
+                sha256=item.sha256,
+                media_type=item.media_type,
+                evidence_kind=item.evidence_kind,
+                source_sha=item.source_sha,
+            )
+            for item in attestation_input.evidence_refs
+        ),
+        producer_id=attestation_input.producer_id,
+        verifier_id=attestation_input.verifier_id,
+        trust_root_id=attestation_input.trust_root_id,
+        runner_id=attestation_input.runner_id,
+        harness_version=attestation_input.harness_version,
+        started_at=attestation_input.started_at,
+        completed_at=attestation_input.completed_at,
+        signed_at=attestation_input.signed_at,
+        result=attestation_input.result,
+        unresolved_limits=tuple(attestation_input.unresolved_limits),
+        release_artifact_id=attestation_input.release_artifact_id,
+        release_artifact_sha256=attestation_input.release_artifact_sha256,
+        schema_version=attestation_input.schema_version,
+        verification_method=attestation_input.verification_method,
+    )
+    verified_attestation_bytes = _qualification_attestation_bytes_exact(attestation)
+    verified_attestation_digest = (
+        "sha256:" + sha256(verified_attestation_bytes).hexdigest()
+    )
+    verified_attestation_json = verified_attestation_bytes.decode("utf-8")
+
     try:
         evidence_reader = trusted_authenticated_reader(
             evidence_root,
@@ -1376,48 +1419,6 @@ def verify_qualification_attestation(
             name="expected_release_artifact_sha256",
         )
 
-    # Reconstruct a fresh exact canonical signed graph from scalar/ref fields.
-    # The RSA signature is verified over this detached graph, never over a
-    # caller-overridable canonical_bytes() method.
-    attestation = QualificationAttestation(
-        attestation_id=attestation_input.attestation_id,
-        source_sha=attestation_input.source_sha,
-        domain=attestation_input.domain,
-        gate=attestation_input.gate,
-        package_id=attestation_input.package_id,
-        protocol_id=attestation_input.protocol_id,
-        protocol_version=attestation_input.protocol_version,
-        requirement_ids=tuple(attestation_input.requirement_ids),
-        evidence_refs=tuple(
-            EvidenceArtifactRef(
-                artifact_id=item.artifact_id,
-                sha256=item.sha256,
-                media_type=item.media_type,
-                evidence_kind=item.evidence_kind,
-                source_sha=item.source_sha,
-            )
-            for item in attestation_input.evidence_refs
-        ),
-        producer_id=attestation_input.producer_id,
-        verifier_id=attestation_input.verifier_id,
-        trust_root_id=attestation_input.trust_root_id,
-        runner_id=attestation_input.runner_id,
-        harness_version=attestation_input.harness_version,
-        started_at=attestation_input.started_at,
-        completed_at=attestation_input.completed_at,
-        signed_at=attestation_input.signed_at,
-        result=attestation_input.result,
-        unresolved_limits=tuple(attestation_input.unresolved_limits),
-        release_artifact_id=attestation_input.release_artifact_id,
-        release_artifact_sha256=attestation_input.release_artifact_sha256,
-        schema_version=attestation_input.schema_version,
-        verification_method=attestation_input.verification_method,
-    )
-    verified_attestation_bytes = _qualification_attestation_bytes_exact(attestation)
-    verified_attestation_digest = (
-        "sha256:" + sha256(verified_attestation_bytes).hexdigest()
-    )
-    verified_attestation_json = verified_attestation_bytes.decode("utf-8")
     if attestation.source_sha != expected_source_sha:
         raise QualificationTrustError(
             "attestation source SHA does not match candidate"

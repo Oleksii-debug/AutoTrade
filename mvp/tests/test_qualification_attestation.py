@@ -211,6 +211,43 @@ class QualificationAttestationTests(unittest.TestCase):
 
         self.assertFalse(executable.called)
 
+    def test_verifier_snapshots_attestation_before_reader_construction_callback(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        mutated = attestation(
+            trust_root,
+            runner_id="qualification-runner-2",
+        )
+        receipt = SignedQualificationAttestation(original, sign(mutated))
+        trust_policy = policy(trust_root)
+        original_reader = qualification_attestation_module.trusted_authenticated_reader
+        callback_calls = 0
+
+        def mutate_attestation_during_reader_construction(*args, **kwargs):
+            nonlocal callback_calls
+            callback_calls += 1
+            object.__setattr__(original, "runner_id", mutated.runner_id)
+            return original_reader(*args, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with (
+                patch.object(
+                    qualification_attestation_module,
+                    "trusted_authenticated_reader",
+                    side_effect=mutate_attestation_during_reader_construction,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "signature",
+                ),
+            ):
+                verify(receipt, store, trust_policy)
+
+        self.assertEqual(callback_calls, 1)
+        self.assertEqual(original.runner_id, mutated.runner_id)
+
     def test_evidence_resolution_uses_one_canonical_authenticated_snapshot_only(self):
         ref = evidence_ref()
         with TemporaryDirectory() as directory:

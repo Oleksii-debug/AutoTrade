@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
-import re
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -433,19 +432,34 @@ class SubmissionResponseBinding:
                 raise ValueError(f"{name} is required")
         if (
             type(self.request_hash) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None
+            or len(self.request_hash) != 71
+            or not self.request_hash.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.request_hash[7:]
+            )
         ):
             raise ValueError("request_hash must be a canonical SHA-256 digest")
         if (
             type(self.submission_scope_hash) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None
+            or len(self.submission_scope_hash) != 71
+            or not self.submission_scope_hash.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.submission_scope_hash[7:]
+            )
         ):
             raise ValueError(
                 "submission_scope_hash must be a canonical SHA-256 digest"
             )
         if (
             type(self.response_sha256) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None
+            or len(self.response_sha256) != 71
+            or not self.response_sha256.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.response_sha256[7:]
+            )
         ):
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         if (
@@ -1178,23 +1192,6 @@ def _install_submission_response_binding_authority(loader):
         for name, member in canonical_json_encoder_surface
         if name in {"__init__", "encode", "iterencode", "default"}
     )
-    canonical_re_module = re
-    canonical_re_module_type = canonical_type(canonical_re_module)
-    canonical_re_namespace = canonical_vars(canonical_re_module)
-    if canonical_type(canonical_re_namespace) is not canonical_dict:
-        raise RuntimeError("regular-expression namespace authority is unavailable")
-    canonical_re_fullmatch = canonical_dict.get(
-        canonical_re_namespace, "fullmatch"
-    )
-    canonical_re_fullmatch_code = canonical_getattr(
-        canonical_re_fullmatch, "__code__", None
-    )
-    canonical_re_fullmatch_defaults = canonical_getattr(
-        canonical_re_fullmatch, "__defaults__", None
-    )
-    canonical_re_fullmatch_kwdefaults = canonical_getattr(
-        canonical_re_fullmatch, "__kwdefaults__", None
-    )
     canonical_sha256 = sha256
     canonical_number_parser = parse_bounded_json_number_token
     number_parser_code = canonical_getattr(
@@ -1485,22 +1482,6 @@ def _install_submission_response_binding_authority(loader):
                 for member, code, defaults, kwdefaults
                 in canonical_json_encoder_codes
             )
-            or re is not canonical_re_module
-            or canonical_type(canonical_re_module) is not canonical_re_module_type
-            or canonical_vars(canonical_re_module) is not canonical_re_namespace
-            or canonical_dict.get(canonical_re_namespace, "fullmatch")
-            is not canonical_re_fullmatch
-            or (
-                canonical_re_fullmatch_code is not None
-                and canonical_getattr(
-                    canonical_re_fullmatch, "__code__", None
-                )
-                is not canonical_re_fullmatch_code
-            )
-            or canonical_getattr(canonical_re_fullmatch, "__defaults__", None)
-            is not canonical_re_fullmatch_defaults
-            or canonical_getattr(canonical_re_fullmatch, "__kwdefaults__", None)
-            is not canonical_re_fullmatch_kwdefaults
             or sha256 is not canonical_sha256
             or parse_bounded_json_number_token is not canonical_number_parser
             or (

@@ -1,13 +1,17 @@
 from contextlib import closing
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
+from types import MappingProxyType
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_reservations import (
+    DurableReservationBook,
+    reservation_snapshot_digest,
+)
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
     ProviderFillEvidence,
@@ -31,10 +35,30 @@ from research.autotrade_research.artifacts import (
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
+    ReservationSnapshot,
 )
 
 
 ARTIFACT_ID = "11111111-1111-4111-8111-111111111111"
+
+
+class _HostileText(str):
+    def strip(self, *_args, **_kwargs):
+        raise AssertionError("hostile strip dispatched")
+
+
+class _HostileMapping(dict):
+    def __bool__(self):
+        raise AssertionError("hostile mapping truth dispatched")
+
+    def __len__(self):
+        raise AssertionError("hostile mapping length dispatched")
+
+    def __iter__(self):
+        raise AssertionError("hostile mapping iteration dispatched")
+
+    def items(self):
+        raise AssertionError("hostile mapping items dispatched")
 
 
 class DurableReservationBookTests(unittest.TestCase):
@@ -246,6 +270,185 @@ class DurableReservationBookTests(unittest.TestCase):
             requirements={"CASH:USD": amount},
             available={"CASH:USD": "100"},
         )
+
+    def test_durable_environment_text_subclass_callback_does_not_execute(self):
+        book = DurableReservationBook(
+            self.store,
+            environment=_HostileText(" PAPER "),
+            account_id=_HostileText(" paper-account "),
+            resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
+        )
+        self.assertEqual(book.environment, "PAPER")
+        self.assertEqual(book.account_id, "paper-account")
+        self.assertEqual(book.version, 0)
+
+    def test_snapshot_digest_rejects_subclass_before_field_access(self):
+        class HostileSnapshot(ReservationSnapshot):
+            def __getattribute__(self, name):
+                if name in {
+                    "reservation_id",
+                    "intent_id",
+                    "original",
+                    "remaining",
+                    "consumed",
+                    "state",
+                    "resolution_evidence",
+                }:
+                    raise AssertionError("hostile snapshot field access dispatched")
+                return super().__getattribute__(name)
+
+        hostile = HostileSnapshot(
+            reservation_id="r-hostile-digest",
+            intent_id="i-hostile-digest",
+            original=MappingProxyType({"CASH:USD": Decimal("1")}),
+            remaining=MappingProxyType({"CASH:USD": Decimal("1")}),
+            consumed=MappingProxyType({"CASH:USD": Decimal("0")}),
+            state="WORKING",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "snapshot must be exact ReservationSnapshot",
+        ):
+            reservation_snapshot_digest(hostile)
+
+    def test_replay_rejects_executable_event_before_mapping_callbacks(self):
+        book = self.book()
+        hostile_event = _HostileMapping()
+        dict.__setitem__(hostile_event, "aggregate_version", 1)
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "exact inert JSON values",
+        ):
+            book._replay([hostile_event])
+
+    def test_replay_rejects_executable_nested_json_before_digest_callbacks(self):
+        book = self.book()
+
+        for nested_name in ("payload", "request", "snapshot"):
+            hostile = _HostileMapping()
+            dict.__setitem__(hostile, "hostile", "value")
+            if nested_name == "payload":
+                event = {
+                    "aggregate_version": 1,
+                    "event_type": "ignored",
+                    "payload": hostile,
+                    "payload_hash": "ignored",
+                }
+            else:
+                payload = {
+                    nested_name: hostile,
+                    "safe": "value",
+                }
+                event = {
+                    "aggregate_version": 1,
+                    "event_type": "ignored",
+                    "payload": payload,
+                    "payload_hash": "ignored",
+                }
+
+            with self.subTest(nested_name=nested_name):
+                with self.assertRaisesRegex(
+                    ReservationConflict,
+                    "exact inert JSON values",
+                ):
+                    book._replay([event])
+
+    def test_durable_text_subclass_callbacks_do_not_execute(self):
+        book = self.book()
+        snapshot = book.reserve(
+            command_id=_HostileText(" cmd-hostile-text "),
+            idempotency_key=_HostileText(" idem-hostile-text "),
+            reservation_id=_HostileText(" r-hostile-text "),
+            intent_id=_HostileText(" i-hostile-text "),
+            requirements={_HostileText(" CASH:USD "): "10"},
+            available={"CASH:USD": "100"},
+        )
+
+        self.assertEqual(snapshot.reservation_id, "r-hostile-text")
+        self.assertEqual(snapshot.intent_id, "i-hostile-text")
+        self.assertEqual(tuple(snapshot.original), ("CASH:USD",))
+        self.assertEqual(book.version, 1)
+        restarted = self.book()
+        self.assertEqual(restarted.get("r-hostile-text"), snapshot)
+
+    def test_durable_reserve_rejects_hostile_mapping_before_journal_mutation(self):
+        for mapping_kind in ("requirements", "available"):
+            hostile = _HostileMapping()
+            dict.__setitem__(
+                hostile,
+                "CASH:USD",
+                "10" if mapping_kind == "requirements" else "100",
+            )
+            for candidate in (hostile, MappingProxyType(hostile)):
+                with self.subTest(
+                    mapping_kind=mapping_kind,
+                    mapping_type=type(candidate).__name__,
+                ):
+                    book = self.book()
+                    before = book.version
+                    kwargs = {
+                        "requirements": {"CASH:USD": "10"},
+                        "available": {"CASH:USD": "100"},
+                    }
+                    kwargs[mapping_kind] = candidate
+                    with self.assertRaisesRegex(
+                        TypeError,
+                        "resource amounts must use an exact dict",
+                    ):
+                        book.reserve(
+                            command_id=f"cmd-hostile-{mapping_kind}",
+                            idempotency_key=f"idem-hostile-{mapping_kind}",
+                            reservation_id=f"r-hostile-{mapping_kind}",
+                            intent_id=f"i-hostile-{mapping_kind}",
+                            **kwargs,
+                        )
+                    self.assertEqual(book.version, before)
+                    self.assertEqual(book.active(), ())
+                    self.assertEqual(self.book().version, before)
+
+    def test_durable_consume_rejects_hostile_mapping_before_journal_mutation(self):
+        for candidate_factory in (
+            lambda hostile: hostile,
+            MappingProxyType,
+        ):
+            with self.subTest(factory=getattr(candidate_factory, "__name__", "proxy")):
+                book = self.book()
+                reservation_id = "r-hostile-consume-" + (
+                    "proxy" if candidate_factory is MappingProxyType else "dict"
+                )
+                intent_id = "i-hostile-consume-" + (
+                    "proxy" if candidate_factory is MappingProxyType else "dict"
+                )
+                book.reserve(
+                    command_id="cmd-" + reservation_id,
+                    idempotency_key="idem-" + reservation_id,
+                    reservation_id=reservation_id,
+                    intent_id=intent_id,
+                    requirements={"CASH:USD": "10"},
+                    available={"CASH:USD": "100"},
+                )
+                before = book.get(reservation_id)
+                before_version = book.version
+                hostile = _HostileMapping()
+                dict.__setitem__(hostile, "CASH:USD", "1")
+                candidate = candidate_factory(hostile)
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.consume(
+                        command_id="cmd-consume-" + reservation_id,
+                        idempotency_key="idem-consume-" + reservation_id,
+                        reservation_id=reservation_id,
+                        usage=candidate,
+                    )
+                self.assertEqual(book.version, before_version)
+                self.assertEqual(book.get(reservation_id), before)
+                restarted = self.book()
+                self.assertEqual(restarted.version, before_version)
+                self.assertEqual(restarted.get(reservation_id), before)
 
     def test_exact_consumption_replays_identically_across_decimal_contexts(self):
         with localcontext() as context:
@@ -764,6 +967,72 @@ class DurableReservationBookTests(unittest.TestCase):
             connection.commit()
 
         with self.assertRaisesRegex(ReservationConflict, "snapshot"):
+            self.book()
+
+    def test_replay_rejects_rehashed_cross_environment_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["environment"] = "LIVE"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "environment.*scope"):
+            self.book()
+
+    def test_replay_rejects_rehashed_cross_account_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["account_id"] = "other-account"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "account.*scope"):
             self.book()
 
     def test_unknown_still_cannot_erase_consumed_exposure(self):

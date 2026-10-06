@@ -5,13 +5,38 @@ from decimal import (
     ROUND_HALF_EVEN,
     localcontext,
 )
+from types import MappingProxyType
 import unittest
 
 from mvp.autotrade_mvp.reservations import (
+    ACTIVE_STATES,
+    TERMINAL_STATES,
     InsufficientAvailable,
     ReservationBook,
     ReservationConflict,
 )
+
+
+class _HostileText(str):
+    def strip(self, *_args, **_kwargs):
+        raise AssertionError("hostile strip dispatched")
+
+    def upper(self, *_args, **_kwargs):
+        raise AssertionError("hostile upper dispatched")
+
+
+class _HostileMapping(dict):
+    def __bool__(self):
+        raise AssertionError("hostile mapping truth dispatched")
+
+    def __len__(self):
+        raise AssertionError("hostile mapping length dispatched")
+
+    def __iter__(self):
+        raise AssertionError("hostile mapping iteration dispatched")
+
+    def items(self):
+        raise AssertionError("hostile mapping items dispatched")
 
 
 class ReservationFoundationTests(unittest.TestCase):
@@ -21,6 +46,118 @@ class ReservationFoundationTests(unittest.TestCase):
         (28, ROUND_HALF_EVEN),
         (80, ROUND_HALF_EVEN),
     )
+
+    def test_reservation_state_authority_constants_are_immutable(self):
+        with self.assertRaises(AttributeError):
+            ACTIVE_STATES.add("FORGED")
+        with self.assertRaises(AttributeError):
+            TERMINAL_STATES.add("FORGED")
+
+    def test_text_subclass_callbacks_do_not_execute_during_reservation_identity(self):
+        book = ReservationBook()
+        snapshot = book.reserve(
+            reservation_id=_HostileText(" reservation-hostile-text "),
+            intent_id=_HostileText(" intent-hostile-text "),
+            requirements={_HostileText(" CASH:USD "): "10"},
+            available={"CASH:USD": "100"},
+        )
+        terminal = book.mark_terminal(
+            _HostileText(" reservation-hostile-text "),
+            outcome=_HostileText(" rejected "),
+            resolution_evidence=_HostileText(" provider-proof "),
+        )
+
+        self.assertEqual(snapshot.reservation_id, "reservation-hostile-text")
+        self.assertEqual(snapshot.intent_id, "intent-hostile-text")
+        self.assertEqual(tuple(snapshot.original), ("CASH:USD",))
+        self.assertEqual(terminal.state, "REJECTED")
+        self.assertEqual(terminal.resolution_evidence, "provider-proof")
+
+    def test_executable_resource_mapping_is_rejected_before_callbacks_or_mutation(self):
+        book = ReservationBook()
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "10")
+
+        for requirements in (hostile, MappingProxyType(hostile)):
+            with self.subTest(mapping_type=type(requirements).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.reserve(
+                        reservation_id="reservation-hostile-map",
+                        intent_id="intent-hostile-map",
+                        requirements=requirements,
+                        available={"CASH:USD": "100"},
+                    )
+                self.assertEqual(book.active(), ())
+
+    def test_executable_available_mapping_is_rejected_before_callbacks_or_mutation(self):
+        book = ReservationBook()
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "100")
+
+        for available in (hostile, MappingProxyType(hostile)):
+            with self.subTest(mapping_type=type(available).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.reserve(
+                        reservation_id="reservation-hostile-available",
+                        intent_id="intent-hostile-available",
+                        requirements={"CASH:USD": "10"},
+                        available=available,
+                    )
+                self.assertEqual(book.active(), ())
+
+    def test_executable_consume_mapping_is_rejected_before_callbacks_or_mutation(self):
+        book = ReservationBook()
+        original = book.reserve(
+            reservation_id="reservation-hostile-consume",
+            intent_id="intent-hostile-consume",
+            requirements={"CASH:USD": "10"},
+            available={"CASH:USD": "100"},
+        )
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "1")
+
+        for usage in (hostile, MappingProxyType(hostile)):
+            with self.subTest(mapping_type=type(usage).__name__):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource amounts must use an exact dict",
+                ):
+                    book.consume("reservation-hostile-consume", usage)
+                self.assertEqual(book.get("reservation-hostile-consume"), original)
+                self.assertEqual(
+                    book.total_reserved("CASH:USD"),
+                    Decimal("10"),
+                )
+
+    def test_capital_projection_cannot_smuggle_executable_resource_mapping(self):
+        book = ReservationBook()
+        hostile = _HostileMapping()
+        dict.__setitem__(hostile, "CASH:USD", "100")
+        proxied = MappingProxyType(hostile)
+
+        class Capital:
+            blocks_new_risk = False
+
+            def reservation_resources(self):
+                return proxied
+
+        with self.assertRaisesRegex(
+            TypeError,
+            r"capital reservation_resources\(\) must return an exact dict",
+        ):
+            book.reserve_from_capital(
+                reservation_id="reservation-capital-hostile-map",
+                intent_id="intent-capital-hostile-map",
+                requirements={"CASH:USD": "10"},
+                capital=Capital(),
+            )
+        self.assertEqual(book.active(), ())
 
     def test_capacity_admission_is_exact_under_hostile_decimal_contexts(self):
         huge = "1000000000000000000000000000000"

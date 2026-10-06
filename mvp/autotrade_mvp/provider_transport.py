@@ -1941,7 +1941,6 @@ def _install_direct_trading_write_execution_authority():
     canonical_vars = vars
     canonical_len = len
     canonical_object = object
-    canonical_zip = zip
     object_getattribute = canonical_object.__getattribute__
     weakref = weakref_ref
 
@@ -2712,8 +2711,8 @@ def _validated_bybit_authenticated_read_wire_semantics_digest(
         "host": _urlsplit(policy.base_url).hostname,
         "timeout_seconds": timeout_seconds,
     }
-    return "sha256:" + sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + _sha256(
+        _json_dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
@@ -2731,6 +2730,7 @@ def _install_direct_authenticated_read_execution_authority(
     canonical_type = type
     canonical_id = id
     canonical_tuple = tuple
+    canonical_zip = zip
     canonical_object = object
     object_getattribute = canonical_object.__getattribute__
     weakref = weakref_ref

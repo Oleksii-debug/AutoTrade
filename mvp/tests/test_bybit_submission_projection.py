@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from autotrade_runtime.artifacts import ArtifactStore
 
+import mvp.autotrade_mvp.bybit_submission_projection as bybit_submission_projection_module
+
 from mvp.autotrade_mvp.bybit_submission_projection import (
     project_authenticated_bybit_submission,
 )
@@ -298,6 +300,161 @@ class AuthenticatedBybitSubmissionProjectionTests(unittest.TestCase):
             snapshot = book.order(client_order_id).snapshot()
             self.assertEqual(snapshot.state, "UNKNOWN")
             self.assertIsNone(snapshot.provider_order_id)
+
+
+    def test_late_parser_global_rebinding_cannot_forge_ack(self):
+        with TemporaryDirectory() as directory:
+            _store, _artifacts, book, prepared, attempt, _client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-authentic-parser",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="late-parser-rebinding",
+            )
+            calls = 0
+
+            def hostile_parser(**_kwargs):
+                nonlocal calls
+                calls += 1
+                return {
+                    "outcome": "ACKNOWLEDGED",
+                    "client_order_id": "forged-client",
+                    "provider_order_id": "forged-provider-order",
+                    "evidence": [],
+                }
+
+            original = bybit_submission_projection_module.parse_submission_response
+            bybit_submission_projection_module.parse_submission_response = hostile_parser
+            try:
+                result = project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            finally:
+                bybit_submission_projection_module.parse_submission_response = original
+
+            self.assertEqual(calls, 0)
+            self.assertEqual(result.snapshot.state, "WORKING")
+            self.assertEqual(
+                result.snapshot.provider_order_id,
+                "provider-authentic-parser",
+            )
+
+    def test_late_oms_acknowledge_rebinding_cannot_retarget_commit(self):
+        with TemporaryDirectory() as directory:
+            _store, _artifacts, book, prepared, attempt, _client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-authentic-oms",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="late-oms-method-rebinding",
+            )
+            calls = 0
+            original = DurableOrderBookProjection.acknowledge
+
+            def hostile_acknowledge(_self, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError("hostile acknowledge must not execute")
+
+            DurableOrderBookProjection.acknowledge = hostile_acknowledge
+            try:
+                result = project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            finally:
+                DurableOrderBookProjection.acknowledge = original
+
+            self.assertEqual(calls, 0)
+            self.assertEqual(result.snapshot.state, "WORKING")
+            self.assertEqual(result.snapshot.provider_order_id, "provider-authentic-oms")
+
+    def test_late_artifact_publisher_rebinding_cannot_retarget_evidence_write(self):
+        with TemporaryDirectory() as directory:
+            _store, artifacts, book, prepared, attempt, _client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-authentic-artifact",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="late-artifact-publisher-rebinding",
+            )
+            calls = 0
+            original = ArtifactStore.publish_bytes
+
+            def hostile_publish(_self, **_kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError("hostile artifact publisher must not execute")
+
+            ArtifactStore.publish_bytes = hostile_publish
+            try:
+                result = project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            finally:
+                ArtifactStore.publish_bytes = original
+
+            self.assertEqual(calls, 0)
+            self.assertEqual(result.snapshot.state, "WORKING")
+            events = _store.load_events("order_projection_book", book.aggregate_id)
+            ref = events[-1]["evidence_refs"][0]
+            self.assertEqual(
+                artifacts.load_manifest(ref["artifact_id"])["sha256"],
+                ref["sha256"],
+            )
+
+    def test_instance_method_shadow_fails_before_hostile_dispatch(self):
+        with TemporaryDirectory() as directory:
+            _store, _artifacts, book, prepared, attempt, _client_order_id = self._sent(
+                directory,
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "orderId": "provider-shadowed",
+                        "orderLinkId": "__CLIENT__",
+                    },
+                },
+                intent_id="instance-shadow-before-authority",
+            )
+            calls = 0
+
+            def hostile_order(_client_order_id):
+                nonlocal calls
+                calls += 1
+                raise AssertionError("shadowed order method must not execute")
+
+            book.order = hostile_order
+            with self.assertRaisesRegex(
+                Exception,
+                "durable OMS instance state is shadowed",
+            ):
+                project_authenticated_bybit_submission(
+                    book,
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                )
+            self.assertEqual(calls, 0)
 
 
 if __name__ == "__main__":

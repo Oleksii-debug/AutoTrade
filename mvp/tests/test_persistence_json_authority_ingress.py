@@ -218,6 +218,60 @@ class PersistenceJsonAuthorityIngressTests(unittest.TestCase):
             self.assertTrue(inserted)
             self.assertEqual(result, {"status": "ACCEPTED"})
 
+    def test_append_event_rejects_text_that_would_diverge_from_envelope_bytes(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event(" evt-noncanonical ")
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_id must be canonical non-empty text",
+            ):
+                store.append_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
+            self.assertIsNone(store.get_event("evt-noncanonical"))
+
+    def test_commit_command_rejects_noncanonical_event_text_before_command_write(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-noncanonical-batch")
+            candidate["event_type"] = " ExecutionFillObserved "
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_type must be canonical non-empty text",
+            ):
+                store.commit_command(
+                    command_id="cmd-noncanonical-event",
+                    actor="operator",
+                    environment="PAPER",
+                    idempotency_key="key-noncanonical-event",
+                    request={"action": "ORDER.SUBMIT"},
+                    result={"status": "ACCEPTED"},
+                    state_version=1,
+                    events=[(candidate, None)],
+                )
+            self.assertEqual(
+                store.whole_store_state_counts(),
+                {
+                    "events": 0,
+                    "outbox": 0,
+                    "command_dedupe": 0,
+                    "projection_checkpoints": 0,
+                    "global_projection_checkpoints": 0,
+                },
+            )
+
+    def test_first_event_claim_rejects_noncanonical_core_text_before_claim(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            candidate = _event("evt-first-canonical")
+            candidate["aggregate_id"] = " paper-json-ingress "
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_id must be canonical non-empty text",
+            ):
+                store.claim_first_event(candidate)
+            self.assertEqual(store.current_journal_sequence(), 0)
+
     def test_exact_tuple_keeps_legacy_json_array_semantics(self):
         self.assertEqual(
             canonical_json(("a", {"b": 1}, [True, None])),

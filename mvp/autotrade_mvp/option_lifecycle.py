@@ -192,6 +192,16 @@ def _text(value: str, name: str) -> str:
     return value
 
 
+def _provider_environment(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not value or value != value.strip():
+        raise OptionLifecycleError(
+            "provider_environment must be canonical exact text"
+        )
+    return value.upper()
+
+
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     try:
         return parse_bounded_exact_decimal(value)
@@ -266,11 +276,7 @@ class OptionLifecycleObservation:
         provider = _text(self.provider_id, "provider_id").upper()
         account = _text(self.account_id, "account_id")
         environment = _text(self.environment, "environment").upper()
-        provider_environment = (
-            None
-            if self.provider_environment is None
-            else _text(self.provider_environment, "provider_environment").upper()
-        )
+        provider_environment = _provider_environment(self.provider_environment)
         venue = _text(self.venue_id, "venue_id")
         instrument_version = _text(self.instrument_version, "instrument_version")
         external_event_id = _text(self.external_event_id, "external_event_id")
@@ -733,11 +739,7 @@ class DurableOptionLifecycleAuthority:
                 "lifecycle endpoints must be canonical provider-relative paths"
             )
         scope = _text(permission_scope, "permission_scope")
-        scoped_provider_environment = (
-            None
-            if provider_environment is None
-            else _text(provider_environment, "provider_environment").upper()
-        )
+        scoped_provider_environment = _provider_environment(provider_environment)
         self.store = store
         self.registry = registry
         self.economic_book = economic_book

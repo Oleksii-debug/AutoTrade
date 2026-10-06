@@ -211,6 +211,19 @@ internal static class ProviderAuthenticatedReadIssuerContractTests
 
         issuer.AbandonAuthenticatedReadAttempt(demo);
 
+        ProviderAuthenticatedReadAttemptBinding oversizedAttempt =
+            issuer.IssueAuthenticatedReadAttempt(
+                subject,
+                started.AddSeconds(8));
+        ExpectFailure(
+            () => issuer.IssueAuthenticatedReadReceipt(
+                oversizedAttempt,
+                200,
+                new byte[ProviderIssuerAuthority.MaxResponseBytes + 1],
+                started.AddSeconds(9)),
+            "authenticated read issuer must reject oversized response evidence");
+        issuer.AbandonAuthenticatedReadAttempt(oversizedAttempt);
+
         using ProviderIssuerAuthority otherIssuer =
             ProviderIssuerAuthority.CreateProcessAuthority(started);
         ExpectFailure(

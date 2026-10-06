@@ -229,7 +229,11 @@ def normalize_spdx_packages(sbom) -> dict[str, dict[str, object]]:
                     _text(ref.get("referenceLocator"), name="SBOM purl")
                 )
         if not purls:
-            continue
+            if name == "AutoTrade":
+                continue
+            raise ReleaseScopeMappingError(
+                f"external SBOM package lacks purl identity: {name}@{version}"
+            )
         if len(purls) != 1 or purls[0] in by_purl:
             raise ReleaseScopeMappingError("SBOM purl identity ambiguous")
         checksums = package.get("checksums", [])
@@ -270,6 +274,7 @@ def build_mapping(
     locked_packages,
     package_rights,
     provenance_components,
+    reuse_documents=(),
 ) -> dict[str, object]:
     composition = normalize_composition(composition)
     if "sha256:" + sha256(sbom_raw).hexdigest() != composition["sbom_sha256"]:
@@ -358,23 +363,87 @@ def build_mapping(
             item.get("release_distribution_state"),
             name=f"{name} release_distribution_state",
         )
+        repository = _text(
+            item.get("repository"), name=f"{name} repository"
+        )
+        revision = _git_sha(
+            item.get("revision"), name=f"{name} revision"
+        )
         record = {
             "name": name,
-            "repository": _text(
-                item.get("repository"), name=f"{name} repository"
-            ),
-            "revision": _text(
-                item.get("revision"), name=f"{name} revision"
-            ),
+            "repository": repository,
+            "revision": revision,
             "release_scope_classification": classification,
             "release_distribution_state": state,
         }
+        if classification == "IMPORTED_FIRST_PARTY_SOURCE":
+            matches = []
+            for reuse in reuse_documents:
+                if type(reuse) is not dict or reuse.get("schema_version") != "1.0.0":
+                    continue
+                source = reuse.get("source")
+                if (
+                    type(source) is dict
+                    and source.get("repository") == repository
+                    and source.get("revision") == revision
+                ):
+                    matches.append(reuse)
+            if len(matches) != 1:
+                raise ReleaseScopeMappingError(
+                    f"imported first-party source requires one exact reuse manifest: {name}"
+                )
+            reuse = matches[0]
+            source = reuse["source"]
+            migrations = reuse.get("migrations")
+            if type(migrations) is not list or not migrations:
+                raise ReleaseScopeMappingError(
+                    f"reuse manifest has no migrations: {name}"
+                )
+            destinations = []
+            for migration in migrations:
+                if type(migration) is not dict:
+                    raise ReleaseScopeMappingError(
+                        f"reuse migration is malformed: {name}"
+                    )
+                if migration.get("runtime_dependency_on_autosport") is not False:
+                    raise ReleaseScopeMappingError(
+                        f"reuse migration retains source runtime dependency: {name}"
+                    )
+                destinations.append(
+                    _path(
+                        migration.get("destination_path"),
+                        name=f"{name} destination_path",
+                    )
+                )
+            if len(destinations) != len(set(destinations)):
+                raise ReleaseScopeMappingError(
+                    f"reuse migration destination is duplicated: {name}"
+                )
+            release_rights = _text(
+                source.get("release_distribution_rights"),
+                name=f"{name} reuse release_distribution_rights",
+            )
+            record["reuse_mapping"] = {
+                "rights_basis": _text(
+                    source.get("rights_basis"),
+                    name=f"{name} reuse rights_basis",
+                ),
+                "release_distribution_rights": release_rights,
+                "destination_paths": sorted(destinations),
+                "manifest_sha256": (
+                    "sha256:" + sha256(canonical_json_bytes(reuse)).hexdigest()
+                ),
+            }
+            if release_rights != "APPROVED":
+                unresolved_rights.append(name)
         scope.append(record)
         if (
-            classification in {
-                "DISTRIBUTED_RUNTIME",
-                "IMPORTED_FIRST_PARTY_SOURCE",
-            }
+            classification == "DISTRIBUTED_RUNTIME"
+            and state != "APPROVED"
+        ):
+            unresolved_rights.append(name)
+        if (
+            classification == "IMPORTED_FIRST_PARTY_SOURCE"
             and state != "APPROVED"
         ):
             unresolved_rights.append(name)
@@ -436,6 +505,16 @@ def build_repository_mapping(*, root: Path, composition_path: Path, sbom_path: P
         (root / "provenance" / "components.json").read_bytes(),
         label="components provenance",
     )
+    reuse_documents = []
+    reuse_root = root / "provenance" / "reuse"
+    if reuse_root.is_dir():
+        for reuse_path in sorted(reuse_root.glob("*.json")):
+            reuse_documents.append(
+                strict_json_bytes(
+                    reuse_path.read_bytes(),
+                    label=f"reuse provenance {reuse_path.name}",
+                )
+            )
     if (
         type(components) is not dict
         or components.get("schema_version") != "1.0.0"
@@ -451,6 +530,7 @@ def build_repository_mapping(*, root: Path, composition_path: Path, sbom_path: P
         locked_packages=locked_package_artifacts(root),
         package_rights=package_rights_records(root),
         provenance_components=components["components"],
+        reuse_documents=reuse_documents,
     )
 
 

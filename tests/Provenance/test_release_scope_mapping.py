@@ -99,6 +99,22 @@ RIGHTS = [{
     "version": "1.0.4258.31",
     "content_hash_sha512_base64": CONTENT_HASH,
 }]
+REUSE = [{
+    "schema_version": "1.0.0",
+    "source": {
+        "repository": "Oleksii-debug/Autosport",
+        "revision": "b" * 40,
+        "rights_basis": "OWNER_AUTHORIZED_MIGRATION_FOR_PROJECT_DEVELOPMENT",
+        "release_distribution_rights": "UNRESOLVED",
+    },
+    "migrations": [{
+        "source_path": "src/autosport/json_integrity.py",
+        "destination_path": "research/autotrade_research/io/strict_json.py",
+        "symbols": ["strict_json_loads"],
+        "runtime_dependency_on_autosport": False,
+    }],
+}]
+
 PROVENANCE = [
     {
         "name": "Autosport first-party source",
@@ -128,8 +144,10 @@ PROVENANCE = [
 
 class ReleaseScopeMappingTests(unittest.TestCase):
     def _build(self, *, extra=False, wrong_hash=False, locked=None,
-               rights=None, provenance=None):
+               rights=None, provenance=None, reuse=None, sbom_override=None):
         sbom, raw = _sbom(extra=extra, wrong_hash=wrong_hash)
+        if sbom_override is not None:
+            sbom, raw = sbom_override
         return build_mapping(
             composition=_composition(raw),
             sbom=sbom,
@@ -139,6 +157,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             provenance_components=(
                 PROVENANCE if provenance is None else provenance
             ),
+            reuse_documents=REUSE if reuse is None else reuse,
         )
 
     def test_exact_webview2_mapping_keeps_imported_rights_blocker(self):
@@ -195,6 +214,41 @@ class ReleaseScopeMappingTests(unittest.TestCase):
         ):
             self._build(provenance=[value])
 
+    def test_external_sbom_package_without_purl_fails(self):
+        document, raw = _sbom()
+        package = dict(document["packages"][0])
+        package.pop("externalRefs")
+        document = dict(document)
+        document["packages"] = [package]
+        raw = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "lacks purl identity"
+        ):
+            self._build(sbom_override=(document, raw))
+
+    def test_imported_source_requires_exact_reuse_manifest(self):
+        with self.assertRaisesRegex(
+            ReleaseScopeMappingError, "requires one exact reuse manifest"
+        ):
+            self._build(reuse=[])
+
+    def test_imported_source_mapping_binds_destination_path(self):
+        result = self._build()
+        autosport = next(
+            item for item in result["provenance_scope"]
+            if item["name"] == "Autosport first-party source"
+        )
+        self.assertEqual(
+            autosport["reuse_mapping"]["destination_paths"],
+            ["research/autotrade_research/io/strict_json.py"],
+        )
+        self.assertEqual(
+            autosport["reuse_mapping"]["release_distribution_rights"],
+            "UNRESOLVED",
+        )
+
     def test_mapping_is_order_stable(self):
         first = self._build()
         second = self._build(provenance=list(reversed(PROVENANCE)))
@@ -212,6 +266,7 @@ class ReleaseScopeMappingTests(unittest.TestCase):
             locked_packages=LOCK,
             package_rights=RIGHTS,
             provenance_components=PROVENANCE,
+            reuse_documents=REUSE,
         )
         composition["runtime"]["minimum_windows_version"] = "11"
         second = build_mapping(

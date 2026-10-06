@@ -89,7 +89,10 @@ def handle_market_data(prices: Iterable[float | int | str | Decimal]) -> list[De
 
 
 def handle_strategy(prices: list[Decimal], quantity: Decimal) -> Decision:
-    return MovingAverageStrategy().decide(prices, quantity)
+    return MovingAverageStrategy(
+        fast=STRATEGY_CONFIGURATION["fast"],
+        slow=STRATEGY_CONFIGURATION["slow"],
+    ).decide(prices, quantity)
 
 
 def handle_risk(decision: Decision, current_position: Decimal, current_cash: Decimal, fee_rate: Decimal, max_abs_position: Decimal, max_notional: Decimal) -> tuple[bool, str]:

@@ -212,3 +212,27 @@ authority.
 The final closure rule remains exact-head terminal baseline + Verify +
 reconvergence-integrity success, clean review state, current-main topology,
 merge and post-merge readback.
+
+
+## 2026-10-06 trigger/capacity and zero-fill chronology closure
+
+The final execution-state audit closed two additional deterministic-state gaps:
+
+- STOP_LIMIT trigger authority is now independent from participation/fill capacity.
+  A causally observed stop touch is retained even when available volume produces
+  less than one executable lot; capacity controls fill quantity, not whether the
+  order became triggered. The independent oracle applies the same separation and
+  rejects omission of the observed trigger even at zero fill capacity.
+- zero-fill status is bound to causal chronology. A pre-arrival observation must
+  remain WAITING_FOR_LATENCY; a post-arrival result cannot claim waiting;
+  a BAR interval that began before arrival must remain AMBIGUOUS_NO_FILL; and
+  AMBIGUOUS_NO_FILL is invalid outside BAR fidelity.
+
+Focused simulation/oracle regressions cover zero-volume stop triggering, forged
+trigger omission, pre/post-arrival status forgery, BAR overlap status forgery and
+non-BAR ambiguity forgery.
+
+Source mutation is frozen after this evidence update unless exact-head CI or
+review identifies a concrete defect. Closure still requires terminal exact-head
+baseline + Verify + reconvergence-integrity success, clean review, current-main
+topology, merge and post-merge readback.

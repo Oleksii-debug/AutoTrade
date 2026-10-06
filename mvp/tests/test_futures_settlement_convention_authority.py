@@ -219,6 +219,27 @@ class FuturesSettlementConventionAuthorityTests(unittest.TestCase):
         self.assertEqual(policy.quantum, "0.00000001")
         self.assertEqual(calls, [])
 
+    def test_inverse_revalidation_rejects_hostile_contract_scalar_without_callback(self):
+        callbacks = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                callbacks.append("strip")
+                raise AssertionError("hostile contract text executed")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                raise AssertionError("hostile contract equality executed")
+
+        contract = FuturesContract.from_instrument_version(
+            inverse_future(settlement_convention=settlement_convention())
+        )
+        object.__setattr__(contract, "instrument", HostileText(contract.instrument))
+
+        with self.assertRaisesRegex(FuturesError, "inverse settlement convention is invalid"):
+            inverse_settlement_convention(contract)
+        self.assertEqual(callbacks, [])
+
     def test_inverse_booking_does_not_accept_free_caller_quantization_policy(self):
         parameters = signature(settle_and_book_inverse_variation_margin).parameters
         self.assertNotIn(

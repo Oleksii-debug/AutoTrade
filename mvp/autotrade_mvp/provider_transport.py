@@ -1227,14 +1227,11 @@ class UrllibJsonWireClient:
         self,
         request: SignedHttpRequest | AuthenticatedReadHttpRequest,
     ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
-        if not isinstance(
-            request,
-            (SignedHttpRequest, AuthenticatedReadHttpRequest),
-        ):
+        if type(request) not in (SignedHttpRequest, AuthenticatedReadHttpRequest):
             raise TypeError(
-                "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
+                "request must be exact SignedHttpRequest or AuthenticatedReadHttpRequest"
             )
-        if isinstance(request, SignedHttpRequest):
+        if type(request) is SignedHttpRequest:
             data = request.body or None
             method = request.method
         else:
@@ -1246,10 +1243,7 @@ class UrllibJsonWireClient:
             headers=dict(request.headers),
             method=method,
         )
-        is_authenticated_read = isinstance(
-            request,
-            AuthenticatedReadHttpRequest,
-        )
+        is_authenticated_read = type(request) is AuthenticatedReadHttpRequest
         # Capture one exact validated budget before any response-body read.
         # Mutating the client during I/O cannot widen this send's read envelope.
         response_budget = self._response_budget()

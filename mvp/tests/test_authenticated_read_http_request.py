@@ -80,6 +80,27 @@ class AuthenticatedReadHttpRequestTests(unittest.TestCase):
         self.assertEqual(request.method, "POST")
         self.assertEqual(request.body, b"nonce=1")
 
+    def test_wire_client_rejects_request_subclass_before_field_access(self):
+        class ExecutableReadRequest(AuthenticatedReadHttpRequest):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name in {"url", "headers", "timeout_seconds", "method", "body"}:
+                    type(self).callbacks += 1
+                    raise AssertionError("request subclass field access executed")
+                return super().__getattribute__(name)
+
+        forged = object.__new__(ExecutableReadRequest)
+        client = UrllibJsonWireClient(max_response_bytes=1024)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact SignedHttpRequest or AuthenticatedReadHttpRequest",
+        ):
+            client.send(forged)
+
+        self.assertEqual(ExecutableReadRequest.callbacks, 0)
+
     def test_wire_client_preserves_explicit_empty_body_post_method(self):
         class Response:
             status = 200

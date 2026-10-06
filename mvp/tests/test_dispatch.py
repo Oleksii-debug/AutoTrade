@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
+import mvp.autotrade_mvp.dispatch as dispatch_module
 from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
@@ -866,6 +867,122 @@ class DispatchTests(unittest.TestCase):
                         attempt_id="exact-response-a1",
                     )
             self.assertEqual(callbacks, [])
+
+    def test_ambiguous_exact_response_cannot_be_retargeted_to_sent_after_send(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            response = ExactJsonTransportResponse(
+                b'{"retCode":10016,"retMsg":"server error"}',
+                http_status=503,
+                requires_reconciliation=True,
+                ambiguity_reason="classified_execution_unknown",
+            )
+
+            def transport(_client_id, _request, guard):
+                guard()
+                object.__setattr__(response, "requires_reconciliation", False)
+                return response
+
+            result = dispatcher.dispatch(
+                attempt_id="mutated-ambiguous-response-a1",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T04:20:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={
+                    "endpoint": "/orders",
+                    "capability_snapshot_ids": ["cap-1"],
+                    "instrument_versions": ["BTCUSD:v1"],
+                },
+            )
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("mutated-ambiguous-response-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact transport response authority is unavailable",
+            ):
+                response.response_sha256
+
+    def test_transport_callback_cannot_rebind_exact_response_authority_to_force_sent(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            response = ExactJsonTransportResponse(b'{"ok":true}')
+            canonical_authority = (
+                dispatch_module._require_canonical_exact_transport_response
+            )
+
+            def forged_authority(_value):
+                return (b'{"ok":true}', 200, False, None)
+
+            def transport(_client_id, _request, guard):
+                guard()
+                dispatch_module._require_canonical_exact_transport_response = (
+                    forged_authority
+                )
+                return response
+
+            try:
+                result = dispatcher.dispatch(
+                    attempt_id="rebound-response-authority-a1",
+                    intent_id="i1",
+                    intent_hash="h1",
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-06T04:21:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    submission_scope={
+                        "endpoint": "/orders",
+                        "capability_snapshot_ids": ["cap-1"],
+                        "instrument_versions": ["BTCUSD:v1"],
+                    },
+                )
+            finally:
+                dispatch_module._require_canonical_exact_transport_response = (
+                    canonical_authority
+                )
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("rebound-response-authority-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:ValueError",
+            )
 
     def test_unknown_json_binding_cannot_mint_provider_observation(self):
         request = {"symbol": "BTCUSDT", "side": "BUY", "quantity": "1"}

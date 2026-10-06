@@ -173,7 +173,7 @@ def _execute(args) -> int:
         canonical = _read_canonical_state(args.state_dir)
         status = canonical["status"] if canonical else _legacy_status(args.state_dir)
         economic_report = canonical["economic_report"] if canonical else None
-        if canonical is None and status.get("status") == "running":
+        if canonical is None and accessible_status_state(status) == "running":
             try:
                 economic_report = get_economic_report(args.state_dir)
             except (

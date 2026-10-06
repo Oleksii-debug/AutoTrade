@@ -24,8 +24,10 @@ from uuid import uuid4
 from .persistence import JournalStore, payload_digest
 from .provider_core import (
     AuthenticatedReadQueryBinding,
+    ProviderCoreError,
     ProviderResponseObservation,
     Surface,
+    _require_authenticated_read_query_binding_authority,
     observe_authenticated_json_response,
 )
 from .provider_response_limits import (
@@ -124,11 +126,18 @@ def _parse_utc_text(value: object, *, name: str) -> datetime:
 
 def _query_snapshot(
     query_binding: AuthenticatedReadQueryBinding,
+    _require_query_authority=_require_authenticated_read_query_binding_authority,
 ) -> dict[str, object]:
     if type(query_binding) is not AuthenticatedReadQueryBinding:
         raise ProviderOriginError(
             "query_binding must be exact AuthenticatedReadQueryBinding"
         )
+    try:
+        _require_query_authority(query_binding)
+    except ProviderCoreError as error:
+        raise ProviderOriginError(
+            "authenticated-read binding lacks canonical preparation authority"
+        ) from error
     state = vars(query_binding)
     required = (
         "provider_id",

@@ -14,6 +14,7 @@ from tools.dotnet_lock import (
     dotnet_restore_command_tokens,
     dotnet_restore_targets_project,
     dotnet_restore_tokens_are_locked,
+    dotnet_restore_workflow_commands,
 )
 
 
@@ -113,6 +114,26 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         self.assertTrue(
             dotnet_restore_targets_project(tokens, 'src/App/App.csproj')
         )
+
+    def test_block_scalar_restore_is_reported_as_unscoped(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: |\n"
+            "      dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(commands, [])
+        self.assertEqual(unscoped_lines, [3])
+
+    def test_canonical_restore_line_is_discovered_once(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [])
 
     def test_restore_project_coverage_requires_first_positional_target(self):
         canonical = dotnet_restore_command_tokens(

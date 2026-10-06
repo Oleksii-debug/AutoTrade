@@ -40,6 +40,32 @@ def _xml_elements(tree: ET.ElementTree, local_name: str):
     )
 
 
+def dotnet_restore_workflow_commands(
+    workflow_text: str,
+) -> tuple[list[str], list[int]]:
+    """Find canonical restore commands and reject restore text outside direct run lines.
+
+    Qualification supports only one-line run: dotnet restore commands.
+    Other executable-looking restore occurrences are surfaced by source line,
+    so YAML block scalars or wrapper shell cannot bypass locked-restore inspection.
+    """
+    if type(workflow_text) is not str:
+        raise TypeError("workflow text must be exact str")
+
+    commands: list[str] = []
+    unscoped_lines: list[int] = []
+    for line_number, raw in enumerate(workflow_text.splitlines(), start=1):
+        command = raw.strip()
+        if command.startswith("- "):
+            command = command[2:].strip()
+        if not command or command.startswith("#") or "dotnet restore" not in command:
+            continue
+        if command.startswith("run: dotnet restore "):
+            commands.append(command)
+        else:
+            unscoped_lines.append(line_number)
+    return commands, unscoped_lines
+
 def dotnet_restore_command_tokens(command: str) -> tuple[str, ...]:
     """Parse one canonical YAML run-line dotnet restore command."""
     if not isinstance(command, str) or not command.startswith('run: dotnet restore '):

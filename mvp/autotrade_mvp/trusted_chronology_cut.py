@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 
 from . import _trusted_chronology_cut_impl as _impl
-from .recovery import RecoveryController
+from .recovery import OwnerFence, RecoveryController
 
 
 _original_require_current_trusted_chronology_cut = (
@@ -61,6 +61,19 @@ def _require_post_verification_currentness(
         or latest_owner.epoch != durable.owner_epoch
     ):
         raise PermissionError("trusted chronology durable recovery owner changed")
+
+    # Signature/evidence verification is an I/O callback boundary. Recheck the
+    # live controller view as well as the durable chain so a local owner swap
+    # cannot leave a current cut paired with an inconsistent RecoveryController.
+    local_owner = recovery.owner
+    if (
+        type(local_owner) is not OwnerFence
+        or local_owner.owner_id != durable.owner_id
+        or local_owner.epoch != durable.owner_epoch
+    ):
+        raise PermissionError(
+            "trusted chronology local recovery owner changed during verification"
+        )
 
     runtime = kwargs.get("runtime")
     if durable.scope is _impl.ChronologyScope.SOURCE_QUALIFICATION:

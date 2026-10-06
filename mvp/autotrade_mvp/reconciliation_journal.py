@@ -50,9 +50,12 @@ def _journal_store_call(
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _instant(value: str, *, name: str) -> str:

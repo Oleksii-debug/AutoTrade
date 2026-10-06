@@ -225,5 +225,58 @@ class AuthenticatedReadProviderEnvironmentTests(unittest.TestCase):
             )
 
 
+    def test_bybit_transport_checks_binding_authority_before_field_comparisons(self):
+        class TrapText(str):
+            def __eq__(self, _other):
+                raise AssertionError("binding equality executed before authority check")
+
+            def __ne__(self, _other):
+                raise AssertionError("binding inequality executed before authority check")
+
+        class NoSecret:
+            def lease_for_execution(self, *_args, **_kwargs):
+                raise AssertionError("secret resolver must not be reached")
+
+        class NoWire:
+            def send(self, _request):
+                raise AssertionError("network must not be reached")
+
+        query = binding("TESTNET")
+        object.__setattr__(
+            query,
+            "provider_environment",
+            TrapText("TESTNET"),
+        )
+        transport = BybitV5AuthenticatedReadTransport(
+            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+            provider_environment="TESTNET",
+            account_id="acct-1",
+            capability_snapshot_id=SNAPSHOT_ID,
+            capability_registry=CapabilityRegistry(),
+            secret_resolver=NoSecret(),
+            credential_handle=PersistentCredentialHandle(
+                handle_id="bybit-read-testnet-authority",
+                account_id="acct-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="READ",
+                generation=1,
+            ),
+            session_token="session",
+            origin="https://localhost",
+            execution_identity="provider-domain-authority-test",
+            clock_millis=lambda: 1_700_000_000_000,
+            clock_utc=lambda: NOW,
+            wire_client=NoWire(),
+        )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "changed after preparation",
+        ):
+            transport(query)
+
+
 if __name__ == "__main__":
     unittest.main()

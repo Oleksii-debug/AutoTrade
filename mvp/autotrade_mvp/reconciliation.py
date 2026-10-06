@@ -1345,8 +1345,8 @@ class ReconciliationResult:
     borrow_differences: Mapping[str, Decimal] | None = None
     settlement_differences: Mapping[str, Decimal] | None = None
     settlement_activity_complete: bool = True
-    settlement_reconciliation_performed: bool = False
     unexpected_provider_fills: tuple[ProviderFillEvidence, ...] = ()
+    settlement_reconciliation_performed: bool = False
 
     @property
     def blocks_new_risk(self) -> bool:

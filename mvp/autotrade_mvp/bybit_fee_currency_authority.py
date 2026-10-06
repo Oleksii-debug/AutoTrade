@@ -754,12 +754,60 @@ def _install_authority_registry():
             projection_values[field_name] = expected
         return BybitExecutionFeeCurrencyProjection(**projection_values)
 
-    return register, project
+    def consume_execution_scope(
+        value: BybitExecutionFeeCurrencyAuthority,
+        *,
+        provider_id: object,
+        runtime_environment: object,
+        account_id: object,
+        entity_id: object,
+        capability_snapshot_id: object,
+        category: object,
+        instrument_version: object,
+        provider_symbol: object,
+        trade_time: datetime,
+    ) -> BybitExecutionFeeCurrencyProjection:
+        projection = project(value)
+        canonical = dict(states[id(value)][1])
+        for name, supplied in (
+            ("provider", provider_id),
+            ("runtime environment", runtime_environment),
+            ("account", account_id),
+            ("entity", entity_id),
+            ("capability", capability_snapshot_id),
+            ("category", category),
+            ("instrument version", instrument_version),
+            ("provider symbol", provider_symbol),
+        ):
+            field_name = {
+                "provider": "provider_id",
+                "runtime environment": "runtime_environment",
+                "account": "account_id",
+                "entity": "entity_id",
+                "capability": "capability_snapshot_id",
+                "category": "category",
+                "instrument version": "instrument_version",
+                "provider symbol": "provider_symbol",
+            }[name]
+            if supplied != canonical[field_name]:
+                raise BybitFeeCurrencyAuthorityError(
+                    f"fee-currency authority {name} mismatch"
+                )
+        point = _point(trade_time, name="trade_time")
+        if not canonical["rule_valid_from"] <= point < canonical["rule_valid_until"]:
+            raise BybitFeeCurrencyAuthorityError(
+                "fee-currency authority is not valid at execution time"
+            )
+        return projection
+
+    return register, project, consume_execution_scope
 
 
-_register_authority, project_bybit_execution_fee_currency_authority = (
-    _install_authority_registry()
-)
+(
+    _register_authority,
+    project_bybit_execution_fee_currency_authority,
+    consume_bybit_execution_fee_currency_authority,
+) = _install_authority_registry()
 del _install_authority_registry
 
 

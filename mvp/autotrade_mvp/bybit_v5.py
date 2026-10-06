@@ -37,6 +37,7 @@ from .exact_decimal import (
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
 )
+from .persistence import payload_digest
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -1136,14 +1137,55 @@ guarded_order_projection = _install_guarded_order_projection(
 del _install_guarded_order_projection
 
 
+def _install_guarded_order_request_sha256(
+    projection,
+    digest_function,
+):
+    """Seal the exact dispatcher-request digest for one canonical Bybit preparation."""
+
+    projection_code = projection.__code__
+    digest_code = digest_function.__code__
+    canonical_dict = dict
+    canonical_getattr = getattr
+    error_type = ProviderCoreError
+
+    def guarded_order_request_sha256(
+        prepared_request: BybitPreparedSubmission,
+    ) -> str:
+        if (
+            guarded_order_projection is not projection
+            or canonical_getattr(projection, "__code__", None)
+            is not projection_code
+            or payload_digest is not digest_function
+            or canonical_getattr(digest_function, "__code__", None)
+            is not digest_code
+            or dict is not canonical_dict
+            or getattr is not canonical_getattr
+            or ProviderCoreError is not error_type
+        ):
+            raise error_type("Bybit prepared-request digest authority changed")
+        return digest_function(canonical_dict(projection(prepared_request)))
+
+    return guarded_order_request_sha256
+
+
+guarded_order_request_sha256 = _install_guarded_order_request_sha256(
+    guarded_order_projection,
+    payload_digest,
+)
+del _install_guarded_order_request_sha256
+
+
 def _install_submission_response_parser(
     prepared_projection,
     observation_projection,
+    request_digest_projection,
 ):
     """Seal final Bybit ACK/reject normalization behind canonical projections."""
 
     prepared_projection_code = prepared_projection.__code__
     observation_projection_code = observation_projection.__code__
+    request_digest_projection_code = request_digest_projection.__code__
     observation_type = ProviderSubmissionObservation
     error_type = ProviderCoreError
     type_error = TypeError
@@ -1177,6 +1219,9 @@ def _install_submission_response_parser(
             or provider_submission_observation_projection
             is not observation_projection
             or observation_projection.__code__ is not observation_projection_code
+            or guarded_order_request_sha256 is not request_digest_projection
+            or request_digest_projection.__code__
+            is not request_digest_projection_code
             or ProviderSubmissionObservation is not observation_type
             or ProviderCoreError is not error_type
             or TypeError is not type_error
@@ -1274,6 +1319,7 @@ def _install_submission_response_parser(
         implementation_changed()
         aid = exact_uuid_text(attempt_id, "attempt_id")
         prepared = prepared_projection(prepared_request)
+        prepared_request_sha256 = request_digest_projection(prepared_request)
         cid = exact_client_id(prepared["body"].get("orderLinkId"))
 
         if canonical_type(transport_ambiguous) is not canonical_bool:
@@ -1325,7 +1371,7 @@ def _install_submission_response_parser(
         if (
             observed["provider_id"] != "BYBIT"
             or observed["endpoint"] != prepared["endpoint"]
-            or observed["request_sha256"] != prepared["body_sha256"]
+            or observed["request_sha256"] != prepared_request_sha256
             or observed["capability_snapshot_ids"]
             != canonical_tuple(prepared["capability_snapshot_ids"])
             or observed["instrument_versions"]
@@ -1412,6 +1458,7 @@ def _install_submission_response_parser(
 parse_submission_response = _install_submission_response_parser(
     guarded_order_projection,
     provider_submission_observation_projection,
+    guarded_order_request_sha256,
 )
 del _install_submission_response_parser
 

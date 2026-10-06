@@ -912,6 +912,52 @@ class NugetLockGateCandidateTests(unittest.TestCase):
             ):
                 dotnet_locked_dependency_graph(root, [project])
 
+    def test_project_restore_force_evaluate_property_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'src' / 'AutoTrade.Desktop' / 'AutoTrade.Desktop.csproj'
+            project.parent.mkdir(parents=True)
+            project.write_text(
+                '<Project><PropertyGroup>'
+                '<RestoreForceEvaluate>true</RestoreForceEvaluate>'
+                '</PropertyGroup><ItemGroup>'
+                '<PackageReference Include="Microsoft.Web.WebView2" '
+                'Version="1.0.4191.47" />'
+                '</ItemGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'src/AutoTrade.Desktop/AutoTrade.Desktop.csproj:'
+                    'RestoreForceEvaluate'
+                ],
+            )
+
+    def test_props_custom_lock_path_property_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            props = root / 'Directory.Build.props'
+            props.write_text(
+                '<Project><PropertyGroup>'
+                '<NuGetLockFilePath>artifacts/other.lock.json</NuGetLockFilePath>'
+                '</PropertyGroup></Project>',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                dotnet_imported_package_reference_blockers(root),
+                [
+                    'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    'Directory.Build.props:NuGetLockFilePath'
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                'restore authority',
+            ):
+                dotnet_locked_dependency_graph(root, [])
+
     def test_root_props_package_reference_fails_closed(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

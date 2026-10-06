@@ -207,6 +207,20 @@ def dotnet_project_package_references(project: Path) -> list[tuple[str | None, s
     return references
 
 
+_RESTORE_AUTHORITY_PROPERTIES = (
+    'RestoreForceEvaluate',
+    'NuGetLockFilePath',
+)
+
+
+def _restore_authority_property_names(tree: ET.ElementTree) -> tuple[str, ...]:
+    return tuple(
+        name
+        for name in _RESTORE_AUTHORITY_PROPERTIES
+        if _xml_elements(tree, name)
+    )
+
+
 def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
     """Reject release dependency declarations hidden in imported MSBuild files.
 
@@ -241,6 +255,11 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
                 blockers.append(
                     f'DOTNET_EXPLICIT_MSBUILD_IMPORT_UNSUPPORTED:{relative}'
                 )
+            for property_name in _restore_authority_property_names(tree):
+                blockers.append(
+                    f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                    f'{relative}:{property_name}'
+                )
 
     for path in sorted(candidates):
         relative = path.relative_to(root).as_posix()
@@ -256,6 +275,11 @@ def dotnet_imported_package_reference_blockers(root: Path) -> list[str]:
         if _xml_elements(tree, 'PackageReference'):
             blockers.append(
                 f'DOTNET_IMPORTED_PACKAGE_REFERENCE_UNSUPPORTED:{relative}'
+            )
+        for property_name in _restore_authority_property_names(tree):
+            blockers.append(
+                f'DOTNET_RESTORE_AUTHORITY_PROPERTY_UNSUPPORTED:'
+                f'{relative}:{property_name}'
             )
     return blockers
 
@@ -517,7 +541,8 @@ def dotnet_locked_dependency_graph(root: Path, package_projects: list[Path]) -> 
     imported_blockers = dotnet_imported_package_reference_blockers(root)
     if imported_blockers:
         raise ValueError(
-            'imported MSBuild PackageReference is outside the static release graph: '
+            'imported MSBuild PackageReference or restore authority is outside '
+            'the static release graph: '
             + ';'.join(imported_blockers)
         )
 

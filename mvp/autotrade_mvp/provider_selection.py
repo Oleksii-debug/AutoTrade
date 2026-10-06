@@ -95,8 +95,10 @@ def _digest(value: object, name: str) -> str:
 
 
 def _instant(value: datetime, name: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
-        raise ProviderSelectionError(f"{name} must be an exact timezone-aware datetime")
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise ProviderSelectionError(
+            f"{name} must be an exact stdlib timezone datetime"
+        )
     return value.astimezone(timezone.utc)
 
 

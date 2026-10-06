@@ -940,6 +940,10 @@ def _repair_interrupted_replay(
                 or event.get("committed_at") != expected_timestamp
             ):
                 raise ValueError("Corrupt simulation journal replay event")
+            store.outbox_delivery_state(
+                event["event_id"],
+                topic="autotrade.simulation.events",
+            )
             journal_ids.add(evidence_id)
     if journal_ids - expected_ids:
         raise ValueError("Simulation journal contains unknown replay evidence")
@@ -1407,6 +1411,10 @@ def verify_replay(state_dir: str | Path) -> bool:
                 != _event_uuid("correlation", evidence_id)
             ):
                 return False
+            store.outbox_delivery_state(
+                event["event_id"],
+                topic="autotrade.simulation.events",
+            )
         if journal_evidence_ids != set(ids):
             return False
         if replayed_order_ids != set(restored_fills):

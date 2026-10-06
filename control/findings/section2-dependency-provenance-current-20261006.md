@@ -1,96 +1,66 @@
 # Section 2 dependency/provenance convergence — 2026-10-06
 
-## Current live basis
+## Canonical source/integration result
 
-- Section: 2 — dependencies / rights / provenance / supply chain.
-- Canonical work package: WP-03 dependency-policy.
-- Canonical convergence PR: #2204.
-- Exact convergence base: `main@8495a66cf7d8979c5e8b3811c2088523ed147bf1`.
-- #2204 is the single current-main successor that collapses the clean #2202 WP-03 result with the independent #2200 WP-64 canonical-proof result without replaying stale ancestry.
-- Its initial convergence tree is byte-identical to #2199 tree `45549029aabfb0f2e9a90d3d5a00a2f22a9923cf`.
+Section 2 source and integration authority is integrated on `main`.
 
-Section 0 remains closed and is not reopened by this work.
+- Canonical final PR: #2264
+- Accepted candidate head: `7f2db08bcd748ad79b8bcb9e06fb33c635269be1`
+- Merge commit: `458cd7bb43b8457e0bb0593b523f54e35f5cd54d`
+- Accepted candidate tree: `25008a8980cc9c2beac8f114a6fe897a58fafcb4`
+- Post-merge main tree at the integration cut: `25008a8980cc9c2beac8f114a6fe897a58fafcb4`
+- Post-merge tree equality: PASS
+- Historical #2141/#2188/#2197/#2199/#2200/#2202/#2204/#2260/#2262 are provenance/superseded integration lineages, not separate merge authorities.
 
-## Current-main authority already present
+## Integrated WP-03 authority
 
-Current main plus #2204 contains the canonical Section-2 source-side dependency, NuGet-rights and supply-chain-proof authority:
+The merged tree contains one fail-closed dependency/provenance path for the selected source/distribution inputs:
 
-- strict NuGet lock parsing and exact target-aware Direct/Transitive graph identities;
-- exact NuGet SHA-512 content hashes;
-- locked restore/project coverage checks;
-- imported MSBuild PackageReference fail-closed boundaries;
-- exact .NET SDK `10.0.100` with roll-forward disabled;
-- hash-locked Python development dependencies;
-- explicit Python `3.12.10` and explicit GitHub-hosted OS routing in canonical workflows;
-- deterministic release dependency manifest generation/checking;
-- Desktop.Client transitive WebView2 lock synchronized to the Desktop direct lock;
-- exact WebView2 package identity represented in the generated release dependency manifest;
-- path-safe restored NuGet identity resolution;
-- exact restored `.nupkg` SHA-512 verification against the lock graph;
-- nuspec id/version plus reviewed license/notice bound to the exact restored artifact;
-- canonical `NUGET_PACKAGES` authority;
-- locked restore and restored-rights verification required in the same actual GitHub Actions job;
-- bypass controls, duplicate/missing verification targets and post-verification re-restore fail closed;
-- restored package-rights verification covers both AutoTrade.Contracts and AutoTrade.Desktop;
-- WP-64 supply-chain qualification remains the terminal release/supply-chain trust owner;
-- canonical detached supply-chain proof bytes, strict proof parsing, delivered-artifact binding and semantic-subject attestation are converged in #2204.
+- exact .NET SDK/runtime selection and locked NuGet Direct + Transitive graph identity;
+- exact NuGet SHA-512 content identities;
+- locked restore/project coverage and imported-MSBuild dependency fences;
+- exact restored package bytes, nuspec id/version, reviewed license and required notice verification;
+- canonical `NUGET_PACKAGES` authority and same-job restore/rights verification;
+- deterministic release dependency manifest generation;
+- Desktop/WebView2 lock and manifest convergence;
+- exact distributed/frozen composition -> provenance identity mapping through `tools/release_scope_mapping.py`;
+- exact SBOM source/application binding and dependency reachability;
+- package-rights and external-runtime/reuse scope closure;
+- provider-free frozen dependency/provenance binding;
+- canonical WP-64 detached supply-chain proof bytes, strict proof ingress, semantic-subject binding and delivered-artifact anti-substitution identity;
+- canonical signed qualification verifier remains the only terminal trust root.
 
-Historical #2141, #2188, #2197, #2199, #2200 and #2202 are not separate merge authorities after #2204 convergence.
+## Issue #2203 — CLOSED
 
-## Source-side defects closed by the #2204 lineage
+The release-composition/provenance mapping residual is implemented and issue #2203 is closed as completed.
 
-1. Desktop.Client's transitive Microsoft.Web.WebView2 lock no longer disagrees with the Desktop direct lock.
-2. The release dependency manifest no longer falsely reports an empty .NET package graph while WebView2 is referenced.
-3. Focused regression coverage prevents Desktop.Client lock identity/content-hash drift.
-4. The WP03 gate no longer claims mutable Python `3.12` selection; canonical workflows use exact `3.12.10`.
-5. Restored NuGet rights are checked against the actual locked package bytes, nuspec identity, reviewed license and notice rather than filename presence or sibling hash text alone.
-6. Package-bearing projects cannot satisfy the gate by placing restore and rights verification in different jobs or by attaching skip/failure-suppression controls to the verifier step.
-7. Section-2 current source state is durably recorded in one current-main convergence lineage.
-8. WP-64 review is bound to one detached canonical semantic proof, including delivered release artifact identity, without introducing a second signer or ArtifactStore.
+The mapping authority rejects missing, duplicate, ambiguous, caller-renamed, wrong-hash and orphan mappings; binds exact source/composition/SBOM/dependency-lock identity; maps exact WebView2 package/version/hash to reviewed rights evidence; retains explicit non-runtime/source-semantic classifications; and keeps unresolved first-party distribution rights fail-closed.
 
-No dependency, license, advisory, model/data right or release state is promoted to APPROVED merely by these source controls.
+## External evidence still required
 
-## Remaining Section-2 blockers
+These are not source-code defects and must not be manufactured:
 
-### Release composition / mapping
+1. **First-party release-distribution rights.**
+   Autosport migrated source remains development-authorized but lacks a complete contributor/release-distribution rights chain. Nika Core is a semantic reference rather than a runtime dependency, but its release-rights provenance remains unresolved wherever it remains in qualification scope.
 
-- exact final release composition evidence is absent;
-- no authenticated mapping yet binds the actually distributed release component set to the corresponding `provenance/components.json` identities;
-- until that mapping exists, the complete inspected-component catalog remains fail-closed qualification scope and must not be silently narrowed.
+2. **Model/data/news rights.**
+   Exact use and redistribution evidence must exist for any such material included in the selected final distribution. If the final frozen composition contains none, that NOT_APPLICABLE conclusion must itself be derived from exact composition evidence rather than asserted by a caller.
 
-### Rights / external evidence
+3. **Production qualification trust material.**
+   The canonical packaged qualification-policy pin remains intentionally unavailable until independently reviewed production `qualification_trust_policy.json` bytes/root material exist. Section 2 does not create a signer/root merely to make a gate green.
 
-- exact model/data/news use and redistribution rights evidence is absent;
-- Autosport first-party migration is owner-authorized for development, but complete contributor/release-distribution rights chain evidence remains unresolved;
-- Nika Core is semantic adaptation rather than a runtime dependency, but release-rights provenance remains unresolved;
-- inspected LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca candidates remain release-blocked until an exact selected composition plus dependency-graph, required-notice and rights evidence exists.
+4. **Dependency advisory evidence.**
+   Exact advisory review must be bound to the exact dependency graph and accepted through the existing WP-64 trust authority. A hand-written candidate JSON or public-search result is diagnostic, not terminal PASS.
 
-### Packaged qualification trust
+5. **Final frozen-release SBOM/provenance.**
+   A final SBOM/provenance artifact must be materialized from the actual delivered/frozen release and bound to that exact artifact identity. Source-side mapping infrastructure is complete; the final release artifact does not yet exist.
 
-- the exact frozen source currently sets `_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256 = None`;
-- the canonical verifier deliberately treats this as packaged terminal trust unavailable;
-- no production `qualification_trust_policy.json` bytes are present in the current source tree to review/pin;
-- therefore release composition cannot honestly become terminally qualified until independently reviewed trust-policy bytes exist and the source-controlled pin binds their exact digest;
-- Section 2 must not create a new signer/root merely to make this gate green.
+## Qualification boundary
 
-### Advisory / frozen-release evidence
+The source/integration portion of Section 2 is complete. Terminal WP-03 / Section-2 evidence remains IN_PROGRESS until the external rights, trust-policy, advisory and frozen-release facts above exist and are independently bound.
 
-- exact dependency-advisory qualification evidence is absent;
-- no final frozen-release SBOM artifact is materialized and independently bound to the delivered release;
-- terminal advisory/supply-chain PASS remains owned by the existing WP-64 signed qualification authority and must not be replaced by a WP-03 self-attestation.
-
-These are blockers, not permission to infer rights from public repository visibility or to manufacture a permissive license.
+Queued/pending/cancelled hosted jobs are not PASS. No provider/PAPER/LIVE, profitability/economic-edge, signed-release authorization or physical Windows/NVDA authority follows from this source integration.
 
 ## Completion rule
 
-Section 2 is DONE only when the canonical selected/distributed scope is explicit and every actually imported or distributed byte has:
-
-- exact source/package identity and lock;
-- rights/license basis and required notices;
-- exact release-composition mapping to provenance identity;
-- advisory review bound to the exact dependency graph;
-- model/data/news rights where applicable;
-- deterministic SBOM/provenance evidence bound to the exact frozen release;
-- no unresolved rights represented as APPROVED.
-
-Provider/PAPER/LIVE, economic-edge, signed-release authorization and physical NVDA qualification remain separate gates.
+Section 2 may move to DONE only when every actually imported or distributed byte in the final selected composition has exact identity/lock, rights/license basis and notices; advisory review is bound to that exact graph; model/data/news rights are either evidenced or composition-proven not applicable; the production qualification trust policy/root is independently reviewed and pinned; and the final frozen SBOM/provenance is bound to the delivered release. Unresolved rights never become APPROVED by inference.

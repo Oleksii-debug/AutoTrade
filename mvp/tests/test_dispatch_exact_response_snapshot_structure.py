@@ -383,6 +383,64 @@ class ExactResponseSnapshotStructureTests(unittest.TestCase):
             )
             self.assertNotIn("response_text", events[-1]["payload"])
 
+    def test_transport_kwdefault_restore_does_not_execute_value_equality(self):
+        class TrapEquality:
+            calls = 0
+
+            def __eq__(self, _other):
+                type(self).calls += 1
+                raise AssertionError("transport-controlled equality executed")
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            dispatcher = self._dispatcher(path)
+            json_loads = dispatch_module.json.loads
+            original_kwdefaults = json_loads.__kwdefaults__
+            baseline_kwdefaults = dict(original_kwdefaults)
+
+            def transport(_client_order_id, _request, final_guard):
+                final_guard()
+                response = ExactJsonTransportResponse(
+                    b'{"accepted":true}',
+                    http_status=200,
+                )
+                json_loads.__kwdefaults__["cls"] = TrapEquality()
+                return response
+
+            try:
+                result = self._dispatch(
+                    dispatcher,
+                    "snapshot-json-kwdefaults-trap-equality",
+                    transport,
+                )
+                self.assertEqual(TrapEquality.calls, 0)
+                self.assertEqual(
+                    json_loads.__kwdefaults__,
+                    baseline_kwdefaults,
+                )
+            finally:
+                json_loads.__kwdefaults__ = original_kwdefaults
+                original_kwdefaults.clear()
+                original_kwdefaults.update(baseline_kwdefaults)
+
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            self.assertEqual(TrapEquality.calls, 0)
+            events = self._events(
+                path,
+                dispatcher,
+                "snapshot-json-kwdefaults-trap-equality",
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertNotIn("response_text", events[-1]["payload"])
+
     def test_transport_cannot_rebind_json_decoder_after_send(self):
         class ForgedDecoder:
             def __init__(self, **_kwargs):

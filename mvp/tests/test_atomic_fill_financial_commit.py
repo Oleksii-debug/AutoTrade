@@ -981,6 +981,40 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         )
         self.assertNotEqual(testnet_digest, demo_digest)
 
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            testnet_plan = testnet_book.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-09-25T09:00:00Z",
+            )
+            demo_plan = demo_book.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-09-25T09:00:00Z",
+            )
+            self.assertEqual(
+                testnet_plan.request["provider_environment"],
+                "TESTNET",
+            )
+            self.assertEqual(
+                demo_plan.request["provider_environment"],
+                "DEMO",
+            )
+            self.assertNotEqual(testnet_plan.batch_digest, demo_plan.batch_digest)
+
         testnet_key = _financial_scope_identity(
             "atomic-fill-command",
             provider_id="BYBIT",

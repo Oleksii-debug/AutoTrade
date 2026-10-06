@@ -1230,5 +1230,48 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 self.assertEqual(callbacks, [])
 
 
+
+    def test_provider_evidence_receipt_binds_bybit_provider_environment(self):
+        contract = self._contract()
+        original = self._settlement(
+            contract,
+            "bybit-provider-domain",
+            "105",
+            sequence=1,
+        )
+        testnet = replace(
+            original,
+            scope=FuturesSettlementScope(
+                source_id="bybit:settlement",
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            ),
+        )
+        demo = replace(
+            original,
+            scope=FuturesSettlementScope(
+                source_id="bybit:settlement",
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_environment="DEMO",
+            ),
+        )
+
+        testnet_receipt = provider_settlement_evidence_receipt(testnet)
+        demo_receipt = provider_settlement_evidence_receipt(demo)
+        self.assertEqual(
+            testnet_receipt["settlement"]["scope"]["provider_environment"],
+            "TESTNET",
+        )
+        self.assertEqual(
+            provider_settlement_evidence_metadata(testnet)["provider_environment"],
+            "TESTNET",
+        )
+        self.assertNotEqual(testnet_receipt, demo_receipt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1062,6 +1062,34 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             )
 
 
+    def test_caller_cannot_mint_pass_decision_with_copied_trust_identity(self):
+        current_policy = policy()
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires exact recovery policy evidence",
+        ):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                blockers=(),
+                measured_downtime_ms={
+                    scenario: 10
+                    for scenario in RecoveryScenario
+                },
+                qualification_attestation_id=RELEASE_ARTIFACT_ID,
+                qualification_attestation_digest="sha256:" + ("1" * 64),
+                qualification_policy_id="sha256:" + ("2" * 64),
+                qualification_trust_root_id="sha256:" + ("3" * 64),
+                recovery_policy_requirement=(
+                    recovery_policy_subject_requirement(current_policy)
+                ),
+            )
+
     def test_direct_pass_decision_cannot_omit_required_scenarios(self):
         with self.assertRaisesRegex(ValueError, "measure every required scenario"):
             RecoveryQualificationDecision(

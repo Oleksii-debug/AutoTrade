@@ -28,8 +28,9 @@ from mvp.tests.test_corporate_action_evidence import (
     ENDPOINT,
     INSTRUMENT_ID,
     canonical_instrument,
+    simulation_read_capability,
 )
-from mvp.tests.test_provider_transport import READ_NOW, verified_read_capability
+from mvp.tests.test_provider_transport import READ_NOW
 
 
 def sealed_action(
@@ -43,7 +44,7 @@ def sealed_action(
     corrects=None,
 ):
     binding = prepare_authenticated_read_query(
-        capability=verified_read_capability(),
+        capability=simulation_read_capability(),
         surface=Surface.ACTIVITIES,
         endpoint=ENDPOINT,
         query={"symbol": "BTCUSDT"},
@@ -92,7 +93,7 @@ def resolve_action(source, *, corrects=None):
         instrument_registry=InstrumentRegistry(versions=(current,)),
         expected_provider_id="BINANCE",
         expected_account_id="acct-1",
-        expected_environment="PAPER",
+        expected_environment="SIMULATION",
         allowed_endpoints=frozenset({ENDPOINT}),
         permission_scope="ORDER.READ",
     )
@@ -119,7 +120,7 @@ def economic_book(store):
         store,
         provider_id="BINANCE",
         account_id="acct-1",
-        environment="PAPER",
+        environment="SIMULATION",
     )
     has_position_seed = any(
         any(
@@ -156,7 +157,7 @@ def evidence_store(store):
         store,
         provider_id="BINANCE",
         account_id="acct-1",
-        environment="PAPER",
+        environment="SIMULATION",
     )
 
 

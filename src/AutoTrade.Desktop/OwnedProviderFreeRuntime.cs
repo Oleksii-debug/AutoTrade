@@ -156,7 +156,12 @@ internal sealed class OwnedProviderFreeRuntime : IEmergencyHostSessionProvider, 
                 {
                     using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(30));
                     try { await _process.WaitForExitAsync(deadline.Token); }
-                    catch (OperationCanceledException) { }
+                    catch (OperationCanceledException error)
+                    {
+                        gracefulStopFailure = new TimeoutException(
+                            "The local host did not drain within the shutdown deadline.",
+                            error);
+                    }
                 }
 
                 if (!_process.HasExited)

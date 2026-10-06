@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.bybit_fee_currency_authority import (
     BybitExecutionFeeCurrencyAuthority,
+    BybitExecutionFeeCurrencyProjection,
     BybitFeeCurrencyAuthorityError,
     bybit_execution_fee_currency_semantic_claim,
     issue_bybit_execution_fee_currency_authority,

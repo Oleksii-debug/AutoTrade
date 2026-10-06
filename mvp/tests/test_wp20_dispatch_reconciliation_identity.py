@@ -276,5 +276,60 @@ class DispatchReconciliationAttemptIdentityTests(unittest.TestCase):
                 )
 
 
+    def test_dispatch_recovery_rejects_polymorphic_text_without_executing_it(self):
+        class TrapText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("caller-controlled strip executed")
+
+            def upper(self):
+                raise AssertionError("caller-controlled upper executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            for kwargs, expected in (
+                (
+                    {"attempt_ids": (TrapText("attempt-a"),)},
+                    "attempt_id is required",
+                ),
+                (
+                    {
+                        "attempt_ids": ("attempt-a",),
+                        "aggregate_ids": {
+                            TrapText("attempt-a"): "submission-attempt:a"
+                        },
+                    },
+                    "aggregate_ids attempt_id is required",
+                ),
+                (
+                    {
+                        "attempt_ids": ("attempt-a",),
+                        "aggregate_ids": {
+                            "attempt-a": TrapText("submission-attempt:a")
+                        },
+                    },
+                    "aggregate_id is required",
+                ),
+                (
+                    {
+                        "attempt_ids": ("attempt-a",),
+                        "environment": TrapText("SIMULATION"),
+                        "account_id": "acct",
+                    },
+                    "environment is required",
+                ),
+                (
+                    {
+                        "attempt_ids": ("attempt-a",),
+                        "environment": "SIMULATION",
+                        "account_id": TrapText("acct"),
+                    },
+                    "account_id is required",
+                ),
+            ):
+                with self.subTest(expected=expected):
+                    with self.assertRaisesRegex(ValueError, expected):
+                        unknown_submissions_from_dispatch(store, **kwargs)
+
+
 if __name__ == "__main__":
     unittest.main()

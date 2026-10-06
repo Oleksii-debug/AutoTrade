@@ -4,18 +4,22 @@ Status: **IN PROGRESS / FAIL CLOSED**.
 
 This gate audits the checked source tree and deliberately refuses to call the release dependency composition qualified while exact dependency or rights evidence is incomplete.
 
-Current exact-main blockers captured by the gate:
+Current canonical blockers captured by the gate:
 
 - first-party Autosport and Nika reuse still has unresolved release/distribution rights records;
-- selected external components remain pending exact package/transitive composition and notice review.
+- selected external components remain pending exact selected-composition, notice and advisory evidence;
+- exact release-composition-to-provenance identity mapping is still absent;
+- model/data/news rights and frozen-release SBOM evidence remain absent.
 
 The gate also verifies that the current Python runtime test requirements are exact-version entries and inspects every `PackageReference` under `src/` for exact version identity.
 
 This is not an SBOM and does not approve any dependency. It is a deterministic blocker inventory that prevents a false WP-03 PASS and gives the remaining composition work a machine-checked boundary.
 
-## Resolved in this lineage
+## Resolved in the canonical #2202 lineage
 
-The repository and both .NET qualification workflows now select SDK `10.0.100` exactly, with `rollForward=disable`. The isolated research build backend is also pinned to `setuptools==84.0.0`. These remove SDK feature-band and Python build-backend drift from WP-03 evidence; they do not resolve transitive package, rights, SBOM or notice blockers.
+The repository and both .NET qualification workflows select SDK `10.0.100` exactly, with `rollForward=disable`. The isolated research build backend is pinned to `setuptools==84.0.0`. Python workflow selection is exact `3.12.10` and GitHub-hosted runner images are explicit.
+
+The current convergence additionally binds the actual WebView2 lock graph into release provenance, keeps Desktop.Client transitive lock identity synchronized with Desktop, verifies the exact restored `.nupkg` SHA-512 against the lock, binds nuspec id/version plus reviewed license/notice to that exact artifact, and requires locked restore plus restored-rights verification in the same real Actions job under canonical `NUGET_PACKAGES`. These close source-side lock/restored-package-rights gaps; they do not manufacture external rights, advisory, SBOM or release qualification.
 
 
 ## Command modes
@@ -30,7 +34,8 @@ The former mutable Python `3.12` CI blocker is resolved on current main. Baselin
 
 The remaining WP-03 blockers are evidence/composition boundaries, not mutable Python runtime selection:
 
-- exact release composition evidence is absent;
+- exact final release composition evidence is absent;
+- authenticated mapping from distributed release components to provenance component identities is absent;
 - model/data/news rights evidence is absent;
 - first-party Autosport/Nika release-distribution rights chain remains unresolved;
 - inspected candidate external components remain release-blocked until exact composition/notice/advisory evidence exists;

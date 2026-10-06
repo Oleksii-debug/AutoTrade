@@ -464,6 +464,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         self.assertNotIn("provider_environment", result["evidence"][0])
 
+    def test_add_order_rejects_noncanonical_provider_order_id(self):
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "transaction id must be canonical exact text",
+        ):
+            self._parse_submission(
+                {
+                    "error": [],
+                    "result": {"txid": [" OABC-D123-E456 "]},
+                }
+            )
+
     def test_provider_error_is_canonical_rejection_not_exception_or_success(self):
         result = self._parse_submission(
             {"error": ["EOrder:Insufficient funds"], "result": None}

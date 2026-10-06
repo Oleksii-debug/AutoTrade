@@ -597,6 +597,52 @@ class AlpacaAdapterTests(unittest.TestCase):
             observation.response_sha256,
         )
 
+    def test_submission_response_rejects_noncanonical_provider_order_id(self):
+        client_id = stable_client_order_id(
+            "ALPACA",
+            "alpaca-submission-intent",
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": " " + str(uuid4()) + " ",
+                "client_order_id": client_id,
+            }
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "response.id must be canonical exact text",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
+    def test_submission_response_rejects_noncanonical_echoed_client_order_id(self):
+        client_id = stable_client_order_id(
+            "ALPACA",
+            "alpaca-submission-intent",
+            environment="PAPER",
+            account_id="paper-account",
+        )
+        attempt, prepared, observation = self._durable_submission_observation(
+            payload={
+                "id": str(uuid4()),
+                "client_order_id": " " + client_id + " ",
+            }
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "response.client_order_id must be canonical exact text",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=observation,
+            )
+
     def test_submission_response_rejects_attempt_and_scope_relabelling(self):
         order_id = str(uuid4())
         attempt, prepared, observation = self._durable_submission_observation(

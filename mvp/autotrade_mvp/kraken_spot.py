@@ -1160,7 +1160,15 @@ def parse_spot_submission_response(
     txids = result.get("txid")
     if isinstance(txids, (str, bytes)) or not isinstance(txids, (list, tuple)) or not txids:
         raise KrakenSpotAdapterError("successful response must contain exactly one transaction id")
-    normalized = tuple(_text(value, name="txid") for value in txids)
+    normalized_values: list[str] = []
+    for value in txids:
+        normalized_value = _text(value, name="txid")
+        if type(value) is not str or normalized_value != value:
+            raise KrakenSpotAdapterError(
+                "Kraken transaction id must be canonical exact text"
+            )
+        normalized_values.append(normalized_value)
+    normalized = tuple(normalized_values)
     if len(normalized) != 1:
         raise KrakenSpotAdapterError(
             "canonical SubmissionResult requires exactly one provider order id"

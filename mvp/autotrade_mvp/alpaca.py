@@ -1106,10 +1106,19 @@ def parse_submission_response(
     response = projection["payload"]
     if not isinstance(response, Mapping):
         raise AlpacaAdapterError("provider response payload must be an object")
-    provider_order_id = _uuid_text(response.get("id"), name="response.id")
-    echoed = validate_client_order_id(
-        _text(response.get("client_order_id"), name="response.client_order_id")
-    )
+    raw_provider_order_id = response.get("id")
+    provider_order_id = _uuid_text(raw_provider_order_id, name="response.id")
+    if type(raw_provider_order_id) is not str or provider_order_id != raw_provider_order_id:
+        raise AlpacaAdapterError(
+            "response.id must be canonical exact text"
+        )
+    raw_echoed = response.get("client_order_id")
+    echoed_text = _text(raw_echoed, name="response.client_order_id")
+    if type(raw_echoed) is not str or echoed_text != raw_echoed:
+        raise AlpacaAdapterError(
+            "response.client_order_id must be canonical exact text"
+        )
+    echoed = validate_client_order_id(echoed_text)
     if echoed != cid:
         raise AlpacaAdapterError(
             "Alpaca client_order_id response does not match request"

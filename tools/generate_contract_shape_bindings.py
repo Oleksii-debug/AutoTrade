@@ -46,6 +46,21 @@ def load_shapes() -> tuple[str, dict[str, dict[str, object]]]:
     ):
         raise ValueError("manifest schemas must be a unique non-empty string array")
 
+    expected_shape_conformance = {
+        "scope": "closed-object-shape-subset",
+        "corpus": "contracts/fixtures/contract-shapes.corpus.json",
+        "bindings": {
+            "python": "contracts/bindings/python/contract_shapes.py",
+            "csharp": "src/AutoTrade.Contracts/ContractShapeContracts.cs",
+            "typescript": "contracts/bindings/typescript/contractShapes.js",
+        },
+    }
+    if manifest.get("shape_conformance") != expected_shape_conformance:
+        raise ValueError(
+            "manifest shape_conformance must name the generated corpus and "
+            "python/csharp/typescript bindings"
+        )
+
     shapes: dict[str, dict[str, object]] = {}
     for schema_name in schema_names:
         path = SCHEMAS / schema_name

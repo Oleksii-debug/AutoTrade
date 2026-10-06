@@ -2606,6 +2606,62 @@ class GuardedDispatcher:
             for name, member in decoder_json_decoder_surface
             if name in {"__init__", "decode", "raw_decode"}
         )
+        decoder_json_decoder_init = decoder_json_decoder.__dict__.get(
+            "__init__"
+        )
+        decoder_json_decoder_init_globals = snapshot_getattr(
+            decoder_json_decoder_init,
+            "__globals__",
+            None,
+        )
+        if snapshot_type(decoder_json_decoder_init_globals) is not snapshot_dict:
+            raise RuntimeError(
+                "JSON decoder global authority is unavailable"
+            )
+        decoder_json_decoder_init_globals_get = (
+            decoder_json_decoder_init_globals.get
+        )
+        decoder_json_decoder_init_globals_set = (
+            decoder_json_decoder_init_globals.__setitem__
+        )
+        decoder_json_init_global_bindings = snapshot_tuple(
+            (
+                name,
+                decoder_json_decoder_init_globals_get(name),
+            )
+            for name in (
+                "scanner",
+                "JSONObject",
+                "JSONArray",
+                "scanstring",
+            )
+        )
+        decoder_json_scanner = decoder_json_decoder_init_globals_get(
+            "scanner"
+        )
+        decoder_json_scanner_namespace = vars(decoder_json_scanner)
+        decoder_json_scanner_namespace_get = (
+            decoder_json_scanner_namespace.get
+        )
+        decoder_json_scanner_namespace_set = (
+            decoder_json_scanner_namespace.__setitem__
+        )
+        decoder_json_scanner_make = decoder_json_scanner_namespace_get(
+            "make_scanner"
+        )
+        decoder_json_scanner_make_code = snapshot_getattr(
+            decoder_json_scanner_make,
+            "__code__",
+            None,
+        )
+        decoder_json_init_global_code_bindings = snapshot_tuple(
+            (
+                dependency,
+                snapshot_getattr(dependency, "__code__", None),
+            )
+            for name, dependency in decoder_json_init_global_bindings
+            if name != "scanner"
+        )
         decoder_depth_guard = require_provider_json_depth
         decoder_depth_guard_code = snapshot_getattr(
             decoder_depth_guard,
@@ -2649,7 +2705,9 @@ class GuardedDispatcher:
         exact_response_code_bindings = (
             (exact_response_snapshot, snapshot_code),
             (decoder_json_loads, decoder_json_loads_code),
+            (decoder_json_scanner_make, decoder_json_scanner_make_code),
             *decoder_json_decoder_code_bindings,
+            *decoder_json_init_global_code_bindings,
             *snapshot_tuple(
                 (dependency, code)
                 for dependency, code in zip(
@@ -2781,6 +2839,20 @@ class GuardedDispatcher:
                 if decoder_json_decoder.__dict__.get(name) is not member:
                     snapshot_setattr(decoder_json_decoder, name, member)
                     changed = True
+
+            for name, expected in decoder_json_init_global_bindings:
+                if decoder_json_decoder_init_globals_get(name) is not expected:
+                    decoder_json_decoder_init_globals_set(name, expected)
+                    changed = True
+            if (
+                decoder_json_scanner_namespace_get("make_scanner")
+                is not decoder_json_scanner_make
+            ):
+                decoder_json_scanner_namespace_set(
+                    "make_scanner",
+                    decoder_json_scanner_make,
+                )
+                changed = True
             return changed
 
         exact_response_authority_changed = False

@@ -725,6 +725,95 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertFalse(retry.inserted)
             self.assertEqual(len(economics.transactions), 4)
 
+    def test_split_revision_to_one_to_one_reverses_original_without_replacement(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            first = resolve_action(
+                sealed_action(
+                    external_event_id="corp-split-cancelled-1",
+                    revision="1",
+                    kind="SPLIT",
+                    numerator="2",
+                    denominator="1",
+                )
+            )
+            first_result = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=first,
+            )
+            self.assertEqual(first_result.next_state.quantity, Decimal("20"))
+            self.assertEqual(
+                economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("20"),
+            )
+
+            current_book = pure_book()
+            current_book.apply(first.event)
+            correction = resolve_action(
+                sealed_action(
+                    external_event_id="corp-split-cancelled-2",
+                    revision="2",
+                    kind="SPLIT",
+                    numerator="1",
+                    denominator="1",
+                    observed_offset=4,
+                    corrects="corp-split-cancelled-1",
+                ),
+                corrects="corp-split-cancelled-1",
+            )
+            corrected = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=current_book,
+                accepted=correction,
+            )
+            self.assertTrue(corrected.inserted)
+            self.assertTrue(corrected.economically_active)
+            self.assertEqual(corrected.next_state.quantity, Decimal("10"))
+            self.assertEqual(corrected.next_state.total_basis, Decimal("1000"))
+            self.assertEqual(
+                economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("10"),
+            )
+            self.assertEqual(len(economics.transactions), 3)
+            original = economics.transactions[-2]
+            reversal = economics.transactions[-1]
+            self.assertEqual(
+                reversal.reverses_transaction_id,
+                original.transaction_id,
+            )
+            self.assertFalse(
+                any(
+                    item.corrects_transaction_id == original.transaction_id
+                    for item in economics.transactions
+                )
+            )
+
+            reopened = JournalStore(path)
+            restarted_economics = economic_book(reopened)
+            retry_book = pure_book()
+            retry_book.apply(first.event)
+            retry = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=restarted_economics,
+                corporate_book=retry_book,
+                accepted=correction,
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(
+                restarted_economics.balance("POSITION:BTCUSDT", "BTCUSDT"),
+                Decimal("10"),
+            )
+            self.assertEqual(len(restarted_economics.transactions), 3)
+
     def test_short_split_fails_closed_until_borrow_obligation_mapping_is_qualified(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

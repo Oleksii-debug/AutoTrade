@@ -26,6 +26,7 @@ if __package__:
         dotnet_restore_workflow_commands,
         dotnet_restore_workflow_environment_authority_lines,
     )
+    from .dotnet_package_rights import package_rights_blockers
 else:
     from dotnet_lock import (
         dotnet_imported_package_reference_blockers,
@@ -36,7 +37,9 @@ else:
         dotnet_restore_targets_project,
         dotnet_restore_tokens_are_locked,
         dotnet_restore_workflow_commands,
+        dotnet_restore_workflow_environment_authority_lines,
     )
+    from dotnet_package_rights import package_rights_blockers
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -590,6 +593,7 @@ def audit_composition(root: Path = ROOT) -> CompositionReport:
         set(
             python_blockers
             + dotnet_blockers
+            + package_rights_blockers(root)
             + _ci_runtime_blockers(root)
             + _rights_blockers(root)
         )

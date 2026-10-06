@@ -485,18 +485,33 @@ project = "not-a-table"
             )
 
 
-    def test_dotnet_restore_target_helper_is_imported_in_both_execution_modes(self):
+    def test_dotnet_restore_authority_helpers_are_imported_in_both_execution_modes(self):
         root = Path(__file__).resolve().parents[2]
         for relative in (
             "tools/check_dependency_composition.py",
             "tools/build_provenance_manifest.py",
         ):
             source = (root / relative).read_text(encoding="utf-8")
-            self.assertEqual(
-                source.count("dotnet_restore_project_target,"),
-                2,
-                relative,
+            for helper in (
+                "dotnet_restore_project_target,",
+                "dotnet_restore_workflow_environment_authority_lines,",
+            ):
+                with self.subTest(relative=relative, helper=helper):
+                    self.assertEqual(source.count(helper), 2, relative)
+
+    def test_unified_wp03_audit_executes_nuget_rights_gate(self):
+        self.assertFalse(
+            any(
+                blocker.startswith("DOTNET_PACKAGE_RIGHTS_")
+                for blocker in self.report.blockers
             )
+        )
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "tools"
+            / "check_dependency_composition.py"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(source.count("package_rights_blockers"), 3)
 
 
             workflow.write_text(

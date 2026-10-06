@@ -19,9 +19,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Windows consistently needs more time for the retained runtime-load/recovery suite;
-    # keep Ubuntu's tighter hang budget while preserving the complete Windows verification.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 10 }}
+    # The retained 120-episode unattended/recovery scenario now exceeds the
+    # former 10-minute Linux budget while still making forward progress.
+    # Preserve a finite hang boundary on both runners without timing out the
+    # canonical core verification before it can produce exact-head evidence.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 20 }}
     env:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}

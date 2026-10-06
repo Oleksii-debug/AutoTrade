@@ -711,22 +711,7 @@ def _install_bybit_prepared_submission_authority(
     canonical_capability_admits_code = capability_type.admits.__code__
     bool_type = bool
     int_type = int
-    float_type = float
     str_type = str
-    decimal_type = Decimal
-    canonical_format = format
-    mapping_type = Mapping
-    canonical_json_module = json
-    canonical_json_dumps = json.dumps
-    canonical_json_loads = json.loads
-    canonical_sha256 = sha256
-    type_error = TypeError
-    value_error = ValueError
-    invalid_operation_type = InvalidOperation
-    capability_error_type = CapabilityError
-    canonical_decimal = _decimal
-    canonical_decimal_code = canonical_decimal.__code__
-    client_id_pattern = _CLIENT_ID
     canonical_dict = dict
     canonical_dict_get = canonical_dict.get
     canonical_len = len
@@ -768,23 +753,7 @@ def _install_bybit_prepared_submission_authority(
             or isinstance is not canonical_isinstance
             or bool is not bool_type
             or int is not int_type
-            or float is not float_type
             or str is not str_type
-            or Decimal is not decimal_type
-            or format is not canonical_format
-            or Mapping is not mapping_type
-            or json is not canonical_json_module
-            or json.dumps is not canonical_json_dumps
-            or json.loads is not canonical_json_loads
-            or sha256 is not canonical_sha256
-            or TypeError is not type_error
-            or ValueError is not value_error
-            or InvalidOperation is not invalid_operation_type
-            or CapabilityError is not capability_error_type
-            or _decimal is not canonical_decimal
-            or canonical_getattr(canonical_decimal, "__code__", None)
-            is not canonical_decimal_code
-            or _CLIENT_ID is not client_id_pattern
             or dict is not canonical_dict
             or len is not canonical_len
             or object is not canonical_object
@@ -965,38 +934,6 @@ def _install_bybit_prepared_submission_authority(
             raise error_type(
                 "Bybit preparation time must use exact stdlib timezone"
             )
-        for name, value in (
-            ("provider_environment", provider_environment),
-            ("product_family", product_family),
-            ("symbol", symbol),
-            ("side", side),
-            ("order_type", order_type),
-            ("client_order_id", client_order_id),
-            ("time_in_force", time_in_force),
-        ):
-            if canonical_type(value) is not str_type:
-                raise error_type(f"{name} must be exact str")
-        quantity_type = canonical_type(quantity)
-        if (
-            quantity_type is not str_type
-            and quantity_type is not decimal_type
-            and quantity_type is not int_type
-        ):
-            raise error_type("quantity must be exact str, Decimal or int")
-        if price is not None:
-            price_type = canonical_type(price)
-            if (
-                price_type is not str_type
-                and price_type is not decimal_type
-                and price_type is not int_type
-            ):
-                raise error_type("price must be exact str, Decimal or int")
-        if canonical_type(reduce_only) is not bool_type:
-            raise error_type("reduce_only must be exact bool")
-        if position_side is not None and canonical_type(position_side) is not str_type:
-            raise error_type("position_side must be exact str or None")
-        if position_idx is not None and canonical_type(position_idx) is not int_type:
-            raise error_type("position_idx must be exact int or None")
 
         prepared = builder(
             capability=capability,
@@ -1453,24 +1390,38 @@ def parse_executions(
             )
 
         provider_fee_currency = row.get("feeCurrency")
-        if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
-            fee_currency = provider_fee_currency.strip()
-        else:
+        if provider_fee_currency is None or provider_fee_currency == "":
             if qualified_fee_currencies is None:
                 raise ProviderCoreError(
                     "Bybit execution fee currency is unresolved; qualified "
                     "fee-currency evidence is required"
                 )
             try:
-                fee_currency = qualified_fee_currencies[instrument]
+                qualified_fee_currency = qualified_fee_currencies[instrument]
             except KeyError as error:
                 raise ProviderCoreError(
                     "Bybit execution fee currency is unresolved for instrument"
                 ) from error
-            fee_currency = _text(
-                fee_currency,
-                name="qualified fee currency",
-            )
+            if (
+                type(qualified_fee_currency) is not str
+                or not qualified_fee_currency
+                or qualified_fee_currency != qualified_fee_currency.strip()
+                or qualified_fee_currency != qualified_fee_currency.upper()
+            ):
+                raise ProviderCoreError(
+                    "qualified fee currency must be canonical exact text"
+                )
+            fee_currency = qualified_fee_currency
+        else:
+            if (
+                type(provider_fee_currency) is not str
+                or provider_fee_currency != provider_fee_currency.strip()
+                or provider_fee_currency != provider_fee_currency.upper()
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution fee currency must be canonical exact text"
+                )
+            fee_currency = provider_fee_currency
 
         side = _text(row.get("side"), name="side").upper()
         if side not in {"BUY", "SELL"}:

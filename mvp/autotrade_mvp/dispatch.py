@@ -667,6 +667,23 @@ def load_submission_response_binding(
                 f"durable {event_name} client_order_id mismatches SubmissionPrepared"
             )
 
+    prepared_owner_token = payload.get("owner_token")
+    prepared_owner_epoch = payload.get("owner_epoch")
+    sending_payload = sending.get("payload")
+    if (
+        type(prepared_owner_token) is not str
+        or not prepared_owner_token
+        or type(prepared_owner_epoch) is not int
+        or prepared_owner_epoch < 1
+        or prepared.get("owner_epoch") != str(prepared_owner_epoch)
+        or type(sending_payload) is not dict
+        or sending_payload.get("owner_token") != prepared_owner_token
+        or sending_payload.get("owner_epoch") != prepared_owner_epoch
+        or sending.get("owner_epoch") != str(prepared_owner_epoch)
+        or sent.get("owner_epoch") != str(prepared_owner_epoch)
+    ):
+        raise ValueError("durable exact response sender ownership is not continuous")
+
     return SubmissionResponseBinding(
         attempt_id=durable_text["attempt_id"],
         aggregate_id=aggregate_id,
@@ -1156,6 +1173,12 @@ class GuardedDispatcher:
                 or sending_payload.get("owner_epoch") != prepared_owner_epoch
                 or events[1].get("owner_epoch") != str(prepared_owner_epoch)
             ):
+                return False
+        if event_types[-1] == "SubmissionSent" or (
+            event_types[-1] == "SubmissionUnknown"
+            and _has_exact_response_markers(events[-1]["payload"])
+        ):
+            if events[-1].get("owner_epoch") != str(prepared_owner_epoch):
                 return False
         history_shape = tuple(event_types)
         if history_shape not in {

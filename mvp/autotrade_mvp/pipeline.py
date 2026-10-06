@@ -845,6 +845,7 @@ def run_vertical_slice(
         raise ValueError("Cash, order quantity and risk limits must be positive")
     if not rate.is_finite() or rate < 0 or rate >= 1:
         raise ValueError("Fee rate must be finite and between zero and one")
+    normalized = handle_market_data(prices)
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
@@ -904,7 +905,6 @@ def run_vertical_slice(
         _require_restored_fill_intent(root, restored_fill)
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
-    normalized = handle_market_data(prices)
     decision = handle_strategy(normalized, quantity)
     intent = None
     fill = None

@@ -1479,6 +1479,156 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 self.assertEqual(result.reason, expected_reason)
                 self.assertEqual(transport_calls, 0)
 
+    def test_dispatch_rejects_mapping_subclasses_before_callbacks(self):
+        class TrapDict(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled items executed")
+
+            def __iter__(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled iteration executed")
+
+        for field_name in ("request", "submission_scope"):
+            with self.subTest(field_name=field_name), TemporaryDirectory() as directory:
+                TrapDict.callbacks = 0
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                authority_calls = 0
+                transport_calls = 0
+
+                def authority(_intent_hash, _now):
+                    nonlocal authority_calls
+                    authority_calls += 1
+                    return True, "allowed"
+
+                def transport(_client_order_id, _request, _guard):
+                    nonlocal transport_calls
+                    transport_calls += 1
+                    raise AssertionError("transport must not execute")
+
+                kwargs = {
+                    "attempt_id": "mapping-shape-a1",
+                    "intent_id": "intent-1",
+                    "intent_hash": "sha256:" + "1" * 64,
+                    "provider": "provider",
+                    "request": {"side": "BUY"},
+                    "now": "2026-10-06T14:00:00Z",
+                    "authority_check": authority,
+                    "transport_send": transport,
+                    "submission_scope": {"endpoint": "/orders"},
+                }
+                kwargs[field_name] = TrapDict(kwargs[field_name])
+                with self.assertRaisesRegex(
+                    TypeError,
+                    f"{field_name} must be an exact dict",
+                ):
+                    dispatcher.dispatch(**kwargs)
+
+                self.assertEqual(TrapDict.callbacks, 0)
+                self.assertEqual(authority_calls, 0)
+                self.assertEqual(transport_calls, 0)
+                self.assertEqual(
+                    JournalStore.load_events(
+                        store,
+                        "submission_attempt",
+                        dispatcher._aggregate_id("mapping-shape-a1"),
+                    ),
+                    [],
+                )
+
+    def test_dispatch_rejects_nested_polymorphic_json_before_callbacks(self):
+        class TrapText(str):
+            callbacks = 0
+
+            def encode(self, *args, **kwargs):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled encode executed")
+
+            def __str__(self):
+                type(self).callbacks += 1
+                raise AssertionError("caller-controlled string conversion executed")
+
+        for field_name in ("request", "submission_scope"):
+            with self.subTest(field_name=field_name), TemporaryDirectory() as directory:
+                TrapText.callbacks = 0
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                kwargs = {
+                    "attempt_id": "nested-json-a1",
+                    "intent_id": "intent-1",
+                    "intent_hash": "sha256:" + "1" * 64,
+                    "provider": "provider",
+                    "request": {"side": "BUY"},
+                    "now": "2026-10-06T14:00:00Z",
+                    "authority_check": lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("authority must not execute")),
+                    "transport_send": lambda *_args: (
+                        _ for _ in ()
+                    ).throw(AssertionError("transport must not execute")),
+                    "submission_scope": {"endpoint": "/orders"},
+                }
+                kwargs[field_name] = {"nested": [TrapText("hostile")]}
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "submission JSON values must use exact built-in",
+                ):
+                    dispatcher.dispatch(**kwargs)
+                self.assertEqual(TrapText.callbacks, 0)
+
+    def test_dispatch_preserves_exact_tuple_json_array_compatibility(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            seen_request = []
+
+            def transport(_client_order_id, request, guard):
+                seen_request.append(request)
+                guard()
+                return ExactJsonTransportResponse(b'{"accepted":true}')
+
+            result = dispatcher.dispatch(
+                attempt_id="tuple-json-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"legs": ("A", "B")},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+                submission_scope={"axes": ("x", "y")},
+            )
+
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(tuple(seen_request[0]["legs"]), ("A", "B"))
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("tuple-json-a1"),
+            )
+            self.assertEqual(
+                events[0]["payload"]["submission_scope"]["axes"],
+                ["x", "y"],
+            )
+
     def test_dispatch_rejects_polymorphic_timestamp_before_timestamp_methods_execute(self):
         class TrapTimestamp(str):
             def strip(self, *args, **kwargs):

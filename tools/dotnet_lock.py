@@ -9,9 +9,13 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 
-_DOTNET_RESTORE_TEXT = re.compile(r"\bdotnet[ \t]+restore\b", re.IGNORECASE)
+_DOTNET_RESTORE_TEXT = re.compile(
+    r"\bdotnet[ \t]+restore(?=$|[ \t\r\n;&|<>()\"'\x60])",
+    re.IGNORECASE,
+)
 _DOTNET_RESTORE_MULTILINE_TEXT = re.compile(
-    r"\bdotnet(?:[ \t]*\\?[ \t]*\r?\n[ \t]+)+restore\b",
+    r"\bdotnet(?:[ \t]*\\?[ \t]*\r?\n[ \t]+)+restore"
+    r"(?=$|[ \t\r\n;&|<>()\"'\x60])",
     re.IGNORECASE,
 )
 _DOTNET_RESTORE_SHELL_CONTROL = re.compile(

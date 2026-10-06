@@ -169,6 +169,19 @@ class NugetLockGateCandidateTests(unittest.TestCase):
         )
         self.assertEqual(unscoped_lines, [3])
 
+    def test_restore_subcommand_label_is_not_executable_restore_text(self):
+        commands, unscoped_lines = dotnet_restore_workflow_commands(
+            "steps:\n"
+            "  - run: python tools/check.py "
+            "--command \"dotnet restore/build release contract\"\n"
+            "  - run: dotnet restore src/App/App.csproj --locked-mode\n"
+        )
+        self.assertEqual(
+            commands,
+            ["run: dotnet restore src/App/App.csproj --locked-mode"],
+        )
+        self.assertEqual(unscoped_lines, [])
+
     def test_canonical_restore_line_is_discovered_once(self):
         commands, unscoped_lines = dotnet_restore_workflow_commands(
             "steps:\n"

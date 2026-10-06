@@ -23,13 +23,17 @@ D7 = "sha256:" + "7" * 64
 D8 = "sha256:" + "8" * 64
 
 
-def exact_scope() -> dict[str, object]:
+def exact_scope(prepared_request_sha256: str) -> dict[str, object]:
     return {
         "provider_id": "BYBIT",
         "account_id": "account-1",
         "environment": "PAPER",
         "provider_environment": "TESTNET",
         "capability_snapshot_id": "capability-1",
+        "endpoint": "/v5/order/create",
+        "prepared_request_sha256": prepared_request_sha256,
+        "capability_snapshot_ids": ["capability-1"],
+        "instrument_versions": ["7"],
         "provider_route_qualification_id": "qualification-1",
         "provider_route_capability_snapshot_id": "capability-1",
         "provider_route_decision_journal_sequence_cut": 41,
@@ -74,7 +78,7 @@ def exact_request() -> tuple[dict[str, object], str]:
 
 def binding() -> FinancialRequestBindingMaterial:
     request, body_sha = exact_request()
-    scope = exact_scope()
+    scope = exact_scope(payload_digest(request))
     return FinancialRequestBindingMaterial(
         risk_snapshot_id=RS,
         risk_decision_id=RD,
@@ -152,7 +156,7 @@ class DurablePreparedFinancialAuthorityTests(unittest.TestCase):
         self._temp = TemporaryDirectory()
         self.journal = JournalStore(Path(self._temp.name) / "journal.db")
         self.material = binding()
-        self.scope = exact_scope()
+        self.scope = exact_scope(self.material.request_sha256)
 
     def tearDown(self) -> None:
         self._temp.cleanup()

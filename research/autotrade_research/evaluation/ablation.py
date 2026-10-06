@@ -1233,6 +1233,7 @@ class RegisteredAblationPopulation:
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
     complete: bool = True
+    coverage_digest: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -1264,6 +1265,54 @@ class RegisteredAblationPopulation:
         object.__setattr__(self, "population_unit_ids", normalized)
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if self.coverage_digest is not None:
+            object.__setattr__(
+                self,
+                "coverage_digest",
+                _digest(self.coverage_digest, "coverage_digest"),
+            )
+
+
+def _ablation_population_candidate_hash(
+    target_component: str,
+    pairs: tuple[AblationPair, ...],
+    *,
+    source_revision: str,
+) -> str:
+    """Bind one selected ablation population without trusting outcome economics."""
+
+    target = _identity_text(target_component, "target_component")
+    if type(source_revision) is not str or _GIT_SHA.fullmatch(source_revision) is None:
+        raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+    material = {
+        "schema_version": "ablation-population-candidate.v1",
+        "source_revision": source_revision,
+        "target_component": target,
+        "pairs": [
+            {
+                "case_id": pair.full.case_id,
+                "input_cutoff_utc": _canonical_utc_text(pair.full.input_cutoff_utc),
+                "input_fingerprint": pair.full.input_fingerprint,
+                "population_unit_id": pair.full.population_unit_id,
+            }
+            for pair in sorted(
+                pairs,
+                key=lambda item: (
+                    item.full.population_unit_id,
+                    item.full.case_id,
+                    item.full.input_fingerprint,
+                ),
+            )
+        ],
+    }
+    raw = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(raw).hexdigest()
 
 
 def _canonical_path_value_binding(
@@ -1878,6 +1927,11 @@ class AblationQualificationAuthority:
                 )
         return population, outcomes
 
+
+# Stable module-level accessor for owner-provenance composition.  Capturing the
+# unbound method preserves the closure-owned issuance resolver even if a later
+# module-global or class attribute is rebound.
+_registered_policy_context = AblationQualificationAuthority._bound_context
 
 del _register_ablation_authority_binding
 del _resolve_ablation_authority_binding

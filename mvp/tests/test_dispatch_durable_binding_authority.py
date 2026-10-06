@@ -980,6 +980,91 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
 
             self.assertEqual(descriptor_calls, [])
 
+    def test_dispatch_rejects_rebound_journal_connect_dependency_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            rebound_calls = []
+            authority_calls = []
+            transport_calls = []
+            original = JournalStore._connect
+
+            def rebound_connect(*_args, **_kwargs):
+                rebound_calls.append("_connect")
+                raise AssertionError("rebound _connect must not execute")
+
+            JournalStore._connect = rebound_connect
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "submission journal class authority changed",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="class-connect-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: authority_calls.append(True),
+                        transport_send=lambda *_args: transport_calls.append(True),
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                JournalStore._connect = original
+
+            self.assertEqual(rebound_calls, [])
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(transport_calls, [])
+
+    def test_dispatch_rejects_rebound_inherited_decode_dependency_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            base = JournalStore.__mro__[1]
+            original = base.__dict__["_decode_event_row"]
+            rebound_calls = []
+            authority_calls = []
+            transport_calls = []
+
+            def rebound_decode(*_args, **_kwargs):
+                rebound_calls.append("_decode_event_row")
+                raise AssertionError("rebound _decode_event_row must not execute")
+
+            setattr(base, "_decode_event_row", rebound_decode)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "submission journal class authority changed",
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="class-decode-a1",
+                        intent_id="intent-1",
+                        intent_hash="sha256:" + "1" * 64,
+                        provider="provider",
+                        request={"side": "BUY"},
+                        now="2026-10-06T14:00:00Z",
+                        authority_check=lambda *_args: authority_calls.append(True),
+                        transport_send=lambda *_args: transport_calls.append(True),
+                        submission_scope={"endpoint": "/orders"},
+                    )
+            finally:
+                setattr(base, "_decode_event_row", original)
+
+            self.assertEqual(rebound_calls, [])
+            self.assertEqual(authority_calls, [])
+            self.assertEqual(transport_calls, [])
+
     def test_runtime_redispatch_rejects_submission_scope_retargeting(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

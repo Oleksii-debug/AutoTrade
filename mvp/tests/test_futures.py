@@ -765,5 +765,69 @@ class FuturesLifecycleTests(unittest.TestCase):
             )
 
 
+
+class FuturesSettlementProviderDomainTests(unittest.TestCase):
+    def _evidence(self, scope: FuturesSettlementScope) -> FuturesSettlementEvidence:
+        return FuturesSettlementEvidence(
+            settlement_id="2026-09-25",
+            observation_id="bybit-settlement-1",
+            instrument_id="55555555-5555-4555-8555-555555555555",
+            instrument_version=1,
+            scope=scope,
+            effective_at=datetime(2026, 9, 25, tzinfo=timezone.utc),
+            sequence=1,
+            revision=0,
+            settlement_price=Decimal("100"),
+            price_currency="USD",
+            settlement_currency="USD",
+        )
+
+    def test_bybit_paper_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(FuturesError, "provider_environment"):
+            FuturesSettlementScope(
+                source_id="bybit:settlement",
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+
+    def test_bybit_provider_environment_must_match_runtime_environment(self):
+        with self.assertRaisesRegex(FuturesError, "provider_environment"):
+            FuturesSettlementScope(
+                source_id="bybit:settlement",
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="LIVE",
+                provider_environment="TESTNET",
+            )
+
+    def test_bybit_testnet_and_demo_are_distinct_settlement_identities(self):
+        testnet = FuturesSettlementScope(
+            source_id="bybit:settlement",
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo = FuturesSettlementScope(
+            source_id="bybit:settlement",
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet, demo)
+        self.assertNotEqual(
+            settlement_identity_digest(self._evidence(testnet)),
+            settlement_identity_digest(self._evidence(demo)),
+        )
+
+    def test_provider_environment_cannot_exist_without_provider_scope(self):
+        with self.assertRaisesRegex(FuturesError, "provider settlement scope"):
+            FuturesSettlementScope(
+                source_id="settlement",
+                provider_environment="TESTNET",
+            )
+
 if __name__ == "__main__":
     unittest.main()

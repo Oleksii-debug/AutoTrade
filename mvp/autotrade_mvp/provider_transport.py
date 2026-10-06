@@ -25,6 +25,7 @@ import binascii
 import hmac
 import json
 import os
+import re
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, ContextManager, Mapping, Protocol
@@ -391,6 +392,28 @@ ALPACA_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+# OAuth2 direct Web API policy only. The local Client Portal Gateway has a
+# different host/TLS deployment model and requires separate qualification.
+IBKR_WEB_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "PAPER": ProviderEndpointPolicy(
+                provider_id="IBKR",
+                environment="PAPER",
+                base_url="https://api.ibkr.com",
+                allowed_hosts=frozenset({"api.ibkr.com"}),
+            ),
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="IBKR",
+                environment="LIVE",
+                base_url="https://api.ibkr.com",
+                allowed_hosts=frozenset({"api.ibkr.com"}),
+            ),
+        }
+    )
+)
+
+
 @dataclass(frozen=True)
 class AuthenticatedReadEndpointRule:
     surface: Surface
@@ -563,6 +586,14 @@ IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+IBKR_WEB_AUTHENTICATED_READ_METHODS: Mapping[str, str] = MappingProxyType(
+    {
+        "/iserver/auth/status": "POST",
+        "/iserver/accounts": "GET",
+    }
+)
+
+
 _BYBIT_OPTION_DELIVERY_ENDPOINT = "/v5/asset/delivery-record"
 _BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
     {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
@@ -727,6 +758,38 @@ def _bybit_authenticated_read_rule(
             "authenticated-read permission scope does not match Bybit endpoint policy"
         )
     _validate_bybit_option_delivery_query(binding)
+    return rule
+
+
+def _ibkr_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError(
+            "IBKR authenticated-read binding must be exact AuthenticatedReadQueryBinding"
+        )
+    _require_authenticated_read_query_binding_authority(binding)
+    if binding.provider_id != "IBKR":
+        raise ProviderTransportScopeError(
+            "IBKR authenticated-read binding provider mismatch"
+        )
+    rule = IBKR_WEB_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "IBKR authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match IBKR policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match IBKR endpoint policy"
+        )
+    if binding.query:
+        raise ProviderTransportScopeError(
+            "IBKR status/accounts authenticated reads require an empty query"
+        )
     return rule
 
 
@@ -1074,9 +1137,10 @@ class SignedHttpRequest:
 class AuthenticatedReadHttpRequest:
     """One immutable authenticated provider read request.
 
-    GET keeps the exact signed-query contract used by Binance. POST supports
-    providers such as Kraken whose private read APIs authenticate a form body.
-    The envelope remains separate from SignedHttpRequest so read responses keep
+    GET supports both exact signed-query reads and session-authenticated
+    queryless reads. POST supports both signed form bodies and exact empty-body
+    session reads. Provider route/capability authority remains outside this
+    envelope, which stays separate from SignedHttpRequest so read responses keep
     their typed observation lifecycle and never acquire write authority.
     """
 
@@ -1108,13 +1172,13 @@ class AuthenticatedReadHttpRequest:
                 "authenticated-read body must be exact bytes"
             )
         if method == "GET":
-            if not parsed.query or self.body:
+            if self.body:
                 raise ProviderTransportScopeError(
-                    "authenticated GET requires an exact signed query and no body"
+                    "authenticated GET requires no body"
                 )
-        elif parsed.query or not self.body:
+        elif parsed.query:
             raise ProviderTransportScopeError(
-                "authenticated POST requires an exact body and no URL query"
+                "authenticated POST requires no URL query"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -4392,6 +4456,295 @@ class BybitV5AuthenticatedReadTransport:
             if wire_response.http_status not in rule.success_statuses:
                 raise ProviderTransportError(
                     "Bybit authenticated read returned unexpected HTTP status "
+                    + str(wire_response.http_status)
+                )
+            return observe_authenticated_json_response(
+                query_binding=query_binding,
+                http_status=wire_response.http_status,
+                response_bytes=wire_response.body,
+                observed_at=self.clock_utc(),
+            )
+
+
+@dataclass(frozen=True)
+class IbkrWebBearerCredential:
+    """Exact OAuth2 SSO bearer token used only inside one credential lease."""
+
+    bearer_token: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "IbkrWebBearerCredential":
+        if type(plaintext) is not str or not plaintext:
+            raise ProviderTransportScopeError(
+                "IBKR OAuth2 bearer credential material is unavailable"
+            )
+        if (
+            plaintext != plaintext.strip()
+            or len(plaintext) > 16384
+            or plaintext.lower().startswith("bearer ")
+            or re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,}", plaintext) is None
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR OAuth2 bearer credential is not canonical token text"
+            )
+        return cls(bearer_token=plaintext)
+
+
+class IbkrWebAuthenticatedReadSigner:
+    """Pure OAuth2 direct-Web-API request builder for qualified read endpoints."""
+
+    _API_PREFIX = "/v1/api"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+    ) -> AuthenticatedReadHttpRequest:
+        if type(policy) is not ProviderEndpointPolicy:
+            raise TypeError("policy must be exact ProviderEndpointPolicy")
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if query_binding.provider_id != "IBKR":
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read signer requires IBKR binding"
+            )
+        canonical_policy = IBKR_WEB_ENDPOINT_POLICIES.get(
+            query_binding.environment
+        )
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read policy does not match exact environment"
+            )
+        _ibkr_authenticated_read_rule(query_binding)
+        method = IBKR_WEB_AUTHENTICATED_READ_METHODS.get(
+            query_binding.endpoint
+        )
+        if method is None:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read method is not defined"
+            )
+        credential = IbkrWebBearerCredential.parse(credential_plaintext)
+        headers = {
+            "Accept": "application/json",
+            "Authorization": "Bearer " + credential.bearer_token,
+        }
+        if method == "POST":
+            # IBKR requires Content-Length on POST. Status carries no body.
+            headers["Content-Length"] = "0"
+            headers["Content-Type"] = "application/json"
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(
+                IbkrWebAuthenticatedReadSigner._API_PREFIX
+                + query_binding.endpoint
+            ),
+            headers=MappingProxyType(headers),
+            timeout_seconds=policy.timeout_seconds,
+            method=method,
+            body=b"",
+        )
+
+
+class IbkrWebAuthenticatedReadTransport:
+    """One-shot OAuth2 direct IBKR read over existing capability authority.
+
+    This transport owns no brokerage-session generation, retries, provider
+    qualification, order submission, or reconciliation. It only carries the
+    already-authorized status/accounts read to the pinned OAuth2 Web API host
+    and mints the canonical exact-byte ProviderResponseObservation.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if type(policy) is not ProviderEndpointPolicy:
+            raise TypeError("policy must be exact ProviderEndpointPolicy")
+        canonical_policy = IBKR_WEB_ENDPOINT_POLICIES.get(policy.environment)
+        if (
+            policy.provider_id != "IBKR"
+            or canonical_policy is None
+            or policy != canonical_policy
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR read policy must be exact OAuth2 direct Web API policy"
+            )
+        if type(credential_handle) is not PersistentCredentialHandle:
+            raise TypeError(
+                "credential_handle must be exact PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "IBKR"
+            or credential_handle.environment != policy.environment
+            or credential_handle.provider_environment != policy.environment
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR READ credential handle scope mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "IBKR credential handle account mismatch"
+            )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "lease_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement lease_for_execution"
+            )
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            type(point) is not datetime
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="IBKR",
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment=self.policy.environment,
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read current capability cannot be verified"
+            ) from error
+        if (
+            type(current) is not CapabilitySnapshot
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "IBKR"
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read capability is no longer valid for exact binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        _require_authenticated_read_query_binding_authority(query_binding)
+        if (
+            query_binding.provider_id != "IBKR"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id
+            != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "IBKR authenticated-read query scope mismatch"
+            )
+        rule = _ibkr_authenticated_read_rule(query_binding)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "IBKR",
+                self.account_id,
+                self.policy.environment,
+                "AUTHENTICATED_READ",
+            )
+
+        self._require_current_capability(query_binding, rule)
+        with self.secret_resolver.lease_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="IBKR",
+            environment=self.policy.environment,
+            purpose="READ",
+            provider_environment=self.policy.environment,
+        ) as credential_plaintext:
+            try:
+                request = IbkrWebAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                )
+            finally:
+                credential_plaintext = None
+
+            # Credential access can race revocation/expiry; re-check immediately
+            # before the one outbound read.
+            self._require_current_capability(query_binding, rule)
+            wire_response = self.wire_client.send(request)
+            if type(wire_response) is not AuthenticatedReadWireResponse:
+                raise ProviderTransportError(
+                    "IBKR authenticated-read wire client must preserve HTTP status"
+                )
+            if wire_response.http_status not in rule.success_statuses:
+                raise ProviderTransportError(
+                    "IBKR authenticated read returned unexpected HTTP status "
                     + str(wire_response.http_status)
                 )
             return observe_authenticated_json_response(

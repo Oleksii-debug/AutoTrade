@@ -5,6 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.check_dependency_composition import (
+    _ci_runtime_blockers,
+    _dotnet_blockers,
     _dotnet_dependency_lock_blockers,
     _python_blockers,
     _rights_blockers,
@@ -416,6 +418,21 @@ project = "not-a-table"
             )
         )
 
+    def test_omitted_dotnet_roll_forward_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "global.json").write_text(
+                json.dumps({"sdk": {"version": "10.0.100"}}),
+                encoding="utf-8",
+            )
+            blockers, references, version = _dotnet_blockers(root)
+            self.assertEqual(version, "10.0.100")
+            self.assertEqual(references, [])
+            self.assertIn(
+                "DOTNET_ROLL_FORWARD_NOT_DISABLED:None",
+                blockers,
+            )
+
     def test_dotnet_ci_installs_the_same_exact_sdk(self):
         root = Path(__file__).resolve().parents[2]
         foundation = (root / ".github" / "workflows" / "dotnet-foundation.yml").read_text(
@@ -444,6 +461,28 @@ project = "not-a-table"
             if item.startswith("NON_EXACT_CI_PYTHON_VERSION:")
         }
         self.assertEqual(blockers, set())
+
+    def test_expression_valued_python_runtime_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            workflow = workflows / "expression.yml"
+            workflow.write_text(
+                "steps:\n"
+                "  - uses: actions/setup-python@v5\n"
+                "    with:\n"
+                "      python-version: ${{ matrix.python-version }}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _ci_runtime_blockers(root),
+                [
+                    "UNRESOLVED_CI_PYTHON_VERSION:"
+                    ".github/workflows/expression.yml:"
+                    "${{ matrix.python-version }}"
+                ],
+            )
 
     def test_unresolved_first_party_rights_remain_fail_closed(self):
         unresolved = {

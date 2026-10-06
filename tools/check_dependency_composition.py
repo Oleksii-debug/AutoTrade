@@ -274,8 +274,9 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
         blockers.append("NON_EXACT_DOTNET_SDK_VERSION")
         version = "" if version is None else str(version)
 
-    if sdk.get("rollForward") not in (None, "disable"):
-        blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{sdk.get('rollForward')}")
+    roll_forward = sdk.get("rollForward")
+    if roll_forward != "disable":
+        blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{roll_forward}")
 
     package_projects: list[Path] = []
     blockers.extend(dotnet_imported_package_reference_blockers(root))
@@ -308,6 +309,9 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
                 continue
             value = stripped.split(":", 1)[1].strip()
             if value.startswith("${{"):
+                blockers.append(
+                    f"UNRESOLVED_CI_PYTHON_VERSION:{path.relative_to(root)}:{value}"
+                )
                 continue
             literals: list[str]
             if value.startswith("[") and value.endswith("]"):

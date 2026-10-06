@@ -170,7 +170,7 @@ _UUID_TEXT_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 )
 _URI_TEXT_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9+.\\-]*:[A-Za-z0-9\\-._~:/?#\\[\\]@!$&'()*+,;=%]*$"
+    r"^[A-Za-z][A-Za-z0-9+.\-]*:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]*$"
 )
 _BAD_PERCENT_ENCODING_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _UTC_INSTANT_RE = re.compile(

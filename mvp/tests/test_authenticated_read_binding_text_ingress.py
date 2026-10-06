@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -27,6 +28,21 @@ class _HostileString(str):
 class _HostileSurface:
     def __str__(self):
         raise AssertionError("hostile surface stringification must never execute")
+
+
+class _HostileDatetime(datetime):
+    def utcoffset(self):
+        raise AssertionError("hostile datetime callback must never execute")
+
+    def astimezone(self, *args, **kwargs):
+        raise AssertionError("hostile datetime callback must never execute")
+
+
+class _HostileCapabilitySnapshot(CapabilitySnapshot):
+    def __getattribute__(self, name):
+        if name in {"status", "observed_at", "expires_at", "provider_id"}:
+            raise AssertionError("hostile capability callback must never execute")
+        return super().__getattribute__(name)
 
 
 def capability():
@@ -142,6 +158,36 @@ class AuthenticatedReadTextIngressTests(unittest.TestCase):
             prepare_authenticated_read_query(
                 capability=capability(),
                 surface=_HostileSurface(),
+                endpoint="/v5/account/transaction-log",
+                query={"category": "option"},
+                at=NOW,
+                permission_scope="ACCOUNT.READ",
+            )
+
+    def test_datetime_subclass_is_rejected_before_time_callbacks(self):
+        hostile = _HostileDatetime(2026, 10, 6, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "at must be an exact timezone-aware datetime",
+        ):
+            prepare_authenticated_read_query(
+                capability=capability(),
+                surface=Surface.ACTIVITIES,
+                endpoint="/v5/account/transaction-log",
+                query={"category": "option"},
+                at=hostile,
+                permission_scope="ACCOUNT.READ",
+            )
+
+    def test_capability_subclass_is_rejected_before_authority_reads(self):
+        hostile = object.__new__(_HostileCapabilitySnapshot)
+        with self.assertRaisesRegex(
+            TypeError,
+            "capability must be exact CapabilitySnapshot",
+        ):
+            prepare_authenticated_read_query(
+                capability=hostile,
+                surface=Surface.ACTIVITIES,
                 endpoint="/v5/account/transaction-log",
                 query={"category": "option"},
                 at=NOW,

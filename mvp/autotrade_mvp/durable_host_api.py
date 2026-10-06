@@ -275,10 +275,19 @@ class JournalBackedHostCommandStore:
         if not isinstance(command, Mapping):
             raise TypeError("command must be a mapping")
         command_id = self._required_text(command, "command_id")
-        idempotency_key = self._required_text(command, "idempotency_key")
+        idempotency_key = command.get("idempotency_key")
+        if (
+            type(idempotency_key) is not str
+            or not 1 <= len(idempotency_key) <= 128
+        ):
+            raise ValueError(
+                "idempotency_key must contain 1 to 128 characters"
+            )
         actor = self._required_text(command, "actor")
         session = self._required_text(command, "session")
-        account_id = self._required_text(command, "account_id")
+        account_id = command.get("account_id")
+        if type(account_id) is not str or not account_id:
+            raise ValueError("account_id must be a non-empty string")
         environment = self._required_text(command, "environment")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")

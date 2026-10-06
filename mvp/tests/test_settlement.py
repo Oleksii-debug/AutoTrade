@@ -1,14 +1,19 @@
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timezone, tzinfo
+from decimal import Decimal, ROUND_DOWN, localcontext
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
     EconomicBook,
+    JournalTransaction,
+    Posting,
     book_equity_fill,
     book_external_cash_flow,
     book_fx_exchange,
     reverse_transaction,
 )
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.reservations import InsufficientAvailable, ReservationBook
 from mvp.autotrade_mvp.settlement import (
     BuyingPowerEvidence,
@@ -40,6 +45,223 @@ def evidence(
 
 
 class SettlementBookTests(unittest.TestCase):
+    def test_scope_and_rule_reject_polymorphic_ingress_before_callbacks(self):
+        class HostileText(str):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic text")
+
+            strip = _explode
+            upper = _explode
+
+        class HostileTuple(tuple):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic tuple")
+
+        HostileText.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            SettlementAccountScope(
+                provider_id=HostileText("TEST_PROVIDER"),
+                account_id="cash-1",
+                environment="PAPER",
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+        scope = SettlementAccountScope(
+            provider_id="TEST_PROVIDER",
+            account_id="cash-1",
+            environment="PAPER",
+        )
+        HostileTuple.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=HostileTuple(("provider:rule",)),
+            )
+        self.assertEqual(HostileTuple.calls, 0)
+
+        HostileText.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact text"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=(HostileText("provider:rule"),),
+            )
+        self.assertEqual(HostileText.calls, 0)
+
+        class ScopeSubclass(SettlementAccountScope):
+            pass
+
+        subclass_scope = ScopeSubclass(
+            provider_id="TEST_PROVIDER",
+            account_id="cash-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementAccountScope"):
+            SettlementRuleBinding(
+                rule_id="rule",
+                rule_version="1",
+                scope=subclass_scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=("provider:rule",),
+            )
+
+    def test_obligation_sequences_reject_polymorphic_iterables_before_callbacks(self):
+        class HostileList(list):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("settlement authority invoked polymorphic iterable")
+
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook(obligations=HostileList())
+        self.assertEqual(HostileList.calls, 0)
+
+        checkpoint = SettlementCheckpoint.create(
+            checkpoint_id="empty",
+            settled_cash={},
+            settled_obligation_evidence={},
+        )
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook.from_history(
+                checkpoint=checkpoint,
+                obligations=HostileList(),
+                settled_obligation_evidence={},
+            )
+        self.assertEqual(HostileList.calls, 0)
+
+        economic = EconomicBook()
+        HostileList.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact tuple or list"):
+            SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=HostileList(),
+                settled_obligation_evidence={},
+            )
+        self.assertEqual(HostileList.calls, 0)
+
+    def test_direct_checkpoint_constructor_cannot_bypass_canonical_identity(self):
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate currency identities",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="duplicate-cash",
+                settled_cash=(
+                    ("USD", Decimal("100")),
+                    ("USD", Decimal("999")),
+                ),
+                settled_obligation_evidence=(),
+            )
+
+        settled = evidence(
+            "cash-1",
+            "provider:settlement:cash-1",
+            day=25,
+        )
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate settlement evidence identities",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="duplicate-evidence",
+                settled_cash=(("USD", Decimal("100")),),
+                settled_obligation_evidence=(settled, settled),
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical uppercase",
+        ):
+            SettlementCheckpoint(
+                checkpoint_id="noncanonical-currency",
+                settled_cash=((" usd ", Decimal("100")),),
+                settled_obligation_evidence=(),
+            )
+
+    def test_recovery_containers_reject_polymorphic_mappings_before_callbacks(self):
+        class HostileDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settlement recovery invoked polymorphic mapping")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        for target in ("book_cash", "book_evidence", "checkpoint_cash", "checkpoint_evidence"):
+            with self.subTest(target=target):
+                HostileDict.calls = 0
+                hostile = HostileDict({"USD": "100"})
+                if target == "book_cash":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementBook(settled_cash=hostile)
+                elif target == "book_evidence":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementBook(settled_obligation_evidence=hostile)
+                elif target == "checkpoint_cash":
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementCheckpoint.create(
+                            checkpoint_id="hostile-checkpoint",
+                            settled_cash=hostile,
+                            settled_obligation_evidence={},
+                        )
+                else:
+                    with self.assertRaisesRegex(TypeError, "exact dict"):
+                        SettlementCheckpoint.create(
+                            checkpoint_id="hostile-checkpoint",
+                            settled_cash={},
+                            settled_obligation_evidence=hostile,
+                        )
+                self.assertEqual(HostileDict.calls, 0)
+
+    def test_settle_due_rejects_polymorphic_evidence_mapping_before_callbacks(self):
+        class HostileDict(dict):
+            calls = 0
+
+            def _explode(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("settle_due invoked polymorphic mapping")
+
+            items = _explode
+            __iter__ = _explode
+            __len__ = _explode
+            __bool__ = _explode
+
+        book = SettlementBook()
+        HostileDict.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            book.settle_due(
+                as_of=date(2026, 9, 25),
+                settlement_evidence=HostileDict({}),
+            )
+        self.assertEqual(HostileDict.calls, 0)
+
     def test_obligation_constructor_canonicalizes_financial_fields(self):
         obligation = SettlementObligation(
             " obligation-1 ",
@@ -835,6 +1057,137 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
             rule_binding=rule or self.rule(),
         )
 
+    def test_unbound_trading_cash_cannot_be_inferred_as_opening_capital(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-unbound", side="SELL")
+        book.append(sold)
+        self.assertEqual(book.cash("USD"), Decimal("1100"))
+
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "active trading cash leg lacks settlement obligation",
+        ):
+            SettlementBook.from_economic_book(
+                economic_book=book,
+                obligations=(),
+            )
+
+        # Typed external/opening cash remains valid opening capital; the fence
+        # distinguishes it from trade-date cash by canonical posting shape.
+        opening_only = self.funded_book()
+        rebuilt = SettlementBook.from_economic_book(
+            economic_book=opening_only,
+            obligations=(),
+        )
+        self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
+
+    def test_economic_projection_rejects_polymorphic_graph_before_callbacks(self):
+        class HostileTransaction(JournalTransaction):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {"transaction_id", "cause_event_id", "postings"}:
+                    type(self).calls += 1
+                    raise AssertionError(
+                        "economic projection read polymorphic transaction"
+                    )
+                return super().__getattribute__(name)
+
+        hostile_transaction = HostileTransaction(
+            transaction_id="hostile-transaction",
+            cause_event_id="hostile-event",
+            postings=(),
+        )
+        economic = EconomicBook()
+        object.__getattribute__(economic, "_transactions").append(
+            hostile_transaction
+        )
+        HostileTransaction.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=(),
+            )
+        self.assertEqual(HostileTransaction.calls, 0)
+
+        class HostileObligation(SettlementObligation):
+            calls = 0
+
+            def __getattribute__(self, name):
+                if name in {"rule_binding", "obligation_id", "source_transaction_id"}:
+                    type(self).calls += 1
+                    raise AssertionError(
+                        "economic projection read polymorphic obligation"
+                    )
+                return super().__getattribute__(name)
+
+        hostile_obligation = HostileObligation(
+            obligation_id="hostile-obligation",
+            cause_event_id="hostile-event",
+            currency="USD",
+            amount=Decimal("-1"),
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+        )
+        HostileObligation.calls = 0
+        with self.assertRaisesRegex(TypeError, "exact SettlementObligation"):
+            SettlementBook.from_economic_book(
+                economic_book=EconomicBook(),
+                obligations=(hostile_obligation,),
+            )
+        self.assertEqual(HostileObligation.calls, 0)
+
+    def test_durable_economic_book_obligations_require_exact_provider_domain(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            economic = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            rebuilt = SettlementBook.from_economic_book(
+                economic_book=economic,
+                obligations=(),
+            )
+            self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("0"))
+
+            demo_scope = SettlementAccountScope(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            demo_rule = SettlementRuleBinding(
+                rule_id="demo-rule",
+                rule_version="1",
+                scope=demo_scope,
+                instrument_version="ABC",
+                settlement_currency="USD",
+                effective_from=date(2026, 9, 1),
+                effective_to=None,
+                evidence_refs=("provider:demo-rule",),
+            )
+            foreign_domain = SettlementObligation(
+                obligation_id="demo-obligation",
+                cause_event_id="demo-fill",
+                currency="USD",
+                amount=Decimal("-10"),
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                source_transaction_id="demo-transaction",
+                rule_binding=demo_rule,
+            )
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "differs from settlement scope",
+            ):
+                SettlementBook.from_economic_book(
+                    economic_book=economic,
+                    obligations=(foreign_domain,),
+                )
+
     def test_sell_is_economic_cash_but_not_available_before_settlement(self):
         book = self.funded_book()
         sold = self.fill(transaction_id="sell-1", side="SELL")
@@ -939,6 +1292,12 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         self.assertEqual(resources["CASH:USD"], Decimal("900"))
         self.assertEqual(resources["MARGIN_CREDIT:USD"], Decimal("250"))
         self.assertNotIn("BUYING_POWER:USD", resources)
+        self.assertEqual(
+            BuyingPowerEvidence.from_resource_detail(
+                buying_power.resource_detail()
+            ),
+            buying_power,
+        )
 
         stale = settlement.available_capital(
             scope=self.scope,
@@ -949,6 +1308,248 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
         )
         self.assertEqual(stale.additional_buying_power, Decimal("0"))
         self.assertTrue(stale.blocks_new_risk)
+
+    def test_margin_buying_power_rejects_executable_ingress_before_callbacks(self):
+        class HostileText(str):
+            calls = 0
+
+            def strip(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile text strip dispatched")
+
+            def upper(self, *_args, **_kwargs):
+                type(self).calls += 1
+                raise AssertionError("hostile text upper dispatched")
+
+        class HostileDatetime(datetime):
+            calls = 0
+
+            def utcoffset(self):
+                type(self).calls += 1
+                raise AssertionError("hostile datetime utcoffset dispatched")
+
+        class HostileTuple(tuple):
+            calls = 0
+
+            def __iter__(self):
+                type(self).calls += 1
+                raise AssertionError("hostile tuple iteration dispatched")
+
+        common = {
+            "evidence_id": "bp-hostile",
+            "scope": self.scope,
+            "currency": "USD",
+            "additional_credit": "250",
+            "observed_at": datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            "valid_until": datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            "evidence_refs": ("provider:buying-power:hostile",),
+        }
+
+        for field, hostile, expected, counter in (
+            ("evidence_id", HostileText("bp-hostile"), "evidence_id must be exact text", HostileText),
+            ("currency", HostileText("USD"), "currency must be exact text", HostileText),
+            (
+                "observed_at",
+                HostileDatetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+                "timestamps must be exact datetime",
+                HostileDatetime,
+            ),
+            (
+                "evidence_refs",
+                HostileTuple(("provider:buying-power:hostile",)),
+                "evidence_refs must be a non-empty exact-text tuple",
+                HostileTuple,
+            ),
+        ):
+            with self.subTest(field=field):
+                before = counter.calls
+                values = dict(common)
+                values[field] = hostile
+                with self.assertRaisesRegex(TypeError, expected):
+                    BuyingPowerEvidence(**values)
+                self.assertEqual(counter.calls, before)
+
+    def test_margin_buying_power_rejects_hostile_timezone_without_callbacks(self):
+        class HostileTimezone(tzinfo):
+            calls = 0
+
+            def utcoffset(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone utcoffset executed")
+
+            def dst(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone dst executed")
+
+            def tzname(self, _dt):
+                type(self).calls += 1
+                raise AssertionError("hostile timezone tzname executed")
+
+        hostile_timezone = HostileTimezone()
+        hostile_observed = datetime(
+            2026, 9, 24, 15, tzinfo=hostile_timezone
+        )
+        hostile_as_of = datetime(
+            2026, 9, 24, 16, tzinfo=hostile_timezone
+        )
+        common = {
+            "evidence_id": "bp-hostile-timezone",
+            "scope": self.scope,
+            "currency": "USD",
+            "additional_credit": "250",
+            "observed_at": hostile_observed,
+            "valid_until": datetime(
+                2026, 9, 24, 17, tzinfo=timezone.utc
+            ),
+            "evidence_refs": ("provider:buying-power:hostile-timezone",),
+        }
+
+        with self.assertRaisesRegex(TypeError, "exact built-in timezone"):
+            BuyingPowerEvidence(**common)
+        self.assertEqual(HostileTimezone.calls, 0)
+
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        with self.assertRaisesRegex(TypeError, "exact built-in timezone"):
+            settlement.available_capital(
+                scope=self.scope,
+                currency="USD",
+                as_of=hostile_as_of,
+            )
+        self.assertEqual(HostileTimezone.calls, 0)
+
+    def test_margin_buying_power_consumer_rejects_authority_subclasses(self):
+        settlement = SettlementBook(settled_cash={"USD": "1000"})
+        exact = BuyingPowerEvidence(
+            evidence_id="bp-exact",
+            scope=self.scope,
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            evidence_refs=("provider:buying-power:exact",),
+        )
+
+        class ScopeSubclass(SettlementAccountScope):
+            pass
+
+        hostile_scope = ScopeSubclass(
+            provider_id=self.scope.provider_id,
+            account_id=self.scope.account_id,
+            environment=self.scope.environment,
+            provider_environment=self.scope.provider_environment,
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementAccountScope"):
+            settlement.available_capital(
+                scope=hostile_scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
+                buying_power_evidence=exact,
+            )
+
+        class BuyingPowerSubclass(BuyingPowerEvidence):
+            pass
+
+        hostile_evidence = BuyingPowerSubclass(
+            evidence_id="bp-subclass",
+            scope=self.scope,
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            evidence_refs=("provider:buying-power:subclass",),
+        )
+        with self.assertRaisesRegex(TypeError, "exact BuyingPowerEvidence"):
+            settlement.available_capital(
+                scope=self.scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
+                buying_power_evidence=hostile_evidence,
+            )
+
+    def test_cash_obligation_derivation_requires_exact_transaction_graph(self):
+        rule = self.rule()
+
+        class TransactionSubclass(JournalTransaction):
+            pass
+
+        subclass_transaction = TransactionSubclass(
+            transaction_id="subclass-transaction",
+            cause_event_id="subclass-event",
+            postings=(),
+        )
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            cash_settlement_obligation_from_transaction(
+                subclass_transaction,
+                obligation_id="subclass-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=rule,
+            )
+
+        class PostingSubclass(Posting):
+            pass
+
+        forged_graph = JournalTransaction(
+            transaction_id="forged-posting-transaction",
+            cause_event_id="forged-posting-event",
+            postings=(
+                PostingSubclass(
+                    ledger_account="CASH:USD",
+                    asset_or_currency="USD",
+                    signed_amount=Decimal("100"),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(TypeError, "exact Posting"):
+            cash_settlement_obligation_from_transaction(
+                forged_graph,
+                obligation_id="forged-posting-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=rule,
+            )
+
+        class RuleSubclass(SettlementRuleBinding):
+            pass
+
+        subclass_rule = RuleSubclass(
+            rule_id="subclass-rule",
+            rule_version="1",
+            scope=self.scope,
+            instrument_version="ABC",
+            settlement_currency="USD",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider:subclass-rule",),
+        )
+        exact_transaction = JournalTransaction(
+            transaction_id="exact-transaction",
+            cause_event_id="exact-event",
+            postings=(
+                Posting(
+                    ledger_account="CASH:USD",
+                    asset_or_currency="USD",
+                    signed_amount=Decimal("100"),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(TypeError, "exact SettlementRuleBinding"):
+            cash_settlement_obligation_from_transaction(
+                exact_transaction,
+                obligation_id="subclass-rule-obligation",
+                currency="USD",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+                component_id="PRIMARY",
+                instrument_version="ABC",
+                rule_binding=subclass_rule,
+            )
 
     def test_settlement_rule_for_different_instrument_version_fails_closed(self):
         sold = self.fill(transaction_id="wrong-instrument-rule", side="SELL")
@@ -1199,6 +1800,161 @@ class EconomicSettlementCapitalTests(unittest.TestCase):
                 self.assertEqual(book.cash("USD"), Decimal("1000"))
                 self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
                 self.assertEqual(rebuilt.obligations, ())
+
+
+    def test_settlement_numeric_ingress_rejects_decimal_subclass(self):
+        class ForgedDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+            def as_tuple(self):
+                raise AssertionError("Decimal subclass virtual method must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            SettlementObligation(
+                "forged",
+                "forged-cause",
+                "USD",
+                ForgedDecimal("1"),
+                date(2026, 9, 24),
+                date(2026, 9, 25),
+            )
+
+    def test_settlement_numeric_ingress_rejects_oversized_text(self):
+        with self.assertRaisesRegex(ValueError, "bounded finite decimal"):
+            SettlementObligation(
+                "oversized",
+                "oversized-cause",
+                "USD",
+                "9" * 10_000,
+                date(2026, 9, 24),
+                date(2026, 9, 25),
+            )
+
+    def test_settlement_accumulation_is_independent_of_ambient_decimal_context(self):
+        huge = "1000000000000000000000000000000"
+        tiny = "0.000000000000000000000000000001"
+        receive_tiny = SettlementObligation(
+            "receive-tiny",
+            "receive-tiny-cause",
+            "USD",
+            tiny,
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        pay_huge = SettlementObligation(
+            "pay-huge",
+            "pay-huge-cause",
+            "USD",
+            "-" + huge,
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        book = SettlementBook(
+            settled_cash={"USD": huge},
+            obligations=(receive_tiny, pay_huge),
+        )
+        with localcontext() as context:
+            context.prec = 3
+            context.rounding = ROUND_DOWN
+            self.assertTrue(
+                book.settle(
+                    "receive-tiny",
+                    as_of=date(2026, 9, 25),
+                    settlement_evidence=evidence(
+                        "receive-tiny",
+                        "provider:settlement:receive-tiny",
+                    ),
+                )
+            )
+            self.assertTrue(
+                book.settle(
+                    "pay-huge",
+                    as_of=date(2026, 9, 25),
+                    settlement_evidence=evidence(
+                        "pay-huge",
+                        "provider:settlement:pay-huge",
+                    ),
+                )
+            )
+            self.assertEqual(book.snapshot("USD").settled_cash, Decimal(tiny))
+            self.assertEqual(book.available_to_spend("USD"), Decimal(tiny))
+
+    def test_equity_obligation_and_capital_projection_ignore_hostile_decimal_context(self):
+        scope = SettlementAccountScope("SIMULATED", "acct", "PAPER")
+        rule = SettlementRuleBinding(
+            rule_id="rule",
+            rule_version="1",
+            scope=scope,
+            instrument_version="ABC-v1",
+            settlement_currency="USD",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider:rule",),
+        )
+        obligation = SettlementObligation(
+            obligation_id="bound-receivable",
+            cause_event_id="bound-receivable-cause",
+            currency="USD",
+            amount="0.000000000000000000000000000001",
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+            source_transaction_id="source-1",
+            rule_binding=rule,
+        )
+        book = SettlementBook(
+            settled_cash={"USD": "1000000000000000000000000000000"},
+            obligations=(obligation,),
+        )
+        credit = BuyingPowerEvidence(
+            evidence_id="bp",
+            scope=scope,
+            currency="USD",
+            additional_credit="0.000000000000000000000000000002",
+            observed_at=datetime(2026, 9, 24, 12, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 14, tzinfo=timezone.utc),
+            evidence_refs=("provider:bp",),
+        )
+
+        expected_obligation = equity_cash_obligation(
+            obligation_id="trade",
+            cause_event_id="trade-cause",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1.000000000000000000000000000001",
+            price="2.000000000000000000000000000002",
+            fee="0.000000000000000000000000000003",
+            trade_date=date(2026, 9, 24),
+            settlement_date=date(2026, 9, 25),
+        )
+        expected_capital = book.available_capital(
+            scope=scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),
+            buying_power_evidence=credit,
+        )
+        with localcontext() as context:
+            context.prec = 4
+            context.rounding = ROUND_DOWN
+            actual_obligation = equity_cash_obligation(
+                obligation_id="trade",
+                cause_event_id="trade-cause",
+                settlement_currency="USD",
+                side="BUY",
+                quantity="1.000000000000000000000000000001",
+                price="2.000000000000000000000000000002",
+                fee="0.000000000000000000000000000003",
+                trade_date=date(2026, 9, 24),
+                settlement_date=date(2026, 9, 25),
+            )
+            actual_capital = book.available_capital(
+                scope=scope,
+                currency="USD",
+                as_of=datetime(2026, 9, 24, 13, tzinfo=timezone.utc),
+                buying_power_evidence=credit,
+            )
+        self.assertEqual(actual_obligation.amount, expected_obligation.amount)
+        self.assertEqual(actual_capital, expected_capital)
 
 
 if __name__ == "__main__":

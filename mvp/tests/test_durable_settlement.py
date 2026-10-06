@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
@@ -20,7 +21,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_correction_with_settlement_replacement,
@@ -41,8 +42,12 @@ ACCOUNT = "acct-1"
 ENVIRONMENT = "PAPER"
 
 
+def artifact_root_for(store: JournalStore) -> Path:
+    return Path(store.path).parent / "settlement-evidence"
+
+
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
-    return ArtifactStore(Path(store.path).parent / "settlement-evidence")
+    return ArtifactStore(artifact_root_for(store))
 
 
 def raw_rule() -> SettlementRuleBinding:
@@ -131,6 +136,7 @@ def durable(store: JournalStore) -> DurableSettlementBook:
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root_for(store),
         evidence_artifact_store=artifact_store_for(store),
     )
 
@@ -241,6 +247,120 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_settlement_evidence_uses_one_authenticated_artifact_snapshot(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            selected = artifact_store_for(store)
+
+            def legacy_split_read_forbidden(*_args, **_kwargs):
+                raise AssertionError("legacy split read must not be used")
+
+            selected.load_manifest = legacy_split_read_forbidden
+            selected.read_bytes = legacy_split_read_forbidden
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_root=artifact_root_for(store),
+                evidence_artifact_store=selected,
+            )
+            item = obligation(store)
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="snapshot-rule",
+                    idempotency_key="snapshot-rule",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            self.assertTrue(
+                settlements.apply_settlement(
+                    evidence,
+                    as_of=date(2026, 9, 26),
+                    command_id="snapshot-completion",
+                    idempotency_key="snapshot-completion",
+                    committed_at="2026-09-26T15:00:01Z",
+                )
+            )
+
+    def test_artifact_store_subclass_cannot_mint_settlement_rule_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            item = obligation(store)
+
+            class HostileArtifactStore(ArtifactStore):
+                called = False
+
+                def read_authenticated_snapshot(self, artifact_id):
+                    type(self).called = True
+                    return super().read_authenticated_snapshot(artifact_id)
+
+            hostile = HostileArtifactStore(
+                Path(store.path).parent / "settlement-evidence"
+            )
+            with self.assertRaises(TypeError):
+                DurableSettlementBook(
+                    store,
+                    provider_id=PROVIDER,
+                    account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                    evidence_artifact_root=artifact_root_for(store),
+                    evidence_artifact_store=hostile,
+                )
+            self.assertFalse(HostileArtifactStore.called)
+
+    def test_snapshot_oserror_fails_before_rule_or_completion_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            settlements = durable(store)
+            item = obligation(store)
+
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
+                side_effect=OSError("simulated snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.register_obligations(
+                        (item,),
+                        command_id="rule-oserror",
+                        idempotency_key="rule-oserror",
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+            self.assertEqual(settlements.obligations, ())
+
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="rule-ok",
+                    idempotency_key="rule-ok",
+                    committed_at="2026-09-25T09:00:03Z",
+                )
+            )
+            evidence = bind_evidence(store, item)
+            with patch(
+                "research.autotrade_research.artifacts._root_authority."
+                "_CANONICAL_AUTHENTICATED_READ",
+                side_effect=OSError("simulated completion snapshot failure"),
+            ):
+                with self.assertRaisesRegex(
+                    SettlementConflict,
+                    "artifact verification failed",
+                ):
+                    settlements.apply_settlement(
+                        evidence,
+                        as_of=date(2026, 9, 26),
+                        command_id="completion-oserror",
+                        idempotency_key="completion-oserror",
+                        committed_at="2026-09-26T15:00:01Z",
+                    )
+            self.assertEqual(settlements.settled_obligation_evidence, {})
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -369,6 +489,43 @@ class DurableSettlementBookTests(unittest.TestCase):
                 Decimal("1100"),
             )
 
+    def test_project_observes_cross_instance_settlement_registration(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            economic = economics(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="deposit-cross-instance",
+                    cause_event_id="deposit-event-cross-instance",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            sold = sell_transaction()
+            economic.append(sold)
+
+            reader = durable(store)
+            writer_store = JournalStore(path)
+            writer = durable(writer_store)
+            writer_item = obligation(writer_store, sold)
+            self.assertTrue(
+                writer.register_obligations(
+                    (writer_item,),
+                    command_id="register-cross-instance",
+                    idempotency_key="register-cross-instance",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+
+            projected = reader.project(economic)
+            self.assertEqual(projected.snapshot("USD").settled_cash, Decimal("1000"))
+            self.assertEqual(
+                projected.snapshot("USD").unsettled_receivable,
+                Decimal("100"),
+            )
+            self.assertEqual(projected.available_to_spend("USD"), Decimal("1000"))
+
     def test_changed_evidence_after_settlement_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -483,11 +640,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             settlements = durable(store)
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected settlement commit failure")
 
-            store.commit_command = fail
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     settlements.register_obligations(
                         (obligation(store),),
@@ -495,11 +651,99 @@ class DurableSettlementBookTests(unittest.TestCase):
                         idempotency_key="register",
                         committed_at="2026-09-25T09:00:02Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             self.assertEqual(durable(JournalStore(path)).obligations, ())
 
+
+    def test_registration_rejects_intervening_journal_write_after_validation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            settlements = durable(store)
+            item = obligation(store)
+            original_prepare = settlements.prepare_register_mutation
+
+            def prepare_then_advance(*args, **kwargs):
+                plan = original_prepare(*args, **kwargs)
+                payload = {"marker": "registration-interleave"}
+                store.append_event(
+                    {
+                        "event_id": "registration-interleave-1",
+                        "event_type": "UnrelatedFinancialStateAdvanced",
+                        "aggregate_type": "test_interleaving",
+                        "aggregate_id": "registration",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-25T09:00:02Z",
+                    }
+                )
+                return plan
+
+            settlements.prepare_register_mutation = prepare_then_advance
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after financial evidence validation",
+            ):
+                settlements.register_obligations(
+                    (item,),
+                    command_id="register-interleaved",
+                    idempotency_key="register-interleaved",
+                    committed_at="2026-09-25T09:00:03Z",
+                )
+
+            self.assertEqual(durable(JournalStore(path)).obligations, ())
+
+    def test_settlement_rejects_intervening_journal_write_after_validation(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            settlements = durable(store)
+            item = obligation(store)
+            self.assertTrue(
+                settlements.register_obligations(
+                    (item,),
+                    command_id="register-before-settlement-interleave",
+                    idempotency_key="register-before-settlement-interleave",
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            )
+            completion = bind_evidence(store, item)
+            original_prepare = settlements.prepare_settlement_mutation
+
+            def prepare_then_advance(*args, **kwargs):
+                plan = original_prepare(*args, **kwargs)
+                payload = {"marker": "settlement-interleave"}
+                store.append_event(
+                    {
+                        "event_id": "settlement-interleave-1",
+                        "event_type": "UnrelatedFinancialStateAdvanced",
+                        "aggregate_type": "test_interleaving",
+                        "aggregate_id": "settlement",
+                        "aggregate_version": "1",
+                        "payload": payload,
+                        "payload_hash": payload_digest(payload),
+                        "committed_at": "2026-09-26T15:00:01Z",
+                    }
+                )
+                return plan
+
+            settlements.prepare_settlement_mutation = prepare_then_advance
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after financial evidence validation",
+            ):
+                settlements.apply_settlement(
+                    completion,
+                    as_of=date(2026, 9, 26),
+                    command_id="settle-interleaved",
+                    idempotency_key="settle-interleaved",
+                    committed_at="2026-09-26T15:00:02Z",
+                )
+
+            reopened = durable(JournalStore(path))
+            self.assertEqual(reopened.obligations, (item,))
+            self.assertEqual(reopened.settled_obligation_evidence, {})
 
     def test_correction_before_settlement_atomically_replaces_pending_cash(self):
         with TemporaryDirectory() as directory:
@@ -728,11 +972,10 @@ class DurableSettlementBookTests(unittest.TestCase):
             before_obligations = settlements.obligations
             original_commit = store.commit_command
 
-            def fail(**kwargs):
+            def fail(_store, **kwargs):
                 raise RuntimeError("injected correction commit failure")
 
-            store.commit_command = fail
-            try:
+            with patch.object(JournalStore, "commit_command", autospec=True, side_effect=fail):
                 with self.assertRaisesRegex(RuntimeError, "commit failure"):
                     commit_economic_correction_with_settlement_replacement(
                         economic,
@@ -744,8 +987,6 @@ class DurableSettlementBookTests(unittest.TestCase):
                         settlement_obligations=(replacement_obligation,),
                         committed_at="2026-09-25T10:00:02Z",
                     )
-            finally:
-                store.commit_command = original_commit
 
             self.assertEqual(economic.audit_digest(), before_economic)
             self.assertEqual(settlements.obligations, before_obligations)

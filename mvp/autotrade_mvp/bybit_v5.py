@@ -4,7 +4,7 @@ This module deliberately performs no networking, stores no credentials and
 cannot grant trading authority. It translates already-authorized canonical
 values and recorded Bybit responses into AutoTrade provider/reconciliation
 contracts. Live, demo and test environments remain unqualified until exact
-adapter evidence satisfies provider_core.QualificationEvidence.
+adapter evidence satisfies the canonical provider qualification authority.
 """
 
 from __future__ import annotations
@@ -18,13 +18,32 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from weakref import ref as weakref_ref
 
 from .capabilities import CapabilityError, CapabilitySnapshot
+from .bybit_fee_currency_authority import (
+    BybitExecutionFeeCurrencyAuthority,
+    BybitFeeCurrencyAuthorityError,
+    consume_bybit_execution_fee_currency_authority,
+    project_bybit_execution_fee_currency_authority,
+)
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+    InstrumentVersion,
+)
+from .exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    provider_response_observation_require_scope,
+    provider_submission_observation_projection,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -39,6 +58,7 @@ BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {
     "POSITIONS": "/v5/position/list",
     "WALLET": "/v5/account/wallet-balance",
     "ACTIVITIES": "/v5/account/transaction-log",
+    "OPTION_DELIVERIES": "/v5/asset/delivery-record",
 }
 
 _CATEGORY_BY_FAMILY = {
@@ -57,6 +77,7 @@ _TIME_IN_FORCE = {
 }
 
 _AMBIGUOUS_RESPONSE_CODES = frozenset({429, 10000, 10014, 10016})
+_DEFINITIVE_REJECTION_CODES = frozenset({10001})
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
 _REST_BASE_BY_ENVIRONMENT: Mapping[str, str] = {
     "MAINNET": "https://api.bybit.com",
@@ -290,6 +311,10 @@ def _position_idx_from_capability(
         raise ProviderCoreError(
             "capability environment does not match target Bybit environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
+        )
 
     family = _text(product_family, name="product_family").upper()
     try:
@@ -376,6 +401,10 @@ def build_order_payload(
         category = _CATEGORY_BY_FAMILY[family]
     except KeyError as error:
         raise ProviderCoreError("unsupported Bybit product family") from error
+    if family == "OPTIONS":
+        raise ProviderCoreError(
+            "Bybit option payload serialization requires dedicated option semantics"
+        )
 
     provider_symbol = _text(symbol, name="symbol")
     if provider_symbol != provider_symbol.upper():
@@ -436,8 +465,10 @@ def build_order_payload(
                 raise ProviderCoreError(
                     "position_idx conflicts with verified account position mode"
                 )
-    elif position_idx is not None:
-        raise ProviderCoreError("position_idx is only supported for derivative orders")
+    elif position_side is not None or position_idx is not None:
+        raise ProviderCoreError(
+            "position_side and position_idx are only supported for derivative orders"
+        )
 
     payload: dict[str, Any] = {
         "category": category,
@@ -592,6 +623,10 @@ def prepare_order_submission(
         raise ProviderCoreError(
             "capability environment does not match Bybit provider environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target Bybit provider environment"
+        )
     point = (
         at.astimezone(timezone.utc)
         if isinstance(at, datetime) and at.tzinfo is not None
@@ -599,6 +634,26 @@ def prepare_order_submission(
     )
     if point is None:
         raise ProviderCoreError("at must be timezone-aware")
+    normalized_family = _text(product_family, name="product_family").upper()
+    if normalized_family == "MARGIN":
+        # Bybit MARGIN maps to spot isLeverage=1 and can borrow. Generic
+        # ORDER_WRITE capability is not evidence of current spot-margin mode,
+        # collateral eligibility, leverage or borrow quota. Keep the pure
+        # payload serializer available for deterministic fixtures, but never
+        # issue a canonical executable prepared request until those financial
+        # authorities are composed explicitly.
+        raise ProviderCoreError(
+            "Bybit MARGIN canonical preparation requires dedicated "
+            "spot-margin borrow/collateral authority"
+        )
+    if normalized_family == "OPTIONS":
+        # Option orders carry distinct payoff, exercise/lifecycle and protection
+        # semantics. Generic ORDER_WRITE does not prove the option-specific
+        # capability/economic authorities required for an executable request.
+        raise ProviderCoreError(
+            "Bybit OPTIONS canonical preparation requires dedicated "
+            "option capability/payoff authority"
+        )
     normalized_type = _text(order_type, name="order_type").upper()
     normalized_tif = _text(time_in_force, name="time_in_force").upper()
     if not capability.admits(
@@ -611,7 +666,7 @@ def prepare_order_submission(
             "exact capability evidence does not admit this Bybit order"
         )
     body = build_order_payload(
-        product_family=product_family,
+        product_family=normalized_family,
         symbol=symbol,
         side=side,
         order_type=order_type,
@@ -641,208 +696,945 @@ def prepare_order_submission(
     )
 
 
-def guarded_order_projection(
-    prepared_request: BybitPreparedSubmission,
-) -> Mapping[str, object]:
-    """Project canonical Bybit preparation into the shared guarded transport seam."""
+def _install_bybit_prepared_submission_authority(
+    builder,
+):
+    """Wrap canonical preparation with closure-owned issued-object provenance."""
 
-    if not isinstance(prepared_request, BybitPreparedSubmission):
-        raise TypeError("prepared_request must be BybitPreparedSubmission")
-    return MappingProxyType(
-        {
-            "endpoint": prepared_request.endpoint,
-            "body": dict(prepared_request.body),
-            "account_id": prepared_request.account_id,
-            "environment": prepared_request.environment,
-            "provider_environment": prepared_request.provider_environment,
-            "capability_snapshot_id": prepared_request.capability_snapshot_id,
-            "entity_id": prepared_request.entity_id,
-            "capability_snapshot_ids": list(
-                prepared_request.capability_snapshot_ids
+    prepared_type = BybitPreparedSubmission
+    capability_type = CapabilitySnapshot
+    datetime_type = datetime
+    timezone_type = timezone
+    prepared_ref = weakref_ref
+    prepared_init = prepared_type.__init__
+    prepared_init_code = prepared_init.__code__
+    prepared_post_init = prepared_type.__post_init__
+    prepared_post_init_code = prepared_post_init.__code__
+    builder_code = builder.__code__
+    canonical_build_order_payload = build_order_payload
+    canonical_build_order_payload_code = build_order_payload.__code__
+    canonical_text = _text
+    canonical_text_code = _text.__code__
+    canonical_decimal_text = _decimal_text
+    canonical_decimal_text_code = _decimal_text.__code__
+    canonical_client_order_id = _client_order_id
+    canonical_client_order_id_code = _client_order_id.__code__
+    canonical_position_idx = _position_idx_from_capability
+    canonical_position_idx_code = _position_idx_from_capability.__code__
+    canonical_capability_admits = capability_type.admits
+    canonical_capability_admits_code = capability_type.admits.__code__
+    bool_type = bool
+    int_type = int
+    float_type = float
+    str_type = str
+    decimal_type = Decimal
+    canonical_format = format
+    mapping_type = Mapping
+    canonical_json_module = json
+    canonical_json_dumps = json.dumps
+    canonical_json_loads = json.loads
+    canonical_sha256 = sha256
+    type_error = TypeError
+    value_error = ValueError
+    invalid_operation_type = InvalidOperation
+    capability_error_type = CapabilityError
+    canonical_decimal = _decimal
+    canonical_decimal_code = canonical_decimal.__code__
+    client_id_pattern = _CLIENT_ID
+    canonical_dict = dict
+    canonical_dict_get = canonical_dict.get
+    canonical_len = len
+    category_by_family = _CATEGORY_BY_FAMILY
+    time_in_force_map = _TIME_IN_FORCE
+    rest_base_by_environment = _REST_BASE_BY_ENVIRONMENT
+    runtime_environment_by_provider_environment = (
+        _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    )
+    derivative_scope_by_family = _DERIVATIVE_ORDER_SCOPE_BY_FAMILY
+    capability_environment_by_provider_environment = (
+        _CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+    )
+    documented_endpoints = BYBIT_DOCUMENTED_ENDPOINTS
+    prepared_token = _BYBIT_PREPARED_SUBMISSION_TOKEN
+    error_type = ProviderCoreError
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_getattr = getattr
+    canonical_isinstance = isinstance
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    attribute_error_type = AttributeError
+    mapping_proxy_type = MappingProxyType
+
+    bindings: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_changed():
+        raise error_type("Bybit prepared submission authority changed")
+
+    def implementation_changed():
+        if (
+            ProviderCoreError is not error_type
+            or type is not canonical_type
+            or id is not canonical_id
+            or tuple is not canonical_tuple
+            or getattr is not canonical_getattr
+            or isinstance is not canonical_isinstance
+            or bool is not bool_type
+            or int is not int_type
+            or float is not float_type
+            or str is not str_type
+            or Decimal is not decimal_type
+            or format is not canonical_format
+            or Mapping is not mapping_type
+            or json is not canonical_json_module
+            or json.dumps is not canonical_json_dumps
+            or json.loads is not canonical_json_loads
+            or sha256 is not canonical_sha256
+            or TypeError is not type_error
+            or ValueError is not value_error
+            or InvalidOperation is not invalid_operation_type
+            or CapabilityError is not capability_error_type
+            or _decimal is not canonical_decimal
+            or canonical_getattr(canonical_decimal, "__code__", None)
+            is not canonical_decimal_code
+            or _CLIENT_ID is not client_id_pattern
+            or dict is not canonical_dict
+            or len is not canonical_len
+            or object is not canonical_object
+            or AttributeError is not attribute_error_type
+            or MappingProxyType is not mapping_proxy_type
+            or datetime is not datetime_type
+            or timezone is not timezone_type
+            or CapabilitySnapshot is not capability_type
+            or BybitPreparedSubmission is not prepared_type
+            or prepared_type.__init__ is not prepared_init
+            or canonical_getattr(prepared_init, "__code__", None)
+            is not prepared_init_code
+            or prepared_type.__post_init__ is not prepared_post_init
+            or canonical_getattr(prepared_post_init, "__code__", None)
+            is not prepared_post_init_code
+            or canonical_getattr(builder, "__code__", None) is not builder_code
+            or build_order_payload is not canonical_build_order_payload
+            or canonical_getattr(
+                canonical_build_order_payload,
+                "__code__",
+                None,
+            )
+            is not canonical_build_order_payload_code
+            or _text is not canonical_text
+            or canonical_getattr(canonical_text, "__code__", None)
+            is not canonical_text_code
+            or _decimal_text is not canonical_decimal_text
+            or canonical_getattr(canonical_decimal_text, "__code__", None)
+            is not canonical_decimal_text_code
+            or _client_order_id is not canonical_client_order_id
+            or canonical_getattr(canonical_client_order_id, "__code__", None)
+            is not canonical_client_order_id_code
+            or _position_idx_from_capability is not canonical_position_idx
+            or canonical_getattr(canonical_position_idx, "__code__", None)
+            is not canonical_position_idx_code
+            or _CATEGORY_BY_FAMILY is not category_by_family
+            or _TIME_IN_FORCE is not time_in_force_map
+            or _REST_BASE_BY_ENVIRONMENT is not rest_base_by_environment
+            or _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not runtime_environment_by_provider_environment
+            or _DERIVATIVE_ORDER_SCOPE_BY_FAMILY is not derivative_scope_by_family
+            or _CAPABILITY_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT
+            is not capability_environment_by_provider_environment
+            or BYBIT_DOCUMENTED_ENDPOINTS is not documented_endpoints
+            or _BYBIT_PREPARED_SUBMISSION_TOKEN is not prepared_token
+            or canonical_type(category_by_family) is not canonical_dict
+            or canonical_len(category_by_family) != 5
+            or canonical_dict_get(category_by_family, "SPOT") != "spot"
+            or canonical_dict_get(category_by_family, "MARGIN") != "spot"
+            or canonical_dict_get(category_by_family, "LINEAR_DERIVATIVES") != "linear"
+            or canonical_dict_get(category_by_family, "INVERSE_DERIVATIVES")
+            != "inverse"
+            or canonical_dict_get(category_by_family, "OPTIONS") != "option"
+            or canonical_type(time_in_force_map) is not canonical_dict
+            or canonical_len(time_in_force_map) != 4
+            or canonical_dict_get(time_in_force_map, "GTC") != "GTC"
+            or canonical_dict_get(time_in_force_map, "IOC") != "IOC"
+            or canonical_dict_get(time_in_force_map, "FOK") != "FOK"
+            or canonical_dict_get(time_in_force_map, "POST_ONLY") != "PostOnly"
+            or canonical_type(rest_base_by_environment) is not canonical_dict
+            or canonical_len(rest_base_by_environment) != 3
+            or canonical_dict_get(rest_base_by_environment, "MAINNET")
+            != "https://api.bybit.com"
+            or canonical_dict_get(rest_base_by_environment, "TESTNET")
+            != "https://api-testnet.bybit.com"
+            or canonical_dict_get(rest_base_by_environment, "DEMO")
+            != "https://api-demo.bybit.com"
+            or canonical_type(runtime_environment_by_provider_environment)
+            is not canonical_dict
+            or canonical_len(runtime_environment_by_provider_environment) != 3
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "MAINNET"
+            )
+            != "LIVE"
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "TESTNET"
+            )
+            != "PAPER"
+            or canonical_dict_get(
+                runtime_environment_by_provider_environment, "DEMO"
+            )
+            != "PAPER"
+            or canonical_type(derivative_scope_by_family) is not canonical_dict
+            or canonical_len(derivative_scope_by_family) != 2
+            or canonical_dict_get(
+                derivative_scope_by_family, "LINEAR_DERIVATIVES"
+            )
+            != "BYBIT.LINEAR.ORDER.WRITE"
+            or canonical_dict_get(
+                derivative_scope_by_family, "INVERSE_DERIVATIVES"
+            )
+            != "BYBIT.INVERSE.ORDER.WRITE"
+            or canonical_type(capability_environment_by_provider_environment)
+            is not canonical_dict
+            or canonical_len(capability_environment_by_provider_environment) != 3
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "MAINNET"
+            )
+            != "LIVE"
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "TESTNET"
+            )
+            != "PAPER"
+            or canonical_dict_get(
+                capability_environment_by_provider_environment, "DEMO"
+            )
+            != "PAPER"
+            or canonical_type(documented_endpoints) is not canonical_dict
+            or canonical_dict_get(documented_endpoints, "PLACE_ORDER")
+            != "/v5/order/create"
+            or capability_type.admits is not canonical_capability_admits
+            or canonical_getattr(canonical_capability_admits, "__code__", None)
+            is not canonical_capability_admits_code
+        ):
+            authority_changed()
+
+    def snapshot(value):
+        try:
+            return (
+                object_getattribute(value, "endpoint"),
+                object_getattribute(value, "body"),
+                object_getattribute(value, "account_id"),
+                object_getattribute(value, "environment"),
+                object_getattribute(value, "provider_environment"),
+                object_getattribute(value, "capability_snapshot_id"),
+                object_getattribute(value, "entity_id"),
+                object_getattribute(value, "instrument_version"),
+                object_getattribute(value, "body_sha256"),
+            )
+        except attribute_error_type:
+            authority_changed()
+
+    def require_canonical_bybit_prepared_submission(value):
+        implementation_changed()
+        if canonical_type(value) is not prepared_type:
+            authority_changed()
+        binding = bindings.get(canonical_id(value))
+        if binding is None:
+            authority_changed()
+        bound_ref, expected = binding
+        if bound_ref() is not value:
+            authority_changed()
+        current = snapshot(value)
+        if (
+            current[1] is not expected[1]
+            or current[:1] + current[2:] != expected[:1] + expected[2:]
+        ):
+            authority_changed()
+        if canonical_type(current[1]) is not mapping_proxy_type:
+            authority_changed()
+        return value
+
+    def canonical_prepare_order_submission(
+        *,
+        capability: CapabilitySnapshot,
+        at: datetime,
+        provider_environment: str,
+        product_family: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: object,
+        client_order_id: str,
+        time_in_force: str,
+        price: object | None = None,
+        reduce_only: bool = False,
+        position_side: str | None = None,
+        position_idx: int | None = None,
+    ) -> BybitPreparedSubmission:
+        implementation_changed()
+        if canonical_type(capability) is not capability_type:
+            raise error_type(
+                "Bybit preparation requires exact CapabilitySnapshot authority"
+            )
+        if canonical_type(at) is not datetime_type:
+            raise error_type("Bybit preparation time must be exact datetime")
+        if canonical_type(at.tzinfo) is not timezone_type:
+            raise error_type(
+                "Bybit preparation time must use exact stdlib timezone"
+            )
+        for name, value in (
+            ("provider_environment", provider_environment),
+            ("product_family", product_family),
+            ("symbol", symbol),
+            ("side", side),
+            ("order_type", order_type),
+            ("client_order_id", client_order_id),
+            ("time_in_force", time_in_force),
+        ):
+            if canonical_type(value) is not str_type:
+                raise error_type(f"{name} must be exact str")
+        quantity_type = canonical_type(quantity)
+        if (
+            quantity_type is not str_type
+            and quantity_type is not decimal_type
+            and quantity_type is not int_type
+        ):
+            raise error_type("quantity must be exact str, Decimal or int")
+        if price is not None:
+            price_type = canonical_type(price)
+            if (
+                price_type is not str_type
+                and price_type is not decimal_type
+                and price_type is not int_type
+            ):
+                raise error_type("price must be exact str, Decimal or int")
+        if canonical_type(reduce_only) is not bool_type:
+            raise error_type("reduce_only must be exact bool")
+        if (
+            position_side is not None
+            and canonical_type(position_side) is not str_type
+        ):
+            raise error_type("position_side must be exact str or None")
+        if (
+            position_idx is not None
+            and canonical_type(position_idx) is not int_type
+        ):
+            raise error_type("position_idx must be exact int or None")
+
+        prepared = builder(
+            capability=capability,
+            at=at,
+            provider_environment=provider_environment,
+            product_family=product_family,
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            client_order_id=client_order_id,
+            time_in_force=time_in_force,
+            price=price,
+            reduce_only=reduce_only,
+            position_side=position_side,
+            position_idx=position_idx,
+        )
+        implementation_changed()
+        if canonical_type(prepared) is not prepared_type:
+            authority_changed()
+
+        dead = [
+            key
+            for key, (existing_ref, _snapshot) in canonical_tuple(bindings.items())
+            if existing_ref() is None
+        ]
+        for key in dead:
+            bindings.pop(key, None)
+
+        bindings[canonical_id(prepared)] = (
+            prepared_ref(prepared),
+            snapshot(prepared),
+        )
+        require_canonical_bybit_prepared_submission(prepared)
+        return prepared
+
+    return canonical_prepare_order_submission, require_canonical_bybit_prepared_submission
+
+_unissued_prepare_order_submission = prepare_order_submission
+(
+    prepare_order_submission,
+    require_canonical_bybit_prepared_submission,
+) = _install_bybit_prepared_submission_authority(_unissued_prepare_order_submission)
+del _unissued_prepare_order_submission
+del _install_bybit_prepared_submission_authority
+
+def _install_guarded_order_projection(verifier):
+    """Capture the final prepared-request projection TCB outside module aliases."""
+
+    verifier_code = verifier.__code__
+    prepared_type = BybitPreparedSubmission
+    error_type = ProviderCoreError
+    canonical_object = object
+    object_getattribute = canonical_object.__getattribute__
+    canonical_dict = dict
+    mapping_proxy_type = MappingProxyType
+    canonical_getattr = getattr
+
+    def guarded_order_projection(
+        prepared_request: BybitPreparedSubmission,
+    ) -> Mapping[str, object]:
+        """Project one canonical preparation without late-bound caller callbacks."""
+
+        if (
+            require_canonical_bybit_prepared_submission is not verifier
+            or canonical_getattr(verifier, "__code__", None) is not verifier_code
+            or BybitPreparedSubmission is not prepared_type
+            or ProviderCoreError is not error_type
+            or object is not canonical_object
+            or dict is not canonical_dict
+            or MappingProxyType is not mapping_proxy_type
+            or getattr is not canonical_getattr
+        ):
+            raise error_type("Bybit guarded projection authority changed")
+
+        verifier(prepared_request)
+        endpoint = object_getattribute(prepared_request, "endpoint")
+        body = object_getattribute(prepared_request, "body")
+        account_id = object_getattribute(prepared_request, "account_id")
+        environment = object_getattribute(prepared_request, "environment")
+        provider_environment = object_getattribute(
+            prepared_request,
+            "provider_environment",
+        )
+        capability_snapshot_id = object_getattribute(
+            prepared_request,
+            "capability_snapshot_id",
+        )
+        entity_id = object_getattribute(prepared_request, "entity_id")
+        instrument_version = object_getattribute(
+            prepared_request,
+            "instrument_version",
+        )
+        body_sha256 = object_getattribute(prepared_request, "body_sha256")
+
+        return mapping_proxy_type(
+            {
+                "endpoint": endpoint,
+                "body": canonical_dict(body),
+                "account_id": account_id,
+                "environment": environment,
+                "provider_environment": provider_environment,
+                "capability_snapshot_id": capability_snapshot_id,
+                "entity_id": entity_id,
+                "capability_snapshot_ids": [capability_snapshot_id],
+                "instrument_versions": [instrument_version],
+                "body_sha256": body_sha256,
+            }
+        )
+
+    return guarded_order_projection
+
+
+guarded_order_projection = _install_guarded_order_projection(
+    require_canonical_bybit_prepared_submission
+)
+del _install_guarded_order_projection
+
+
+def _install_submission_response_parser(
+    prepared_projection,
+    observation_projection,
+):
+    """Seal final Bybit ACK/reject normalization behind canonical projections."""
+
+    prepared_projection_code = prepared_projection.__code__
+    observation_projection_code = observation_projection.__code__
+    observation_type = ProviderSubmissionObservation
+    error_type = ProviderCoreError
+    type_error = TypeError
+    value_error = ValueError
+    canonical_type = type
+    canonical_str = str
+    canonical_int = int
+    canonical_bool = bool
+    canonical_tuple = tuple
+    canonical_mapping_proxy = MappingProxyType
+    canonical_uuid = UUID
+    canonical_uuid5 = uuid5
+    canonical_uuid5_code = canonical_uuid5.__code__
+    canonical_namespace = NAMESPACE_URL
+    canonical_datetime = datetime
+    canonical_timezone = timezone
+    canonical_timedelta = timedelta
+    canonical_divmod = divmod
+    client_id_pattern = _CLIENT_ID
+    rest_bases = MappingProxyType(dict(_REST_BASE_BY_ENVIRONMENT))
+    ambiguous_codes = frozenset(_AMBIGUOUS_RESPONSE_CODES)
+    definitive_rejection_codes = frozenset(_DEFINITIVE_REJECTION_CODES)
+
+    def authority_changed():
+        raise error_type("Bybit submission response parser authority changed")
+
+    def implementation_changed():
+        if (
+            guarded_order_projection is not prepared_projection
+            or prepared_projection.__code__ is not prepared_projection_code
+            or provider_submission_observation_projection
+            is not observation_projection
+            or observation_projection.__code__ is not observation_projection_code
+            or ProviderSubmissionObservation is not observation_type
+            or ProviderCoreError is not error_type
+            or TypeError is not type_error
+            or ValueError is not value_error
+            or type is not canonical_type
+            or str is not canonical_str
+            or int is not canonical_int
+            or bool is not canonical_bool
+            or tuple is not canonical_tuple
+            or MappingProxyType is not canonical_mapping_proxy
+            or UUID is not canonical_uuid
+            or uuid5 is not canonical_uuid5
+            or canonical_uuid5.__code__ is not canonical_uuid5_code
+            or NAMESPACE_URL is not canonical_namespace
+            or datetime is not canonical_datetime
+            or timezone is not canonical_timezone
+            or timedelta is not canonical_timedelta
+            or divmod is not canonical_divmod
+            or _CLIENT_ID is not client_id_pattern
+        ):
+            authority_changed()
+
+    def exact_text(value, name):
+        if canonical_type(value) is not canonical_str:
+            raise error_type(f"{name} is required")
+        normalized = value.strip()
+        if not normalized:
+            raise error_type(f"{name} is required")
+        return normalized
+
+    def exact_client_id(value):
+        client_id = exact_text(value, "client_order_id")
+        if client_id_pattern.fullmatch(client_id) is None:
+            raise error_type(
+                "client_order_id must be 1-36 letters, numbers, dashes or underscores"
+            )
+        return client_id
+
+    def exact_uuid_text(value, name):
+        value_text = exact_text(value, name)
+        try:
+            canonical_uuid(value_text)
+        except value_error as error:
+            raise error_type(f"{name} must be a UUID") from error
+        return value_text
+
+    def exact_mapping(value, name):
+        if canonical_type(value) is not canonical_mapping_proxy:
+            raise error_type(f"{name} must be an object")
+        return value
+
+    def exact_integer(value, name):
+        if canonical_type(value) is not canonical_int:
+            raise error_type(f"{name} must be an integer")
+        return value
+
+    def millis_to_utc(value, name):
+        milliseconds = exact_integer(value, name)
+        if milliseconds < 0:
+            raise error_type(f"{name} must be at least 0")
+        seconds, remainder = canonical_divmod(milliseconds, 1000)
+        instant = canonical_datetime.fromtimestamp(
+            seconds,
+            tz=canonical_timezone.utc,
+        ) + canonical_timedelta(milliseconds=remainder)
+        return instant.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    def evidence_from_projection(observed, prepared):
+        source_uri = (
+            rest_bases[prepared["provider_environment"]]
+            + prepared["endpoint"]
+        )
+        return {
+            "artifact_id": canonical_str(
+                canonical_uuid5(
+                    canonical_namespace,
+                    f"{source_uri}#{observed['evidence_ref']}",
+                )
             ),
-            "instrument_versions": list(prepared_request.instrument_versions),
-            "body_sha256": prepared_request.body_sha256,
+            "sha256": observed["response_sha256"],
+            "source_uri": source_uri,
+            "observed_at": observed["sent_at"],
+            "rights_id": "provider-observation-bybit",
         }
-    )
 
+    def parse_submission_response(
+        *,
+        attempt_id: str,
+        prepared_request: BybitPreparedSubmission,
+        observation: ProviderSubmissionObservation | None = None,
+        transport_ambiguous: bool = False,
+    ) -> dict[str, Any]:
+        """Map one authenticated durable Bybit create-order response."""
 
-def _submission_evidence(
-    observation: ProviderSubmissionObservation,
-    *,
-    prepared_request: BybitPreparedSubmission,
-) -> dict[str, str]:
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
+        implementation_changed()
+        aid = exact_uuid_text(attempt_id, "attempt_id")
+        prepared = prepared_projection(prepared_request)
+        cid = exact_client_id(prepared["body"].get("orderLinkId"))
+
+        if canonical_type(transport_ambiguous) is not canonical_bool:
+            raise error_type("transport_ambiguous must be boolean")
+        if transport_ambiguous:
+            if observation is not None:
+                raise error_type(
+                    "ambiguous transport cannot also claim an authoritative response"
+                )
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
+                "evidence": [],
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+
+        if canonical_type(observation) is not observation_type:
+            raise type_error(
+                "observation must be durable ProviderSubmissionObservation"
+            )
+        observed = observation_projection(observation)
+        if observed["attempt_id"] != aid:
+            raise error_type("Bybit submission observation attempt_id mismatch")
+        submission_scope = exact_mapping(
+            observed["submission_scope"],
+            "submission_scope",
         )
-    observation.require_scope(
-        provider_id="BYBIT",
-        endpoint=prepared_request.endpoint,
-        prepared_request_sha256=prepared_request.body_sha256,
-        capability_snapshot_ids=prepared_request.capability_snapshot_ids,
-        instrument_versions=prepared_request.instrument_versions,
-        account_id=prepared_request.account_id,
-        environment=prepared_request.environment,
-        client_order_id=_client_order_id(
-            prepared_request.body.get("orderLinkId")
-        ),
-    )
-    source_uri = (
-        _REST_BASE_BY_ENVIRONMENT[prepared_request.provider_environment]
-        + prepared_request.endpoint
-    )
-    return {
-        "artifact_id": str(
-            uuid5(
-                NAMESPACE_URL,
-                f"{source_uri}#{observation.evidence_ref}",
+        raw_scoped_provider_environment = submission_scope.get(
+            "provider_environment"
+        )
+        scoped_provider_environment = exact_text(
+            raw_scoped_provider_environment,
+            "submission_scope.provider_environment",
+        )
+        if scoped_provider_environment != raw_scoped_provider_environment:
+            raise error_type("provider-write provenance scope mismatch")
+        http_status = observed["http_status"]
+        if http_status is None:
+            raise error_type(
+                "Bybit submission observation requires successful HTTP status"
             )
-        ),
-        "sha256": observation.response_sha256,
-        "source_uri": source_uri,
-        "observed_at": observation.observed_at,
-        "rights_id": "provider-observation-bybit",
-    }
-
-def parse_submission_response(
-    *,
-    attempt_id: str,
-    prepared_request: BybitPreparedSubmission,
-    observation: ProviderSubmissionObservation | None = None,
-    transport_ambiguous: bool = False,
-) -> dict[str, Any]:
-    """Map one exact durable Bybit create-order response to SubmissionResult."""
-
-    aid = _uuid_text(attempt_id, name="attempt_id")
-    if not isinstance(prepared_request, BybitPreparedSubmission):
-        raise TypeError("prepared_request must be BybitPreparedSubmission")
-    cid = _client_order_id(prepared_request.body.get("orderLinkId"))
-    if type(transport_ambiguous) is not bool:
-        raise ProviderCoreError("transport_ambiguous must be boolean")
-    if transport_ambiguous:
-        if observation is not None:
-            raise ProviderCoreError(
-                "ambiguous transport cannot also claim an authoritative response"
+        http_status = exact_integer(http_status, "http_status")
+        if http_status < 200 or http_status > 299:
+            raise error_type(
+                "Bybit submission observation requires successful HTTP status"
             )
+        if (
+            observed["provider_id"] != "BYBIT"
+            or observed["endpoint"] != prepared["endpoint"]
+            or observed["request_sha256"] != prepared["body_sha256"]
+            or observed["capability_snapshot_ids"]
+            != canonical_tuple(prepared["capability_snapshot_ids"])
+            or observed["instrument_versions"]
+            != canonical_tuple(prepared["instrument_versions"])
+            or observed["account_id"] != prepared["account_id"]
+            or observed["environment"] != prepared["environment"]
+            or scoped_provider_environment != prepared["provider_environment"]
+            or observed["client_order_id"] != cid
+        ):
+            raise error_type("provider-write provenance scope mismatch")
+
+        evidence = [evidence_from_projection(observed, prepared)]
+        envelope = exact_mapping(observed["payload"], "response")
+        code = exact_integer(envelope.get("retCode"), "retCode")
+        response_time = envelope.get("time")
+        provider_received_at = (
+            millis_to_utc(response_time, "response.time")
+            if response_time is not None
+            else None
+        )
+
+        if code == 0:
+            result = exact_mapping(envelope.get("result"), "result")
+            raw_provider_order_id = result.get("orderId")
+            provider_order_id = exact_text(
+                raw_provider_order_id,
+                "result.orderId",
+            )
+            if provider_order_id != raw_provider_order_id:
+                raise error_type(
+                    "Bybit orderId response must be canonical exact text"
+                )
+            raw_echoed_client_id = result.get("orderLinkId")
+            echoed_client_id = exact_text(
+                raw_echoed_client_id,
+                "result.orderLinkId",
+            )
+            if echoed_client_id != raw_echoed_client_id:
+                raise error_type(
+                    "Bybit orderLinkId response must be canonical exact text"
+                )
+            if echoed_client_id != cid:
+                raise error_type(
+                    "Bybit orderLinkId response does not match request"
+                )
+            return {
+                "attempt_id": aid,
+                "outcome": "ACKNOWLEDGED",
+                "provider_order_id": provider_order_id,
+                "client_order_id": cid,
+                **(
+                    {"provider_received_at": provider_received_at}
+                    if provider_received_at is not None
+                    else {}
+                ),
+                "evidence": evidence,
+                "retry_disposition": "NEVER",
+            }
+
+        outcome = (
+            "REJECTED"
+            if code in definitive_rejection_codes
+            else "UNKNOWN"
+        )
         return {
             "attempt_id": aid,
-            "outcome": "UNKNOWN",
-            "client_order_id": cid,
-            "reason_code": "BYBIT_TRANSPORT_AMBIGUOUS",
-            "evidence": [],
-            "retry_disposition": "RECONCILE_FIRST",
-        }
-    if not isinstance(observation, ProviderSubmissionObservation):
-        raise TypeError(
-            "observation must be durable ProviderSubmissionObservation"
-        )
-    if observation.response_binding.attempt_id != aid:
-        raise ProviderCoreError("Bybit submission observation attempt_id mismatch")
-    evidence = [
-        _submission_evidence(
-            observation,
-            prepared_request=prepared_request,
-        )
-    ]
-    envelope = _mapping(observation.payload, name="response")
-    code = _integer(envelope.get("retCode"), name="retCode")
-    provider_received_at = (
-        _millis_to_utc(envelope.get("time"), name="response.time")
-        if envelope.get("time") is not None
-        else None
-    )
-
-    if code == 0:
-        result = _mapping(envelope.get("result"), name="result")
-        provider_order_id = _text(result.get("orderId"), name="result.orderId")
-        echoed_client_id = _text(
-            result.get("orderLinkId"), name="result.orderLinkId"
-        )
-        if echoed_client_id != cid:
-            raise ProviderCoreError(
-                "Bybit orderLinkId response does not match request"
-            )
-        return {
-            "attempt_id": aid,
-            "outcome": "ACKNOWLEDGED",
-            "provider_order_id": provider_order_id,
+            "outcome": outcome,
             "client_order_id": cid,
             **(
                 {"provider_received_at": provider_received_at}
                 if provider_received_at is not None
                 else {}
             ),
+            "reason_code": f"BYBIT_{code}",
             "evidence": evidence,
-            "retry_disposition": "NEVER",
+            "retry_disposition": (
+                "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
+            ),
         }
 
-    outcome = "UNKNOWN" if code in _AMBIGUOUS_RESPONSE_CODES else "REJECTED"
-    return {
-        "attempt_id": aid,
-        "outcome": outcome,
-        "client_order_id": cid,
-        **(
-            {"provider_received_at": provider_received_at}
-            if provider_received_at is not None
-            else {}
-        ),
-        "reason_code": f"BYBIT_{code}",
-        "evidence": evidence,
-        "retry_disposition": (
-            "RECONCILE_FIRST" if outcome == "UNKNOWN" else "NEVER"
-        ),
-    }
+    return parse_submission_response
 
+
+parse_submission_response = _install_submission_response_parser(
+    guarded_order_projection,
+    provider_submission_observation_projection,
+)
+del _install_submission_response_parser
 
 def parse_executions(
     observation: ProviderResponseObservation,
     *,
     instrument_versions: Mapping[str, str],
-    qualified_fee_currencies: Mapping[str, str] | None = None,
+    fee_currency_authorities: tuple[BybitExecutionFeeCurrencyAuthority, ...] = (),
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one authenticated, exact-byte Bybit execution read into fills."""
 
-    if not isinstance(observation, ProviderResponseObservation):
-        raise TypeError("observation must be ProviderResponseObservation")
-    observation.require_scope(
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError("observation must be exact ProviderResponseObservation")
+    projection = provider_response_observation_require_scope(
+        observation,
         provider_id="BYBIT",
         surface=Surface.AUTHENTICATED_READ,
         endpoint=BYBIT_DOCUMENTED_ENDPOINTS["EXECUTIONS"],
     )
-    response = observation.payload
-    account_id = observation.account_id
-    environment = observation.environment
+    if projection["permission_scope"] != "ORDER.READ":
+        raise ProviderCoreError(
+            "Bybit execution evidence requires ORDER.READ permission scope"
+        )
+    query = projection["query"]
+    query_category = query.get("category")
+    if (
+        type(query_category) is not str
+        or query_category not in {"spot", "linear", "inverse", "option"}
+    ):
+        raise ProviderCoreError(
+            "Bybit execution query requires exact documented category"
+        )
+    query_exec_type = query.get("execType")
+    if (
+        query_exec_type is not None
+        and (
+            type(query_exec_type) is not str
+            or query_exec_type != "Trade"
+        )
+    ):
+        raise ProviderCoreError(
+            "Bybit canonical fill evidence requires query execType to be exact Trade"
+        )
+
+    execution_filters = []
+    for filter_name in ("orderId", "orderLinkId", "symbol", "baseCoin"):
+        filter_value = query.get(filter_name)
+        if filter_value is None:
+            continue
+        if (
+            type(filter_value) is not str
+            or not filter_value
+            or filter_value != filter_value.strip()
+        ):
+            raise ProviderCoreError(
+                f"Bybit execution query {filter_name} must be canonical exact text"
+            )
+        execution_filters.append((filter_name, filter_value))
+    if len(execution_filters) > 1:
+        raise ProviderCoreError(
+            "Bybit execution query must not combine provider selectors without "
+            "qualified conjunction semantics"
+        )
+    execution_filter = execution_filters[0] if execution_filters else None
+    if execution_filter is not None and execution_filter[0] == "baseCoin":
+        raise ProviderCoreError(
+            "Bybit baseCoin-filtered execution rows require qualified "
+            "symbol/base-coin authority"
+        )
+    response = projection["payload"]
+    account_id = projection["account_id"]
+    entity_id = projection["entity_id"]
+    environment = projection["environment"]
+    capability_snapshot_id = projection["capability_snapshot_id"]
+    admitted_instrument_version = projection["instrument_version"]
+    observation_evidence_ref = projection["evidence_ref"]
     envelope = _mapping(response, name="response")
-    if _integer(envelope.get("retCode"), name="retCode") != 0:
+    ret_code = envelope.get("retCode")
+    if type(ret_code) is not int:
+        raise ProviderCoreError(
+            "Bybit execution retCode must be exact integer"
+        )
+    if ret_code != 0:
         raise ProviderCoreError("Bybit execution response was not successful")
     result = _mapping(envelope.get("result"), name="result")
+    response_category = result.get("category")
+    if (
+        type(response_category) is not str
+        or response_category != query_category
+    ):
+        raise ProviderCoreError(
+            "Bybit execution response category must match exact queried category"
+        )
     rows = result.get("list")
     if not isinstance(rows, (list, tuple)):
         raise ProviderCoreError("result.list must be an array")
-    if not isinstance(instrument_versions, Mapping):
-        raise ProviderCoreError("instrument_versions must be a mapping")
-    if qualified_fee_currencies is not None and not isinstance(
-        qualified_fee_currencies, Mapping
-    ):
-        raise ProviderCoreError("qualified_fee_currencies must be a mapping")
+    def exact_text_mapping_snapshot(value, *, name):
+        if type(value) is dict:
+            items = tuple(dict.items(value))
+        elif type(value) is MappingProxyType:
+            items = tuple(value.items())
+        else:
+            raise ProviderCoreError(
+                f"{name} must be an exact dict snapshot or exact mappingproxy snapshot"
+            )
+        snapshot = {}
+        for key, item in items:
+            if type(key) is not str or type(item) is not str:
+                raise ProviderCoreError(
+                    f"{name} keys and values must be exact text"
+                )
+            dict.__setitem__(snapshot, key, item)
+        return MappingProxyType(snapshot)
+
+    instrument_versions = exact_text_mapping_snapshot(
+        instrument_versions,
+        name="instrument_versions",
+    )
+    if type(fee_currency_authorities) is not tuple:
+        raise ProviderCoreError(
+            "fee_currency_authorities must be an exact tuple of qualified authorities"
+        )
+    fee_authority_by_instrument = {}
+    authority_value_by_instrument = {}
+    for authority_value in fee_currency_authorities:
+        try:
+            authority_projection = (
+                project_bybit_execution_fee_currency_authority(authority_value)
+            )
+        except (TypeError, BybitFeeCurrencyAuthorityError) as error:
+            raise ProviderCoreError(
+                "Bybit execution fee-currency authority is not canonically issued"
+            ) from error
+        if authority_projection.instrument_version in fee_authority_by_instrument:
+            raise ProviderCoreError(
+                "Bybit execution fee-currency authority is ambiguous for instrument"
+            )
+        fee_authority_by_instrument[
+            authority_projection.instrument_version
+        ] = authority_projection
+        authority_value_by_instrument[
+            authority_projection.instrument_version
+        ] = authority_value
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
         row = _mapping(value, name=f"result.list[{index}]")
-        execution_id = _text(row.get("execId"), name="execId")
-        symbol = _text(row.get("symbol"), name="symbol")
+        raw_execution_id = row.get("execId")
+        if (
+            type(raw_execution_id) is not str
+            or not raw_execution_id
+            or raw_execution_id != raw_execution_id.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit execution id must be canonical exact text"
+            )
+        execution_id = raw_execution_id
+
+        raw_symbol = row.get("symbol")
+        if (
+            type(raw_symbol) is not str
+            or not raw_symbol
+            or raw_symbol != raw_symbol.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit execution symbol must be canonical exact text"
+            )
+        symbol = raw_symbol
         try:
             instrument = instrument_versions[symbol]
         except KeyError as error:
             raise ProviderCoreError(
                 f"unmapped Bybit instrument symbol: {symbol}"
             ) from error
-        instrument = _text(instrument, name="instrument_version")
+        if (
+            type(instrument) is not str
+            or not instrument
+            or instrument != instrument.strip()
+        ):
+            raise ProviderCoreError(
+                "Bybit instrument version must be canonical exact text"
+            )
+        if instrument != admitted_instrument_version:
+            raise ProviderCoreError(
+                "Bybit execution instrument version does not match authenticated "
+                "read capability"
+            )
 
         link = row.get("orderLinkId")
         client_id = None
         if link not in (None, ""):
+            if type(link) is not str or link != link.strip():
+                raise ProviderCoreError(
+                    "Bybit execution orderLinkId must be canonical exact text"
+                )
             client_id = _client_order_id(link)
+
+        if execution_filter is not None:
+            filter_name, filter_value = execution_filter
+            if filter_name == "orderId":
+                row_order_id = row.get("orderId")
+                if (
+                    type(row_order_id) is not str
+                    or row_order_id != filter_value
+                ):
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderId query"
+                    )
+            elif filter_name == "orderLinkId":
+                if type(link) is not str or link != filter_value:
+                    raise ProviderCoreError(
+                        "Bybit execution row does not match exact orderLinkId query"
+                    )
+            elif filter_name == "symbol" and symbol != filter_value:
+                raise ProviderCoreError(
+                    "Bybit execution row does not match exact symbol query"
+                )
+
+        provider_exec_type = row.get("execType")
+        if type(provider_exec_type) is not str or provider_exec_type != "Trade":
+            raise ProviderCoreError(
+                "Bybit canonical fill evidence requires row execType to be exact Trade"
+            )
 
         extra_fees = row.get("extraFees")
         if extra_fees not in (None, "", [], {}, ()):
@@ -852,28 +1644,108 @@ def parse_executions(
             )
 
         provider_fee_currency = row.get("feeCurrency")
-        if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
-            fee_currency = provider_fee_currency.strip()
-        else:
-            if qualified_fee_currencies is None:
-                raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved; qualified "
-                    "fee-currency evidence is required"
-                )
-            try:
-                fee_currency = qualified_fee_currencies[instrument]
-            except KeyError as error:
-                raise ProviderCoreError(
-                    "Bybit execution fee currency is unresolved for instrument"
-                ) from error
-            fee_currency = _text(
-                fee_currency,
-                name="qualified fee currency",
-            )
 
-        side = _text(row.get("side"), name="side").upper()
-        if side not in {"BUY", "SELL"}:
-            raise ProviderCoreError("execution side must be BUY or SELL")
+        provider_side = row.get("side")
+        if (
+            type(provider_side) is not str
+            or provider_side not in {"Buy", "Sell"}
+        ):
+            raise ProviderCoreError(
+                "Bybit execution side must be exact Buy or Sell"
+            )
+        side = "BUY" if provider_side == "Buy" else "SELL"
+
+        exec_qty = row.get("execQty")
+        exec_price = row.get("execPrice")
+        exec_fee = row.get("execFee")
+        exec_time = row.get("execTime")
+        for field_name, field_value in (
+            ("execQty", exec_qty),
+            ("execPrice", exec_price),
+            ("execFee", exec_fee),
+            ("execTime", exec_time),
+        ):
+            if (
+                type(field_value) is not str
+                or not field_value
+                or field_value != field_value.strip()
+            ):
+                raise ProviderCoreError(
+                    f"Bybit execution {field_name} must be canonical exact text"
+                )
+
+        bounded_economics: dict[str, Decimal] = {}
+        for field_name, field_value in (
+            ("execQty", exec_qty),
+            ("execPrice", exec_price),
+            ("execFee", exec_fee),
+        ):
+            try:
+                bounded_economics[field_name] = parse_bounded_exact_decimal(
+                    field_value
+                )
+            except ExactDecimalError as error:
+                raise ProviderCoreError(
+                    f"Bybit execution {field_name} exceeds exact numeric envelope"
+                ) from error
+        try:
+            exec_time_millis = parse_bounded_json_integer_token(exec_time)
+        except ExactDecimalError as error:
+            raise ProviderCoreError(
+                "Bybit execution execTime must be a bounded integer string"
+            ) from error
+        try:
+            trade_time = _millis_to_utc(exec_time_millis, name="execTime")
+        except (OverflowError, OSError, ValueError) as error:
+            raise ProviderCoreError(
+                "Bybit execution execTime is outside supported UTC range"
+            ) from error
+
+        fee_authority = fee_authority_by_instrument.get(instrument)
+        authority_evidence_ref = None
+        if fee_authority is not None:
+            try:
+                fee_authority = consume_bybit_execution_fee_currency_authority(
+                    authority_value_by_instrument[instrument],
+                    provider_id="BYBIT",
+                    runtime_environment=environment,
+                    account_id=account_id,
+                    entity_id=entity_id,
+                    capability_snapshot_id=capability_snapshot_id,
+                    category=query_category,
+                    instrument_version=instrument,
+                    provider_symbol=symbol,
+                    trade_time=trade_time,
+                )
+            except BybitFeeCurrencyAuthorityError as error:
+                raise ProviderCoreError(str(error)) from error
+            authority_evidence_ref = fee_authority.evidence_ref
+
+        if provider_fee_currency is None or provider_fee_currency == "":
+            if fee_authority is None:
+                raise ProviderCoreError(
+                    "Bybit execution fee currency is unresolved; exact qualified "
+                    "provider/instrument fee-currency authority is required"
+                )
+            fee_currency = fee_authority.fee_currency
+        else:
+            if (
+                type(provider_fee_currency) is not str
+                or provider_fee_currency != provider_fee_currency.strip()
+                or provider_fee_currency != provider_fee_currency.upper()
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution fee currency must be canonical exact text"
+                )
+            fee_currency = provider_fee_currency
+            if (
+                fee_authority is not None
+                and fee_currency != fee_authority.fee_currency
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution provider fee currency conflicts with qualified rule"
+                )
+
         fill = ProviderFillEvidence.create(
             provider_id="BYBIT",
             account_id=account_id,
@@ -882,12 +1754,16 @@ def parse_executions(
             client_order_id=client_id,
             instrument=instrument,
             side=side,
-            quantity=row.get("execQty"),
-            price=row.get("execPrice"),
-            fee_amount=row.get("execFee"),
+            quantity=bounded_economics["execQty"],
+            price=bounded_economics["execPrice"],
+            fee_amount=bounded_economics["execFee"],
             fee_currency=fee_currency,
-            trade_time=_millis_to_utc(row.get("execTime"), name="execTime"),
-            evidence_refs=(observation.evidence_ref,),
+            trade_time=trade_time,
+            evidence_refs=(
+                (observation_evidence_ref,)
+                if authority_evidence_ref is None
+                else (observation_evidence_ref, authority_evidence_ref)
+            ),
         )
         previous = by_execution.get(execution_id)
         if previous is not None and previous != fill:
@@ -897,6 +1773,572 @@ def parse_executions(
         by_execution[execution_id] = fill
 
     return tuple(by_execution.values())
+
+
+BYBIT_EXECUTION_PARSER_IDENTITY = "BYBIT_EXECUTION_V5_JSON_V1"
+BYBIT_EXECUTION_PARSER_VERSION = "1.2.0"
+BYBIT_EXECUTION_PARSER_CONTRACT_DIGEST = (
+    "sha256:"
+    + sha256(
+        json.dumps(
+            {
+                "parser_identity": BYBIT_EXECUTION_PARSER_IDENTITY,
+                "parser_version": BYBIT_EXECUTION_PARSER_VERSION,
+                "source_type": "EXACT_ProviderResponseObservation",
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "surface": "AUTHENTICATED_READ",
+                    "endpoint": "/v5/execution/list",
+                    "permission_scope": "ORDER.READ",
+                    "query_category": ["spot", "linear", "inverse", "option"],
+                    "response_category": "EXACT_MATCH_QUERY_CATEGORY",
+                },
+                "exec_type": {
+                    "query": "ABSENT_OR_EXACT_Trade",
+                    "row": (
+                        "EXACT_Trade_ONLY_OTHER_TYPES_REQUIRE_SPECIALIZED_"
+                        "ECONOMIC_MODEL"
+                    ),
+                },
+                "query_filter": {
+                    "priority": ["orderId", "orderLinkId", "symbol", "baseCoin"],
+                    "orderId": "EXACT_ROW_MATCH",
+                    "orderLinkId": "EXACT_ROW_MATCH",
+                    "symbol": "EXACT_ROW_MATCH",
+                    "baseCoin": (
+                        "FAIL_CLOSED_WITHOUT_QUALIFIED_SYMBOL_BASE_COIN_AUTHORITY"
+                    ),
+                    "multiple_selectors": (
+                        "FAIL_CLOSED_WITHOUT_QUALIFIED_CONJUNCTION_SEMANTICS"
+                    ),
+                },
+                "row_identity": {
+                    "execId": "EXACT_NONEMPTY_TEXT",
+                    "orderLinkId": "EMPTY_OR_EXACT_CANONICAL_CLIENT_ID",
+                    "symbol": "EXACT_NONEMPTY_TEXT",
+                    "side": ["Buy", "Sell"],
+                },
+                "source_authority": (
+                    "CLOSURE_OWNED_PROVIDER_RESPONSE_SCOPE_PROJECTION"
+                ),
+                "metadata_inputs": (
+                    "CALLBACK_FREE_EXACT_DICT_OR_MAPPINGPROXY_TEXT_SNAPSHOT"
+                ),
+                "instrument_binding": (
+                    "SYMBOL_MAPPING_MUST_EQUAL_AUTHENTICATED_READ_"
+                    "CAPABILITY_INSTRUMENT_VERSION"
+                ),
+                "economic_fields": {
+                    "execQty": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execPrice": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execFee": "BOUNDED_EXACT_DECIMAL_TEXT",
+                    "execTime": "BOUNDED_INTEGER_TEXT_SUPPORTED_UTC_RANGE",
+                },
+                "fee_currency": (
+                    "EXACT_UPPERCASE_PROVIDER_TEXT_OR_Q_CAPABILITY_INSTRUMENT_BOUND_"
+                    "AUTHORITY_FALLBACK_ONLY_WHEN_PROVIDER_FIELD_EMPTY"
+                ),
+                "fee_currency_reconciliation": (
+                    "WHEN_QUALIFIED_RULE_IS_SUPPLIED_NONEMPTY_PROVIDER_CURRENCY_"
+                    "MUST_MATCH_EXACT_RULE_CURRENCY"
+                ),
+                "fee_currency_fallback_authority": (
+                    "SEALED_Q_CAPABILITY_INSTRUMENT_RULE_CAMPAIGN_IDENTITY"
+                ),
+                "fee_currency_authority_evidence": (
+                    "QUALIFIED_AUTHORITY_IDENTITY_ADDED_TO_FILL_EVIDENCE_REFS"
+                ),
+                "extra_fees": "FAIL_CLOSED_WHEN_ECONOMICALLY_NONEMPTY",
+                "duplicate_execution_id": "IDENTICAL_OR_FAIL_CLOSED",
+                "output": "ProviderFillEvidence_WITH_EXACT_READ_EVIDENCE_REF",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+)
+
+
+BYBIT_OPTION_DELIVERY_PARSER_IDENTITY = "BYBIT_OPTION_DELIVERY_V5_JSON_V1"
+BYBIT_OPTION_DELIVERY_PARSER_VERSION = "1.3.0"
+BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST = (
+    "sha256:"
+    + sha256(
+        json.dumps(
+            {
+                "parser_identity": BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+                "parser_version": BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+                "source_type": "ProviderResponseObservation",
+                "source_authority": (
+                    "CLOSURE_OWNED_PROVIDER_RESPONSE_SCOPE_PROJECTION"
+                ),
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "surface": "ACTIVITIES",
+                    "endpoint": "/v5/asset/delivery-record",
+                    "permission_scope": "ACCOUNT.READ",
+                    "category": "option",
+                    "symbol": "EXPLICIT_QUERY_SYMBOL",
+                    "time_window": "EXPLICIT_START_OR_END",
+                },
+                "query_fields": [
+                    "category",
+                    "symbol",
+                    "startTime",
+                    "endTime",
+                    "expDate",
+                    "limit",
+                    "cursor",
+                ],
+                "row_fields": {
+                    "required": [
+                        "symbol",
+                        "side",
+                        "deliveryTime",
+                        "strike",
+                        "fee",
+                        "position",
+                        "deliveryPrice",
+                        "deliveryRpl",
+                    ],
+                    "optional": ["entryPrice"],
+                },
+                "cursor_rule": "OPAQUE_CANONICAL_PROVIDER_TEXT",
+                "instrument_binding": (
+                    "CANONICAL_INSTRUMENT_REGISTRY_EXACT_VERSION_PROVIDER_SYMBOL"
+                ),
+                "economic_numbers": "BOUNDED_CANONICAL_DECIMAL_TEXT",
+                "lifecycle_classification": "NONE",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+)
+_BYBIT_OPTION_DELIVERY_DECIMAL_RE = re.compile(
+    r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$"
+)
+_BYBIT_OPTION_DELIVERY_CURSOR_RE = re.compile(
+    r"^(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+$"
+)
+_BYBIT_OPTION_DELIVERY_MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000
+_BYBIT_OPTION_DELIVERY_QUERY_FIELDS = frozenset(
+    {"category", "symbol", "startTime", "endTime", "expDate", "limit", "cursor"}
+)
+
+
+def _bybit_option_delivery_query_integer(value: object, *, name: str) -> int:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 20
+        or not value.isascii()
+        or not value.isdigit()
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    parsed = int(value, 10)
+    if str(parsed) != value:
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} must be canonical integer text"
+        )
+    return parsed
+
+
+
+def _bybit_option_delivery_expiry_text(value: object, *, name: str) -> str:
+    if (
+        type(value) is not str
+        or re.fullmatch(r"[0-3][0-9][A-Z]{3}[0-9]{2}", value) is None
+    ):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is non-canonical"
+        )
+    day = int(value[:2], 10)
+    month = value[2:5]
+    year = 2000 + int(value[5:], 10)
+    month_days = {
+        "JAN": 31,
+        "FEB": 29 if (
+            year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        ) else 28,
+        "MAR": 31,
+        "APR": 30,
+        "MAY": 31,
+        "JUN": 30,
+        "JUL": 31,
+        "AUG": 31,
+        "SEP": 30,
+        "OCT": 31,
+        "NOV": 30,
+        "DEC": 31,
+    }
+    if day < 1 or day > month_days.get(month, 0):
+        raise ProviderCoreError(
+            f"Bybit option delivery query {name} is a non-existent calendar date"
+        )
+    return value
+
+
+def _bybit_option_delivery_decimal_text(
+    value: object,
+    *,
+    name: str,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 160
+        or _BYBIT_OPTION_DELIVERY_DECIMAL_RE.fullmatch(value) is None
+    ):
+        raise ProviderCoreError(
+            f"{name} must be canonical provider decimal text"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryRecord:
+    """One raw documented option-delivery row, without lifecycle classification."""
+
+    delivery_time_ms: int
+    symbol: str
+    side: str
+    position: str
+    entry_price: str | None
+    delivery_price: str
+    strike: str
+    fee: str
+    delivery_rpl: str
+
+
+@dataclass(frozen=True)
+class BybitOptionDeliveryPage:
+    """One exact provider page plus immutable authenticated-read scope."""
+
+    records: tuple[BybitOptionDeliveryRecord, ...]
+    next_page_cursor: str
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
+    capability_snapshot_id: str
+    instrument_version: str
+    provider_symbol: str
+    surface: Surface
+    endpoint: str
+    permission_scope: str
+    query_digest: str
+    parser_identity: str
+    parser_version: str
+    parser_contract_digest: str
+    evidence_ref: str
+    response_sha256: str
+    observed_at: str
+
+
+def parse_option_delivery_page(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_registry: InstrumentRegistry,
+) -> BybitOptionDeliveryPage:
+    """Parse exact Bybit option delivery rows without minting lifecycle economics.
+
+    Bybit's delivery endpoint does not expose an EXERCISE/ASSIGNMENT/EXPIRY
+    discriminator. This parser therefore preserves only documented provider
+    facts and must not be treated as OptionLifecycleObservation authority.
+    """
+
+    if type(observation) is not ProviderResponseObservation:
+        raise TypeError(
+            "observation must be exact ProviderResponseObservation"
+        )
+    projection = provider_response_observation_require_scope(
+        observation,
+        provider_id="BYBIT",
+        surface=Surface.ACTIVITIES,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["OPTION_DELIVERIES"],
+    )
+    query = projection["query"]
+    if (
+        projection["permission_scope"] != "ACCOUNT.READ"
+        or type(query.get("category")) is not str
+        or query.get("category") != "option"
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery evidence requires ACCOUNT.READ category=option"
+        )
+    unsupported_query = set(query) - _BYBIT_OPTION_DELIVERY_QUERY_FIELDS
+    if unsupported_query:
+        raise ProviderCoreError(
+            "Bybit option delivery evidence contains unsupported query fields"
+        )
+
+    requested_symbol = query.get("symbol")
+    if requested_symbol is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is required for bounded delivery evidence"
+        )
+    if (
+        type(requested_symbol) is not str
+        or not requested_symbol
+        or len(requested_symbol) > 160
+        or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", requested_symbol) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query symbol is non-canonical"
+        )
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be exact InstrumentRegistry")
+    try:
+        instrument = InstrumentRegistry.exact(
+            instrument_registry,
+            projection["instrument_version"],
+        )
+    except InstrumentRegistryError as error:
+        raise ProviderCoreError(
+            "Bybit option delivery instrument_version is not present in canonical registry"
+        ) from error
+    if type(instrument) is not InstrumentVersion:
+        raise ProviderCoreError(
+            "Bybit option delivery registry returned non-canonical instrument"
+        )
+    if (
+        instrument.provider_id != "BYBIT"
+        or instrument.venue_id != "OPTIONS"
+        or instrument.asset_class != "OPTION"
+        or instrument.provider_symbol != requested_symbol
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery symbol does not match canonical instrument_version"
+        )
+
+    start_ms = (
+        _bybit_option_delivery_query_integer(query["startTime"], name="startTime")
+        if "startTime" in query
+        else None
+    )
+    end_ms = (
+        _bybit_option_delivery_query_integer(query["endTime"], name="endTime")
+        if "endTime" in query
+        else None
+    )
+    if start_ms is None and end_ms is None:
+        raise ProviderCoreError(
+            "Bybit option delivery query must include explicit startTime or endTime"
+        )
+    if start_ms is not None and end_ms is not None:
+        if end_ms < start_ms or end_ms - start_ms > _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS:
+            raise ProviderCoreError(
+                "Bybit option delivery query time range is non-canonical"
+            )
+    effective_start_ms = (
+        start_ms
+        if start_ms is not None
+        else (
+            end_ms - _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if end_ms is not None
+            else None
+        )
+    )
+    effective_end_ms = (
+        end_ms
+        if end_ms is not None
+        else (
+            start_ms + _BYBIT_OPTION_DELIVERY_MAX_RANGE_MS
+            if start_ms is not None
+            else None
+        )
+    )
+    requested_limit = query.get("limit")
+    if requested_limit is not None:
+        requested_limit = _bybit_option_delivery_query_integer(
+            requested_limit,
+            name="limit",
+        )
+        if not 1 <= requested_limit <= 50:
+            raise ProviderCoreError(
+                "Bybit option delivery query limit must be between 1 and 50"
+            )
+
+    requested_cursor = query.get("cursor")
+    if requested_cursor is not None and (
+        type(requested_cursor) is not str
+        or not requested_cursor
+        or _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(requested_cursor) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery query cursor is non-canonical"
+        )
+
+    requested_exp_date = query.get("expDate")
+    if requested_exp_date is not None:
+        requested_exp_date = _bybit_option_delivery_expiry_text(
+            requested_exp_date,
+            name="expDate",
+        )
+
+    envelope = _mapping(projection["payload"], name="response")
+    ret_code = envelope.get("retCode")
+    if type(ret_code) is not int or ret_code != 0:
+        raise ProviderCoreError(
+            "Bybit option delivery response requires exact integer retCode=0"
+        )
+    result = _mapping(envelope.get("result"), name="result")
+    if result.get("category") != "option":
+        raise ProviderCoreError(
+            "Bybit option delivery result category must be option"
+        )
+    rows = result.get("list")
+    if not isinstance(rows, (list, tuple)):
+        raise ProviderCoreError(
+            "Bybit option delivery result.list must be an array"
+        )
+    if requested_limit is not None and len(rows) > requested_limit:
+        raise ProviderCoreError(
+            "Bybit option delivery response exceeds requested limit"
+        )
+
+    next_cursor = result.get("nextPageCursor")
+    if type(next_cursor) is not str:
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor must be text"
+        )
+    if (
+        next_cursor
+        and _BYBIT_OPTION_DELIVERY_CURSOR_RE.fullmatch(next_cursor) is None
+    ):
+        raise ProviderCoreError(
+            "Bybit option delivery nextPageCursor is non-canonical"
+        )
+
+    required_row_fields = frozenset(
+        {
+            "symbol",
+            "side",
+            "deliveryTime",
+            "strike",
+            "fee",
+            "position",
+            "deliveryPrice",
+            "deliveryRpl",
+        }
+    )
+    optional_row_fields = frozenset({"entryPrice"})
+    records: list[BybitOptionDeliveryRecord] = []
+    for index, value in enumerate(rows):
+        row = _mapping(value, name=f"result.list[{index}]")
+        row_fields = frozenset(row)
+        if (
+            not required_row_fields.issubset(row_fields)
+            or row_fields - required_row_fields - optional_row_fields
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}] fields do not match the qualified delivery schema"
+            )
+        symbol = row.get("symbol")
+        if (
+            type(symbol) is not str
+            or not symbol
+            or symbol != symbol.strip()
+            or len(symbol) > 160
+            or re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", symbol) is None
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery symbol is non-canonical"
+            )
+        side = row.get("side")
+        if type(side) is not str or side not in {"Buy", "Sell"}:
+            raise ProviderCoreError(
+                "Bybit option delivery side must be Buy or Sell exact text"
+            )
+        delivery_time_value = row.get("deliveryTime")
+        if (
+            type(delivery_time_value) is not int
+            or delivery_time_value < 0
+        ):
+            raise ProviderCoreError(
+                f"result.list[{index}].deliveryTime must be an exact non-negative integer"
+            )
+        delivery_time_ms = delivery_time_value
+        if symbol != requested_symbol:
+            raise ProviderCoreError(
+                "Bybit option delivery row violates bound instrument symbol"
+            )
+        if (
+            effective_start_ms is not None
+            and delivery_time_ms < effective_start_ms
+        ) or (
+            effective_end_ms is not None
+            and delivery_time_ms > effective_end_ms
+        ):
+            raise ProviderCoreError(
+                "Bybit option delivery row violates requested time range"
+            )
+        if requested_exp_date is not None:
+            symbol_parts = symbol.split("-")
+            if len(symbol_parts) < 4 or symbol_parts[1] != requested_exp_date:
+                raise ProviderCoreError(
+                    "Bybit option delivery row violates requested expiry filter"
+                )
+        if "entryPrice" in row:
+            entry_price = _bybit_option_delivery_decimal_text(
+                row["entryPrice"],
+                name=f"result.list[{index}].entryPrice",
+            )
+        else:
+            entry_price = None
+        records.append(
+            BybitOptionDeliveryRecord(
+                delivery_time_ms=delivery_time_ms,
+                symbol=symbol,
+                side=side,
+                position=_bybit_option_delivery_decimal_text(
+                    row.get("position"),
+                    name=f"result.list[{index}].position",
+                ),
+                entry_price=entry_price,
+                delivery_price=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryPrice"),
+                    name=f"result.list[{index}].deliveryPrice",
+                ),
+                strike=_bybit_option_delivery_decimal_text(
+                    row.get("strike"),
+                    name=f"result.list[{index}].strike",
+                ),
+                fee=_bybit_option_delivery_decimal_text(
+                    row.get("fee"),
+                    name=f"result.list[{index}].fee",
+                ),
+                delivery_rpl=_bybit_option_delivery_decimal_text(
+                    row.get("deliveryRpl"),
+                    name=f"result.list[{index}].deliveryRpl",
+                ),
+            )
+        )
+
+    return BybitOptionDeliveryPage(
+        records=tuple(records),
+        next_page_cursor=next_cursor,
+        provider_id=projection["provider_id"],
+        account_id=projection["account_id"],
+        entity_id=projection["entity_id"],
+        environment=projection["environment"],
+        capability_snapshot_id=projection["capability_snapshot_id"],
+        instrument_version=projection["instrument_version"],
+        provider_symbol=requested_symbol,
+        surface=projection["surface"],
+        endpoint=projection["endpoint"],
+        permission_scope=projection["permission_scope"],
+        query_digest=projection["query_digest"],
+        parser_identity=BYBIT_OPTION_DELIVERY_PARSER_IDENTITY,
+        parser_version=BYBIT_OPTION_DELIVERY_PARSER_VERSION,
+        parser_contract_digest=BYBIT_OPTION_DELIVERY_PARSER_CONTRACT_DIGEST,
+        evidence_ref=projection["evidence_ref"],
+        response_sha256=projection["response_sha256"],
+        observed_at=projection["observed_at"],
+    )
 
 
 def coverage_evidence(
@@ -910,11 +2352,13 @@ def coverage_evidence(
     consistency_horizon_satisfied: bool,
     qualified_exclusion_semantics: bool = False,
 ) -> CoverageSurfaceEvidence:
-    """Create one provider-surface fact without overclaiming proven absence.
+    """Create diagnostic Bybit coverage without minting absence authority.
 
-    The default deliberately does not claim that missing rows exclude execution.
-    That stronger fact must come from recorded qualification evidence for the
-    exact endpoint/product/environment before reconciliation may use it.
+    ``qualified_exclusion_semantics`` remains only as a compatibility trap for
+    older callers. A scalar supplied by a caller is never provider qualification
+    authority. Until an exact-current, immutable provider-Q absence-semantics
+    issuer is wired to reconciliation, this adapter must stay fail-closed and
+    emit ``provider_semantics_exclude_execution=False``.
     """
 
     normalized = _text(surface, name="surface").upper()
@@ -932,6 +2376,11 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise ProviderCoreError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise ProviderCoreError(
+            "Bybit exclusion semantics require canonical provider qualification "
+            "authority; a caller boolean cannot grant absence authority"
+        )
     return CoverageSurfaceEvidence(
         provider_id="BYBIT",
         account_id=account_id,
@@ -941,5 +2390,5 @@ def coverage_evidence(
         coverage_end=coverage_end,
         pagination_complete=pagination_complete,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
-        provider_semantics_exclude_execution=qualified_exclusion_semantics,
+        provider_semantics_exclude_execution=False,
     )

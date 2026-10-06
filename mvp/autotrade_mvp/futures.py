@@ -8,15 +8,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from typing import Literal
+from weakref import ref as weakref_ref
 
 from .accounting import JournalTransaction, posting, validate_transaction
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
-from .instruments import InstrumentVersion
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
+)
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion, _detached_instrument_version
+from .settlement_convention import SettlementConvention
 
 
 class FuturesError(ValueError):
@@ -30,38 +43,71 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
     if isinstance(value, bool) or isinstance(value, float):
         raise FuturesError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise FuturesError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FuturesError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError, ValueError) as error:
+        raise FuturesError(
+            f"{name} must be a bounded finite exact decimal"
+        ) from error
     if positive and result <= 0:
         raise FuturesError(f"{name} must be positive")
     return result
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise FuturesError(f"{name} is required")
+    if type(value) is not str or not value.strip():
+        raise FuturesError(f"{name} must be exact non-empty text")
     return value.strip()
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise FuturesError(f"{name} must be timezone-aware")
+    if type(value) is not datetime or value.tzinfo is None:
+        raise FuturesError(f"{name} must be exact timezone-aware datetime")
     return value.astimezone(timezone.utc)
 
 
 def _fraction(value: Decimal) -> Fraction:
-    sign, digits, exponent = value.as_tuple()
-    integer = 0
-    for digit in digits:
-        integer = integer * 10 + digit
-    if sign:
-        integer = -integer
-    if exponent >= 0:
-        return Fraction(integer * (10**exponent), 1)
-    return Fraction(integer, 10 ** (-exponent))
+    try:
+        return as_fraction(value)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _bounded_fraction(value: Fraction) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise FuturesError(
+            "futures exact rational exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
+
+
+def _exact_multiply(*values: Decimal) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "futures exact arithmetic exceeds the shared resource envelope"
+        ) from error
 
 
 def _decimal_identity(value: Decimal) -> str:
@@ -74,8 +120,81 @@ def _decimal_identity(value: Decimal) -> str:
         ) from error
 
 
+def _install_futures_contract_lifecycle_authority():
+    """Return a construction metaclass plus an integrity verifier.
+
+    Registration occurs only after type.__call__ completes the ordinary
+    __new__ -> generated dataclass __init__ -> __post_init__ path.  Calling
+    object.__new__, __new__, __init__, or __post_init__ directly therefore
+    cannot mint lifecycle authority.
+    """
+
+    authorities: dict[
+        int,
+        tuple[
+            weakref.ReferenceType,
+            tuple[str, str, datetime, datetime, datetime],
+        ],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _snapshot) in tuple(authorities.items())
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    class LifecycleAuthorityMeta(type):
+        def __call__(cls, *args, **kwargs):
+            value = super().__call__(*args, **kwargs)
+            if type(value) is cls:
+                prune_dead()
+                object_id = id(value)
+                current = authorities.get(object_id)
+                if current is not None and current[0]() is not None:
+                    raise FuturesError(
+                        "futures lifecycle authority identity collision"
+                    )
+                snapshot = (
+                    value.instrument,
+                    value.settlement_method,
+                    value.expiry,
+                    value.last_trade_at,
+                    value.delivery_cutoff,
+                )
+                authorities[object_id] = (weakref.ref(value), snapshot)
+            return value
+
+    def snapshot_for(
+        value: object,
+    ) -> tuple[str, str, datetime, datetime, datetime]:
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise FuturesError("futures lifecycle authority is not established")
+        value_ref, snapshot = entry
+        current = value_ref()
+        if current is value:
+            return snapshot
+        if current is None:
+            authorities.pop(id(value), None)
+            raise FuturesError("futures lifecycle authority is not established")
+        raise FuturesError("futures lifecycle authority identity collision")
+
+    return LifecycleAuthorityMeta, snapshot_for
+
+
+(
+    _FuturesContractLifecycleMeta,
+    _futures_contract_lifecycle_snapshot_for,
+) = _install_futures_contract_lifecycle_authority()
+del _install_futures_contract_lifecycle_authority
+
+
 @dataclass(frozen=True)
-class FuturesContract:
+class FuturesContract(metaclass=_FuturesContractLifecycleMeta):
     instrument: str
     payoff: Literal["LINEAR", "INVERSE"]
     multiplier: Decimal
@@ -87,11 +206,12 @@ class FuturesContract:
     settlement_method: Literal["CASH", "PHYSICAL"]
     price_base_currency: str | None = None
     canonical_instrument: InstrumentVersion | None = None
-
     def __post_init__(self) -> None:
         object.__setattr__(self, "instrument", _text(self.instrument, "instrument"))
-        if self.payoff not in {"LINEAR", "INVERSE"}:
+        payoff = _text(self.payoff, "payoff")
+        if payoff not in {"LINEAR", "INVERSE"}:
             raise FuturesError("payoff must be LINEAR or INVERSE")
+        object.__setattr__(self, "payoff", payoff)
         object.__setattr__(self, "multiplier", _decimal(self.multiplier, "multiplier", positive=True))
         object.__setattr__(self, "quote_currency", _text(self.quote_currency, "quote_currency"))
         object.__setattr__(
@@ -105,8 +225,10 @@ class FuturesContract:
             raise FuturesError("last_trade_at cannot be after expiry")
         if not self.delivery_cutoff <= self.expiry:
             raise FuturesError("delivery_cutoff cannot be after expiry")
-        if self.settlement_method not in {"CASH", "PHYSICAL"}:
+        settlement_method = _text(self.settlement_method, "settlement_method")
+        if settlement_method not in {"CASH", "PHYSICAL"}:
             raise FuturesError("settlement_method must be CASH or PHYSICAL")
+        object.__setattr__(self, "settlement_method", settlement_method)
         if (
             self.settlement_method == "PHYSICAL"
             and self.delivery_cutoff > self.last_trade_at
@@ -132,8 +254,10 @@ class FuturesContract:
 
         if self.canonical_instrument is not None:
             version = self.canonical_instrument
-            if not isinstance(version, InstrumentVersion):
-                raise FuturesError("canonical_instrument must be an InstrumentVersion")
+            if type(version) is not InstrumentVersion:
+                raise FuturesError(
+                    "canonical_instrument must be exact InstrumentVersion"
+                )
             if version.asset_class != "FUTURE":
                 raise FuturesError("canonical instrument must have FUTURE asset_class")
             canonical_key = f"{version.instrument_id}@{version.version}"
@@ -170,36 +294,130 @@ class FuturesContract:
 
     @classmethod
     def from_instrument_version(cls, version: InstrumentVersion) -> "FuturesContract":
-        if not isinstance(version, InstrumentVersion):
-            raise FuturesError("canonical InstrumentVersion is required")
-        if version.asset_class != "FUTURE":
+        if type(version) is not InstrumentVersion:
+            raise FuturesError("exact canonical InstrumentVersion is required")
+        try:
+            detached = _detached_instrument_version(version)
+        except (TypeError, ValueError) as error:
+            raise FuturesError("canonical InstrumentVersion is invalid") from error
+        if detached.asset_class != "FUTURE":
             raise FuturesError("canonical instrument must have FUTURE asset_class")
-        if version.payoff not in {"LINEAR", "INVERSE"}:
+        if detached.payoff not in {"LINEAR", "INVERSE"}:
             raise FuturesError("canonical future payoff must be LINEAR or INVERSE")
         if (
-            version.expiry is None
-            or version.last_trade_at is None
-            or version.delivery_cutoff is None
-            or version.settlement_method not in {"CASH", "PHYSICAL"}
+            detached.expiry is None
+            or detached.last_trade_at is None
+            or detached.delivery_cutoff is None
+            or detached.settlement_method not in {"CASH", "PHYSICAL"}
         ):
             raise FuturesError(
                 "canonical future requires expiry, last_trade_at, delivery_cutoff and settlement_method"
             )
-        return cls(
-            instrument=f"{version.instrument_id}@{version.version}",
-            payoff=version.payoff,
-            multiplier=version.contract_multiplier,
-            quote_currency=version.quote_currency,
-            settlement_currency=version.settlement_currency,
-            last_trade_at=version.last_trade_at,
-            delivery_cutoff=version.delivery_cutoff,
-            expiry=version.expiry,
-            settlement_method=version.settlement_method,
+        contract = cls(
+            instrument=f"{detached.instrument_id}@{detached.version}",
+            payoff=detached.payoff,
+            multiplier=detached.contract_multiplier,
+            quote_currency=detached.quote_currency,
+            settlement_currency=detached.settlement_currency,
+            last_trade_at=detached.last_trade_at,
+            delivery_cutoff=detached.delivery_cutoff,
+            expiry=detached.expiry,
+            settlement_method=detached.settlement_method,
             price_base_currency=(
-                version.base_currency if version.payoff == "INVERSE" else None
+                detached.base_currency if detached.payoff == "INVERSE" else None
             ),
-            canonical_instrument=version,
+            canonical_instrument=detached,
         )
+        if detached.payoff == "INVERSE":
+            if type(detached.settlement_convention) is not SettlementConvention:
+                raise FuturesError(
+                    "canonical INVERSE future requires exact settlement convention"
+                )
+            _bind_futures_contract_settlement_authority(
+                contract,
+                detached.settlement_convention,
+            )
+        return contract
+
+
+del _FuturesContractLifecycleMeta
+
+
+def _install_futures_contract_settlement_authority():
+    """Bind terminal settlement economics outside caller-writable object state."""
+
+    authorities = {}
+    contract_type = FuturesContract
+    convention_type = SettlementConvention
+    canonical_type = type
+    canonical_id = id
+    canonical_tuple = tuple
+    canonical_ref = weakref_ref
+    object_getattribute = object.__getattribute__
+    error_type = FuturesError
+    names = (
+        "provider_id",
+        "instrument_id",
+        "instrument_version",
+        "settlement_currency",
+        "quantum",
+        "rounding",
+        "evidence_artifact_id",
+        "evidence_sha256",
+    )
+
+    def snapshot(convention):
+        if canonical_type(convention) is not convention_type:
+            raise error_type("settlement convention authority must be exact")
+        return canonical_tuple(object_getattribute(convention, name) for name in names)
+
+    def prune():
+        dead = [
+            key
+            for key, (contract_ref, _expected) in canonical_tuple(authorities.items())
+            if contract_ref() is None
+        ]
+        for key in dead:
+            authorities.pop(key, None)
+
+    def bind(contract, convention):
+        if canonical_type(contract) is not contract_type:
+            raise error_type("settlement authority requires exact FuturesContract")
+        prune()
+        key = canonical_id(contract)
+        if key in authorities:
+            raise error_type("settlement authority is already established")
+        authorities[key] = (canonical_ref(contract), snapshot(convention))
+
+    def resolve(contract, current_convention):
+        if canonical_type(contract) is not contract_type:
+            raise error_type("settlement authority requires exact FuturesContract")
+        prune()
+        entry = authorities.get(canonical_id(contract))
+        if entry is None or entry[0]() is not contract:
+            raise error_type("settlement convention authority is not established")
+        expected = entry[1]
+        if snapshot(current_convention) != expected:
+            raise error_type("settlement convention changed after contract admission")
+        return convention_type(
+            provider_id=expected[0],
+            instrument_id=expected[1],
+            instrument_version=expected[2],
+            settlement_currency=expected[3],
+            quantum=expected[4],
+            rounding=expected[5],
+            evidence_artifact_id=expected[6],
+            evidence_sha256=expected[7],
+        )
+
+    return bind, resolve
+
+
+(
+    _bind_futures_contract_settlement_authority,
+    _resolve_futures_contract_settlement_authority,
+) = _install_futures_contract_settlement_authority()
+del _install_futures_contract_settlement_authority
 
 
 @dataclass(frozen=True)
@@ -265,10 +483,11 @@ class FuturesSettlementEvidence:
             or self.instrument_version < 1
         ):
             raise FuturesError("instrument_version must be a positive integer")
-        if not isinstance(self.scope, FuturesSettlementScope):
-            raise FuturesError("settlement scope is required")
+        if type(self.scope) is not FuturesSettlementScope:
+            raise FuturesError("settlement scope must be exact FuturesSettlementScope")
         object.__setattr__(
-            self, "effective_at", _utc(self.effective_at, "effective_at")
+            self,
+            "effective_at", _utc(self.effective_at, "effective_at")
         )
         for name in ("sequence", "revision"):
             value = getattr(self, name)
@@ -313,7 +532,7 @@ def _require_settlement_contract(
     scope: FuturesSettlementScope,
     evidence: FuturesSettlementEvidence,
 ) -> None:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     version = contract.canonical_instrument
     if version is None:
@@ -343,9 +562,9 @@ def _validate_settlement_history(
     history: tuple[FuturesSettlementEvidence, ...],
     last_price: Decimal,
 ) -> None:
-    if not isinstance(scope, FuturesSettlementScope):
+    if type(scope) is not FuturesSettlementScope:
         raise FuturesError("settlement_scope is required")
-    if not isinstance(history, tuple):
+    if type(history) is not tuple:
         raise FuturesError("settlement_history must be an immutable tuple")
     seen_observations: set[str] = set()
     latest_by_period: dict[str, FuturesSettlementEvidence] = {}
@@ -434,7 +653,7 @@ def _settlement_duplicate_or_require_new(
 
 
 def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     material = {
         "settlement_id": evidence.settlement_id,
@@ -464,6 +683,24 @@ def settlement_identity_digest(evidence: FuturesSettlementEvidence) -> str:
     return "sha256:" + sha256(encoded).hexdigest()
 
 
+def _require_contract_quantity(contract: FuturesContract, quantity: Decimal) -> None:
+    """Lifecycle contracts obey their instrument grid, without order-entry limits."""
+    version = contract.canonical_instrument
+    if version is None:
+        # Legacy unbound states remain diagnostic; settlement admission already
+        # rejects them before any economic transition. No grid can be invented.
+        return
+    if type(version) is not InstrumentVersion:
+        raise FuturesError("lifecycle quantity requires canonical InstrumentVersion binding")
+    quantum = _decimal(version.quantity_step, "quantity_step", positive=True)
+    try:
+        aligned = is_exact_decimal_multiple(quantity, quantum)
+    except ExactDecimalError as error:
+        raise FuturesError("lifecycle quantity exceeds exact numeric envelope") from error
+    if not aligned:
+        raise FuturesError("signed_contracts must be an exact multiple of instrument quantity_step")
+
+
 @dataclass(frozen=True)
 class InverseVariationMarginState:
     """Exact inverse-futures state between explicit settlement boundaries."""
@@ -476,19 +713,27 @@ class InverseVariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("inverse variation-margin state requires exact FuturesContract")
         if self.contract.payoff != "INVERSE":
             raise FuturesError("inverse variation-margin state requires INVERSE futures")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,
             "last_settlement_price",
             _decimal(self.last_settlement_price, "last_settlement_price", positive=True),
         )
-        if not isinstance(self.cumulative_variation_margin, Fraction):
+        if type(self.cumulative_variation_margin) is not Fraction:
             raise FuturesError("cumulative inverse variation margin must be an exact Fraction")
+        object.__setattr__(
+            self,
+            "cumulative_variation_margin",
+            _bounded_fraction(self.cumulative_variation_margin),
+        )
         _validate_settlement_history(
             self.contract,
             self.settlement_scope,
@@ -507,9 +752,12 @@ class VariationMarginState:
     settlement_history: tuple[FuturesSettlementEvidence, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.contract) is not FuturesContract:
+            raise FuturesError("linear variation-margin state requires exact FuturesContract")
         contracts = _decimal(self.signed_contracts, "signed_contracts")
         if contracts == 0:
             raise FuturesError("signed_contracts must be non-zero")
+        _require_contract_quantity(self.contract, contracts)
         object.__setattr__(self, "signed_contracts", contracts)
         object.__setattr__(
             self,
@@ -542,7 +790,8 @@ def linear_futures_pnl(
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return contracts * contract_multiplier * (exit_value - entry)
+    spread = _exact_subtract(exit_value, entry)
+    return _exact_multiply(contracts, contract_multiplier, spread)
 
 
 def inverse_futures_pnl_exact(
@@ -562,11 +811,11 @@ def inverse_futures_pnl_exact(
     face = _decimal(contract_quote_value, "contract_quote_value", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    entry_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = _bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    inverse_spread = _bounded_fraction(entry_inverse - exit_inverse)
+    contract_face = _bounded_fraction(_fraction(contracts) * _fraction(face))
+    return _bounded_fraction(contract_face * inverse_spread)
 
 
 def settle_fraction(
@@ -577,13 +826,14 @@ def settle_fraction(
 ) -> Decimal:
     """Round an exact rational to an exact multiple of the settlement quantum."""
 
-    if not isinstance(value, Fraction):
+    if type(value) is not Fraction:
         raise FuturesError("value must be an exact Fraction")
+    exact_value = _bounded_fraction(value)
     step = _decimal(quantum, "quantum", positive=True)
-    if rounding not in {"HALF_EVEN", "DOWN"}:
+    if type(rounding) is not str or rounding not in {"HALF_EVEN", "DOWN"}:
         raise FuturesError("unsupported rounding policy")
 
-    units = value / _fraction(step)
+    units = _bounded_fraction(exact_value / _fraction(step))
     sign = -1 if units < 0 else 1
     numerator = abs(units.numerator)
     denominator = units.denominator
@@ -595,7 +845,7 @@ def settle_fraction(
             whole += 1
 
     signed_units = whole * sign
-    return step * Decimal(signed_units)
+    return _exact_multiply(step, Decimal(signed_units))
 
 
 def apply_variation_margin(
@@ -604,7 +854,7 @@ def apply_variation_margin(
 ) -> tuple[VariationMarginState, Decimal]:
     """Apply one identity-bound linear settlement exactly once."""
 
-    if not isinstance(state, VariationMarginState):
+    if type(state) is not VariationMarginState:
         raise FuturesError("linear variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -620,11 +870,12 @@ def apply_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _exact_add(state.cumulative_variation_margin, amount)
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -637,7 +888,7 @@ def apply_inverse_variation_margin(
 ) -> tuple[InverseVariationMarginState, Fraction]:
     """Apply one identity-bound inverse settlement without premature rounding."""
 
-    if not isinstance(state, InverseVariationMarginState):
+    if type(state) is not InverseVariationMarginState:
         raise FuturesError("inverse variation-margin state is required")
     disposition = _settlement_duplicate_or_require_new(
         contract=state.contract,
@@ -653,11 +904,14 @@ def apply_inverse_variation_margin(
         entry_price=state.last_settlement_price,
         exit_price=settlement.settlement_price,
     )
+    new_cumulative = _bounded_fraction(
+        state.cumulative_variation_margin + amount
+    )
     return (
         replace(
             state,
             last_settlement_price=settlement.settlement_price,
-            cumulative_variation_margin=state.cumulative_variation_margin + amount,
+            cumulative_variation_margin=new_cumulative,
             settlement_history=state.settlement_history + (settlement,),
         ),
         amount,
@@ -692,13 +946,30 @@ def replay_inverse_variation_margin(
     return state
 
 
+def inverse_settlement_convention(contract: FuturesContract) -> SettlementConvention:
+    """Resolve terminal cash policy only from the exact canonical instrument version."""
+    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
+        raise FuturesError("inverse settlement requires an exact INVERSE futures contract")
+    if type(contract.canonical_instrument) is not InstrumentVersion:
+        raise FuturesError("inverse settlement requires canonical InstrumentVersion authority")
+    try:
+        version = _detached_instrument_version(contract.canonical_instrument)
+        canonical = FuturesContract.from_instrument_version(version)
+    except (TypeError, ValueError) as error:
+        raise FuturesError("inverse settlement convention is invalid") from error
+    if canonical != contract or type(version.settlement_convention) is not SettlementConvention:
+        raise FuturesError("inverse settlement contract conflicts with canonical convention")
+    return _resolve_futures_contract_settlement_authority(
+        contract,
+        version.settlement_convention,
+    )
+
+
 def settle_and_book_inverse_variation_margin(
     *,
     settlement: FuturesSettlementEvidence,
     contract: FuturesContract,
     exact_amount: Fraction,
-    settlement_quantum: Decimal | str,
-    rounding: Literal["HALF_EVEN", "DOWN"] = "HALF_EVEN",
 ) -> tuple[Decimal, JournalTransaction | None]:
     """Round only at the explicit settlement boundary and book exact currency truth.
 
@@ -707,19 +978,20 @@ def settle_and_book_inverse_variation_margin(
     is the provider-facing cash settlement amount.
     """
 
-    if not isinstance(contract, FuturesContract) or contract.payoff != "INVERSE":
+    if type(contract) is not FuturesContract or contract.payoff != "INVERSE":
         raise FuturesError("inverse settlement booking requires an INVERSE futures contract")
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     _require_settlement_contract(contract, settlement.scope, settlement)
     if settlement.price_currency != contract.quote_currency:
         raise FuturesError("settlement price currency does not match contract")
     if settlement.settlement_currency != contract.settlement_currency:
         raise FuturesError("settlement currency does not match contract")
+    convention = inverse_settlement_convention(contract)
     settled = settle_fraction(
         exact_amount,
-        quantum=settlement_quantum,
-        rounding=rounding,
+        quantum=convention.quantum,
+        rounding=convention.rounding,
     )
     if settled == 0:
         return settled, None
@@ -767,7 +1039,7 @@ def book_variation_margin(
 ) -> JournalTransaction:
     """Create one deterministic journal identity from accepted settlement evidence."""
 
-    if not isinstance(settlement, FuturesSettlementEvidence):
+    if type(settlement) is not FuturesSettlementEvidence:
         raise FuturesError("immutable FuturesSettlementEvidence is required")
     value = _decimal(amount, "amount")
     if value == 0:
@@ -779,7 +1051,11 @@ def book_variation_margin(
         cause_event_id=f"FUTURES_SETTLEMENT:{digest}",
         postings=(
             posting(f"CASH:{currency}", currency, value),
-            posting(f"FUTURES_VARIATION_PNL:{currency}", currency, -value),
+            posting(
+                f"FUTURES_VARIATION_PNL:{currency}",
+                currency,
+                _exact_subtract(Decimal("0"), value),
+            ),
         ),
     )
     validate_transaction(transaction)
@@ -790,20 +1066,208 @@ def lifecycle_gate(
     contract: FuturesContract,
     at: datetime,
     *,
-    physical_delivery_authorized: bool = False,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> str:
-    """Return a conservative lifecycle state for holding/trading the contract."""
+    """Return the conservative lifecycle state for holding/trading the contract.
+
+    Physical delivery is intentionally not authorizable in this provider-neutral
+    primitive. Until a separately qualified canonical authority/provider path
+    exists, reaching the delivery cutoff is a hard fail-closed boundary.
+    """
+
+    if type(contract) is not FuturesContract:
+        raise FuturesError("lifecycle gate requires exact FuturesContract")
+
+    for field_name in (
+        "instrument",
+        "payoff",
+        "quote_currency",
+        "settlement_currency",
+        "settlement_method",
+    ):
+        if type(getattr(contract, field_name)) is not str:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact text"
+            )
+    if type(contract.multiplier) is not Decimal:
+        raise FuturesError("lifecycle contract multiplier must be exact Decimal")
+    if (
+        contract.price_base_currency is not None
+        and type(contract.price_base_currency) is not str
+    ):
+        raise FuturesError(
+            "lifecycle contract price_base_currency must be exact text or None"
+        )
+    for field_name in ("expiry", "last_trade_at", "delivery_cutoff"):
+        value = getattr(contract, field_name)
+        if type(value) is not datetime or value.tzinfo is not timezone.utc:
+            raise FuturesError(
+                f"lifecycle contract {field_name} must be exact UTC datetime"
+            )
+
+    version = contract.canonical_instrument
+    if type(version) is not InstrumentVersion:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentVersion"
+        )
+    if (
+        type(version.instrument_id) is not str
+        or type(version.version) is not int
+        or type(version.asset_class) is not str
+        or type(version.payoff) is not str
+        or type(version.contract_multiplier) is not Decimal
+        or type(version.quote_currency) is not str
+        or type(version.settlement_currency) is not str
+        or type(version.base_currency) is not str
+        or type(version.settlement_method) is not str
+        or type(version.expiry) is not datetime
+        or type(version.last_trade_at) is not datetime
+        or type(version.delivery_cutoff) is not datetime
+        or version.expiry.tzinfo is not timezone.utc
+        or version.last_trade_at.tzinfo is not timezone.utc
+        or version.delivery_cutoff.tzinfo is not timezone.utc
+    ):
+        raise FuturesError(
+            "canonical lifecycle instrument fields must retain exact UTC types"
+        )
+    if (
+        version.asset_class != "FUTURE"
+        or contract.instrument != f"{version.instrument_id}@{version.version}"
+        or contract.payoff != version.payoff
+        or contract.multiplier != version.contract_multiplier
+        or contract.quote_currency != version.quote_currency
+        or contract.settlement_currency != version.settlement_currency
+        or contract.expiry != version.expiry
+        or contract.last_trade_at != version.last_trade_at
+        or contract.delivery_cutoff != version.delivery_cutoff
+        or contract.settlement_method != version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != version.base_currency
+        )
+    ):
+        raise FuturesError(
+            "futures lifecycle contract no longer matches canonical InstrumentVersion"
+        )
+
+    snapshot = _futures_contract_lifecycle_snapshot_for(contract)
+    current_lifecycle = (
+        contract.instrument,
+        contract.settlement_method,
+        contract.expiry,
+        contract.last_trade_at,
+        contract.delivery_cutoff,
+    )
+    if type(snapshot) is not tuple or len(snapshot) != 5 or snapshot != current_lifecycle:
+        raise FuturesError(
+            "futures lifecycle contract no longer matches construction authority"
+        )
+
+    # Exact object shape and a construction snapshot establish integrity only.
+    # This registry resolution is deliberately diagnostic: InstrumentRegistry
+    # construction is public, so the object supplied here does not by itself
+    # prove product/composition selection authority for opening exposure.
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise FuturesError(
+            "futures lifecycle requires exact canonical InstrumentRegistry"
+        )
+    try:
+        selected_version = InstrumentRegistry.exact(
+            instrument_registry,
+            contract.instrument,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle instrument is not selected by canonical InstrumentRegistry"
+        ) from error
+    if type(selected_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid InstrumentVersion authority"
+        )
+
+    selected_contract_cut = (
+        selected_version.instrument_id,
+        selected_version.version,
+        selected_version.asset_class,
+        selected_version.payoff,
+        selected_version.contract_multiplier,
+        selected_version.quote_currency,
+        selected_version.settlement_currency,
+        selected_version.base_currency,
+        selected_version.settlement_method,
+        selected_version.expiry,
+        selected_version.last_trade_at,
+        selected_version.delivery_cutoff,
+    )
+    supplied_contract_cut = (
+        version.instrument_id,
+        version.version,
+        version.asset_class,
+        version.payoff,
+        version.contract_multiplier,
+        version.quote_currency,
+        version.settlement_currency,
+        version.base_currency,
+        version.settlement_method,
+        version.expiry,
+        version.last_trade_at,
+        version.delivery_cutoff,
+    )
+    if selected_contract_cut != supplied_contract_cut:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion differs from canonical registry selection"
+        )
+    if (
+        contract.instrument
+        != f"{selected_version.instrument_id}@{selected_version.version}"
+        or contract.payoff != selected_version.payoff
+        or contract.multiplier != selected_version.contract_multiplier
+        or contract.quote_currency != selected_version.quote_currency
+        or contract.settlement_currency != selected_version.settlement_currency
+        or contract.expiry != selected_version.expiry
+        or contract.last_trade_at != selected_version.last_trade_at
+        or contract.delivery_cutoff != selected_version.delivery_cutoff
+        or contract.settlement_method != selected_version.settlement_method
+        or (
+            contract.payoff == "INVERSE"
+            and contract.price_base_currency != selected_version.base_currency
+        )
+    ):
+        raise FuturesError(
+            "futures lifecycle contract differs from canonical registry selection"
+        )
 
     point = _utc(at, "at")
-    if type(physical_delivery_authorized) is not bool:
-        raise FuturesError("physical_delivery_authorized must be boolean")
+    try:
+        effective_version = InstrumentRegistry.at(
+            instrument_registry,
+            selected_version.instrument_id,
+            point,
+        )
+    except InstrumentRegistryError as error:
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        ) from error
+    if type(effective_version) is not InstrumentVersion:
+        raise FuturesError(
+            "canonical registry returned invalid effective InstrumentVersion authority"
+        )
+    if (
+        effective_version.instrument_id != selected_version.instrument_id
+        or effective_version.version != selected_version.version
+    ):
+        raise FuturesError(
+            "futures lifecycle InstrumentVersion is not effective at requested instant"
+        )
+
+    if selected_version.status != "ACTIVE":
+        return f"INSTRUMENT_{selected_version.status}"
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:
         return "TRADING_ENDED"
     if (
         contract.settlement_method == "PHYSICAL"
-        and not physical_delivery_authorized
         and point >= contract.delivery_cutoff
     ):
         return "DELIVERY_BLOCKED"
@@ -814,12 +1278,24 @@ def require_open_for_new_exposure(
     contract: FuturesContract,
     at: datetime,
     *,
-    physical_delivery_authorized: bool = False,
+    instrument_registry: InstrumentRegistry | None = None,
 ) -> None:
+    """Fail closed unless lifecycle blocks first or product authority is proven.
+
+    ``lifecycle_gate`` can validate an exact registry/version cut, but callers can
+    construct ``InstrumentRegistry`` themselves. Until the real order-admission
+    composition owns and re-resolves a selected registry authority, an ``OPEN``
+    diagnostic state is not permission to create financial exposure.
+    """
+
     state = lifecycle_gate(
         contract,
         at,
-        physical_delivery_authorized=physical_delivery_authorized,
+        instrument_registry=instrument_registry,
     )
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")
+    raise FuturesError(
+        "new futures exposure requires product-selected instrument registry "
+        "composition authority; caller-supplied InstrumentRegistry is diagnostic only"
+    )

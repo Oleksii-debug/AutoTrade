@@ -96,7 +96,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_object_entry
             swapped = False
 
-            def validate_then_swap(path):
+            def validate_then_swap(_selected_store, path):
                 nonlocal swapped
                 entry = original_validate(path)
                 if not swapped:
@@ -105,8 +105,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_object_entry",
+                autospec=True,
                 side_effect=validate_then_swap,
             ), patch(
                 "autotrade_research.artifacts.store.os.read"
@@ -200,7 +201,7 @@ class ArtifactStoreTests(unittest.TestCase):
             replacement.write_bytes(b"attacker")
             original_open = store._open_object_descriptor
 
-            def open_then_swap(path, *, expected_bytes):
+            def open_then_swap(_selected_store, path, *, expected_bytes):
                 descriptor, opened = original_open(
                     path,
                     expected_bytes=expected_bytes,
@@ -209,8 +210,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return descriptor, opened
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_open_object_descriptor",
+                autospec=True,
                 side_effect=open_then_swap,
             ):
                 with self.assertRaisesRegex(
@@ -241,7 +243,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_object_entry
             swapped = False
 
-            def validate_then_swap(path):
+            def validate_then_swap(_selected_store, path):
                 nonlocal swapped
                 entry = original_validate(path)
                 if not swapped:
@@ -251,8 +253,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_object_entry",
+                autospec=True,
                 side_effect=validate_then_swap,
             ), patch(
                 "autotrade_research.artifacts.store.os.read"
@@ -284,7 +287,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_object_entry
             swapped = False
 
-            def validate_then_swap(path):
+            def validate_then_swap(_selected_store, path):
                 nonlocal swapped
                 entry = original_validate(path)
                 if not swapped:
@@ -294,8 +297,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_object_entry",
+                autospec=True,
                 side_effect=validate_then_swap,
             ), patch(
                 "autotrade_research.artifacts.store.os.read"
@@ -362,7 +366,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_object_entry
             swapped = False
 
-            def validate_then_swap(path):
+            def validate_then_swap(_selected_store, path):
                 nonlocal swapped
                 entry = original_validate(path)
                 if not swapped:
@@ -371,8 +375,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_object_entry",
+                autospec=True,
                 side_effect=validate_then_swap,
             ), patch(
                 "autotrade_research.artifacts.store.os.read"
@@ -528,7 +533,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_manifest_entry
             validation_count = 0
 
-            def validate_then_replace(path):
+            def validate_then_replace(_selected_store, path):
                 nonlocal validation_count
                 entry = original_validate(path)
                 validation_count += 1
@@ -537,8 +542,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_manifest_entry",
+                autospec=True,
                 side_effect=validate_then_replace,
             ):
                 with self.assertRaisesRegex(
@@ -561,7 +567,7 @@ class ArtifactStoreTests(unittest.TestCase):
 
             original_validate = store._validate_manifest_entry
 
-            def validate_with_timestamp_representation_difference(path):
+            def validate_with_timestamp_representation_difference(_selected_store, path):
                 entry = original_validate(path)
                 values = list(entry)
                 values[8] = entry.st_mtime + 1.0
@@ -569,8 +575,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return os.stat_result(values)
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_manifest_entry",
+                autospec=True,
                 side_effect=validate_with_timestamp_representation_difference,
             ):
                 self.assertEqual(store.load_manifest(artifact_id), manifest)
@@ -681,14 +688,15 @@ class ArtifactStoreTests(unittest.TestCase):
             atomic_write_json(replacement_path, replacement_for_same_id)
             original_read = store._read_verified_object_bytes
 
-            def replace_manifest_then_read(manifest):
+            def replace_manifest_then_read(_selected_store, manifest):
                 os.replace(manifest_path, canonical_backup)
                 os.replace(replacement_path, manifest_path)
                 return original_read(manifest)
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_read_verified_object_bytes",
+                autospec=True,
                 side_effect=replace_manifest_then_read,
             ):
                 with self.assertRaisesRegex(
@@ -738,7 +746,7 @@ class ArtifactStoreTests(unittest.TestCase):
             atomic_write_json(replacement_path, replacement_for_same_id)
             original_read = store._read_verified_object_bytes
 
-            def aba_manifest_then_read(manifest):
+            def aba_manifest_then_read(_selected_store, manifest):
                 os.replace(manifest_path, canonical_backup)
                 os.replace(replacement_path, manifest_path)
                 os.replace(manifest_path, replacement_backup)
@@ -747,8 +755,9 @@ class ArtifactStoreTests(unittest.TestCase):
 
             try:
                 with patch.object(
-                    store,
+                    ArtifactStore,
                     "_read_verified_object_bytes",
+                autospec=True,
                     side_effect=aba_manifest_then_read,
                 ):
                     manifest, data = store.read_authenticated_snapshot(
@@ -766,17 +775,16 @@ class ArtifactStoreTests(unittest.TestCase):
                 self.assertNotEqual(manifest["sha256"], replacement["sha256"])
 
     def test_read_bytes_delegates_to_authenticated_snapshot(self):
-        store = ArtifactStore.__new__(ArtifactStore)
-        artifact_id = str(uuid4())
-        manifest = {"artifact_id": artifact_id}
-
-        with patch.object(
-            store,
-            "read_authenticated_snapshot",
-            return_value=(manifest, b"bound-data"),
-        ) as snapshot:
-            self.assertEqual(store.read_bytes(artifact_id), b"bound-data")
-        snapshot.assert_called_once_with(artifact_id)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = {"artifact_id": artifact_id}
+            with patch.object(
+                ArtifactStore, "read_authenticated_snapshot", autospec=True,
+                return_value=(manifest, b"bound-data"),
+            ) as snapshot:
+                self.assertEqual(store.read_bytes(artifact_id), b"bound-data")
+            snapshot.assert_called_once_with(store, artifact_id)
 
     def test_manifest_aba_replacement_fails_before_transient_bytes_are_read(self):
         with TemporaryDirectory() as directory:
@@ -802,7 +810,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_manifest_entry
             validation_count = 0
 
-            def validate_with_aba(path):
+            def validate_with_aba(_selected_store, path):
                 nonlocal validation_count
                 entry = original_validate(path)
                 validation_count += 1
@@ -815,8 +823,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return entry
 
             with patch.object(
-                store,
+                ArtifactStore,
                 "_validate_manifest_entry",
+                autospec=True,
                 side_effect=validate_with_aba,
             ), patch(
                 "autotrade_research.artifacts.store.os.read"
@@ -850,7 +859,7 @@ class ArtifactStoreTests(unittest.TestCase):
             original_validate = store._validate_manifest_entry
             swapped = False
 
-            def validate_then_swap(path):
+            def validate_then_swap(_selected_store, path):
                 nonlocal swapped
                 entry = original_validate(path)
                 if not swapped:
@@ -861,8 +870,9 @@ class ArtifactStoreTests(unittest.TestCase):
 
             try:
                 with patch.object(
-                    store,
+                    ArtifactStore,
                     "_validate_manifest_entry",
+                autospec=True,
                     side_effect=validate_then_swap,
                 ), patch(
                     "autotrade_research.artifacts.store.os.read"

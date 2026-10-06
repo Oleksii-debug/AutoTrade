@@ -6,14 +6,13 @@ provider/account/runtime/provider-environment/entity-policy/instrument-family
 cut, and records explicit activation.  Historical resolution is reconstructed
 from immutable journal events at an exact global journal sequence.
 
-It intentionally does not modify AuthorityService yet.  The production risk
-composition in #987 can consume this registry once the provider-domain/persistence
-integration lineage is on main and bind the returned identity into
-RiskAuthorityRequest / AuthoritativeRiskSnapshot.
+AuthorityService consumes the registry-issued result at its exact financial
+cut when a durable policy scope is selected. Provider-free orchestration uses
+that composition; PAPER/LIVE product-owned issuer qualification remains separate.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import InitVar, dataclass, field, fields
 from datetime import datetime, timezone
 from hashlib import sha256
 import re
@@ -35,6 +34,9 @@ from .persistence import (
 )
 from .risk import RISK_ENVIRONMENTS, RiskPolicy
 from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
+
+
+_RESOLVED_POLICY_AUTHORITY_TOKEN = object()
 
 
 class RiskPolicyAuthorityError(ValueError):
@@ -60,6 +62,35 @@ def _canonical_journal_authority_snapshot(
         store,
         subject="current risk policy journal",
     )
+
+def _journal_store_identity_payload(
+    identity: JournalStoreIdentity,
+) -> dict[str, object]:
+    exact = require_exact_journal_store_identity(
+        identity,
+        subject="resolved risk policy journal identity",
+    )
+    if exact.identity_source == "windows_by_handle":
+        # Windows path spelling is not physical JournalStore identity.  Reopen
+        # continuity is carried by the retained HANDLE volume/file-index tuple.
+        return {
+            "schema_version": "1.0.0",
+            "identity_source": exact.identity_source,
+            "windows_volume_serial": exact.windows_volume_serial,
+            "windows_file_index_high": exact.windows_file_index_high,
+            "windows_file_index_low": exact.windows_file_index_low,
+        }
+    return {
+        "schema_version": "1.0.0",
+        "identity_source": exact.identity_source,
+        "canonical_path": exact.canonical_path,
+        "filesystem_device": exact.filesystem_device,
+        "filesystem_inode": exact.filesystem_inode,
+    }
+
+def journal_store_identity_digest(identity: JournalStoreIdentity) -> str:
+    return payload_digest(_journal_store_identity_payload(identity))
+
 
 _DECIMAL_FIELDS = (
     "max_abs_position",
@@ -290,7 +321,7 @@ class RiskPolicyIdentity:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ResolvedRiskPolicy:
     """One immutable policy plus the durable events that establish its authority."""
 
@@ -301,8 +332,15 @@ class ResolvedRiskPolicy:
     activation_event_id: str
     activation_journal_sequence: int
     resolved_journal_sequence_cut: int
+    journal_store_identity_digest: str
+    _authority_token: InitVar[object | None] = None
+    _authority_digest: str = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _authority_token: object | None) -> None:
+        if _authority_token is not _RESOLVED_POLICY_AUTHORITY_TOKEN:
+            raise RiskPolicyAuthorityError(
+                "ResolvedRiskPolicy must be issued by DurableRiskPolicyRegistry"
+            )
         if type(self.identity) is not RiskPolicyIdentity:
             raise TypeError("identity must be RiskPolicyIdentity")
         if type(self.policy) is not RiskPolicy:
@@ -314,6 +352,14 @@ class ResolvedRiskPolicy:
             "activation_journal_sequence",
         ):
             _positive_int(getattr(self, name), name=name)
+        object.__setattr__(
+            self,
+            "journal_store_identity_digest",
+            _digest(
+                self.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
+        )
         if (
             type(self.resolved_journal_sequence_cut) is not int
             or self.resolved_journal_sequence_cut < 0
@@ -327,6 +373,11 @@ class ResolvedRiskPolicy:
             raise RiskPolicyAuthorityError("policy activation is newer than resolved cut")
         if risk_policy_digest(self.policy) != self.identity.content_digest:
             raise RiskPolicyAuthorityError("resolved policy content digest mismatch")
+        object.__setattr__(
+            self,
+            "_authority_digest",
+            _resolved_policy_authority_digest(self),
+        )
 
     @property
     def evidence_payload(self) -> dict[str, object]:
@@ -337,7 +388,86 @@ class ResolvedRiskPolicy:
             "activation_event_id": self.activation_event_id,
             "activation_journal_sequence": self.activation_journal_sequence,
             "resolved_journal_sequence_cut": self.resolved_journal_sequence_cut,
+            "journal_store_identity_digest": self.journal_store_identity_digest,
         }
+
+
+def _canonical_resolved_policy_identity(
+    value: object,
+) -> RiskPolicyIdentity:
+    if type(value) is not RiskPolicyIdentity:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity must be exact RiskPolicyIdentity"
+        )
+    raw = vars(value)
+    if any(type(key) is not str for key in raw):
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity state keys must be exact strings"
+        )
+    if frozenset(raw) != _IDENTITY_KEYS:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy identity state shape is not canonical"
+        )
+    return RiskPolicyIdentity(
+        policy_id=_text(raw["policy_id"], name="policy_id"),
+        version=_positive_int(raw["version"], name="version"),
+        content_digest=_digest(raw["content_digest"], name="content_digest"),
+        scope=RiskPolicyScope(*_require_canonical_scope(raw["scope"])),
+    )
+
+
+def _resolved_policy_authority_digest(value: ResolvedRiskPolicy) -> str:
+    identity = _canonical_resolved_policy_identity(value.identity)
+    if type(value.policy) is not RiskPolicy:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy content must be exact RiskPolicy"
+        )
+    registration_event_id = _text(
+        value.registration_event_id,
+        name="registration_event_id",
+    )
+    activation_event_id = _text(
+        value.activation_event_id,
+        name="activation_event_id",
+    )
+    registration_sequence = _positive_int(
+        value.registration_journal_sequence,
+        name="registration_journal_sequence",
+    )
+    activation_sequence = _positive_int(
+        value.activation_journal_sequence,
+        name="activation_journal_sequence",
+    )
+    cut = value.resolved_journal_sequence_cut
+    if type(cut) is not int or cut < 0:
+        raise RiskPolicyAuthorityError(
+            "resolved_journal_sequence_cut must be a non-negative integer"
+        )
+    if registration_sequence > activation_sequence or activation_sequence > cut:
+        raise RiskPolicyAuthorityError(
+            "resolved RiskPolicy chronology is not canonical"
+        )
+    policy_digest = risk_policy_digest(value.policy)
+    if policy_digest != identity.content_digest:
+        raise RiskPolicyAuthorityError(
+            "resolved policy content digest mismatch"
+        )
+    return payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "identity": identity.payload(),
+            "policy_digest": policy_digest,
+            "registration_event_id": registration_event_id,
+            "registration_journal_sequence": str(registration_sequence),
+            "activation_event_id": activation_event_id,
+            "activation_journal_sequence": str(activation_sequence),
+            "resolved_journal_sequence_cut": str(cut),
+            "journal_store_identity_digest": _digest(
+                value.journal_store_identity_digest,
+                name="journal_store_identity_digest",
+            ),
+        }
+    )
 
 
 def _decimal_text(value: object, *, name: str) -> str | None:
@@ -515,6 +645,12 @@ def _policy_from_payload(value: object) -> RiskPolicy:
     return policy
 
 
+def canonical_risk_policy(policy: RiskPolicy) -> RiskPolicy:
+    """Return one detached exact-base RiskPolicy after canonical content validation."""
+
+    return _policy_from_payload(risk_policy_payload(policy))
+
+
 def _scope_from_payload(value: object) -> RiskPolicyScope:
     payload = _strict_mapping(value, name="risk policy scope", keys=_SCOPE_KEYS)
     scope = RiskPolicyScope(**payload)
@@ -563,16 +699,82 @@ class _ReplayState:
     activation_requests: dict[str, tuple[RiskPolicyIdentity, str | None, str, int]]
 
 
-# Callback-free weak references are deliberate. WeakKeyDictionary installs a
-# caller-discoverable removal callback on its key weakref; invoking that callback
-# manually can erase a live composition binding. Key by id instead, retain weak
-# refs with no callbacks, and prove referent identity at every use. Dead-id
-# entries are replaced lazily only when Python actually reuses that object id.
+# Compatibility/diagnostic surface only. Financial composition authority is
+# deliberately NOT stored here: callers can import and mutate module globals.
 _RISK_POLICY_REGISTRY_BINDINGS: dict[
     int,
     tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
 ] = {}
-_RISK_POLICY_REGISTRY_BINDINGS_LOCK = threading.RLock()
+
+
+def _risk_policy_registry_binding_operations():
+    """Return closure-owned one-shot registry composition operations.
+
+    Callback-free weak references are deliberate. WeakKeyDictionary installs a
+    caller-discoverable removal callback on its key weakref; invoking that
+    callback manually can erase a live composition binding. Key by id instead,
+    retain weak refs with no callbacks, and prove referent identity at every use.
+    """
+
+    bindings: dict[
+        int,
+        tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
+    ] = {}
+    lock = threading.RLock()
+
+    def bind(
+        registry: "DurableRiskPolicyRegistry",
+        store: JournalStore,
+    ) -> JournalStoreIdentity:
+        registry_id = id(registry)
+        with lock:
+            existing = bindings.get(registry_id)
+            if existing is not None:
+                existing_registry = existing[0]()
+                if existing_registry is registry:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry composition is already initialized"
+                    )
+                if existing_registry is not None:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry binding identity collision"
+                    )
+                # Python reused the id of a genuinely dead registry.
+                bindings.pop(registry_id, None)
+
+            selected_identity = _canonical_journal_authority_snapshot(store)
+            visible_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="selected risk policy journal identity",
+            )
+            module_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="module-owned risk policy journal identity",
+            )
+            bindings[registry_id] = (
+                weakref.ref(registry),
+                weakref.ref(store),
+                module_identity,
+            )
+            return visible_identity
+
+    def resolve(
+        registry: "DurableRiskPolicyRegistry",
+    ) -> tuple[
+        weakref.ReferenceType,
+        weakref.ReferenceType,
+        JournalStoreIdentity,
+    ] | None:
+        with lock:
+            return bindings.get(id(registry))
+
+    return bind, resolve
+
+
+(
+    _bind_risk_policy_registry,
+    _resolve_risk_policy_registry_binding,
+) = _risk_policy_registry_binding_operations()
 
 
 class DurableRiskPolicyRegistry:
@@ -587,50 +789,16 @@ class DurableRiskPolicyRegistry:
         if type(self) is not DurableRiskPolicyRegistry:
             raise TypeError("registry must be exact DurableRiskPolicyRegistry")
         # Python permits explicit re-entry into __init__ on an existing object.
-        # Composition selection is one-shot financial authority: never inspect a
-        # replacement store, let alone overwrite the module-owned binding.
-        registry_id = id(self)
-        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
-            existing = _RISK_POLICY_REGISTRY_BINDINGS.get(registry_id)
-            if existing is not None:
-                existing_registry = existing[0]()
-                if existing_registry is self:
-                    raise RiskPolicyAuthorityError(
-                        "risk policy registry composition is already initialized"
-                    )
-                if existing_registry is not None:
-                    raise RiskPolicyAuthorityError(
-                        "risk policy registry binding identity collision"
-                    )
-                # The prior registry is genuinely dead. Reuse of its Python id is
-                # the only supported transition; no weakref callback can erase a
-                # live binding.
-                _RISK_POLICY_REGISTRY_BINDINGS.pop(registry_id, None)
-            selected_identity = _canonical_journal_authority_snapshot(store)
-            # Keep the caller-visible diagnostic snapshot and the module-owned
-            # selected identity as detached values.  Mutating one cannot rewrite
-            # the other through a frozen-dataclass __dict__ alias.
-            visible_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="selected risk policy journal identity",
-            )
-            module_identity = require_exact_journal_store_identity(
-                selected_identity,
-                subject="module-owned risk policy journal identity",
-            )
-            self._journal_store_identity = visible_identity
-            self.store = store
-            _RISK_POLICY_REGISTRY_BINDINGS[registry_id] = (
-                weakref.ref(self),
-                weakref.ref(store),
-                module_identity,
-            )
+        # The closure-owned binding rejects re-entry before inspecting a replacement
+        # store, and caller-visible fields below remain diagnostics only.
+        visible_identity = _bind_risk_policy_registry(self, store)
+        self._journal_store_identity = visible_identity
+        self.store = store
 
     def _journal_store_authority(self) -> tuple[JournalStore, JournalStoreIdentity]:
         if type(self) is not DurableRiskPolicyRegistry:
             raise TypeError("registry must be exact DurableRiskPolicyRegistry")
-        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
-            binding = _RISK_POLICY_REGISTRY_BINDINGS.get(id(self))
+        binding = _resolve_risk_policy_registry_binding(self)
         if binding is None:
             raise RiskPolicyAuthorityError(
                 "risk policy registry lacks original journal composition"
@@ -1135,6 +1303,14 @@ class DurableRiskPolicyRegistry:
         with journal_store_authority_scope(store, expected_store_identity):
             current = JournalStore.current_journal_sequence(store)
         cut = current if journal_sequence_cut is None else journal_sequence_cut
+        if type(cut) is not int or cut < 0:
+            raise RiskPolicyAuthorityError(
+                "journal_sequence_cut must be a non-negative integer"
+            )
+        if cut > current:
+            raise RiskPolicyAuthorityError(
+                "journal_sequence_cut cannot be newer than the durable journal"
+            )
         state = DurableRiskPolicyRegistry._replay(self, scope, journal_sequence_cut=cut)
         if (
             state.active_key is None
@@ -1147,7 +1323,7 @@ class DurableRiskPolicyRegistry:
         identity, policy, registration_event_id, registration_sequence = state.registered[
             state.active_key
         ]
-        return ResolvedRiskPolicy(
+        resolved = ResolvedRiskPolicy(
             identity=identity,
             policy=policy,
             registration_event_id=registration_event_id,
@@ -1155,4 +1331,95 @@ class DurableRiskPolicyRegistry:
             activation_event_id=state.activation_event_id,
             activation_journal_sequence=state.activation_sequence,
             resolved_journal_sequence_cut=cut,
+            journal_store_identity_digest=journal_store_identity_digest(
+                expected_store_identity
+            ),
+            _authority_token=_RESOLVED_POLICY_AUTHORITY_TOKEN,
         )
+        return resolved
+
+def _install_resolved_policy_issuance_authority():
+    """Install a closure-owned issuance capability on the registry resolver.
+
+    The mutable binding table and the registrar are deliberately not module
+    globals. Importing the constructor token or recomputing the caller-visible
+    diagnostic digest therefore cannot register a caller-constructed result.
+    """
+
+    lock = threading.RLock()
+    bindings: dict[int, tuple[weakref.ReferenceType, str]] = {}
+    original_resolve = DurableRiskPolicyRegistry.resolve_current
+
+    def bind_issued(value: ResolvedRiskPolicy) -> ResolvedRiskPolicy:
+        if type(value) is not ResolvedRiskPolicy:
+            raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
+        issued_digest = _resolved_policy_authority_digest(value)
+        if value._authority_digest != issued_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed before registry issuance"
+            )
+        key = id(value)
+        with lock:
+            existing = bindings.get(key)
+            if existing is not None:
+                referent = existing[0]()
+                if referent is value:
+                    if existing[1] != issued_digest:
+                        raise RiskPolicyAuthorityError(
+                            "resolved RiskPolicy issuance binding changed"
+                        )
+                    return value
+                if referent is not None:
+                    raise RiskPolicyAuthorityError(
+                        "resolved RiskPolicy issuance identity collision"
+                    )
+                bindings.pop(key, None)
+            # Callback-free weakrefs prevent caller-invoked removal callbacks
+            # from erasing issuance truth for a live result.
+            bindings[key] = (weakref.ref(value), issued_digest)
+        return value
+
+    def sealed_resolve_current(
+        self,
+        scope: RiskPolicyScope,
+        *,
+        journal_sequence_cut: int | None = None,
+    ) -> ResolvedRiskPolicy:
+        resolved = original_resolve(
+            self,
+            scope,
+            journal_sequence_cut=journal_sequence_cut,
+        )
+        return bind_issued(resolved)
+
+    def require_issued(value: object) -> ResolvedRiskPolicy:
+        if type(value) is not ResolvedRiskPolicy:
+            raise TypeError("resolved policy must be exact ResolvedRiskPolicy")
+        key = id(value)
+        with lock:
+            binding = bindings.get(key)
+        if binding is None or binding[0]() is not value:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy was not issued by DurableRiskPolicyRegistry"
+            )
+        issued_digest = binding[1]
+        try:
+            current_digest = _resolved_policy_authority_digest(value)
+        except (RiskPolicyAuthorityError, TypeError, ValueError) as error:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed after registry issuance"
+            ) from error
+        if value._authority_digest != issued_digest or current_digest != issued_digest:
+            raise RiskPolicyAuthorityError(
+                "resolved RiskPolicy authority changed after registry issuance"
+            )
+        return value
+
+    DurableRiskPolicyRegistry.resolve_current = sealed_resolve_current
+    return require_issued
+
+
+require_registry_issued_resolved_policy = (
+    _install_resolved_policy_issuance_authority()
+)
+del _install_resolved_policy_issuance_authority

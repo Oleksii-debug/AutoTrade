@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, fields
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 import re
+import weakref
 from types import MappingProxyType
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
+
+from research.autotrade_research.artifacts import (
+    ArtifactStore, ArtifactIntegrityError, trusted_authenticated_reader,
+)
 
 from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     is_exact_decimal_multiple,
 )
+from .settlement_convention import SettlementConvention
 
 
 class InstrumentRegistryError(ValueError):
@@ -31,16 +39,18 @@ class InstrumentNotFound(InstrumentRegistryError):
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Financial/provider metadata ingress must not virtual-dispatch caller text
+    # subclasses before the value has been reduced to inert built-in authority.
+    if type(value) is not str or not value.strip():
         raise InstrumentRegistryError(f"{field} is required")
     return value.strip()
 
 
 def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise InstrumentRegistryError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise InstrumentRegistryError(f"{field} must be a finite decimal") from error
     if not result.is_finite():
@@ -51,9 +61,15 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
 
 
 def _utc(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise InstrumentRegistryError(f"{field} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # An exact datetime can still carry an arbitrary tzinfo implementation whose
+    # utcoffset()/fromutc() methods execute caller code. Instrument authority is
+    # canonical UTC, so admit only an exact built-in datetime already bound to
+    # the process-owned UTC singleton and avoid conversion callbacks entirely.
+    if type(value) is not datetime or value.tzinfo is not timezone.utc:
+        raise InstrumentRegistryError(
+            f"{field} must be an exact timezone-aware UTC datetime"
+        )
+    return value
 
 
 def _utc_text(value: datetime) -> str:
@@ -110,19 +126,21 @@ def _split_instrument_version_ref(value: str, field: str = "instrument_version")
 
 
 def _freeze_jsonish(value: object, field: str) -> object:
-    if isinstance(value, Mapping):
+    # Never iterate or stringify arbitrary Mapping/container/scalar subclasses
+    # at an authority-bearing metadata boundary.
+    if type(value) is dict:
         frozen: dict[str, object] = {}
         for key, item in value.items():
-            if not isinstance(key, str) or not key:
+            if type(key) is not str or not key:
                 raise InstrumentRegistryError(f"{field} object keys must be non-empty strings")
             frozen[key] = _freeze_jsonish(item, field)
         return MappingProxyType(frozen)
-    if isinstance(value, (list, tuple)):
+    if type(value) in (list, tuple):
         return tuple(_freeze_jsonish(item, field) for item in value)
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or type(value) in (str, bool, int):
         return value
     raise InstrumentRegistryError(
-        f"{field} must contain only JSON-safe string, integer, boolean, null, object or array values"
+        f"{field} must contain only exact built-in JSON-safe string, integer, boolean, null, object or array values"
     )
 
 
@@ -139,8 +157,10 @@ _EVIDENCE_ALLOWED = _EVIDENCE_REQUIRED | {"source_uri", "rights_id"}
 
 
 def _evidence_ref(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise InstrumentRegistryError("metadata_evidence entries must be objects")
+    if type(value) is not dict:
+        raise InstrumentRegistryError(
+            "metadata_evidence entries must be exact built-in objects"
+        )
     keys = set(value)
     missing = _EVIDENCE_REQUIRED - keys
     unknown = keys - _EVIDENCE_ALLOWED
@@ -195,7 +215,7 @@ class OffsetTransition:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "effective_from", _utc(self.effective_from, "effective_from"))
-        if isinstance(self.utc_offset_minutes, bool) or not isinstance(self.utc_offset_minutes, int):
+        if type(self.utc_offset_minutes) is not int:
             raise InstrumentRegistryError("utc_offset_minutes must be an integer")
         if not -14 * 60 <= self.utc_offset_minutes <= 14 * 60:
             raise InstrumentRegistryError("utc_offset_minutes is outside supported bounds")
@@ -208,14 +228,51 @@ class WeeklySession:
     close_minute: int
 
     def __post_init__(self) -> None:
-        if isinstance(self.weekday, bool) or self.weekday not in range(7):
+        if type(self.weekday) is not int or self.weekday not in range(7):
             raise InstrumentRegistryError("weekday must be between 0 and 6")
-        if not 0 <= self.open_minute < 24 * 60:
+        if type(self.open_minute) is not int or not 0 <= self.open_minute < 24 * 60:
             raise InstrumentRegistryError("open_minute is outside the day")
-        if not 0 < self.close_minute <= 24 * 60:
+        if type(self.close_minute) is not int or not 0 < self.close_minute <= 24 * 60:
             raise InstrumentRegistryError("close_minute is outside the day")
         if self.open_minute >= self.close_minute:
             raise InstrumentRegistryError("overnight or empty sessions require an explicit split")
+
+
+@dataclass(frozen=True)
+class CalendarDateOverride:
+    """One local calendar date replacing the recurring weekly schedule.
+
+    An empty sessions tuple means the venue is closed for the entire local date.
+    Non-empty sessions represent special/early/late sessions and must use the
+    same local weekday as the override date.
+    """
+
+    local_date: date
+    sessions: tuple[WeeklySession, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.local_date) is not date:
+            raise InstrumentRegistryError("calendar override local_date must be exact date")
+        if type(self.sessions) is not tuple:
+            raise InstrumentRegistryError("calendar override sessions must be exact tuple")
+        canonical = []
+        for session in self.sessions:
+            if type(session) is not WeeklySession:
+                raise InstrumentRegistryError(
+                    "calendar override sessions must be exact WeeklySession"
+                )
+            if session.weekday != self.local_date.weekday():
+                raise InstrumentRegistryError(
+                    "calendar override session weekday must match local_date"
+                )
+            canonical.append(
+                WeeklySession(
+                    weekday=session.weekday,
+                    open_minute=session.open_minute,
+                    close_minute=session.close_minute,
+                )
+            )
+        object.__setattr__(self, "sessions", tuple(canonical))
 
 
 @dataclass(frozen=True)
@@ -224,16 +281,37 @@ class TradingCalendar:
     timezone_id: str
     sessions: tuple[WeeklySession, ...] = ()
     transitions: tuple[OffsetTransition, ...] = ()
+    date_overrides: tuple[CalendarDateOverride, ...] = ()
     continuous: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "calendar_id", _text(self.calendar_id, "calendar_id"))
         object.__setattr__(self, "timezone_id", _text(self.timezone_id, "timezone_id"))
+        if type(self.continuous) is not bool:
+            raise InstrumentRegistryError("continuous must be a boolean")
+        if type(self.sessions) not in (tuple, list):
+            raise InstrumentRegistryError("sessions must be an exact built-in array")
+        if type(self.transitions) not in (tuple, list):
+            raise InstrumentRegistryError("transitions must be an exact built-in array")
+        if any(type(item) is not WeeklySession for item in self.sessions):
+            raise InstrumentRegistryError("sessions entries must be exact WeeklySession")
+        if any(type(item) is not OffsetTransition for item in self.transitions):
+            raise InstrumentRegistryError(
+                "transitions entries must be exact OffsetTransition"
+            )
         object.__setattr__(self, "sessions", tuple(self.sessions))
         ordered = tuple(sorted(tuple(self.transitions), key=lambda item: item.effective_from))
         if len({item.effective_from for item in ordered}) != len(ordered):
             raise InstrumentRegistryError("calendar transition instants must be unique")
         object.__setattr__(self, "transitions", ordered)
+        overrides = tuple(sorted(tuple(self.date_overrides), key=lambda item: item.local_date))
+        if any(type(item) is not CalendarDateOverride for item in overrides):
+            raise InstrumentRegistryError(
+                "date_overrides must contain exact CalendarDateOverride values"
+            )
+        if len({item.local_date for item in overrides}) != len(overrides):
+            raise InstrumentRegistryError("calendar override local dates must be unique")
+        object.__setattr__(self, "date_overrides", overrides)
         if not self.continuous and not self.sessions:
             raise InstrumentRegistryError("non-continuous calendar requires sessions")
 
@@ -255,6 +333,22 @@ class TradingCalendar:
 
     def is_open(self, instant: datetime) -> bool:
         point = _utc(instant, "instant")
+        if self.date_overrides:
+            local = point + timedelta(minutes=self._offset_minutes(point))
+            override = next(
+                (
+                    item
+                    for item in self.date_overrides
+                    if item.local_date == local.date()
+                ),
+                None,
+            )
+            if override is not None:
+                minute = local.hour * 60 + local.minute
+                return any(
+                    session.open_minute <= minute < session.close_minute
+                    for session in override.sessions
+                )
         if self.continuous:
             return True
         local = point + timedelta(minutes=self._offset_minutes(point))
@@ -313,16 +407,19 @@ class InstrumentVersion:
     option_right: str | None = None
     exercise_style: str | None = None
     deliverable: tuple[DeliverableLeg, ...] = ()
+    exercise_cash_per_contract: Decimal | None = None
     margin_model_id: str | None = None
     metadata_evidence: tuple[Mapping[str, object], ...] = ()
+    settlement_convention: SettlementConvention | None = None
 
     def __post_init__(self) -> None:
+        raw_instrument_id = _text(self.instrument_id, "instrument_id")
         try:
-            canonical_instrument_id = str(UUID(self.instrument_id))
+            canonical_instrument_id = str(UUID(raw_instrument_id))
         except (ValueError, TypeError, AttributeError) as error:
             raise InstrumentRegistryError("instrument_id must be a UUID") from error
         object.__setattr__(self, "instrument_id", canonical_instrument_id)
-        if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
+        if type(self.version) is not int or self.version < 1:
             raise InstrumentRegistryError("version must be a positive integer")
 
         for field in (
@@ -338,6 +435,8 @@ class InstrumentVersion:
         ):
             object.__setattr__(self, field, _text(getattr(self, field), field))
 
+        object.__setattr__(self, "asset_class", _text(self.asset_class, "asset_class"))
+        object.__setattr__(self, "status", _text(self.status, "status"))
         if self.asset_class not in {
             "CASH_EQUITY",
             "FUND",
@@ -397,12 +496,74 @@ class InstrumentVersion:
         if self.effective_to is not None and self.effective_to <= start:
             raise InstrumentRegistryError("effective_to must be after effective_from")
 
-        object.__setattr__(self, "deliverable", tuple(self.deliverable))
+        if type(self.deliverable) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "deliverable must be an exact built-in array"
+            )
+        if type(self.metadata_evidence) not in (tuple, list):
+            raise InstrumentRegistryError(
+                "metadata_evidence must be an exact built-in array"
+            )
+
+        canonical_deliverable = []
+        for leg in self.deliverable:
+            if type(leg) is not DeliverableLeg:
+                raise InstrumentRegistryError(
+                    "deliverable entries must be exact DeliverableLeg"
+                )
+            canonical_deliverable.append(
+                DeliverableLeg(asset_id=leg.asset_id, quantity=leg.quantity)
+            )
+        object.__setattr__(self, "deliverable", tuple(canonical_deliverable))
         frozen_evidence = tuple(_evidence_ref(item) for item in self.metadata_evidence)
         object.__setattr__(self, "metadata_evidence", frozen_evidence)
 
+        convention = self.settlement_convention
+        if self.asset_class == "FUTURE" and self.payoff == "INVERSE" and convention is None:
+            raise InstrumentRegistryError("INVERSE future requires a settlement convention")
+        if convention is not None:
+            if type(convention) is not SettlementConvention:
+                raise InstrumentRegistryError(
+                    "settlement_convention must be exact SettlementConvention"
+                )
+            if self.asset_class != "FUTURE" or self.payoff != "INVERSE":
+                raise InstrumentRegistryError(
+                    "settlement convention requires an INVERSE future"
+                )
+            convention = SettlementConvention(
+                provider_id=convention.provider_id,
+                instrument_id=convention.instrument_id,
+                instrument_version=convention.instrument_version,
+                settlement_currency=convention.settlement_currency,
+                quantum=convention.quantum,
+                rounding=convention.rounding,
+                evidence_artifact_id=convention.evidence_artifact_id,
+                evidence_sha256=convention.evidence_sha256,
+            )
+            if (
+                convention.provider_id != self.provider_id
+                or convention.instrument_id != self.instrument_id
+                or convention.instrument_version != self.version
+                or convention.settlement_currency != self.settlement_currency
+            ):
+                raise InstrumentRegistryError(
+                    "settlement convention scope must match InstrumentVersion"
+                )
+            if not any(
+                evidence["artifact_id"] == convention.evidence_artifact_id
+                and evidence["sha256"] == convention.evidence_sha256
+                for evidence in frozen_evidence
+            ):
+                raise InstrumentRegistryError(
+                    "settlement convention evidence must be covered by metadata_evidence"
+                )
+            object.__setattr__(self, "settlement_convention", convention)
+
         derivative = self.asset_class in {"FUTURE", "PERPETUAL", "OPTION"}
         if derivative:
+            if self.payoff is None:
+                raise InstrumentRegistryError("derivative payoff is required")
+            object.__setattr__(self, "payoff", _text(self.payoff, "payoff"))
             if self.payoff not in {"LINEAR", "INVERSE", "OPTION"}:
                 raise InstrumentRegistryError("derivative payoff is required")
             if self.asset_class in {"FUTURE", "PERPETUAL"} and self.payoff not in {
@@ -442,6 +603,7 @@ class InstrumentVersion:
                 self.strike,
                 self.option_right,
                 self.exercise_style,
+                self.exercise_cash_per_contract,
                 self.margin_model_id,
             )
         ) or self.deliverable:
@@ -455,8 +617,10 @@ class InstrumentVersion:
                 raise InstrumentRegistryError("perpetual must not invent an expiry")
             if self.funding_schedule is None:
                 raise InstrumentRegistryError("perpetual funding_schedule is required")
-            if not isinstance(self.funding_schedule, Mapping) or not self.funding_schedule:
-                raise InstrumentRegistryError("funding_schedule must be a non-empty object")
+            if type(self.funding_schedule) is not dict or not self.funding_schedule:
+                raise InstrumentRegistryError(
+                    "funding_schedule must be a non-empty exact built-in object"
+                )
             object.__setattr__(
                 self,
                 "funding_schedule",
@@ -473,6 +637,11 @@ class InstrumentVersion:
             if self.strike is None:
                 raise InstrumentRegistryError("option strike is required")
             object.__setattr__(self, "strike", _decimal(self.strike, "strike", positive=True))
+            if self.option_right is None:
+                raise InstrumentRegistryError("option_right must be CALL or PUT")
+            object.__setattr__(
+                self, "option_right", _text(self.option_right, "option_right")
+            )
             if self.option_right not in {"CALL", "PUT"}:
                 raise InstrumentRegistryError("option_right must be CALL or PUT")
             if self.exercise_style is None:
@@ -482,7 +651,40 @@ class InstrumentVersion:
             )
             if not self.deliverable:
                 raise InstrumentRegistryError("option deliverable is required")
-        elif self.strike is not None or self.option_right is not None or self.exercise_style is not None:
+            exercise_cash = self.exercise_cash_per_contract
+            if exercise_cash is not None:
+                exercise_cash = _decimal(
+                    exercise_cash,
+                    "exercise_cash_per_contract",
+                )
+                if exercise_cash < 0:
+                    raise InstrumentRegistryError(
+                        "exercise_cash_per_contract cannot be negative"
+                    )
+                object.__setattr__(
+                    self,
+                    "exercise_cash_per_contract",
+                    exercise_cash,
+                )
+            if self.settlement_method == "CASH" and exercise_cash is not None:
+                raise InstrumentRegistryError(
+                    "cash-settled option cannot carry physical exercise cash"
+                )
+            if self.settlement_method == "PHYSICAL":
+                adjusted = (
+                    len(self.deliverable) != 1
+                    or self.deliverable[0].quantity != self.contract_multiplier
+                )
+                if adjusted and exercise_cash is None:
+                    raise InstrumentRegistryError(
+                        "adjusted physical option requires explicit exercise_cash_per_contract"
+                    )
+        elif (
+            self.strike is not None
+            or self.option_right is not None
+            or self.exercise_style is not None
+            or self.exercise_cash_per_contract is not None
+        ):
             raise InstrumentRegistryError("option-only fields are not valid for this asset class")
 
     def contains(self, instant: datetime, implicit_end: datetime | None = None) -> bool:
@@ -545,6 +747,11 @@ class InstrumentVersion:
             "last_trade_at": _utc_text(self.last_trade_at) if self.last_trade_at else None,
             "delivery_cutoff": _utc_text(self.delivery_cutoff) if self.delivery_cutoff else None,
             "settlement_method": self.settlement_method,
+            "settlement_convention": (
+                self.settlement_convention.payload()
+                if self.settlement_convention is not None
+                else None
+            ),
             "funding_schedule": (
                 _thaw_jsonish(self.funding_schedule)
                 if self.funding_schedule is not None
@@ -553,6 +760,11 @@ class InstrumentVersion:
             "strike": _decimal_text(self.strike) if self.strike is not None else None,
             "option_right": self.option_right,
             "exercise_style": self.exercise_style,
+            "exercise_cash_per_contract": (
+                _decimal_text(self.exercise_cash_per_contract)
+                if self.exercise_cash_per_contract is not None
+                else None
+            ),
             "margin_model_id": self.margin_model_id,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
@@ -574,6 +786,363 @@ class InstrumentVersion:
         return payload
 
 
+    def metadata_evidence_binding(self) -> str:
+        """Digest the exact canonical instrument-version facts evidenced by metadata.
+
+        The evidence references themselves are excluded to avoid circular identity:
+        an immutable ArtifactStore manifest binds to these economic/version facts,
+        and InstrumentRegistry separately verifies that manifest and object.
+        """
+
+        payload = self.to_contract_dict()
+        payload.pop("metadata_evidence", None)
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return "sha256:" + sha256(canonical).hexdigest()
+
+
+def _detached_instrument_version(version: InstrumentVersion) -> InstrumentVersion:
+    """Revalidate and detach one exact instrument version before registry publication."""
+
+    if type(version) is not InstrumentVersion:
+        raise TypeError("version must be exact InstrumentVersion")
+
+    string_fields = (
+        "instrument_id",
+        "provider_id",
+        "venue_id",
+        "provider_symbol",
+        "asset_class",
+        "base_currency",
+        "quote_currency",
+        "settlement_currency",
+        "quantity_unit",
+        "calendar_id",
+        "timezone_id",
+        "status",
+        "minimum_notional_currency",
+        "payoff",
+        "underlying_id",
+        "settlement_method",
+        "option_right",
+        "exercise_style",
+        "margin_model_id",
+    )
+    decimal_fields = (
+        "contract_multiplier",
+        "price_tick",
+        "quantity_step",
+        "minimum_quantity",
+        "minimum_notional_amount",
+        "maximum_quantity",
+        "price_band_low",
+        "price_band_high",
+        "strike",
+        "exercise_cash_per_contract",
+    )
+    datetime_fields = (
+        "effective_from",
+        "effective_to",
+        "expiry",
+        "last_trade_at",
+        "delivery_cutoff",
+    )
+
+    if type(version.version) is not int:
+        raise TypeError("version.version must be exact int")
+    for field_name in string_fields:
+        value = getattr(version, field_name)
+        if value is not None and type(value) is not str:
+            raise TypeError(f"version.{field_name} must be exact str")
+    for field_name in decimal_fields:
+        value = getattr(version, field_name)
+        if value is not None and type(value) is not Decimal:
+            raise TypeError(f"version.{field_name} must be exact Decimal")
+    for field_name in datetime_fields:
+        value = getattr(version, field_name)
+        if value is not None and type(value) is not datetime:
+            raise TypeError(f"version.{field_name} must be exact datetime")
+
+    if type(version.deliverable) is not tuple:
+        raise TypeError("version.deliverable must be exact tuple")
+    for leg in version.deliverable:
+        if type(leg) is not DeliverableLeg:
+            raise TypeError("version.deliverable entries must be exact DeliverableLeg")
+        if type(leg.asset_id) is not str:
+            raise TypeError("deliverable.asset_id must be exact str")
+        if type(leg.quantity) is not Decimal:
+            raise TypeError("deliverable.quantity must be exact Decimal")
+
+    if version.funding_schedule is not None and type(version.funding_schedule) is not MappingProxyType:
+        raise TypeError("version.funding_schedule must be canonical immutable mapping")
+    if (
+        version.settlement_convention is not None
+        and type(version.settlement_convention) is not SettlementConvention
+    ):
+        raise TypeError(
+            "version.settlement_convention must be exact SettlementConvention"
+        )
+    if type(version.metadata_evidence) is not tuple:
+        raise TypeError("version.metadata_evidence must be exact tuple")
+    for evidence in version.metadata_evidence:
+        if type(evidence) is not MappingProxyType:
+            raise TypeError("metadata_evidence entries must be canonical immutable mappings")
+        if any(type(key) is not str or type(value) is not str for key, value in evidence.items()):
+            raise TypeError("metadata_evidence values must be exact strings")
+
+    payload = {
+        field.name: getattr(version, field.name)
+        for field in fields(InstrumentVersion)
+    }
+    return InstrumentVersion(**payload)
+
+
+def _detached_trading_calendar(calendar: TradingCalendar) -> TradingCalendar:
+    """Revalidate and detach one exact trading calendar before registry use."""
+
+    if type(calendar) is not TradingCalendar:
+        raise TypeError("calendar must be exact TradingCalendar")
+    if type(calendar.calendar_id) is not str:
+        raise TypeError("calendar.calendar_id must be exact str")
+    if type(calendar.timezone_id) is not str:
+        raise TypeError("calendar.timezone_id must be exact str")
+    if type(calendar.continuous) is not bool:
+        raise TypeError("calendar.continuous must be exact bool")
+    if type(calendar.sessions) is not tuple:
+        raise TypeError("calendar.sessions must be exact tuple")
+    if type(calendar.transitions) is not tuple:
+        raise TypeError("calendar.transitions must be exact tuple")
+    if type(calendar.date_overrides) is not tuple:
+        raise TypeError("calendar.date_overrides must be exact tuple")
+
+    sessions = []
+    for session in calendar.sessions:
+        if type(session) is not WeeklySession:
+            raise TypeError("calendar sessions must be exact WeeklySession")
+        if (
+            type(session.weekday) is not int
+            or type(session.open_minute) is not int
+            or type(session.close_minute) is not int
+        ):
+            raise TypeError("calendar session scalars must be exact int")
+        sessions.append(
+            WeeklySession(
+                weekday=session.weekday,
+                open_minute=session.open_minute,
+                close_minute=session.close_minute,
+            )
+        )
+
+    transitions = []
+    for transition in calendar.transitions:
+        if type(transition) is not OffsetTransition:
+            raise TypeError("calendar transitions must be exact OffsetTransition")
+        if type(transition.effective_from) is not datetime:
+            raise TypeError("calendar transition effective_from must be exact datetime")
+        if type(transition.utc_offset_minutes) is not int:
+            raise TypeError("calendar transition offset must be exact int")
+        transitions.append(
+            OffsetTransition(
+                effective_from=transition.effective_from,
+                utc_offset_minutes=transition.utc_offset_minutes,
+            )
+        )
+
+    overrides = []
+    for override in calendar.date_overrides:
+        if type(override) is not CalendarDateOverride:
+            raise TypeError("calendar overrides must be exact CalendarDateOverride")
+        if type(override.local_date) is not date:
+            raise TypeError("calendar override local_date must be exact date")
+        if type(override.sessions) is not tuple:
+            raise TypeError("calendar override sessions must be exact tuple")
+        override_sessions = []
+        for session in override.sessions:
+            if type(session) is not WeeklySession:
+                raise TypeError("calendar override sessions must be exact WeeklySession")
+            override_sessions.append(
+                WeeklySession(
+                    weekday=session.weekday,
+                    open_minute=session.open_minute,
+                    close_minute=session.close_minute,
+                )
+            )
+        overrides.append(
+            CalendarDateOverride(
+                local_date=override.local_date,
+                sessions=tuple(override_sessions),
+            )
+        )
+
+    return TradingCalendar(
+        calendar_id=calendar.calendar_id,
+        timezone_id=calendar.timezone_id,
+        sessions=tuple(sessions),
+        transitions=tuple(transitions),
+        date_overrides=tuple(overrides),
+        continuous=calendar.continuous,
+    )
+
+
+def _install_instrument_registry_calendar_authority():
+    """Keep calendar authority outside caller-writable instance state."""
+
+    authorities: dict[
+        int,
+        tuple[weakref.ReferenceType, dict[str, TradingCalendar]],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _state) in authorities.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    def bound_state(value: object) -> dict[str, TradingCalendar]:
+        if type(value) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise InstrumentRegistryError("registry calendar authority is not established")
+        value_ref, state = entry
+        current = value_ref()
+        if current is value:
+            return state
+        if current is None:
+            authorities.pop(id(value), None)
+            raise InstrumentRegistryError("registry calendar authority is not established")
+        raise InstrumentRegistryError("registry calendar authority identity collision")
+
+    def initialize(value: object) -> None:
+        if type(value) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        prune_dead()
+        if id(value) in authorities:
+            raise InstrumentRegistryError("registry calendar authority is already established")
+        default = _detached_trading_calendar(TradingCalendar.continuous_24_7())
+        authorities[id(value)] = (
+            weakref.ref(value),
+            {default.calendar_id: default},
+        )
+
+    def calendar_for(
+        value: object,
+        calendar_id: str,
+    ) -> TradingCalendar | None:
+        state = bound_state(value)
+        calendar = state.get(calendar_id)
+        if calendar is None:
+            return None
+        return _detached_trading_calendar(calendar)
+
+    def commit(value: object, calendar: TradingCalendar) -> None:
+        state = bound_state(value)
+        detached = _detached_trading_calendar(calendar)
+        existing = state.get(detached.calendar_id)
+        if existing is not None and existing != detached:
+            raise InstrumentConflict("calendar_id is immutable")
+        state[detached.calendar_id] = detached
+
+    return initialize, calendar_for, commit
+
+
+_registry_calendars_initialize = None
+_registry_calendar_for = None
+_registry_calendars_commit = None
+
+
+def _install_instrument_registry_version_authority():
+    """Keep canonical version history outside caller-writable instance state."""
+
+    authorities: dict[
+        int,
+        tuple[weakref.ReferenceType, dict[str, list[InstrumentVersion]]],
+    ] = {}
+
+    def prune_dead() -> None:
+        dead = [
+            object_id
+            for object_id, (value_ref, _state) in authorities.items()
+            if value_ref() is None
+        ]
+        for object_id in dead:
+            authorities.pop(object_id, None)
+
+    def bound_state(value: object) -> dict[str, list[InstrumentVersion]]:
+        if type(value) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        prune_dead()
+        entry = authorities.get(id(value))
+        if entry is None:
+            raise InstrumentRegistryError("registry version authority is not established")
+        value_ref, state = entry
+        current = value_ref()
+        if current is value:
+            return state
+        if current is None:
+            authorities.pop(id(value), None)
+            raise InstrumentRegistryError("registry version authority is not established")
+        raise InstrumentRegistryError("registry version authority identity collision")
+
+    def initialize(value: object) -> None:
+        if type(value) is not InstrumentRegistry:
+            raise TypeError("registry must be exact InstrumentRegistry")
+        prune_dead()
+        if id(value) in authorities:
+            raise InstrumentRegistryError("registry version authority is already established")
+        authorities[id(value)] = (weakref.ref(value), {})
+
+    def snapshot(value: object) -> dict[str, list[InstrumentVersion]]:
+        state = bound_state(value)
+        return {
+            instrument_id: [
+                _detached_instrument_version(version)
+                for version in versions
+            ]
+            for instrument_id, versions in state.items()
+        }
+
+    def versions_for(
+        value: object,
+        instrument_id: str,
+    ) -> tuple[InstrumentVersion, ...]:
+        state = bound_state(value)
+        return tuple(
+            _detached_instrument_version(version)
+            for version in state.get(instrument_id, ())
+        )
+
+    def instrument_ids(value: object) -> tuple[str, ...]:
+        state = bound_state(value)
+        return tuple(state)
+
+    def commit(value: object, candidate: InstrumentVersion) -> None:
+        state = bound_state(value)
+        detached = _detached_instrument_version(candidate)
+        versions = list(state.get(detached.instrument_id, ()))
+        versions.append(detached)
+        versions.sort(key=lambda item: item.version)
+        state[detached.instrument_id] = versions
+
+    return initialize, snapshot, versions_for, instrument_ids, commit
+
+
+_registry_versions_initialize = None
+_registry_versions_snapshot = None
+_registry_versions_for = None
+_registry_instrument_ids = None
+_registry_versions_commit = None
+
+
 class InstrumentRegistry:
     """Append-only registry whose history remains stable across metadata changes."""
 
@@ -582,24 +1151,21 @@ class InstrumentRegistry:
         calendars: Iterable[TradingCalendar] = (),
         versions: Iterable[InstrumentVersion] = (),
     ) -> None:
-        self._calendars: dict[str, TradingCalendar] = {
-            "CONTINUOUS_24_7": TradingCalendar.continuous_24_7()
-        }
-        self._versions: dict[str, list[InstrumentVersion]] = {}
+        _registry_versions_initialize(self)
+        _registry_calendars_initialize(self)
         for calendar in calendars:
             self.add_calendar(calendar)
         for version in versions:
             self.add(version)
 
     def add_calendar(self, calendar: TradingCalendar) -> None:
-        existing = self._calendars.get(calendar.calendar_id)
-        if existing is not None and existing != calendar:
-            raise InstrumentConflict("calendar_id is immutable")
-        self._calendars[calendar.calendar_id] = calendar
+        _registry_calendars_commit(self, calendar)
 
     def _candidate_state(self, candidate: InstrumentVersion) -> dict[str, list[InstrumentVersion]]:
-        state = {key: list(value) for key, value in self._versions.items()}
-        state.setdefault(candidate.instrument_id, []).append(candidate)
+        state = _registry_versions_snapshot(self)
+        state.setdefault(candidate.instrument_id, []).append(
+            _detached_instrument_version(candidate)
+        )
         state[candidate.instrument_id].sort(key=lambda item: item.version)
         return state
 
@@ -628,13 +1194,14 @@ class InstrumentRegistry:
         return left_start < right_limit and right_start < left_limit
 
     def add(self, version: InstrumentVersion) -> None:
-        calendar = self._calendars.get(version.calendar_id)
+        version = _detached_instrument_version(version)
+        calendar = _registry_calendar_for(self, version.calendar_id)
         if calendar is None:
             raise InstrumentRegistryError("calendar_id is unknown")
         if calendar.timezone_id != version.timezone_id:
             raise InstrumentRegistryError("instrument timezone_id conflicts with its calendar")
 
-        existing = self._versions.get(version.instrument_id, [])
+        existing = list(_registry_versions_for(self, version.instrument_id))
         if existing:
             same_version = tuple(
                 item for item in existing if item.version == version.version
@@ -653,8 +1220,8 @@ class InstrumentRegistry:
         elif version.version != 1:
             raise InstrumentConflict("first instrument version must be 1")
 
-        state = self._candidate_state(version)
-        intervals = list(self._intervals(state))
+        state = InstrumentRegistry._candidate_state(self, version)
+        intervals = list(InstrumentRegistry._intervals(state))
         for index, (left_id, left, left_start, left_end) in enumerate(intervals):
             for right_id, right, right_start, right_end in intervals[index + 1 :]:
                 if left_id == right_id:
@@ -663,27 +1230,27 @@ class InstrumentRegistry:
                     left.provider_id == right.provider_id
                     and left.venue_id == right.venue_id
                     and left.provider_symbol == right.provider_symbol
-                    and self._overlap(left_start, left_end, right_start, right_end)
+                    and InstrumentRegistry._overlap(left_start, left_end, right_start, right_end)
                 ):
                     raise InstrumentConflict(
                         "provider symbol is assigned to different instruments in overlapping intervals"
                     )
-        self._versions = state
+        _registry_versions_commit(self, version)
 
     def versions(self, instrument_id: str) -> tuple[InstrumentVersion, ...]:
-        return tuple(self._versions.get(instrument_id, ()))
+        return _registry_versions_for(self, instrument_id)
 
     def exact(self, instrument_version: str) -> InstrumentVersion:
         instrument_id, version_number = _split_instrument_version_ref(
             instrument_version, "instrument_version"
         )
-        for version in self._versions.get(instrument_id, ()):
+        for version in _registry_versions_for(self, instrument_id):
             if version.version == version_number:
                 return version
         raise InstrumentNotFound("instrument_version is unknown")
 
     def at(self, instrument_id: str, instant: datetime) -> InstrumentVersion:
-        versions = self._versions.get(instrument_id)
+        versions = _registry_versions_for(self, instrument_id)
         if not versions:
             raise InstrumentNotFound("instrument_id is unknown")
         for index in range(len(versions) - 1, -1, -1):
@@ -694,6 +1261,192 @@ class InstrumentRegistry:
             if version.contains(instant, implicit_end):
                 return version
         raise InstrumentNotFound("no instrument version is effective at requested instant")
+
+    @staticmethod
+    def _metadata_known_by(
+        version: InstrumentVersion,
+        knowledge_cutoff: datetime,
+        *,
+        artifact_store: ArtifactStore,
+        trusted_read,
+    ) -> bool:
+        """Whether immutable metadata evidence was actually committed by the cutoff."""
+
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
+        cutoff = _utc(knowledge_cutoff, "knowledge_cutoff")
+        if not version.metadata_evidence:
+            return False
+        known_at: list[datetime] = []
+        for evidence in version.metadata_evidence:
+            raw = evidence.get("observed_at")
+            if type(raw) is not str or not raw.endswith("Z"):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence has invalid observed_at"
+                )
+            try:
+                observed = datetime.fromisoformat(raw[:-1] + "+00:00").astimezone(
+                    timezone.utc
+                )
+            except ValueError as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence has invalid observed_at"
+                ) from error
+
+            artifact_id = evidence.get("artifact_id")
+            expected_digest = evidence.get("sha256")
+            if type(artifact_id) is not str or type(expected_digest) is not str:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence identity is invalid"
+                )
+            try:
+                manifest, _data = trusted_read(artifact_id)
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence cannot be integrity verified"
+                ) from error
+            if manifest.get("sha256") != expected_digest:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence digest mismatch"
+                )
+            if (
+                manifest.get("media_type")
+                != "application/vnd.autotrade.instrument-metadata+json"
+            ):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence media type is invalid"
+                )
+            metadata = manifest.get("metadata")
+            if (
+                type(metadata) is not dict
+                or metadata.get("kind") != "instrument-metadata"
+                or metadata.get("instrument_version_binding")
+                != InstrumentVersion.metadata_evidence_binding(version)
+            ):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence is not bound to this instrument version"
+                )
+            if "rights_id" in evidence and manifest.get("rights", {}).get("rights_id") != evidence["rights_id"]:
+                raise InstrumentRegistryError("instrument metadata evidence rights identity mismatch")
+            committed_raw = manifest.get("created_at")
+            if type(committed_raw) is not str:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence lacks trusted commit time"
+                )
+            try:
+                committed = datetime.fromisoformat(
+                    committed_raw.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except ValueError as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence commit time is invalid"
+                ) from error
+            if observed > committed:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence observation follows immutable commit"
+                )
+            known_at.append(max(observed, committed))
+        return max(known_at) <= cutoff
+
+    def at_known(
+        self,
+        instrument_id: str,
+        instant: datetime,
+        *,
+        knowledge_cutoff: datetime,
+        artifact_store: ArtifactStore,
+    ) -> InstrumentVersion:
+        """Resolve only from metadata that was actually knowable by the cutoff.
+
+        This is the replay/science lookup.  It intentionally differs from at():
+        operational runtime can use the registry's currently loaded truth, while
+        historical replay must not let a later-discovered version retroactively
+        truncate a prior version's effective interval.
+        """
+
+        effective_point = _utc(instant, "instant")
+        cutoff = _utc(knowledge_cutoff, "knowledge_cutoff")
+        if effective_point > cutoff:
+            raise InstrumentRegistryError(
+                "instant cannot be later than causal knowledge_cutoff"
+            )
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
+        trusted_read = trusted_authenticated_reader(
+            artifact_store.root, publication_store=artifact_store,
+        )
+        versions = _registry_versions_for(self, instrument_id)
+        if not versions:
+            raise InstrumentNotFound("instrument_id is unknown")
+
+        known_versions = [
+            version
+            for version in versions
+            if InstrumentRegistry._metadata_known_by(
+                version,
+                cutoff,
+                artifact_store=artifact_store,
+                trusted_read=trusted_read,
+            )
+        ]
+        for index in range(len(known_versions) - 1, -1, -1):
+            version = known_versions[index]
+            implicit_end = (
+                known_versions[index + 1].effective_from
+                if index + 1 < len(known_versions)
+                else None
+            )
+            if version.contains(effective_point, implicit_end):
+                return version
+        raise InstrumentNotFound(
+            "no causally known instrument version is effective at requested instant"
+        )
+
+    def resolve_known(
+        self,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        instant: datetime,
+        *,
+        knowledge_cutoff: datetime,
+        artifact_store: ArtifactStore,
+    ) -> InstrumentVersion:
+        """Causal provider-symbol resolution for replay/research."""
+
+        provider = _text(provider_id, "provider_id")
+        venue = _text(venue_id, "venue_id")
+        symbol = _text(provider_symbol, "provider_symbol")
+        matches = []
+        for instrument_id in _registry_instrument_ids(self):
+            try:
+                version = InstrumentRegistry.at_known(
+                    self, instrument_id,
+                    instant,
+                    knowledge_cutoff=knowledge_cutoff,
+                    artifact_store=artifact_store,
+                )
+            except InstrumentNotFound:
+                continue
+            if (
+                version.provider_id == provider
+                and version.venue_id == venue
+                and version.provider_symbol == symbol
+            ):
+                matches.append(version)
+        if not matches:
+            raise InstrumentNotFound(
+                "provider symbol is not causally known at requested instant"
+            )
+        if len(matches) > 1:
+            raise InstrumentConflict("causal provider symbol resolution is ambiguous")
+        return matches[0]
 
     def resolve(
         self,
@@ -706,9 +1459,9 @@ class InstrumentRegistry:
         venue = _text(venue_id, "venue_id")
         symbol = _text(provider_symbol, "provider_symbol")
         matches = []
-        for instrument_id in self._versions:
+        for instrument_id in _registry_instrument_ids(self):
             try:
-                version = self.at(instrument_id, instant)
+                version = InstrumentRegistry.at(self, instrument_id, instant)
             except InstrumentNotFound:
                 continue
             if (
@@ -724,10 +1477,12 @@ class InstrumentRegistry:
         return matches[0]
 
     def require_tradable(self, instrument_id: str, instant: datetime) -> InstrumentVersion:
-        version = self.at(instrument_id, instant)
+        version = InstrumentRegistry.at(self, instrument_id, instant)
         if version.status != "ACTIVE":
             raise InstrumentRegistryError(f"instrument status is {version.status}")
-        calendar = self._calendars[version.calendar_id]
+        calendar = _registry_calendar_for(self, version.calendar_id)
+        if calendar is None:
+            raise InstrumentRegistryError("calendar_id is unknown")
         if not calendar.is_open(instant):
             raise InstrumentRegistryError("instrument calendar is closed")
         point = _utc(instant, "instant")
@@ -736,3 +1491,17 @@ class InstrumentRegistry:
         if version.expiry is not None and point >= version.expiry:
             raise InstrumentRegistryError("instrument is expired")
         return version
+
+(
+    _registry_versions_initialize,
+    _registry_versions_snapshot,
+    _registry_versions_for,
+    _registry_instrument_ids,
+    _registry_versions_commit,
+) = _install_instrument_registry_version_authority()
+(
+    _registry_calendars_initialize,
+    _registry_calendar_for,
+    _registry_calendars_commit,
+) = _install_instrument_registry_calendar_authority()
+

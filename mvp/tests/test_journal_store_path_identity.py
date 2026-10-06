@@ -14,7 +14,12 @@ from mvp.autotrade_mvp.persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from mvp.autotrade_mvp.store_identity import JournalStoreIdentity
+from mvp.autotrade_mvp import store_identity as store_identity_module
+from mvp.autotrade_mvp.store_identity import (
+    JournalStoreIdentity,
+    observe_database_identity,
+    same_journal_backing_object,
+)
 
 
 class JournalStorePathIdentityRegressionTests(unittest.TestCase):
@@ -231,17 +236,30 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                 os.chdir(first)
                 store = JournalStore("state/journal.sqlite")
                 expected = (first / "state" / "journal.sqlite").resolve()
+                frozen_path = Path(store.path)
 
                 self.assertTrue(
-                    Path(store.path).is_absolute(),
+                    frozen_path.is_absolute(),
                     "JournalStore must freeze relative durable-state authority to an absolute path at construction",
                 )
-                self.assertEqual(Path(store.path), expected)
+                if sys.platform == "win32":
+                    self.assertEqual(
+                        store.store_identity.identity_source,
+                        "windows_by_handle",
+                    )
+                    self.assertTrue(
+                        same_journal_backing_object(
+                            store.store_identity,
+                            observe_database_identity(expected),
+                        )
+                    )
+                else:
+                    self.assertEqual(frozen_path, expected)
 
                 os.chdir(second)
                 self.assertEqual(
                     Path(store.path),
-                    expected,
+                    frozen_path,
                     "changing process CWD must not retarget an already-constructed JournalStore",
                 )
                 os.chdir(original_cwd)
@@ -254,24 +272,52 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
                 first = Path(first_dir)
                 second = Path(second_dir)
-                real_mkdir = Path.mkdir
                 cwd_changed = False
-
-                def mkdir_after_cwd_change(path, *args, **kwargs):
-                    nonlocal cwd_changed
-                    if not cwd_changed:
-                        cwd_changed = True
-                        os.chdir(second)
-                    return real_mkdir(path, *args, **kwargs)
-
                 os.chdir(first)
-                with patch.object(Path, "mkdir", new=mkdir_after_cwd_change):
-                    store = JournalStore("state/journal.sqlite")
+
+                if sys.platform == "win32":
+                    real_guard = store_identity_module.retain_windows_parent_namespace
+
+                    @contextmanager
+                    def parent_guard_after_cwd_change(path, *args, **kwargs):
+                        nonlocal cwd_changed
+                        if not cwd_changed:
+                            cwd_changed = True
+                            os.chdir(second)
+                        with real_guard(path, *args, **kwargs) as authority:
+                            yield authority
+
+                    with patch.object(
+                        store_identity_module,
+                        "retain_windows_parent_namespace",
+                        new=parent_guard_after_cwd_change,
+                    ):
+                        store = JournalStore("state/journal.sqlite")
+                else:
+                    real_mkdir = Path.mkdir
+
+                    def mkdir_after_cwd_change(path, *args, **kwargs):
+                        nonlocal cwd_changed
+                        if not cwd_changed:
+                            cwd_changed = True
+                            os.chdir(second)
+                        return real_mkdir(path, *args, **kwargs)
+
+                    with patch.object(Path, "mkdir", new=mkdir_after_cwd_change):
+                        store = JournalStore("state/journal.sqlite")
 
                 expected = (first / "state" / "journal.sqlite").resolve()
                 unexpected = second / "state" / "journal.sqlite"
                 self.assertTrue(cwd_changed)
-                self.assertEqual(Path(store.path), expected)
+                if sys.platform == "win32":
+                    self.assertTrue(
+                        same_journal_backing_object(
+                            store.store_identity,
+                            observe_database_identity(expected),
+                        )
+                    )
+                else:
+                    self.assertEqual(Path(store.path), expected)
                 self.assertTrue(expected.exists())
                 self.assertFalse(
                     unexpected.exists(),

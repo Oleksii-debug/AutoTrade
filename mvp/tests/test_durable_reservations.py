@@ -1,5 +1,5 @@
 from contextlib import closing
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -181,6 +181,8 @@ class DurableReservationBookTests(unittest.TestCase):
             )
         elif outcome == "FILLED":
             fill = ProviderFillEvidence.create(
+                       side="BUY",
+                       evidence_refs=("test:normalized-fill",),
                 provider_id=unknown.provider_id,
                 account_id=unknown.account_id,
                 environment=unknown.environment,
@@ -244,6 +246,94 @@ class DurableReservationBookTests(unittest.TestCase):
             requirements={"CASH:USD": amount},
             available={"CASH:USD": "100"},
         )
+
+    def test_exact_consumption_replays_identically_across_decimal_contexts(self):
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            first = self.book()
+            first.reserve(
+                command_id="cmd-exact-reserve",
+                idempotency_key="idem-exact-reserve",
+                reservation_id="r-exact",
+                intent_id="i-exact",
+                requirements={"CASH:USD": "100000.0000001"},
+                available={"CASH:USD": "200000"},
+            )
+            first.consume(
+                command_id="cmd-exact-consume",
+                idempotency_key="idem-exact-consume",
+                reservation_id="r-exact",
+                usage={"CASH:USD": "0.0000001"},
+            )
+            before = first.get("r-exact")
+            before_total = first.total_reserved("CASH:USD")
+
+        with localcontext() as context:
+            context.prec = 80
+            context.rounding = ROUND_HALF_EVEN
+            restarted = self.book()
+            after = restarted.get("r-exact")
+            after_total = restarted.total_reserved("CASH:USD")
+
+        self.assertEqual(before, after)
+        self.assertEqual(before.remaining["CASH:USD"], Decimal("100000"))
+        self.assertEqual(before.consumed["CASH:USD"], Decimal("0.0000001"))
+        self.assertEqual(before_total, Decimal("100000"))
+        self.assertEqual(after_total, Decimal("100000"))
+        self.assertEqual(restarted.version, 2)
+
+    def test_durable_reserve_rejects_oversized_amount_before_journal_mutation(self):
+        book = self.book()
+        before = book.version
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            book.reserve(
+                command_id="cmd-oversized",
+                idempotency_key="idem-oversized",
+                reservation_id="r-oversized",
+                intent_id="i-oversized",
+                requirements={"CASH:USD": "1e1000"},
+                available={"CASH:USD": "1e1000"},
+            )
+        self.assertEqual(book.version, before)
+        self.assertEqual(book.active(), ())
+        self.assertEqual(self.book().version, before)
+
+    def test_returned_snapshot_mutation_cannot_change_durable_capacity_or_restart(self):
+        book = self.book()
+        returned = self.reserve(book)
+
+        object.__setattr__(returned, "state", "CANCELED")
+        object.__setattr__(returned, "remaining", {"CASH:USD": Decimal("0")})
+
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(book.get("r1").state, "WORKING")
+        with self.assertRaises(InsufficientAvailable):
+            book.reserve(
+                command_id="cmd-overallocate-after-mutation",
+                idempotency_key="idem-overallocate-after-mutation",
+                reservation_id="r2",
+                intent_id="i2",
+                requirements={"CASH:USD": "40"},
+                available={"CASH:USD": "100"},
+            )
+
+        restarted = self.book()
+        self.assertEqual(restarted.get("r1").state, "WORKING")
+        self.assertEqual(
+            restarted.get("r1").remaining["CASH:USD"],
+            Decimal("70"),
+        )
+        self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))
+        with self.assertRaises(InsufficientAvailable):
+            restarted.reserve(
+                command_id="cmd-overallocate-after-restart",
+                idempotency_key="idem-overallocate-after-restart",
+                reservation_id="r3",
+                intent_id="i3",
+                requirements={"CASH:USD": "40"},
+                available={"CASH:USD": "100"},
+            )
 
     def test_restart_reconstructs_active_reservation_from_journal(self):
         first = self.book()
@@ -615,8 +705,9 @@ class DurableReservationBookTests(unittest.TestCase):
     def test_journal_failure_does_not_mutate_projection(self):
         book = self.book()
         with patch.object(
-            self.store,
+            JournalStore,
             "commit_command",
+            autospec=True,
             side_effect=RuntimeError("simulated disk failure"),
         ):
             with self.assertRaisesRegex(RuntimeError, "disk failure"):
@@ -675,6 +766,72 @@ class DurableReservationBookTests(unittest.TestCase):
         with self.assertRaisesRegex(ReservationConflict, "snapshot"):
             self.book()
 
+    def test_replay_rejects_rehashed_cross_environment_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["environment"] = "LIVE"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "environment.*scope"):
+            self.book()
+
+    def test_replay_rejects_rehashed_cross_account_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["account_id"] = "other-account"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "account.*scope"):
+            self.book()
+
     def test_unknown_still_cannot_erase_consumed_exposure(self):
         book = self.book()
         self.reserve(book, amount="100")
@@ -710,12 +867,15 @@ class DurableReservationBookTests(unittest.TestCase):
     def test_concurrent_same_idempotency_between_reads_is_not_double_applied(self):
         book = self.book()
         self.reserve(book, amount="100")
+        original_events_class = DurableReservationBook._events
         original_events = book._events
         calls = 0
         raced = False
 
-        def race_on_second_read():
+        def race_on_second_read(selected):
             nonlocal calls, raced
+            if selected is not book:
+                return original_events_class(selected)
             calls += 1
             if calls == 2 and not raced:
                 raced = True
@@ -732,7 +892,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 )
             return original_events()
 
-        with patch.object(book, "_events", side_effect=race_on_second_read):
+        with patch.object(DurableReservationBook, "_events", autospec=True, side_effect=race_on_second_read):
             result = book.consume(
                 command_id="cmd-local-consume",
                 idempotency_key="idem-shared-consume",
@@ -749,18 +909,19 @@ class DurableReservationBookTests(unittest.TestCase):
 
     def test_concurrent_writer_fences_stale_projection_without_corrupting_journal(self):
         book = self.book()
+        original_commit_class = JournalStore.commit_command
         original_commit = self.store.commit_command
+        competing = DurableReservationBook(
+            JournalStore(self.path), environment="PAPER", account_id="paper-account",
+        )
         raced = False
 
-        def race_then_commit(*args, **kwargs):
+        def race_then_commit(selected, *args, **kwargs):
             nonlocal raced
+            if selected is not self.store:
+                return original_commit_class(selected, *args, **kwargs)
             if not raced:
                 raced = True
-                competing = DurableReservationBook(
-                    JournalStore(self.path),
-                    environment="PAPER",
-                    account_id="paper-account",
-                )
                 competing.reserve(
                     command_id="cmd-race",
                     idempotency_key="idem-race",
@@ -772,8 +933,9 @@ class DurableReservationBookTests(unittest.TestCase):
             return original_commit(*args, **kwargs)
 
         with patch.object(
-            self.store,
+            JournalStore,
             "commit_command",
+            autospec=True,
             side_effect=race_then_commit,
         ):
             with self.assertRaisesRegex(ValueError, "aggregate_version must be 2"):
@@ -1201,11 +1363,11 @@ class DurableReservationBookTests(unittest.TestCase):
         original = self.store.commit_command
         observed = {}
 
-        def capture(**kwargs):
+        def capture(_store, **kwargs):
             observed.update(kwargs)
             return original(**kwargs)
 
-        with patch.object(self.store, "commit_command", side_effect=capture):
+        with patch.object(JournalStore, "commit_command", autospec=True, side_effect=capture):
             self.reserve(book)
 
         self.assertEqual(observed["actor"], "autotrade-reservation-authority")

@@ -9,8 +9,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from fractions import Fraction
 from typing import Iterable, Literal, Mapping
+
+from autotrade_numeric import (
+    MAX_SCALE,
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    exact_abs,
+    exact_add,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+    round_fraction_to_quantum,
+)
 
 
 class SpecialistDagError(ValueError):
@@ -18,31 +31,89 @@ class SpecialistDagError(ValueError):
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
+        raise SpecialistDagError(f"{name} must be an exact string")
+    normalized = value.strip()
+    if not normalized:
         raise SpecialistDagError(f"{name} is required")
-    return value.strip()
+    return normalized
 
 
 def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise SpecialistDagError(f"{name} must use exact decimal input")
+    """Admit specialist numerics through the shared bounded exact authority."""
+
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise SpecialistDagError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise SpecialistDagError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            f"{name} must use bounded exact decimal input"
+        ) from error
     if non_negative and result < 0:
         raise SpecialistDagError(f"{name} cannot be negative")
     return result
 
 
+_SCORE_QUANTUM = Decimal((0, (1,), -MAX_SCALE))
+
+
+def _exact_add(left: Decimal, right: Decimal, name: str) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            f"{name} exceeds the exact numeric resource envelope"
+        ) from error
+
+
+def _fraction(value: Decimal, name: str) -> Fraction:
+    try:
+        return as_fraction(value)
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            f"{name} exceeds the exact numeric resource envelope"
+        ) from error
+
+
+def _bounded_fraction(value: Fraction, name: str) -> Fraction:
+    try:
+        return bounded_fraction(value)
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            f"{name} exceeds the exact numeric resource envelope"
+        ) from error
+
+
+def _score_decimal(value: Fraction) -> Decimal:
+    try:
+        return round_fraction_to_quantum(
+            bounded_fraction(value),
+            _SCORE_QUANTUM,
+            mode="HALF_EVEN",
+        )
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            "aggregate score exceeds the exact numeric resource envelope"
+        ) from error
+
+
+def _exact_sequence(value: object, name: str) -> tuple[object, ...]:
+    """Detach one caller collection without invoking polymorphic iteration."""
+
+    if type(value) not in (list, tuple):
+        raise SpecialistDagError(f"{name} must be an exact built-in list or tuple")
+    return tuple(value)
+
+
 def _utc(value: datetime, name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    # The outer datetime type alone is not enough: an exact datetime may embed
+    # caller-defined tzinfo whose utcoffset/dst/fromutc callbacks would execute
+    # while this authority-bearing deadline/evidence time is normalized.
+    # Admit only the non-polymorphic stdlib timezone implementation first.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise SpecialistDagError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    if value.utcoffset() is None:
         raise SpecialistDagError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
@@ -67,9 +138,9 @@ class SpecialistSpec:
             "expected_incremental_value",
             _decimal(self.expected_incremental_value, "expected_incremental_value"),
         )
-        if not isinstance(self.required_inputs, tuple):
+        if type(self.required_inputs) is not tuple:
             raise SpecialistDagError("required_inputs must be a tuple")
-        if not isinstance(self.dependencies, tuple):
+        if type(self.dependencies) is not tuple:
             raise SpecialistDagError("dependencies must be a tuple")
         required_inputs = tuple(
             _text(item, "required input") for item in self.required_inputs
@@ -106,27 +177,33 @@ class SpecialistRun:
             "input_snapshot_id",
             _text(self.input_snapshot_id, "input_snapshot_id"),
         )
-        if self.direction not in {"LONG", "SHORT", "FLAT"}:
-            raise SpecialistDagError("direction must be LONG, SHORT or FLAT")
+        if type(self.direction) is not str or self.direction not in {"LONG", "SHORT", "FLAT"}:
+            raise SpecialistDagError("direction must be exact LONG, SHORT or FLAT")
         score = _decimal(self.score, "score")
         confidence = _decimal(self.confidence, "confidence", non_negative=True)
         if confidence > 1:
             raise SpecialistDagError("confidence cannot exceed one")
-        if abs(score) > 1:
+        try:
+            score_magnitude = exact_abs(score)
+        except ExactDecimalError as error:
+            raise SpecialistDagError(
+                "score exceeds the exact numeric resource envelope"
+            ) from error
+        if score_magnitude > 1:
             raise SpecialistDagError("score magnitude cannot exceed one")
         expected_direction = "LONG" if score > 0 else "SHORT" if score < 0 else "FLAT"
         if self.direction != expected_direction:
             raise SpecialistDagError("direction must match score sign")
         object.__setattr__(self, "score", score)
         object.__setattr__(self, "confidence", confidence)
-        if not isinstance(self.evidence_refs, tuple):
+        if type(self.evidence_refs) is not tuple:
             raise SpecialistDagError("evidence_refs must be a tuple")
         refs = tuple(_text(item, "evidence reference") for item in self.evidence_refs)
         if not refs:
             raise SpecialistDagError("specialist output requires evidence")
         if len(set(refs)) != len(refs):
             raise SpecialistDagError("duplicate evidence references are not allowed")
-        if not isinstance(self.critique, tuple):
+        if type(self.critique) is not tuple:
             raise SpecialistDagError("critique must be a tuple")
         critique = tuple(_text(item, "critique") for item in self.critique)
         object.__setattr__(self, "evidence_refs", refs)
@@ -151,8 +228,8 @@ class DagPlan:
             _text(self.input_snapshot_id, "input_snapshot_id"),
         )
         for name in ("scheduled_roles", "skipped_roles", "available_inputs"):
-            if not isinstance(getattr(self, name), tuple):
-                raise SpecialistDagError(f"{name} must be a tuple")
+            if type(getattr(self, name)) is not tuple:
+                raise SpecialistDagError(f"{name} must be an exact tuple")
         scheduled = tuple(_text(item, "scheduled role") for item in self.scheduled_roles)
         if len(scheduled) != len(set(scheduled)):
             raise SpecialistDagError("scheduled_roles must not contain duplicates")
@@ -161,8 +238,8 @@ class DagPlan:
             raise SpecialistDagError("available_inputs must not contain duplicates")
         skipped: list[tuple[str, str]] = []
         for item in self.skipped_roles:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise SpecialistDagError("skipped_roles entries must be role/reason tuples")
+            if type(item) is not tuple or len(item) != 2:
+                raise SpecialistDagError("skipped_roles entries must be exact role/reason tuples")
             skipped.append(
                 (_text(item[0], "skipped role"), _text(item[1], "skip reason"))
             )
@@ -177,6 +254,64 @@ class DagPlan:
         object.__setattr__(self, "total_budget", budget)
 
 
+def _require_canonical_record_accessor(record_type: type, name: str) -> None:
+    """Fail closed if a canonical authority DTO's instance accessor was rebound.
+
+    The public readmission boundary must not execute caller-controlled class
+    callbacks before it has detached and revalidated the DTO fields.
+    """
+
+    if type.__getattribute__(record_type, "__getattribute__") is not object.__getattribute__:
+        raise SpecialistDagError(
+            f"{name} canonical instance accessor has been rebound"
+        )
+
+
+def _readmit_spec(value: object) -> SpecialistSpec:
+    if type(value) is not SpecialistSpec:
+        raise SpecialistDagError("specialist specification must be exact SpecialistSpec")
+    _require_canonical_record_accessor(SpecialistSpec, "SpecialistSpec")
+    return SpecialistSpec(
+        role_id=value.role_id,
+        correlation_group=value.correlation_group,
+        max_cost=value.max_cost,
+        expected_incremental_value=value.expected_incremental_value,
+        required_inputs=value.required_inputs,
+        dependencies=value.dependencies,
+    )
+
+
+def _readmit_run(value: object) -> SpecialistRun:
+    if type(value) is not SpecialistRun:
+        raise SpecialistDagError("specialist result must be exact SpecialistRun")
+    _require_canonical_record_accessor(SpecialistRun, "SpecialistRun")
+    return SpecialistRun(
+        role_id=value.role_id,
+        input_snapshot_id=value.input_snapshot_id,
+        direction=value.direction,
+        score=value.score,
+        confidence=value.confidence,
+        evidence_refs=value.evidence_refs,
+        cost=value.cost,
+        completed_at=value.completed_at,
+        critique=value.critique,
+    )
+
+
+def _readmit_plan(value: object) -> DagPlan:
+    if type(value) is not DagPlan:
+        raise SpecialistDagError("plan must be an exact DagPlan")
+    _require_canonical_record_accessor(DagPlan, "DagPlan")
+    return DagPlan(
+        input_snapshot_id=value.input_snapshot_id,
+        scheduled_roles=value.scheduled_roles,
+        skipped_roles=value.skipped_roles,
+        reserved_cost=value.reserved_cost,
+        available_inputs=value.available_inputs,
+        total_budget=value.total_budget,
+    )
+
+
 @dataclass(frozen=True)
 class AggregatedProposal:
     direction: Literal["LONG", "SHORT", "FLAT"]
@@ -186,6 +321,65 @@ class AggregatedProposal:
     evidence_refs: tuple[str, ...]
     total_cost: Decimal
     live_authority_granted: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.live_authority_granted) is not bool or self.live_authority_granted:
+            raise SpecialistDagError(
+                "specialist aggregation cannot grant live financial authority"
+            )
+        if type(self.direction) is not str or self.direction not in {
+            "LONG",
+            "SHORT",
+            "FLAT",
+        }:
+            raise SpecialistDagError(
+                "aggregate direction must be exact LONG, SHORT or FLAT"
+            )
+        score = _decimal(self.score, "aggregate score")
+        try:
+            if exact_abs(score) > 1:
+                raise SpecialistDagError(
+                    "aggregate score magnitude cannot exceed one"
+                )
+        except ExactDecimalError as error:
+            raise SpecialistDagError(
+                "aggregate score exceeds the exact numeric resource envelope"
+            ) from error
+        expected_direction = "LONG" if score > 0 else "SHORT" if score < 0 else "FLAT"
+        if self.direction != expected_direction:
+            raise SpecialistDagError("aggregate direction must match score sign")
+        if type(self.accepted_roles) is not tuple:
+            raise SpecialistDagError("accepted_roles must be an exact tuple")
+        if type(self.rejected_roles) is not tuple:
+            raise SpecialistDagError("rejected_roles must be an exact tuple")
+        if type(self.evidence_refs) is not tuple:
+            raise SpecialistDagError("evidence_refs must be an exact tuple")
+        accepted = tuple(_text(item, "accepted role") for item in self.accepted_roles)
+        if len(accepted) != len(set(accepted)):
+            raise SpecialistDagError("accepted_roles must not contain duplicates")
+        rejected: list[tuple[str, str]] = []
+        for item in self.rejected_roles:
+            if type(item) is not tuple or len(item) != 2:
+                raise SpecialistDagError(
+                    "rejected_roles entries must be exact role/reason tuples"
+                )
+            rejected.append(
+                (_text(item[0], "rejected role"), _text(item[1], "rejection reason"))
+            )
+        refs = tuple(_text(item, "evidence reference") for item in self.evidence_refs)
+        if len(refs) != len(set(refs)):
+            raise SpecialistDagError(
+                "aggregate evidence references must not contain duplicates"
+            )
+        object.__setattr__(self, "score", score)
+        object.__setattr__(self, "accepted_roles", accepted)
+        object.__setattr__(self, "rejected_roles", tuple(rejected))
+        object.__setattr__(self, "evidence_refs", refs)
+        object.__setattr__(
+            self,
+            "total_cost",
+            _decimal(self.total_cost, "aggregate total_cost", non_negative=True),
+        )
 
 
 def plan_specialists(
@@ -197,14 +391,16 @@ def plan_specialists(
 ) -> DagPlan:
     """Choose useful dependency-satisfied roles without exceeding the hard budget."""
 
+    raw_items = _exact_sequence(specs, "specs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
     snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     budget = _decimal(total_budget, "total_budget", non_negative=True)
-    items = tuple(specs)
+    items = tuple(_readmit_spec(item) for item in raw_items)
     by_id = {item.role_id: item for item in items}
     if len(by_id) != len(items):
         raise SpecialistDagError("specialist role ids must be unique")
 
-    available = {_text(item, "available input") for item in available_inputs}
+    available = {_text(item, "available input") for item in raw_available}
     scheduled: list[str] = []
     skipped: list[tuple[str, str]] = []
     reserved = Decimal("0")
@@ -233,11 +429,16 @@ def plan_specialists(
             if spec.expected_incremental_value <= 0:
                 skipped.append((role_id, "non_positive_incremental_value"))
                 continue
-            if reserved + spec.max_cost > budget:
+            next_reserved = _exact_add(
+                reserved,
+                spec.max_cost,
+                "reserved specialist cost",
+            )
+            if next_reserved > budget:
                 skipped.append((role_id, "budget_exceeded"))
                 continue
             scheduled.append(role_id)
-            reserved += spec.max_cost
+            reserved = next_reserved
         if not progressed:
             raise SpecialistDagError("specialist dependency graph contains a cycle")
 
@@ -264,24 +465,51 @@ def aggregate_specialists(
 ) -> AggregatedProposal:
     """Aggregate only outputs admitted by the exact canonical specialist plan."""
 
+    raw_spec_items = _exact_sequence(specs, "specs")
+    raw_runs = _exact_sequence(runs, "runs")
+    raw_available = _exact_sequence(available_inputs, "available_inputs")
+    raw_blockers = _exact_sequence(
+        blocking_critique_terms,
+        "blocking_critique_terms",
+    )
     deadline = _utc(decision_deadline, "decision_deadline")
-    spec_items = tuple(specs)
+    spec_items = tuple(_readmit_spec(spec) for spec in raw_spec_items)
     by_id = {spec.role_id: spec for spec in spec_items}
     if not by_id:
         raise SpecialistDagError("at least one specialist specification is required")
     if len(by_id) != len(spec_items):
         raise SpecialistDagError("specialist role ids must be unique")
-    if not isinstance(plan, DagPlan):
-        raise SpecialistDagError("plan must be a DagPlan")
+    plan = _readmit_plan(plan)
 
     snapshot_id = _text(input_snapshot_id, "input_snapshot_id")
     canonical_plan = plan_specialists(
         spec_items,
         input_snapshot_id=snapshot_id,
-        available_inputs=available_inputs,
+        available_inputs=raw_available,
         total_budget=total_budget,
     )
-    if plan != canonical_plan:
+    # Never dispatch through DagPlan.__eq__: the canonical class is public
+    # Python state and can be monkey-patched after a plan was created. Compare
+    # detached, already-readmitted fields through object.__getattribute__
+    # instead, so class-level equality rebinding cannot self-authenticate a
+    # forged schedule.
+    plan_state = (
+        object.__getattribute__(plan, "input_snapshot_id"),
+        object.__getattribute__(plan, "scheduled_roles"),
+        object.__getattribute__(plan, "skipped_roles"),
+        object.__getattribute__(plan, "reserved_cost"),
+        object.__getattribute__(plan, "available_inputs"),
+        object.__getattribute__(plan, "total_budget"),
+    )
+    canonical_plan_state = (
+        object.__getattribute__(canonical_plan, "input_snapshot_id"),
+        object.__getattribute__(canonical_plan, "scheduled_roles"),
+        object.__getattribute__(canonical_plan, "skipped_roles"),
+        object.__getattribute__(canonical_plan, "reserved_cost"),
+        object.__getattribute__(canonical_plan, "available_inputs"),
+        object.__getattribute__(canonical_plan, "total_budget"),
+    )
+    if plan_state != canonical_plan_state:
         raise SpecialistDagError(
             "DagPlan does not match canonical planner output for this context"
         )
@@ -291,9 +519,12 @@ def aggregate_specialists(
     seen: set[str] = set()
     accepted: list[tuple[SpecialistSpec, SpecialistRun]] = []
     rejected: list[tuple[str, str]] = []
-    blockers = {str(item).strip().lower() for item in blocking_critique_terms if str(item).strip()}
+    blockers: set[str] = set()
+    for item in raw_blockers:
+        blockers.add(_text(item, "blocking critique term").lower())
 
-    for run in runs:
+    for raw_run in raw_runs:
+        run = _readmit_run(raw_run)
         if run.role_id in seen:
             raise SpecialistDagError("duplicate specialist result")
         seen.add(run.role_id)
@@ -360,18 +591,54 @@ def aggregate_specialists(
     for spec, run in accepted:
         grouped.setdefault(spec.correlation_group, []).append(run)
 
-    group_scores: list[Decimal] = []
+    # Use exact rational arithmetic for weighting/averaging. Decimal operators
+    # obey the process-global mutable Decimal context and therefore cannot be
+    # allowed to decide a durable/replayable specialist proposal.
+    group_scores: list[Fraction] = []
     for group_runs in grouped.values():
-        weight_sum = sum((run.confidence for run in group_runs), Decimal("0"))
+        weight_sum = Fraction(0, 1)
+        weighted_score = Fraction(0, 1)
+        for run in group_runs:
+            confidence = _fraction(run.confidence, "specialist confidence")
+            score = _fraction(run.score, "specialist score")
+            weight_sum = _bounded_fraction(
+                weight_sum + confidence,
+                "specialist group confidence",
+            )
+            weighted_score = _bounded_fraction(
+                weighted_score
+                + _bounded_fraction(
+                    score * confidence,
+                    "specialist weighted score",
+                ),
+                "specialist group weighted score",
+            )
         if weight_sum == 0:
-            group_scores.append(Decimal("0"))
+            # A zero-confidence group is evidence with no numerical weight.
+            # Counting it in the equal-group denominator would let a
+            # zero-confidence specialist dilute an independent signal.
             continue
         group_scores.append(
-            sum((run.score * run.confidence for run in group_runs), Decimal("0"))
-            / weight_sum
+            _bounded_fraction(
+                weighted_score / weight_sum,
+                "specialist group score",
+            )
         )
 
-    aggregate = sum(group_scores, Decimal("0")) / Decimal(len(group_scores))
+    if group_scores:
+        aggregate_fraction = Fraction(0, 1)
+        for group_score in group_scores:
+            aggregate_fraction = _bounded_fraction(
+                aggregate_fraction + group_score,
+                "aggregate specialist score",
+            )
+        aggregate_fraction = _bounded_fraction(
+            aggregate_fraction / len(group_scores),
+            "aggregate specialist score",
+        )
+        aggregate = _score_decimal(aggregate_fraction)
+    else:
+        aggregate = Decimal("0")
     if aggregate > 0:
         direction: Literal["LONG", "SHORT", "FLAT"] = "LONG"
     elif aggregate < 0:
@@ -380,7 +647,9 @@ def aggregate_specialists(
         direction = "FLAT"
 
     refs = tuple(sorted({ref for _, run in accepted for ref in run.evidence_refs}))
-    total_cost = sum((run.cost for _, run in accepted), Decimal("0"))
+    total_cost = Decimal("0")
+    for _, run in accepted:
+        total_cost = _exact_add(total_cost, run.cost, "specialist total cost")
     return AggregatedProposal(
         direction=direction,
         score=aggregate,
@@ -400,8 +669,12 @@ def marginal_value(
 ) -> Decimal:
     """Measured net contribution used for future role scheduling, never for authority."""
 
-    return (
-        _decimal(full_utility, "full_utility")
-        - _decimal(ablated_utility, "ablated_utility")
-        - _decimal(incremental_cost, "incremental_cost", non_negative=True)
-    )
+    full = _decimal(full_utility, "full_utility")
+    ablated = _decimal(ablated_utility, "ablated_utility")
+    cost = _decimal(incremental_cost, "incremental_cost", non_negative=True)
+    try:
+        return exact_subtract(exact_subtract(full, ablated), cost)
+    except ExactDecimalError as error:
+        raise SpecialistDagError(
+            "marginal value exceeds the exact numeric resource envelope"
+        ) from error

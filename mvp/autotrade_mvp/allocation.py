@@ -6,9 +6,10 @@ treats simulated or expected returns as evidence of profitability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
+from fractions import Fraction
 from hashlib import sha256
 import json
 from types import MappingProxyType
@@ -18,18 +19,130 @@ from .allocation_valuation import (
     AllocationValuationError,
     normalize_allocation_valuation,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction as _shared_as_fraction,
+    bounded_fraction as _shared_bounded_fraction,
+    exact_abs as _shared_exact_abs,
+    exact_add as _shared_exact_add,
+    exact_multiply as _shared_exact_multiply,
+    exact_subtract as _shared_exact_subtract,
+    exact_sum as _shared_exact_sum,
+    round_fraction_to_quantum as _shared_round_fraction_to_quantum,
+    terminating_decimal as _shared_terminating_decimal,
+    parse_bounded_exact_decimal,
+)
+
+
+_EXACT_ARITHMETIC_ERROR = "allocation exact arithmetic exceeds resource envelope"
+
+
+def _exact_abs(value: Decimal) -> Decimal:
+    try:
+        return _shared_exact_abs(value)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return _shared_exact_add(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return _shared_exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_multiply(*values: Decimal) -> Decimal:
+    try:
+        return _shared_exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_sum(values) -> Decimal:
+    try:
+        return _shared_exact_sum(values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_fx_monetary_conversion(
+    value: Decimal,
+    *,
+    asset_rate_numerator: int,
+    asset_rate_denominator: int,
+    liability_rate_numerator: int,
+    liability_rate_denominator: int,
+    rounding_quantum: Decimal | None,
+    purpose: str,
+) -> Decimal:
+    """Convert one monetary constraint through a validated exact FX identity.
+
+    Both asset and liability numerator/denominator identities plus the optional
+    quantum come only from normalize_allocation_valuation(), which derives them
+    through canonical sign-aware FX valuation over one authenticated quote.
+    A non-terminating result is never approximated through Decimal division:
+    it requires the canonical reporting-currency quantum and a purpose-specific
+    conservative projection.
+    """
+
+    if type(purpose) is not str or purpose not in (
+        "TARGET_NOTIONAL", "MIN_NOTIONAL", "FEE_FLOOR", "MAX_EXECUTABLE_NOTIONAL"
+    ):
+        raise ValueError("allocation FX projection purpose is invalid")
+    try:
+        value_fraction = _shared_as_fraction(value)
+        use_liability_side = (
+            purpose in ("MIN_NOTIONAL", "FEE_FLOOR")
+            or (purpose == "TARGET_NOTIONAL" and value_fraction < 0)
+        )
+        rate_numerator = (
+            liability_rate_numerator if use_liability_side else asset_rate_numerator
+        )
+        rate_denominator = (
+            liability_rate_denominator if use_liability_side else asset_rate_denominator
+        )
+        converted = _shared_bounded_fraction(
+            value_fraction * Fraction(rate_numerator, rate_denominator)
+        )
+        try:
+            return _shared_terminating_decimal(converted)
+        except ExactDecimalError as error:
+            if str(error) != (
+                "rational value has a non-terminating decimal expansion"
+            ):
+                raise
+            if rounding_quantum is None:
+                raise ValueError(
+                    "allocation FX conversion requires explicit rounding policy"
+                ) from error
+            return _shared_round_fraction_to_quantum(
+                converted,
+                rounding_quantum,
+                mode=(
+                    "CEILING"
+                    if purpose in ("MIN_NOTIONAL", "FEE_FLOOR")
+                    or (purpose == "TARGET_NOTIONAL" and converted < 0)
+                    else "FLOOR"
+                ),
+            )
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a bounded exact decimal") from error
 
 
 def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
@@ -210,7 +323,10 @@ class AllocationCandidate:
                     allow_zero=True,
                 ),
             )
-            if self.turnover_cost_rate + self.holding_cost_rate != self.cost_rate:
+            if _exact_add(
+                self.turnover_cost_rate,
+                self.holding_cost_rate,
+            ) != self.cost_rate:
                 raise ValueError(
                     "turnover and holding cost rates must sum to cost_rate"
                 )
@@ -357,7 +473,10 @@ class ObjectiveCandidate:
 
     @property
     def objective_rate(self) -> Decimal:
-        return self.expected_return_rate - self.risk_penalty_rate
+        return _exact_subtract(
+            self.expected_return_rate,
+            self.risk_penalty_rate,
+        )
 
 
 @dataclass(frozen=True)
@@ -375,8 +494,14 @@ class AllocationPolicy:
     min_scale_tolerance: Decimal = Decimal("0.000001")
     require_adverse_stress_evidence: bool = True
     require_fresh_stress_evidence: bool = True
+    max_execution_states: int = 10000
 
     def __post_init__(self) -> None:
+        if (
+            type(self.max_execution_states) is not int
+            or self.max_execution_states < 1
+        ):
+            raise ValueError("max_execution_states must be a positive integer")
         for field_name in (
             "cash_available",
             "max_gross_notional",
@@ -406,11 +531,7 @@ class AllocationPolicy:
                     allow_zero=True,
                 ),
             )
-        if (
-            not isinstance(self.max_iterations, int)
-            or isinstance(self.max_iterations, bool)
-            or self.max_iterations < 1
-        ):
+        if type(self.max_iterations) is not int or self.max_iterations < 1:
             raise ValueError("max_iterations must be a positive integer")
         if not isinstance(self.require_adverse_stress_evidence, bool):
             raise TypeError("require_adverse_stress_evidence must be a boolean")
@@ -442,8 +563,9 @@ class AllocationPolicy:
         min_scale_tolerance="0.000001",
         require_adverse_stress_evidence: bool = True,
         require_fresh_stress_evidence: bool = True,
+        max_execution_states: int = 10000,
     ) -> "AllocationPolicy":
-        if not isinstance(max_iterations, int) or isinstance(max_iterations, bool) or max_iterations < 1:
+        if type(max_iterations) is not int or max_iterations < 1:
             raise ValueError("max_iterations must be a positive integer")
         if not isinstance(require_adverse_stress_evidence, bool):
             raise TypeError("require_adverse_stress_evidence must be a boolean")
@@ -479,6 +601,7 @@ class AllocationPolicy:
             min_scale_tolerance=_positive(min_scale_tolerance, name="min_scale_tolerance"),
             require_adverse_stress_evidence=require_adverse_stress_evidence,
             require_fresh_stress_evidence=require_fresh_stress_evidence,
+            max_execution_states=max_execution_states,
         )
 
 
@@ -499,7 +622,7 @@ class AllocationResult:
     gross_notional: Decimal
     net_notional: Decimal
     estimated_cost: Decimal
-    worst_stress_loss: Decimal
+    worst_stress_loss: Decimal | None
     cash_required: Decimal
     reason: str
     turnover_notional: Decimal = Decimal("0")
@@ -517,15 +640,21 @@ class ObjectiveAllocationResult:
 def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Decimal:
     if notional == 0:
         return Decimal("0")
-    absolute_quantity = abs(notional) / price
-    lots = (absolute_quantity / lot_size).to_integral_value(rounding=ROUND_DOWN)
-    quantity = lots * lot_size
-    return quantity if notional > 0 else -quantity
+    lot_notional = Fraction(price) * Fraction(lot_size)
+    lots = int(Fraction(_exact_abs(notional)) // lot_notional)
+    quantity = _exact_multiply(Decimal(lots), lot_size)
+    return (
+        quantity
+        if notional > 0
+        else _exact_subtract(Decimal("0"), quantity)
+    )
 
 
 def _normalize_stress_scenarios(
     candidates: Sequence[AllocationCandidate],
     stress_scenarios: Mapping[str, Mapping[str, object]] | None,
+    *,
+    require_complete: bool = True,
 ) -> dict[str, dict[str, Decimal]]:
     symbols = [candidate.symbol for candidate in candidates]
     if len(symbols) != len(set(symbols)):
@@ -555,13 +684,14 @@ def _normalize_stress_scenarios(
             f"stress scenarios reference unknown symbols: {', '.join(unknown)}"
         )
 
-    for scenario_name, scenario in normalized.items():
-        missing = sorted(symbol_set - set(scenario))
-        if missing:
-            raise ValueError(
-                f"stress scenario {scenario_name} is missing explicit shocks for: "
-                f"{', '.join(missing)}"
-            )
+    if require_complete:
+        for scenario_name, scenario in normalized.items():
+            missing = sorted(symbol_set - set(scenario))
+            if missing:
+                raise ValueError(
+                    f"stress scenario {scenario_name} is missing explicit shocks for: "
+                    f"{', '.join(missing)}"
+                )
     return normalized
 
 
@@ -592,6 +722,7 @@ def _normalize_stress_evidence(
     normalized = _normalize_stress_scenarios(
         candidates,
         {item.name: dict(item.shocks) for item in materialized},
+        require_complete=False,
     )
     return normalized, None
 
@@ -609,53 +740,83 @@ def _evaluate(
     capital_required = Decimal("0")
 
     for candidate in candidates:
-        current_notional = candidate.current_quantity * candidate.price
-        scaled = current_notional + (
-            candidate.desired_notional - current_notional
-        ) * scale
-        quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
-        notional = quantity * candidate.price
-        delta_notional = notional - current_notional
+        current_notional = _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
+        )
+        # Exact ratios avoid losing a lot at recurring transition scales (e.g.
+        # 1/3) or when subtracting a small delta from a large current holding.
+        raw_delta_notional = (
+            Fraction(candidate.desired_notional) - Fraction(current_notional)
+        ) * Fraction(scale)
+        if candidate.max_executable_notional is not None:
+            cap = Fraction(candidate.max_executable_notional)
+            if abs(raw_delta_notional) > cap:
+                raw_delta_notional = (
+                    cap if raw_delta_notional > 0 else -cap
+                )
+
+        # Lot size and minimum notional are order constraints. Apply them to the
+        # proposed delta, never to the already-reconciled holding. This preserves
+        # odd/fractional legacy positions exactly while ensuring every new order
+        # increment is executable and cannot overshoot a liquidity cap after
+        # target rounding.
+        lot_notional = Fraction(candidate.price) * Fraction(candidate.lot_size)
+        delta_quantity = _exact_multiply(
+            Decimal(int(raw_delta_notional / lot_notional)),
+            candidate.lot_size,
+        )
+        executable_delta_notional = _exact_multiply(
+            delta_quantity,
+            candidate.price,
+        )
         if (
-            candidate.max_executable_notional is not None
-            and abs(delta_notional) > candidate.max_executable_notional
+            executable_delta_notional != 0
+            and _exact_abs(executable_delta_notional) < candidate.min_notional
         ):
-            direction = Decimal("1") if delta_notional > 0 else Decimal("-1")
-            capped_target = (
-                current_notional
-                + direction * candidate.max_executable_notional
-            )
-            quantity = _round_quantity(
-                capped_target,
-                candidate.price,
-                candidate.lot_size,
-            )
-            notional = quantity * candidate.price
-        if quantity != 0 and abs(notional) < candidate.min_notional:
-            quantity = Decimal("0")
-            notional = Decimal("0")
-        turnover = abs(notional - current_notional)
+            delta_quantity = Decimal("0")
+            executable_delta_notional = Decimal("0")
+
+        quantity = _exact_add(candidate.current_quantity, delta_quantity)
+        notional = _exact_add(current_notional, executable_delta_notional)
+        turnover = _exact_abs(executable_delta_notional)
         if candidate.turnover_cost_rate is None:
-            proportional_cost = abs(notional) * candidate.cost_rate
+            proportional_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.cost_rate,
+            )
             cost = (
                 max(proportional_cost, candidate.fee_floor)
                 if notional != 0
                 else Decimal("0")
             )
         else:
-            proportional_cost = (
-                turnover * candidate.turnover_cost_rate
-                + abs(notional) * candidate.holding_cost_rate
+            holding_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.holding_cost_rate,
             )
-            cost = (
-                max(proportional_cost, candidate.fee_floor)
+            execution_cost = (
+                max(
+                    _exact_multiply(
+                        turnover,
+                        candidate.turnover_cost_rate,
+                    ),
+                    candidate.fee_floor,
+                )
                 if turnover != 0
-                else proportional_cost
+                else Decimal("0")
             )
+            cost = _exact_add(holding_cost, execution_cost)
         notionals[candidate.symbol] = notional
-        total_cost += cost
-        total_turnover += turnover
-        capital_required += abs(notional) * candidate.capital_requirement_rate
+        total_cost = _exact_add(total_cost, cost)
+        total_turnover = _exact_add(total_turnover, turnover)
+        capital_required = _exact_add(
+            capital_required,
+            _exact_multiply(
+                _exact_abs(notional),
+                candidate.capital_requirement_rate,
+            ),
+        )
         targets.append(
             AllocationTarget(
                 symbol=candidate.symbol,
@@ -666,23 +827,24 @@ def _evaluate(
             )
         )
 
-    gross = sum((abs(value) for value in notionals.values()), Decimal("0"))
-    net = abs(sum(notionals.values(), Decimal("0")))
-    cash_required = capital_required + total_cost
+    gross = _exact_sum(_exact_abs(value) for value in notionals.values())
+    net = _exact_abs(_exact_sum(notionals.values()))
+    cash_required = _exact_add(capital_required, total_cost)
 
     worst_stress_loss = Decimal("0")
     for scenario in stress_scenarios.values():
-        pnl = sum(
-            (
-                notional * scenario[symbol]
-                for symbol, notional in notionals.items()
-            ),
-            Decimal("0"),
+        pnl = _exact_sum(
+            _exact_multiply(notional, scenario[symbol])
+            for symbol, notional in notionals.items()
+            if notional != 0
         )
-        worst_stress_loss = max(worst_stress_loss, -pnl)
+        worst_stress_loss = max(
+            worst_stress_loss,
+            _exact_subtract(Decimal("0"), pnl),
+        )
 
     symbol_ok = all(
-        abs(value) <= policy.max_symbol_notional
+        _exact_abs(value) <= policy.max_symbol_notional
         for value in notionals.values()
     )
     turnover_ok = (
@@ -696,7 +858,8 @@ def _evaluate(
         and net <= policy.max_net_notional
         and total_cost <= policy.max_total_cost
         and worst_stress_loss <= policy.max_stress_loss
-        and cash_required + policy.minimum_cash_reserve <= policy.cash_available
+        and _exact_add(cash_required, policy.minimum_cash_reserve)
+        <= policy.cash_available
     )
 
     return AllocationResult(
@@ -720,34 +883,177 @@ def _evaluate(
 def _cash_fallback(
     candidates: Sequence[AllocationCandidate],
     *,
+    policy: AllocationPolicy,
     reason: str,
+    stress_scenarios: Mapping[str, Mapping[str, Decimal]] | None = None,
 ) -> AllocationResult:
-    current_targets = tuple(
-        AllocationTarget(
-            symbol=candidate.symbol,
-            quantity=candidate.current_quantity,
-            notional=candidate.current_quantity * candidate.price,
-            estimated_cost=Decimal("0"),
-            turnover_notional=Decimal("0"),
+    """Preserve current reconciled positions without inventing zero economics.
+
+    A no-increase decision is not an all-cash state when reconciled holdings
+    already exist.  Turnover is zero, but existing exposure still consumes
+    capital and can carry holding costs.  Report those known economics exactly
+    so downstream risk/authority code cannot mistake a preserved portfolio for
+    unused capital.  When qualified stress scenarios are available, preserved
+    exposure is marked to those scenarios as well. Callers that lack qualified
+    stress evidence must rely on the fail-closed status and reason rather than
+    treating this fallback as a fresh risk approval.
+    """
+
+    targets: list[AllocationTarget] = []
+    current_notionals: list[Decimal] = []
+    total_holding_cost = Decimal("0")
+    capital_required = Decimal("0")
+    for candidate in candidates:
+        notional = _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
         )
-        for candidate in candidates
+        if candidate.current_quantity == 0:
+            holding_cost = Decimal("0")
+        else:
+            if candidate.holding_cost_rate is None:
+                raise ValueError(
+                    "non-zero current position lacks explicit holding cost rate"
+                )
+            holding_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.holding_cost_rate,
+            )
+        total_holding_cost = _exact_add(total_holding_cost, holding_cost)
+        capital_required = _exact_add(
+            capital_required,
+            _exact_multiply(
+                _exact_abs(notional),
+                candidate.capital_requirement_rate,
+            ),
+        )
+        current_notionals.append(notional)
+        targets.append(
+            AllocationTarget(
+                symbol=candidate.symbol,
+                quantity=candidate.current_quantity,
+                notional=notional,
+                estimated_cost=holding_cost,
+                turnover_notional=Decimal("0"),
+            )
+        )
+
+    exposed_symbols = {
+        candidate.symbol
+        for candidate, notional in zip(candidates, current_notionals)
+        if notional != 0
+    }
+    scenarios = tuple((stress_scenarios or {}).values())
+    stress_is_qualified = (
+        not exposed_symbols
+        or (
+            bool(scenarios)
+            and all(exposed_symbols <= set(scenario) for scenario in scenarios)
+        )
     )
-    current_notionals = tuple(target.notional for target in current_targets)
+    if stress_is_qualified and policy.require_adverse_stress_evidence:
+        stress_is_qualified = all(
+            any(
+                _exact_multiply(scenario[candidate.symbol], notional) < 0
+                for scenario in scenarios
+            )
+            for candidate, notional in zip(candidates, current_notionals)
+            if notional != 0
+        )
+    worst_stress_loss: Decimal | None
+    if not stress_is_qualified:
+        # Missing/incomplete stress evidence is unknown, not a measured zero.
+        # Preserve the portfolio fail-closed without emitting a fabricated
+        # economic fact that downstream logs/UI could mistake for qualification.
+        worst_stress_loss = None
+    else:
+        worst_stress_loss = Decimal("0")
+        for scenario in scenarios:
+            pnl = _exact_sum(
+                _exact_multiply(notional, scenario[candidate.symbol])
+                for candidate, notional in zip(candidates, current_notionals)
+                if notional != 0
+            )
+            worst_stress_loss = max(
+                worst_stress_loss,
+                _exact_subtract(Decimal("0"), pnl),
+            )
+
     return AllocationResult(
         status="NO_INCREASE_FALLBACK",
         scale=Decimal("0"),
-        targets=current_targets,
-        gross_notional=sum(
-            (abs(value) for value in current_notionals),
-            Decimal("0"),
+        targets=tuple(targets),
+        gross_notional=_exact_sum(
+            _exact_abs(value) for value in current_notionals
         ),
-        net_notional=abs(sum(current_notionals, Decimal("0"))),
-        estimated_cost=Decimal("0"),
-        worst_stress_loss=Decimal("0"),
-        cash_required=Decimal("0"),
+        net_notional=_exact_abs(_exact_sum(current_notionals)),
+        estimated_cost=total_holding_cost,
+        worst_stress_loss=worst_stress_loss,
+        cash_required=_exact_add(capital_required, total_holding_cost),
         turnover_notional=Decimal("0"),
         reason=reason,
     )
+
+
+class _ExecutionSearchBudgetExceeded(Exception):
+    pass
+
+
+def _execution_state_scales(
+    candidates: Sequence[AllocationCandidate], budget: int,
+) -> set[Fraction]:
+    """Enumerate a bounded union of exact order-lot activation thresholds.
+
+    Count candidate transitions before allocating them. Counting duplicates
+    conservatively avoids work proportional to an unbounded lot count even if
+    several symbols happen to have identical thresholds. 0/1 are sentinels and
+    do not consume the transition budget. Legacy max_iterations/tolerance remain
+    accepted configuration fields; they cannot truncate this complete search.
+    """
+    ranges: list[tuple[Fraction, Fraction, int, int]] = []
+    count = 0
+    for candidate in candidates:
+        current = (
+            Fraction(candidate.current_quantity) * Fraction(candidate.price)
+        )
+        change = abs(Fraction(candidate.desired_notional) - current)
+        if change == 0:
+            continue
+        lot = Fraction(candidate.price) * Fraction(candidate.lot_size)
+        extent = change
+        if candidate.max_executable_notional is not None:
+            extent = min(extent, Fraction(candidate.max_executable_notional))
+        last = int(extent // lot)
+        minimum_lots = Fraction(candidate.min_notional) / lot
+        first = max(1, -(-minimum_lots.numerator // minimum_lots.denominator))
+        count += max(0, last - first + 1)
+        if count > budget:
+            raise _ExecutionSearchBudgetExceeded
+        ranges.append((lot, change, first, last))
+    scales = {Fraction(0), Fraction(1)}
+    for lot, change, first, last in ranges:
+        scales.update(k * lot / change for k in range(first, last + 1))
+    return scales
+
+
+def _execution_scale_witness(lower: Fraction, upper: Fraction) -> Decimal:
+    """A finite Decimal in [lower, upper), without rounding below a lot step.
+
+    Distinct rational endpoints are separated by at least 1/(q1*q2).
+    The bit-length-derived decimal precision is conservatively larger than
+    both denominators' decimal sizes, so upward rounding stays in this cell.
+    The explicit rational check keeps the guarantee independent of context.
+    """
+    bits = lower.denominator.bit_length() + upper.denominator.bit_length()
+    with localcontext() as ctx:
+        ctx.prec = max(28, bits + 4)
+        ctx.rounding = ROUND_CEILING
+        ctx.traps[Inexact] = False
+        ctx.traps[Rounded] = False
+        witness = Decimal(lower.numerator) / Decimal(lower.denominator)
+    if not lower <= Fraction(witness) < upper:
+        raise ValueError("execution scale cannot represent the selected state")
+    return witness
 
 
 def allocate_targets(
@@ -758,123 +1064,180 @@ def allocate_targets(
     stress_evidence: Sequence[StressScenarioEvidence] = (),
     decision_time: str | None = None,
 ) -> AllocationResult:
-    """Return the largest uniformly scaled feasible target set.
+    """Return the highest reachable feasible executed target state.
 
-    When no positive lot can be proven feasible inside the bounded search,
-    returns an explicit all-cash no-increase fallback.
+    Scale is a deterministic witness for discrete order quantities. If complete
+    search exceeds policy.max_execution_states, preserve the current portfolio
+    with explicit unestablished feasibility instead of asserting infeasibility.
     """
 
     if not candidates:
-        return _cash_fallback(candidates, reason="no allocation candidates")
+        return _cash_fallback(candidates, policy=policy, reason="no allocation candidates")
 
-    normalized_stress = _normalize_stress_scenarios(candidates, stress_scenarios)
-    if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
+    normalized_stress = _normalize_stress_scenarios(
+        candidates,
+        stress_scenarios,
+        require_complete=False,
+    )
+    if policy.require_fresh_stress_evidence:
         normalized_stress, evidence_problem = _normalize_stress_evidence(
             candidates,
             stress_evidence,
             decision_time=decision_time,
         )
         if evidence_problem is not None:
-            return _cash_fallback(candidates, reason=evidence_problem)
+            return _cash_fallback(
+                candidates,
+                policy=policy,
+                reason=evidence_problem,
+                stress_scenarios=normalized_stress,
+            )
+
+    stress_relevant_symbols = {
+        candidate.symbol
+        for candidate in candidates
+        if (
+            candidate.current_quantity != 0
+            or candidate.desired_notional != 0
+        )
+    }
+    incomplete_scenarios = {
+        scenario_name: sorted(stress_relevant_symbols - set(scenario))
+        for scenario_name, scenario in normalized_stress.items()
+        if stress_relevant_symbols - set(scenario)
+    }
+    if incomplete_scenarios:
+        details = "; ".join(
+            f"{name}: {', '.join(symbols)}"
+            for name, symbols in sorted(incomplete_scenarios.items())
+        )
+        return _cash_fallback(
+            candidates,
+            policy=policy,
+            stress_scenarios=normalized_stress,
+            reason=(
+                "stress evidence is missing explicit shocks for the current/requested "
+                f"portfolio: {details}"
+            ),
+        )
 
     if policy.minimum_cash_reserve > policy.cash_available:
         return _cash_fallback(
             candidates,
+            policy=policy,
+            stress_scenarios=normalized_stress,
             reason="minimum cash reserve exceeds available cash",
         )
 
     if policy.require_adverse_stress_evidence:
-        requested_symbols = {
-            candidate.symbol: candidate.desired_notional
+        relevant_directions = {
+            (candidate.symbol, notional > 0)
             for candidate in candidates
-            if candidate.desired_notional != 0
+            for notional in (
+                candidate.desired_notional,
+                _exact_multiply(
+                    candidate.current_quantity,
+                    candidate.price,
+                ),
+            )
+            if notional != 0
         }
-        if requested_symbols and not normalized_stress:
+        if relevant_directions and not normalized_stress:
             return _cash_fallback(
                 candidates,
+                policy=policy,
+                stress_scenarios=normalized_stress,
                 reason=(
                     "adverse stress evidence is required before increasing exposure; "
                     "no stress scenarios were supplied"
                 ),
             )
         uncovered = []
-        for symbol, desired_notional in requested_symbols.items():
-            has_adverse_shock = any(
-                (
-                    scenario[symbol] < 0
-                    if desired_notional > 0
-                    else scenario[symbol] > 0
-                )
+        for symbol, is_long in sorted(relevant_directions):
+            if not any(
+                scenario[symbol] < 0 if is_long else scenario[symbol] > 0
                 for scenario in normalized_stress.values()
-            )
-            if not has_adverse_shock:
+            ):
                 uncovered.append(symbol)
         if uncovered:
             return _cash_fallback(
                 candidates,
+                policy=policy,
+                stress_scenarios=normalized_stress,
                 reason=(
-                    "adverse stress evidence is missing for requested exposure: "
+                    "adverse stress evidence is missing for current/requested exposure: "
                     + ", ".join(sorted(uncovered))
                 ),
             )
 
+    requested_change = any(
+        candidate.desired_notional
+        != _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
+        )
+        for candidate in candidates
+    )
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
-        if requested.gross_notional > 0:
+        if requested_change and requested.turnover_notional == 0:
+            return _cash_fallback(
+                candidates,
+                policy=policy,
+                stress_scenarios=normalized_stress,
+                reason=(
+                    "requested change is below executable lot/minimum-notional "
+                    "constraints; preserve the current portfolio"
+                ),
+            )
+        if requested.gross_notional > 0 or requested.turnover_notional > 0:
             return requested
         return _cash_fallback(
             candidates,
+            policy=policy,
+            stress_scenarios=normalized_stress,
             reason=(
                 "requested allocation contains no executable positive lot after "
                 "lot-size and minimum-notional constraints; remain in cash"
             ),
         )
 
-    low = Decimal("0")
-    high = Decimal("1")
-    best = _evaluate(candidates, policy, normalized_stress, low)
-
-    for _ in range(policy.max_iterations):
-        if high - low <= policy.min_scale_tolerance:
-            break
-        mid = (low + high) / Decimal("2")
-        result = _evaluate(candidates, policy, normalized_stress, mid)
-        if result.status == "ALLOCATED":
-            best = result
-            low = mid
-        else:
-            high = mid
-
-    if best.turnover_notional == 0 and requested.turnover_notional > 0:
+    try:
+        scales = _execution_state_scales(candidates, policy.max_execution_states)
+    except _ExecutionSearchBudgetExceeded:
         return _cash_fallback(
             candidates,
-            reason=(
-                "bounded search found no positive-turnover feasible allocation; "
-                "preserve the current portfolio without increasing risk"
-            ),
-        )
-    if best.gross_notional == 0:
-        return _cash_fallback(
-            candidates,
-            reason=(
-                "bounded search found no positive-lot feasible allocation; "
-                "remain in cash"
-            ),
+            policy=policy,
+            stress_scenarios=normalized_stress,
+            reason="execution-state search budget exceeded; feasibility not established",
         )
 
-    return AllocationResult(
-        status="ALLOCATED",
-        scale=best.scale,
-        targets=best.targets,
-        gross_notional=best.gross_notional,
-        net_notional=best.net_notional,
-        estimated_cost=best.estimated_cost,
-        worst_stress_loss=best.worst_stress_loss,
-        cash_required=best.cash_required,
-        turnover_notional=best.turnover_notional,
+    # Every executed portfolio is constant between consecutive lot transitions.
+    # Descending evaluation finds the highest reachable feasible executed state,
+    # including disconnected intervals caused by net/stress/fee-floor gates.
+    upper = Fraction(1)
+    for lower in sorted(scales, reverse=True):
+        if lower == 1:
+            continue  # The full request was already evaluated above.
+        scale = _execution_scale_witness(lower, upper)
+        upper = lower
+        result = _evaluate(candidates, policy, normalized_stress, scale)
+        if result.status == "ALLOCATED" and result.turnover_notional > 0:
+            return replace(
+                result,
+                reason=(
+                    "highest feasible executed target state; scale is a "
+                    "deterministic witness, not a continuous optimum"
+                ),
+            )
+
+    return _cash_fallback(
+        candidates,
+        policy=policy,
+        stress_scenarios=normalized_stress,
         reason=(
-            "requested allocation was infeasible; uniformly reduced to the "
-            "largest verified feasible target found"
+            "complete bounded execution-state search found no positive-turnover "
+            "feasible allocation; preserve the current portfolio"
         ),
     )
 
@@ -884,18 +1247,47 @@ def _expected_net_utility(
     objective_by_symbol: Mapping[str, ObjectiveCandidate],
     policy: AllocationPolicy,
 ) -> Decimal:
-    gross_objective = sum(
-        (
-            abs(target.notional)
-            * objective_by_symbol[target.symbol].objective_rate
-            for target in result.targets
-        ),
-        Decimal("0"),
+    # Objective rates describe the requested direction. Evaluate the complete
+    # resulting portfolio rather than subset labels: unchanged holdings are
+    # still economic exposure, and a partial reversal that remains opposite to
+    # the requested direction must not receive positive desired-direction
+    # utility.
+    gross_objective = Decimal("0")
+    for target in result.targets:
+        objective = objective_by_symbol.get(target.symbol)
+        if objective is None or target.notional == 0:
+            continue
+        desired = objective.candidate.desired_notional
+        if desired == 0:
+            continue
+        aligned = (target.notional > 0) == (desired > 0)
+        directional_rate = (
+            objective.objective_rate
+            if aligned
+            else _exact_subtract(
+                Decimal("0"),
+                objective.objective_rate,
+            )
+        )
+        gross_objective = _exact_add(
+            gross_objective,
+            _exact_multiply(_exact_abs(target.notional), directional_rate),
+        )
+    if result.worst_stress_loss is None:
+        if policy.stress_loss_penalty_rate != 0:
+            raise ValueError(
+                "objective utility requires qualified worst_stress_loss evidence"
+            )
+        stress_penalty = Decimal("0")
+    else:
+        stress_penalty = _exact_multiply(
+            result.worst_stress_loss,
+            policy.stress_loss_penalty_rate,
+        )
+    return _exact_subtract(
+        _exact_subtract(gross_objective, result.estimated_cost),
+        stress_penalty,
     )
-    stress_penalty = (
-        result.worst_stress_loss * policy.stress_loss_penalty_rate
-    )
-    return gross_objective - result.estimated_cost - stress_penalty
 
 
 def allocate_objective_targets(
@@ -910,8 +1302,11 @@ def allocate_objective_targets(
     """Select the best deterministic feasible candidate subset by net utility.
 
     Candidates are ranked only to make enumeration and tie-breaking stable.
-    Every non-empty subset of positive objective-rate candidates is evaluated
-    through the same hard allocation constraints. Estimated execution cost is
+    Every non-empty subset of eligible candidates is evaluated through the
+    same hard allocation constraints. A known hard-infeasible current portfolio
+    may admit nonpositive-alpha moves only to restore hard feasibility; a
+    hard-feasible portfolio still requires positive objective rate and strict
+    utility improvement. Estimated execution cost is
     subtracted exactly once from the objective, and an explicit portfolio-level
     stress-loss penalty may rank feasible subsets without replacing the hard
     risk gate. The search is exhaustive only
@@ -920,7 +1315,7 @@ def allocate_objective_targets(
     than silently truncating instrument selection.
     """
 
-    if not isinstance(max_candidate_sets, int) or isinstance(max_candidate_sets, bool):
+    if type(max_candidate_sets) is not int:
         raise ValueError("max_candidate_sets must be a positive integer")
     if max_candidate_sets < 1:
         raise ValueError("max_candidate_sets must be a positive integer")
@@ -932,73 +1327,158 @@ def allocate_objective_targets(
         allocation_candidates.append(item.candidate)
 
     if not candidates:
-        fallback = _cash_fallback((), reason="no objective candidates")
+        fallback = _cash_fallback((), policy=policy, reason="no objective candidates")
         return ObjectiveAllocationResult(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            objective_version="deterministic-net-utility-v9",
             reason="no objective candidates",
         )
 
     normalized_stress = _normalize_stress_scenarios(
         allocation_candidates,
         stress_scenarios,
+        require_complete=False,
     )
     normalized_evidence: tuple[StressScenarioEvidence, ...] = ()
-    if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
+    if policy.require_fresh_stress_evidence:
         normalized_stress, evidence_problem = _normalize_stress_evidence(
             allocation_candidates,
             stress_evidence,
             decision_time=decision_time,
         )
         if evidence_problem is not None:
-            fallback = _cash_fallback(allocation_candidates, reason=evidence_problem)
+            fallback = _cash_fallback(
+                allocation_candidates,
+                policy=policy,
+                stress_scenarios=normalized_stress,
+                reason=evidence_problem,
+            )
             return ObjectiveAllocationResult(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v3",
+                objective_version="deterministic-net-utility-v9",
                 reason=evidence_problem,
             )
         normalized_evidence = tuple(stress_evidence)
+
+    complete_objective = {
+        item.candidate.symbol: item
+        for item in candidates
+    }
+    current_portfolio_candidates = [
+        replace(
+            item.candidate,
+            desired_notional=_exact_multiply(
+                item.candidate.current_quantity,
+                item.candidate.price,
+            ),
+        )
+        for item in candidates
+    ]
+    current_result = allocate_targets(
+        current_portfolio_candidates,
+        policy,
+        stress_scenarios=normalized_stress,
+        stress_evidence=normalized_evidence,
+        decision_time=decision_time,
+    )
+    try:
+        current_utility = _expected_net_utility(
+            current_result,
+            complete_objective,
+            policy,
+        )
+    except ValueError as error:
+        if "qualified worst_stress_loss evidence" not in str(error):
+            raise
+        return ObjectiveAllocationResult(
+            allocation=current_result,
+            selected_symbols=(),
+            expected_net_utility=Decimal("0"),
+            objective_version="deterministic-net-utility-v9",
+            reason=(
+                "current portfolio utility is not qualified; preserve no-trade "
+                "state rather than compare against an invented zero baseline"
+            ),
+        )
+
+    # The no-trade utility is an admissible decision baseline only when the
+    # current reconciled portfolio itself passes the same hard allocation
+    # constraints. An infeasible current state may have high nominal objective
+    # utility precisely because it exceeds a risk/capital limit; treating that
+    # number as an acceptance hurdle would prevent a feasible de-risking trade.
+    current_baseline_is_qualified = current_result.status == "ALLOCATED"
+
+    # allocate_targets() deliberately converts an infeasible frozen request
+    # into NO_INCREASE_FALLBACK, so its public status cannot distinguish known
+    # hard-limit failure from evidence/qualification fallback.  Probe the exact
+    # current state with the internal hard-constraint evaluator only to decide
+    # whether nonpositive-alpha de-risk candidates may enter the search.  Final
+    # candidate admission still goes through allocate_targets(), so this probe
+    # can never waive stress/evidence gates.
+    current_exposed_symbols = {
+        item.candidate.symbol
+        for item in candidates
+        if item.candidate.current_quantity != 0
+    }
+    current_stress_complete = all(
+        current_exposed_symbols <= set(scenario)
+        for scenario in normalized_stress.values()
+    )
+    current_hard_infeasible = False
+    if current_stress_complete:
+        current_hard_evaluation = _evaluate(
+            current_portfolio_candidates,
+            policy,
+            normalized_stress,
+            Decimal("0"),
+        )
+        current_hard_infeasible = current_hard_evaluation.status == "INFEASIBLE"
 
     ranked = sorted(
         (
             item
             for item in candidates
-            if item.objective_rate > 0
+            if (
+                item.objective_rate > 0
+                or (
+                    current_hard_infeasible
+                    and item.candidate.desired_notional
+                    != _exact_multiply(
+                        item.candidate.current_quantity,
+                        item.candidate.price,
+                    )
+                )
+            )
         ),
-        key=lambda item: (-item.objective_rate, item.candidate.symbol),
+        key=lambda item: (
+            _exact_subtract(Decimal("0"), item.objective_rate),
+            item.candidate.symbol,
+        ),
     )
 
     if not ranked:
-        fallback = _cash_fallback(
-            allocation_candidates,
-            reason="no candidate has positive expected return after risk penalty",
-        )
         return ObjectiveAllocationResult(
-            allocation=fallback,
+            allocation=current_result,
             selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
-            reason="no candidate has positive expected return after risk penalty",
+            expected_net_utility=current_utility,
+            objective_version="deterministic-net-utility-v9",
+            reason=(
+                "no candidate has positive expected return after risk penalty "
+                "and no hard-infeasible de-risk move is eligible"
+            ),
         )
 
     candidate_set_count = (1 << len(ranked)) - 1
     if candidate_set_count > max_candidate_sets:
-        fallback = _cash_fallback(
-            allocation_candidates,
-            reason=(
-                "objective search budget exceeded before complete subset "
-                "evaluation"
-            ),
-        )
         return ObjectiveAllocationResult(
-            allocation=fallback,
+            allocation=current_result,
             selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            expected_net_utility=current_utility,
+            objective_version="deterministic-net-utility-v9",
             reason=(
                 "objective search budget exceeded before complete subset "
                 "evaluation"
@@ -1011,7 +1491,22 @@ def allocate_objective_targets(
     }
     best_result: AllocationResult | None = None
     best_symbols: tuple[str, ...] = ()
-    best_utility = Decimal("0")
+    # A hard-feasible current state is the strict no-trade utility floor.
+    # A current state that is *known hard-infeasible* is different: restoring
+    # hard feasibility is a risk-control obligation and must not be blocked by
+    # nominal objective utility, including a zero-alpha liquidation target.
+    # Unknown/unqualified fallback states retain the conservative v7 floor.
+    if current_baseline_is_qualified:
+        utility_floor: Decimal | None = current_utility
+    elif current_hard_infeasible:
+        utility_floor = None
+    else:
+        utility_floor = (
+            current_utility
+            if current_utility < 0
+            else Decimal("0")
+        )
+    best_utility = current_utility if utility_floor is None else utility_floor
 
     for subset_mask in range(1, candidate_set_count + 1):
         subset = [
@@ -1020,40 +1515,79 @@ def allocate_objective_targets(
             if subset_mask & (1 << index)
         ]
         subset_symbols = tuple(item.candidate.symbol for item in subset)
-        projected_stress = {
-            scenario_name: {
-                symbol: scenario[symbol]
-                for symbol in subset_symbols
-            }
-            for scenario_name, scenario in normalized_stress.items()
-        }
-        projected_evidence = tuple(
-            StressScenarioEvidence.create(
-                name=item.name,
-                shocks={symbol: item.shocks[symbol] for symbol in subset_symbols},
-                observed_at=item.observed_at,
-                valid_until=item.valid_until,
-                source_ref=item.source_ref,
+        selected = set(subset_symbols)
+        portfolio_candidates = [
+            item.candidate
+            if item.candidate.symbol in selected
+            else replace(
+                item.candidate,
+                desired_notional=(
+                    _exact_multiply(
+                        item.candidate.current_quantity,
+                        item.candidate.price,
+                    )
+                ),
             )
-            for item in normalized_evidence
-        )
+            for item in candidates
+        ]
+        # Hard constraints always see the whole reconciled portfolio. Symbols
+        # omitted from the objective subset are frozen at their current holding;
+        # they do not disappear from gross/net/capital/stress just because the
+        # optimizer chose not to trade them.
         result = allocate_targets(
-            [item.candidate for item in subset],
+            portfolio_candidates,
             policy,
-            stress_scenarios=projected_stress,
-            stress_evidence=projected_evidence,
+            stress_scenarios=normalized_stress,
+            stress_evidence=normalized_evidence,
             decision_time=decision_time,
         )
+        if "execution-state search budget exceeded" in result.reason:
+            return ObjectiveAllocationResult(
+                allocation=current_result,
+                selected_symbols=(),
+                expected_net_utility=current_utility,
+                objective_version="deterministic-net-utility-v9",
+                reason=result.reason,
+            )
         if result.status != "ALLOCATED":
             continue
-        utility = _expected_net_utility(result, objective_by_symbol, policy)
-        if utility <= 0:
+        utility = _expected_net_utility(result, complete_objective, policy)
+        if utility_floor is not None and utility <= utility_floor:
             continue
+        target_by_symbol = {
+            target.symbol: target
+            for target in result.targets
+        }
+        subset_candidate_by_symbol = {
+            item.candidate.symbol: item.candidate
+            for item in subset
+        }
         active_symbols = tuple(
             sorted(
-                target.symbol
-                for target in result.targets
-                if target.notional != 0
+                symbol
+                for symbol in subset_symbols
+                if (
+                    target_by_symbol[symbol].notional
+                    != _exact_multiply(
+                        subset_candidate_by_symbol[symbol].current_quantity,
+                        subset_candidate_by_symbol[symbol].price,
+                    )
+                    and _exact_abs(
+                        _exact_subtract(
+                            subset_candidate_by_symbol[symbol].desired_notional,
+                            target_by_symbol[symbol].notional,
+                        )
+                    )
+                    < _exact_abs(
+                        _exact_subtract(
+                            subset_candidate_by_symbol[symbol].desired_notional,
+                            _exact_multiply(
+                                subset_candidate_by_symbol[symbol].current_quantity,
+                                subset_candidate_by_symbol[symbol].price,
+                            ),
+                        )
+                    )
+                )
             )
         )
         if not active_symbols:
@@ -1064,12 +1598,19 @@ def allocate_objective_targets(
             and best_result is not None
             and utility == best_utility
         ):
+            # Equal qualified utility must prefer the state that requires
+            # less market activity before considering secondary portfolio-shape
+            # preferences.  Cost may be zero/equal for materially different
+            # turnover, so cost/gross alone cannot implement the no-churn
+            # deterministic tie contract.
             candidate_key = (
+                result.turnover_notional,
                 result.estimated_cost,
                 result.gross_notional,
                 active_symbols,
             )
             current_key = (
+                best_result.turnover_notional,
                 best_result.estimated_cost,
                 best_result.gross_notional,
                 best_symbols,
@@ -1081,21 +1622,14 @@ def allocate_objective_targets(
             best_utility = utility
 
     if best_result is None:
-        fallback = _cash_fallback(
-            allocation_candidates,
-            reason=(
-                "no positive-utility feasible allocation survived hard "
-                "constraints and estimated costs"
-            ),
-        )
         return ObjectiveAllocationResult(
-            allocation=fallback,
+            allocation=current_result,
             selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            expected_net_utility=current_utility,
+            objective_version="deterministic-net-utility-v9",
             reason=(
-                "no positive-utility feasible allocation survived hard "
-                "constraints and estimated costs"
+                "no feasible allocation strictly improved the admissible "
+                "no-trade/de-risk utility floor"
             ),
         )
 
@@ -1103,10 +1637,11 @@ def allocate_objective_targets(
         allocation=best_result,
         selected_symbols=best_symbols,
         expected_net_utility=best_utility,
-        objective_version="deterministic-net-utility-v3",
+        objective_version="deterministic-net-utility-v9",
         reason=(
-            "selected the highest positive expected-net-utility deterministic "
-            "candidate subset that passed all hard allocation constraints"
+            "selected the highest deterministic expected-net-utility candidate "
+            "subset that strictly improved the admissible no-trade/de-risk "
+            "utility floor and passed all hard allocation constraints"
         ),
     )
 
@@ -1321,6 +1856,8 @@ class ImmutableAllocationEvidence:
 class EvidenceBoundObjectiveAllocationResult:
     objective: ObjectiveAllocationResult
     decision_digest: str
+    policy_config_digest: str
+    objective_search_config_digest: str
     evidence_refs: tuple[tuple[str, str], ...]
     environment: str
     policy_version: str
@@ -1407,7 +1944,7 @@ def _candidate_evidence_matches(
     market: ImmutableAllocationEvidence,
     *,
     decision_time: str,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str]:
     symbol = item.candidate.symbol
     if _payload_text(objective, "symbol") != symbol:
         raise ValueError(f"objective evidence symbol mismatch for {symbol}")
@@ -1430,8 +1967,20 @@ def _candidate_evidence_matches(
         _payload_text(objective, "information_cutoff"),
         name="objective information_cutoff",
     )
-    if cutoff > _instant(decision_time, name="decision_time"):
+    decision_point = _instant(decision_time, name="decision_time")
+    if cutoff > decision_point:
         raise ValueError(f"objective evidence information_cutoff is in the future for {symbol}")
+    forecast_horizon_end = _instant(
+        _payload_text(objective, "forecast_horizon_end"),
+        name="objective forecast_horizon_end",
+    )
+    if forecast_horizon_end <= decision_point:
+        raise ValueError(
+            f"objective evidence forecast_horizon_end must be after decision_time for {symbol}"
+        )
+    normalized_forecast_horizon_end = (
+        forecast_horizon_end.isoformat().replace("+00:00", "Z")
+    )
 
     candidate = item.candidate
     if _payload_text(market, "symbol") != symbol:
@@ -1479,7 +2028,54 @@ def _candidate_evidence_matches(
         _payload_text(market, "account_id"),
         _payload_text(market, "instrument_version"),
         _payload_text(market, "capability_snapshot_id"),
+        normalized_forecast_horizon_end,
     )
+
+
+_EXECUTION_SEARCH_ALGORITHM = "bounded-execution-state-enumeration-v1"
+_OBJECTIVE_SEARCH_ALGORITHM = "complete-subset-enumeration-with-hard-infeasible-de-risk-turnover-tie-v8"
+_OBJECTIVE_HORIZON_BINDING_ALGORITHM = "forecast-holding-cost-horizon-binding-v1"
+_STRESS_EVIDENCE_POLICY_ALGORITHM = "independent-freshness-gate-v1"
+_ALLOCATION_FX_PROJECTION_ALGORITHM = "role-side-conservative-fx-projection-exact-unit-v4"
+
+
+def _allocation_policy_digest(policy: AllocationPolicy) -> str:
+    if not isinstance(policy, AllocationPolicy):
+        raise TypeError("policy must be an AllocationPolicy")
+    payload = {
+        "execution_search_algorithm": _EXECUTION_SEARCH_ALGORITHM,
+        "objective_horizon_binding_algorithm": _OBJECTIVE_HORIZON_BINDING_ALGORITHM,
+        "stress_evidence_policy_algorithm": _STRESS_EVIDENCE_POLICY_ALGORITHM,
+        "allocation_fx_projection_algorithm": _ALLOCATION_FX_PROJECTION_ALGORITHM,
+        "cash_available": policy.cash_available,
+        "max_gross_notional": policy.max_gross_notional,
+        "max_net_notional": policy.max_net_notional,
+        "max_symbol_notional": policy.max_symbol_notional,
+        "max_total_cost": policy.max_total_cost,
+        "max_stress_loss": policy.max_stress_loss,
+        "stress_loss_penalty_rate": policy.stress_loss_penalty_rate,
+        "max_turnover_notional": policy.max_turnover_notional,
+        "minimum_cash_reserve": policy.minimum_cash_reserve,
+        "max_iterations": policy.max_iterations,
+        "min_scale_tolerance": policy.min_scale_tolerance,
+        "require_adverse_stress_evidence": policy.require_adverse_stress_evidence,
+        "require_fresh_stress_evidence": policy.require_fresh_stress_evidence,
+        "max_execution_states": policy.max_execution_states,
+    }
+    return sha256(_canonical_evidence_json(payload).encode("utf-8")).hexdigest()
+
+
+def _objective_search_config_digest(max_candidate_sets: int) -> str:
+    if (
+        type(max_candidate_sets) is not int
+        or max_candidate_sets < 1
+    ):
+        raise ValueError("max_candidate_sets must be a positive integer")
+    payload = {
+        "objective_search_algorithm": _OBJECTIVE_SEARCH_ALGORITHM,
+        "max_candidate_sets": max_candidate_sets,
+    }
+    return sha256(_canonical_evidence_json(payload).encode("utf-8")).hexdigest()
 
 
 def _allocation_decision_digest(
@@ -1488,6 +2084,8 @@ def _allocation_decision_digest(
     evidence_refs: Sequence[tuple[str, str]],
     environment: str,
     policy_version: str,
+    policy_config_digest: str,
+    objective_search_config_digest: str,
     decision_time: str,
     provider_id: str,
     account_id: str,
@@ -1503,6 +2101,8 @@ def _allocation_decision_digest(
     payload = {
         "environment": environment,
         "policy_version": policy_version,
+        "policy_config_digest": policy_config_digest,
+        "objective_search_config_digest": objective_search_config_digest,
         "decision_time": decision_time,
         "provider_id": provider_id,
         "account_id": account_id,
@@ -1529,7 +2129,11 @@ def _allocation_decision_digest(
             "gross_notional": str(result.allocation.gross_notional),
             "net_notional": str(result.allocation.net_notional),
             "estimated_cost": str(result.allocation.estimated_cost),
-            "worst_stress_loss": str(result.allocation.worst_stress_loss),
+            "worst_stress_loss": (
+                None
+                if result.allocation.worst_stress_loss is None
+                else str(result.allocation.worst_stress_loss)
+            ),
             "cash_required": str(result.allocation.cash_required),
             "turnover_notional": str(result.allocation.turnover_notional),
             "targets": [
@@ -1571,7 +2175,9 @@ def allocate_evidence_bound_objective_targets(
     This wrapper remains proposal-only.  It binds all decision-relevant inputs
     to immutable evidence and emits a deterministic digest that a later
     financial authority can revalidate against current account/reservation
-    versions before admission.
+    versions before admission. Forecast return and holding-cost evidence must
+    share one explicit future horizon, so financing/funding/borrow economics
+    cannot be compared against a return rate from a different time interval.
     """
 
     normalized_environment = _text(environment, name="allocation environment").upper()
@@ -1606,6 +2212,7 @@ def allocate_evidence_bound_objective_targets(
     account_ids = set()
     instrument_versions = {}
     capability_snapshot_ids = {}
+    forecast_horizon_ends = {}
     for item in materialized:
         symbol = item.candidate.symbol
         objective = _resolve_allocation_evidence(
@@ -1627,6 +2234,7 @@ def allocate_evidence_bound_objective_targets(
             account_id,
             instrument_version,
             capability_snapshot_id,
+            forecast_horizon_end,
         ) = _candidate_evidence_matches(
             item,
             objective,
@@ -1639,6 +2247,7 @@ def allocate_evidence_bound_objective_targets(
         account_ids.add(account_id)
         instrument_versions[symbol] = instrument_version
         capability_snapshot_ids[symbol] = capability_snapshot_id
+        forecast_horizon_ends[symbol] = forecast_horizon_end
     if len(provider_ids) != 1:
         raise ValueError("market evidence candidates must share one provider_id")
     if len(account_ids) != 1:
@@ -1716,12 +2325,20 @@ def allocate_evidence_bound_objective_targets(
             expected_environment=normalized_environment,
             at=normalized_decision_time,
         )
+        holding_cost_horizon_end = _instant(
+            _payload_text(valuation, "holding_cost_horizon_end"),
+            name="valuation holding_cost_horizon_end",
+        ).isoformat().replace("+00:00", "Z")
+        if holding_cost_horizon_end != forecast_horizon_ends[symbol]:
+            raise ValueError(
+                "valuation holding-cost horizon does not match objective "
+                f"forecast horizon for {symbol}"
+            )
         quote_currency = _payload_text(
             resolved_market[symbol],
             "quote_currency",
         ).upper()
-        valuation_fx_rate = _payload_decimal(valuation, "fx_rate")
-        # Monetary units are authority, including the identity-FX case.  Requiring
+        # Monetary units are authority, including the identity-FX case. Requiring
         # declarations only for cross-currency candidates lets a same-currency
         # caller omit or mislabel desired/minimum/fee/cap units while those raw
         # numbers are silently treated as portfolio-base amounts.
@@ -1757,39 +2374,30 @@ def allocate_evidence_bound_objective_targets(
             raise ValueError(
                 f"valuation desired_notional currency mismatch for {symbol}"
             )
-        if quote_currency == base_currency:
-            if valuation_fx_rate != Decimal("1"):
-                raise ValueError(
-                    f"identity-currency valuation for {symbol} must use unit FX"
-                )
-            monetary_rate = Decimal("1")
-        else:
-            monetary_rate = valuation_fx_rate
 
-        desired_notional_base = item.candidate.desired_notional * monetary_rate
-        min_notional_base = item.candidate.min_notional * monetary_rate
-        fee_floor_base = item.candidate.fee_floor * monetary_rate
-        max_executable_notional_base = (
-            None
-            if item.candidate.max_executable_notional is None
-            else item.candidate.max_executable_notional * monetary_rate
-        )
-        if quote_currency != base_currency:
-            if _payload_decimal(
+        if quote_currency == base_currency:
+            provisional_min_notional_base = item.candidate.min_notional
+            provisional_fee_floor_base = item.candidate.fee_floor
+            provisional_max_executable_notional_base = (
+                item.candidate.max_executable_notional
+            )
+        else:
+            provisional_min_notional_base = _payload_decimal(
                 valuation,
-                "desired_notional_base",
-            ) != desired_notional_base:
-                raise ValueError(
-                    f"valuation desired_notional_base mismatch for {symbol}"
-                )
-        elif "desired_notional_base" in valuation.payload:
-            if _payload_decimal(
+                "min_notional_base",
+            )
+            provisional_fee_floor_base = _payload_decimal(
                 valuation,
-                "desired_notional_base",
-            ) != desired_notional_base:
-                raise ValueError(
-                    f"valuation desired_notional_base mismatch for {symbol}"
+                "fee_floor_base",
+            )
+            provisional_max_executable_notional_base = (
+                None
+                if item.candidate.max_executable_notional is None
+                else _payload_decimal(
+                    valuation,
+                    "max_executable_notional_base",
                 )
+            )
 
         try:
             normalized = normalize_allocation_valuation(
@@ -1799,9 +2407,11 @@ def allocate_evidence_bound_objective_targets(
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,
-                expected_min_notional_base=min_notional_base,
-                expected_fee_floor_base=fee_floor_base,
-                expected_max_executable_notional_base=max_executable_notional_base,
+                expected_min_notional_base=provisional_min_notional_base,
+                expected_fee_floor_base=provisional_fee_floor_base,
+                expected_max_executable_notional_base=(
+                    provisional_max_executable_notional_base
+                ),
                 decision_time=normalized_decision_time,
                 portfolio_base_currency=base_currency,
             )
@@ -1809,13 +2419,109 @@ def allocate_evidence_bound_objective_targets(
             raise ValueError(
                 f"allocation valuation evidence is unusable for {symbol}: {error}"
             ) from error
+
+        asset_unit_base_notional = normalized.unit_base_notional
+        liability_unit_base_notional = normalized.unit_base_liability_notional
+        if liability_unit_base_notional is None:
+            raise ValueError(
+                f"allocation valuation lacks liability-side unit notional for {symbol}"
+            )
+        source_desired_notional = item.candidate.desired_notional
+        current_quantity = current_quantities[symbol]
+        crosses_fx_side = (
+            (current_quantity > 0 and source_desired_notional < 0)
+            or (current_quantity < 0 and source_desired_notional > 0)
+        )
+        if (
+            quote_currency != base_currency
+            and asset_unit_base_notional != liability_unit_base_notional
+            and crosses_fx_side
+        ):
+            raise ValueError(
+                "cross-currency sign reversal with a nonzero FX spread requires "
+                f"piecewise side-aware allocation for {symbol}"
+            )
+        use_liability_unit = (
+            source_desired_notional < 0
+            or (source_desired_notional == 0 and current_quantity < 0)
+        )
+        allocation_unit_base_notional = (
+            liability_unit_base_notional
+            if use_liability_unit
+            else asset_unit_base_notional
+        )
+
+        conversion = {
+            "asset_rate_numerator": normalized.fx_rate_numerator,
+            "asset_rate_denominator": normalized.fx_rate_denominator,
+            "liability_rate_numerator": normalized.fx_liability_rate_numerator,
+            "liability_rate_denominator": normalized.fx_liability_rate_denominator,
+            "rounding_quantum": normalized.fx_rounding_quantum,
+        }
+        desired_notional_base = _exact_fx_monetary_conversion(
+            item.candidate.desired_notional,
+            purpose="TARGET_NOTIONAL",
+            **conversion,
+        )
+        min_notional_base = _exact_fx_monetary_conversion(
+            item.candidate.min_notional,
+            purpose="MIN_NOTIONAL",
+            **conversion,
+        )
+        fee_floor_base = _exact_fx_monetary_conversion(
+            item.candidate.fee_floor,
+            purpose="FEE_FLOOR",
+            **conversion,
+        )
+        max_executable_notional_base = (
+            None
+            if item.candidate.max_executable_notional is None
+            else _exact_fx_monetary_conversion(
+                item.candidate.max_executable_notional,
+                purpose="MAX_EXECUTABLE_NOTIONAL",
+                **conversion,
+            )
+        )
+
+        if quote_currency != base_currency:
+            declared_desired = _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            )
+            if declared_desired != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
+            if provisional_min_notional_base != min_notional_base:
+                raise ValueError(
+                    f"valuation min_notional_base mismatch for {symbol}"
+                )
+            if provisional_fee_floor_base != fee_floor_base:
+                raise ValueError(
+                    f"valuation fee_floor_base mismatch for {symbol}"
+                )
+            if (
+                provisional_max_executable_notional_base
+                != max_executable_notional_base
+            ):
+                raise ValueError(
+                    f"valuation max_executable_notional_base mismatch for {symbol}"
+                )
+        elif "desired_notional_base" in valuation.payload:
+            if _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            ) != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
         resolved_valuation[symbol] = valuation
         normalized_candidates.append(
             ObjectiveCandidate(
                 candidate=AllocationCandidate(
                     symbol=symbol,
                     desired_notional=desired_notional_base,
-                    price=normalized.unit_base_notional,
+                    price=allocation_unit_base_notional,
                     lot_size=item.candidate.lot_size,
                     cost_rate=item.candidate.cost_rate,
                     capital_requirement_rate=item.candidate.capital_requirement_rate,
@@ -1823,14 +2529,16 @@ def allocate_evidence_bound_objective_targets(
                     fee_floor=fee_floor_base,
                     max_executable_notional=max_executable_notional_base,
                     current_quantity=current_quantities[symbol],
-                    turnover_cost_rate=(
-                        normalized.cost_rate_components["execution"]
-                        + normalized.cost_rate_components["fx"]
+                    turnover_cost_rate=_exact_add(
+                        normalized.cost_rate_components["execution"],
+                        normalized.cost_rate_components["fx"],
                     ),
-                    holding_cost_rate=(
-                        normalized.cost_rate_components["financing"]
-                        + normalized.cost_rate_components["funding"]
-                        + normalized.cost_rate_components["borrow"]
+                    holding_cost_rate=_exact_sum(
+                        (
+                            normalized.cost_rate_components["financing"],
+                            normalized.cost_rate_components["funding"],
+                            normalized.cost_rate_components["borrow"],
+                        )
                     ),
                 ),
                 expected_return_rate=item.expected_return_rate,
@@ -1856,16 +2564,34 @@ def allocate_evidence_bound_objective_targets(
         versions_raw = resolved.payload.get("instrument_versions")
         if not isinstance(shocks_raw, Mapping) or not isinstance(versions_raw, Mapping):
             raise ValueError("stress evidence requires shocks and instrument_versions mappings")
-        if set(shocks_raw) != set(symbols) or set(versions_raw) != set(symbols):
-            raise ValueError("stress evidence must exactly cover candidate symbols")
+        stress_relevant_symbols = {
+            item.candidate.symbol
+            for item in normalized_candidates
+            if (
+                item.candidate.current_quantity != 0
+                or item.candidate.desired_notional != 0
+            )
+        }
+        shock_symbols = set(shocks_raw)
+        version_symbols = set(versions_raw)
+        if shock_symbols != version_symbols:
+            raise ValueError(
+                "stress evidence shocks and instrument_versions must cover the same symbols"
+            )
+        if not stress_relevant_symbols.issubset(shock_symbols):
+            raise ValueError(
+                "stress evidence must cover every current/requested exposure symbol"
+            )
+        if not shock_symbols.issubset(set(symbols)):
+            raise ValueError("stress evidence contains an unknown candidate symbol")
         shocks = {
             symbol: _decimal(
                 shocks_raw[symbol],
                 name=f"stress evidence {name} shock {symbol}",
             )
-            for symbol in symbols
+            for symbol in shock_symbols
         }
-        for symbol in symbols:
+        for symbol in shock_symbols:
             if _text(
                 versions_raw[symbol],
                 name=f"stress evidence {name} instrument version {symbol}",
@@ -1904,11 +2630,17 @@ def allocate_evidence_bound_objective_targets(
     )
     bound_instrument_versions = tuple(sorted(instrument_versions.items()))
     bound_capability_snapshot_ids = tuple(sorted(capability_snapshot_ids.items()))
+    policy_config_digest = _allocation_policy_digest(policy)
+    objective_search_config_digest = _objective_search_config_digest(
+        max_candidate_sets
+    )
     decision_digest = _allocation_decision_digest(
         objective_result,
         evidence_refs=evidence_refs,
         environment=normalized_environment,
         policy_version=normalized_policy_version,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
         decision_time=normalized_decision_time,
         provider_id=provider_id,
         account_id=account_id,
@@ -1924,6 +2656,8 @@ def allocate_evidence_bound_objective_targets(
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective_result,
         decision_digest=decision_digest,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
         evidence_refs=evidence_refs,
         environment=normalized_environment,
         policy_version=normalized_policy_version,
@@ -1964,6 +2698,8 @@ def revalidate_evidence_bound_allocation(
     environment: str,
     as_of: str,
     current_policy_version: str,
+    current_policy: AllocationPolicy,
+    current_max_candidate_sets: int,
     current_provider_id: str,
     current_instrument_versions: Mapping[str, str],
     current_capability_snapshot_ids: Mapping[str, str],
@@ -1991,6 +2727,13 @@ def revalidate_evidence_bound_allocation(
     point = point_instant.isoformat().replace("+00:00", "Z")
     if _text(current_policy_version, name="current_policy_version") != result.policy_version:
         raise ValueError("policy version changed after allocation proposal")
+    if _allocation_policy_digest(current_policy) != result.policy_config_digest:
+        raise ValueError("allocation policy configuration changed after proposal")
+    if (
+        _objective_search_config_digest(current_max_candidate_sets)
+        != result.objective_search_config_digest
+    ):
+        raise ValueError("objective search configuration changed after proposal")
     if _text(current_provider_id, name="current_provider_id") != result.provider_id:
         raise ValueError("provider identity changed after allocation proposal")
     if _normalize_current_scope_mapping(
@@ -2053,6 +2796,8 @@ def revalidate_evidence_bound_allocation(
         evidence_refs=result.evidence_refs,
         environment=result.environment,
         policy_version=result.policy_version,
+        policy_config_digest=result.policy_config_digest,
+        objective_search_config_digest=result.objective_search_config_digest,
         decision_time=result.decision_time,
         provider_id=result.provider_id,
         account_id=result.account_id,
@@ -2068,4 +2813,3 @@ def revalidate_evidence_bound_allocation(
     if expected_digest != result.decision_digest:
         raise ValueError("allocation decision digest does not match result content")
     return True
-

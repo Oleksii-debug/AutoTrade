@@ -1,9 +1,17 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
+from fractions import Fraction
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -17,11 +25,18 @@ from mvp.autotrade_mvp.perpetual_margin import (
     PerpetualStress,
     evaluate_perpetual_margin,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 
-def tier(upper="10000", rate="0.005", adjustment="0", convention="ADD"):
-    return MarginTier(
+def tier(
+    upper="10000",
+    rate="0.005",
+    adjustment="0",
+    convention="ADD",
+    *,
+    cls=MarginTier,
+):
+    return cls(
         notional_upper_bound=Decimal(upper),
         maintenance_rate=Decimal(rate),
         maintenance_adjustment=Decimal(adjustment),
@@ -40,7 +55,7 @@ def capability(**overrides):
         provider_id="TEST_PROVIDER",
         account_id="account-A",
         entity_id="perpetual-account",
-        environment="PAPER",
+        environment="SIMULATION",
         instrument_version="BTC-PERP@v4",
         observed_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
         expires_at=datetime(2026, 9, 26, tzinfo=timezone.utc),
@@ -82,12 +97,12 @@ def capability(**overrides):
     )
 
 
-def evidence(**overrides):
+def evidence(*, cls=PerpetualMarginEvidence, **overrides):
     values = dict(
         provider_id="TEST_PROVIDER",
         account_id="account-A",
         entity_id="perpetual-account",
-        environment="PAPER",
+        environment="SIMULATION",
         instrument_version="BTC-PERP@v4",
         capability_snapshot_id=SNAPSHOT_ID,
         position_mode="ONE_WAY",
@@ -107,7 +122,7 @@ def evidence(**overrides):
         margin_tiers=(tier(), tier("50000", "0.01", "10", "ADD")),
     )
     values.update(overrides)
-    return PerpetualMarginEvidence(**values)
+    return cls(**values)
 
 
 class EvidenceArtifactStore:
@@ -120,6 +135,7 @@ class EvidenceArtifactStore:
             "account_id": value.account_id,
             "entity_id": value.entity_id,
             "environment": value.environment,
+            "provider_environment": value.provider_environment,
             "instrument_version": value.instrument_version,
             "capability_snapshot_id": value.capability_snapshot_id,
             "position_mode": value.position_mode,
@@ -186,6 +202,7 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         "account_id": value.account_id,
         "entity_id": value.entity_id,
         "environment": value.environment,
+        "provider_environment": value.provider_environment,
         "instrument_version": value.instrument_version,
         "capability_snapshot_id": value.capability_snapshot_id,
         "position_mode": value.position_mode,
@@ -232,7 +249,7 @@ def publish_margin_artifacts(store: ArtifactStore, value: PerpetualMarginEvidenc
         )
 
 
-def stress(**overrides):
+def stress(*, cls=PerpetualStress, **overrides):
     values = dict(
         price_loss_fraction=Decimal("0.05"),
         collateral_fx_loss_fraction=Decimal("0"),
@@ -242,7 +259,7 @@ def stress(**overrides):
         notional_increase_fraction=Decimal("0"),
     )
     values.update(overrides)
-    return PerpetualStress(**values)
+    return cls(**values)
 
 
 def evaluate(**overrides):
@@ -273,6 +290,23 @@ def evaluate(**overrides):
             **values,
             artifact_store=artifact_store,
         )
+
+
+class HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def as_tuple(self):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def normalize(self, *args, **kwargs):
+        raise AssertionError("Decimal subclass virtual method must not run")
+
+    def __lt__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
+
+    def __le__(self, other):
+        raise AssertionError("Decimal subclass comparison must not run")
 
 
 class PerpetualMarginTests(unittest.TestCase):
@@ -403,6 +437,93 @@ class PerpetualMarginTests(unittest.TestCase):
         with self.assertRaisesRegex(PerpetualMarginError, "capability scope mismatch"):
             evaluate(capability=capability(environment="LIVE"))
 
+    def test_paper_and_live_caller_authored_margin_evidence_fail_closed(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment):
+                scoped_capability = capability(environment=environment)
+                scoped_evidence = evidence(environment=environment)
+                with TemporaryDirectory() as directory:
+                    store = ArtifactStore(directory)
+                    publish_margin_artifacts(store, scoped_evidence)
+                    with patch.object(
+                        ArtifactStore,
+                        "read_authenticated_snapshot",
+                        autospec=True,
+                        side_effect=AssertionError(
+                            "artifact evidence must not be read before provider-origin authority"
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            PerpetualMarginError,
+                            "requires canonical provider-origin evidence",
+                        ):
+                            evaluate(
+                                capability=scoped_capability,
+                                evidence=scoped_evidence,
+                                artifact_store=store,
+                            )
+
+    def test_provider_environment_is_exact_capability_scope(self):
+        testnet_capability = capability(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        testnet_evidence = evidence(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        result = evaluate(
+            capability=testnet_capability,
+            evidence=testnet_evidence,
+        )
+        self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+        self.assertEqual(testnet_evidence.provider_environment, "TESTNET")
+
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "capability scope mismatch",
+        ):
+            evaluate(
+                capability=testnet_capability,
+                evidence=evidence(
+                    provider_id="BYBIT",
+                    provider_environment="DEMO",
+                ),
+            )
+
+    def test_provider_environment_is_immutable_artifact_scope(self):
+        trusted = evidence(
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        relabelled = evidence(
+            provider_id="BYBIT",
+            provider_environment="DEMO",
+        )
+        demo_capability = capability(
+            provider_id="BYBIT",
+            provider_environment="DEMO",
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "scope metadata mismatch",
+            ):
+                evaluate(
+                    capability=demo_capability,
+                    evidence=relabelled,
+                    artifact_store=store,
+                )
+
+    def test_bybit_margin_evidence_requires_explicit_provider_environment(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "BYBIT requires explicit provider_environment",
+        ):
+            evidence(provider_id="BYBIT")
+
     def test_position_and_margin_modes_are_not_portable(self):
         with self.assertRaisesRegex(PerpetualMarginError, "position mode"):
             evaluate(capability=capability(position_mode="HEDGE"))
@@ -526,6 +647,70 @@ class PerpetualMarginTests(unittest.TestCase):
         ):
             evaluate(evidence=trusted, artifact_store=fake_store)
 
+    def test_margin_evidence_payloads_ignore_ambient_decimal_context(self):
+        trusted = evidence(
+            mark_price=Decimal("1234567890123456789012345678.1"),
+            index_price=Decimal("1234567890123456789012345678.2"),
+            collateral_fx_to_settlement=Decimal("0.9999999999999999999999999999"),
+            margin_tiers=(
+                MarginTier(
+                    notional_upper_bound=Decimal(
+                        "1234567890123456789012345678.3"
+                    ),
+                    maintenance_rate=Decimal(
+                        "0.1234567890123456789012345678"
+                    ),
+                    maintenance_adjustment=Decimal(
+                        "0.000000000000000000123456789"
+                    ),
+                ),
+            ),
+        )
+
+        with localcontext() as context:
+            context.prec = 6
+            low_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+        with localcontext() as context:
+            context.prec = 80
+            high_precision = (
+                trusted.tier_table_payload(),
+                trusted.evidence_bundle_payload(),
+            )
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertEqual(
+            low_precision[1]["mark_price"],
+            "1234567890123456789012345678.1",
+        )
+        self.assertEqual(
+            low_precision[0]["tiers"][0]["maintenance_rate"],
+            "0.1234567890123456789012345678",
+        )
+
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("10000")
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound=hostile,
+                maintenance_rate=Decimal("0.005"),
+            )
+
+    def test_margin_numeric_ingress_uses_shared_resource_envelope(self):
+        with self.assertRaisesRegex(
+            PerpetualMarginError,
+            "bounded exact decimal",
+        ):
+            MarginTier(
+                notional_upper_bound="1e1000000",
+                maintenance_rate="0.005",
+            )
+
     def test_float_money_and_rates_are_rejected(self):
         with self.assertRaises(TypeError):
             evaluate(collateral_amount=1000.0)
@@ -622,6 +807,299 @@ class PerpetualMarginTests(unittest.TestCase):
                 collateral_amount=Decimal("10000"),
                 stress=stress(notional_increase_fraction=Decimal("0.10")),
             )
+
+    def test_margin_arithmetic_and_divergence_are_exact_across_decimal_contexts(self):
+        exact_evidence = evidence(
+            mark_price=Decimal("4"),
+            index_price=Decimal("3"),
+            margin_tiers=(
+                tier(
+                    "2000000000000000000000000000",
+                    "0.0000000000000000000000000001",
+                    "0.0000000000000000000000000001",
+                ),
+            ),
+        )
+        exact_stress = stress(
+            price_loss_fraction=Decimal("0"),
+            collateral_fx_loss_fraction=Decimal("0"),
+            exit_cost_fraction=Decimal("0"),
+            additional_funding_loss=Decimal("0"),
+            unavailable_exit_extra_loss=Decimal("0"),
+            notional_increase_fraction=Decimal("0"),
+        )
+        common = dict(
+            evidence=exact_evidence,
+            signed_notional_settlement=Decimal(
+                "1000000000000000000000000000.1"
+            ),
+            collateral_amount=Decimal(
+                "1000000000000000000000000000.2"
+            ),
+            unrealized_pnl_settlement=Decimal(
+                "0.0000000000000000000000000003"
+            ),
+            collateral_haircut_fraction=Decimal(
+                "0.0000000000000000000000000001"
+            ),
+            stress=exact_stress,
+        )
+
+        allowed = []
+        blocked = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    allowed.append(
+                        evaluate(
+                            **common,
+                            maximum_mark_index_divergence_bps=Decimal(
+                                "3333.3334"
+                            ),
+                        )
+                    )
+                    blocked.append(
+                        evaluate(
+                            **common,
+                            maximum_mark_index_divergence_bps=Decimal(
+                                "3333.3333"
+                            ),
+                        )
+                    )
+
+        self.assertTrue(all(result == allowed[0] for result in allowed))
+        self.assertTrue(all(result == blocked[0] for result in blocked))
+        self.assertEqual(allowed[0].verdict, "ALLOW_NEW_RISK")
+        self.assertEqual(blocked[0].verdict, "BLOCK_NEW_RISK")
+        self.assertIn("MARK_INDEX_DIVERGENCE", blocked[0].reasons)
+        self.assertEqual(
+            allowed[0].mark_index_divergence_bps,
+            Fraction(10000, 3),
+        )
+        self.assertEqual(
+            allowed[0].maintenance_requirement,
+            Decimal("0.10000000000000000000000000011"),
+        )
+
+    def test_margin_authority_rejects_polymorphic_domain_objects_before_virtual_dispatch(self):
+        class ForgedEvidence(PerpetualMarginEvidence):
+            verification_called = False
+
+            def verify_immutable_artifacts(self, store):
+                type(self).verification_called = True
+                return None
+
+        class ForgedStress(PerpetualStress):
+            pass
+
+        class ForgedTier(MarginTier):
+            maintenance_called = False
+
+            def maintenance_requirement(self, notional):
+                type(self).maintenance_called = True
+                return Decimal("0")
+
+        forged_evidence = evidence(cls=ForgedEvidence)
+        with self.assertRaisesRegex(TypeError, "exact PerpetualMarginEvidence"):
+            evaluate(evidence=forged_evidence)
+        self.assertFalse(ForgedEvidence.verification_called)
+
+        forged_stress = stress(cls=ForgedStress)
+        with self.assertRaisesRegex(TypeError, "exact PerpetualStress"):
+            evaluate(stress=forged_stress)
+
+        with self.assertRaisesRegex(TypeError, "exact MarginTier"):
+            evidence(margin_tiers=(tier(cls=ForgedTier),))
+        self.assertFalse(ForgedTier.maintenance_called)
+
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            evidence(margin_tiers=[tier()])
+
+    def test_margin_text_identity_rejects_string_subclass_before_strip_dispatch(self):
+        class HostileText(str):
+            strip_called = False
+
+            def strip(self, *args, **kwargs):
+                type(self).strip_called = True
+                raise AssertionError("string subclass strip must not run")
+
+        with self.assertRaisesRegex(PerpetualMarginError, "provider_id is required"):
+            evidence(provider_id=HostileText("TEST_PROVIDER"))
+        self.assertFalse(HostileText.strip_called)
+
+    def test_margin_artifact_refs_require_canonical_lowercase_uuid(self):
+        for field, value in (
+            ("evidence_bundle_ref", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
+            ("tier_table_evidence_ref", "{33333333-3333-4333-8333-333333333333}"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "canonical lowercase artifact UUID",
+                ):
+                    evidence(**{field: value})
+
+    def test_freshness_budget_requires_exact_int_before_artifact_io(self):
+        class HostileInt(int):
+            comparison_called = False
+
+            def __lt__(self, other):
+                type(self).comparison_called = True
+                raise AssertionError("integer subclass comparison must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
+                side_effect=AssertionError(
+                    "artifact reader must not run before freshness-budget admission"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "maximum_evidence_age_seconds must be a non-negative integer",
+                ):
+                    evaluate(
+                        evidence=trusted,
+                        artifact_store=store,
+                        maximum_evidence_age_seconds=HostileInt(30),
+                    )
+        self.assertFalse(HostileInt.comparison_called)
+
+    def test_margin_artifacts_use_one_authenticated_snapshot_per_artifact(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            original = ArtifactStore.read_authenticated_snapshot
+            calls = []
+
+            def read_snapshot(instance, artifact_id):
+                calls.append(artifact_id)
+                return original(instance, artifact_id)
+
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
+                side_effect=read_snapshot,
+            ):
+                result = evaluate(evidence=trusted, artifact_store=store)
+
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+            self.assertEqual(calls, [TIER_TABLE_ID, EVIDENCE_BUNDLE_ID])
+
+    def test_instance_poisoning_cannot_split_margin_artifact_snapshot(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+
+            def poisoned(*_args, **_kwargs):
+                raise AssertionError("instance artifact reader must not execute")
+
+            store.load_manifest = poisoned
+            store.read_bytes = poisoned
+            store.read_authenticated_snapshot = poisoned
+
+            result = evaluate(evidence=trusted, artifact_store=store)
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+
+    def test_class_rebinding_cannot_replace_margin_artifact_reader(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            with patch.object(
+                ArtifactStore,
+                "read_authenticated_snapshot",
+                side_effect=AssertionError(
+                    "late ArtifactStore class rebinding must not become financial authority"
+                ),
+            ):
+                result = evaluate(evidence=trusted, artifact_store=store)
+            self.assertEqual(result.verdict, "ALLOW_NEW_RISK")
+
+    def test_margin_artifact_snapshot_requires_exact_builtin_bytes(self):
+        class HostileBytes(bytes):
+            pass
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            original = ArtifactStore.read_authenticated_snapshot
+
+            def hostile_snapshot(instance, artifact_id):
+                manifest, payload = original(instance, artifact_id)
+                return manifest, HostileBytes(payload)
+
+            with patch(
+                "mvp.autotrade_mvp.perpetual_margin."
+                "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
+                side_effect=hostile_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    PerpetualMarginError,
+                    "unsupported representation",
+                ):
+                    evaluate(evidence=trusted, artifact_store=store)
+
+    def test_margin_artifact_snapshot_failures_are_bounded_and_fail_closed(self):
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish_margin_artifacts(store, trusted)
+            for error in (
+                ArtifactIntegrityError("integrity"),
+                OSError("io"),
+                TypeError("type"),
+                ValueError("value"),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    with patch(
+                        "mvp.autotrade_mvp.perpetual_margin."
+                        "_READ_AUTHENTICATED_ARTIFACT_SNAPSHOT",
+                        side_effect=error,
+                    ):
+                        with self.assertRaisesRegex(
+                            PerpetualMarginError,
+                            "artifact is missing or corrupt",
+                        ):
+                            evaluate(evidence=trusted, artifact_store=store)
+
+    def test_artifact_store_subclass_is_rejected_before_virtual_dispatch(self):
+        class ForgedArtifactStore(ArtifactStore):
+            load_called = False
+            snapshot_called = False
+
+            def load_manifest(self, artifact_id):
+                type(self).load_called = True
+                raise AssertionError("subclass method must not run")
+
+            def read_bytes(self, artifact_id):
+                raise AssertionError("subclass method must not run")
+
+            def read_authenticated_snapshot(self, artifact_id):
+                type(self).snapshot_called = True
+                raise AssertionError("subclass snapshot reader must not run")
+
+        trusted = evidence()
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            publish_margin_artifacts(canonical, trusted)
+            forged = ForgedArtifactStore(directory)
+            with self.assertRaisesRegex(
+                PerpetualMarginError,
+                "canonical ArtifactStore",
+            ):
+                evaluate(evidence=trusted, artifact_store=forged)
+            self.assertFalse(ForgedArtifactStore.load_called)
+            self.assertFalse(ForgedArtifactStore.snapshot_called)
 
 if __name__ == "__main__":
     unittest.main()

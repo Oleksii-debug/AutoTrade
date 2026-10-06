@@ -17,6 +17,7 @@ EVIDENCE = {
     "sha256": "sha256:" + "a" * 64,
     "observed_at": "2026-09-24T16:00:00Z",
 }
+TEST_ADAPTER_VERSION = "autotrade.market-causal-test@1"
 
 
 def at(second: int = 0) -> datetime:
@@ -67,6 +68,7 @@ def update(
         provider_id="provider-a",
         venue_id="venue-a",
         provider_symbol="ABC-USD",
+        adapter_version=TEST_ADAPTER_VERSION,
         kind=kind,
         source_event_at=source,
         available_at=available,
@@ -119,6 +121,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id=TextSubclass("provider-a"),
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=at(),
                 available_at=at(1),
@@ -138,6 +141,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=at(),
                 available_at=at(1),
@@ -157,6 +161,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 provider_id="provider-a",
                 venue_id="venue-a",
                 provider_symbol="ABC-USD",
+                adapter_version=TEST_ADAPTER_VERSION,
                 kind="TRADE",
                 source_event_at=DatetimeSubclass(
                     2026, 9, 24, 16, 0, tzinfo=timezone.utc
@@ -322,6 +327,7 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
             provider_id="provider-a",
             venue_id="venue-a",
             provider_symbol="ABC-USD",
+            adapter_version=TEST_ADAPTER_VERSION,
             kind="BOOK_SNAPSHOT",
             source_event_at=at(),
             available_at=at(1),
@@ -429,6 +435,38 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
                 {"status": "OPEN", "recursive": recursive},
             )
 
+
+
+    def test_raw_payload_snapshot_has_structural_resource_envelope(self):
+        too_wide = {"status": "OPEN", "opaque": [None] * 20001}
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "container resource envelope",
+        ):
+            update("STATUS", too_wide)
+
+        nested = None
+        for _ in range(65):
+            nested = [nested]
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "nesting resource envelope",
+        ):
+            update("STATUS", {"status": "OPEN", "opaque": nested})
+
+    def test_book_depth_supported_width_fits_snapshot_structural_budget(self):
+        bids = [
+            [f"{100 - index / 100:.2f}", "1.000"]
+            for index in range(10000)
+        ]
+        admitted = update(
+            "BOOK_SNAPSHOT",
+            {
+                "bids": bids,
+                "asks": [["100.01", "1.000"]],
+            },
+        )
+        self.assertEqual(len(admitted.payload["bids"]), 10000)
 
 if __name__ == "__main__":
     unittest.main()

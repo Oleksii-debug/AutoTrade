@@ -90,7 +90,20 @@ class GitRegistryStore:
             raise ValueError("complete commit SHAs required")
         if self._git("show", "-s", "--format=%P", prepared_head) != expected_head:
             raise RegistryProtocolError("prepared commit must have exactly the expected parent")
-        self._git("push", "--porcelain", self.remote, f"{prepared_head}:{self.REF}")
+        # Normal fast-forward push is not an exact-tip CAS if the remote ref
+        # disappeared before push negotiation: Git may then recreate the ref.
+        # Bind the update to the exact advertised parent OID as a lease.  The
+        # prepared commit is already required to have exactly expected_head as
+        # its sole parent, so a successful update remains an expected-parent
+        # fast-forward while deletion/replacement of the authority ref fails.
+        lease = f"--force-with-lease={self.REF}:{expected_head}"
+        self._git(
+            "push",
+            "--porcelain",
+            lease,
+            self.remote,
+            f"{prepared_head}:{self.REF}",
+        )
         observed = self._git("ls-remote", self.remote, self.REF).split()
         if not observed or observed[0] != prepared_head:
             raise RegistryWriteUnconfirmed("Registry advanced; refresh and reconcile request ID")

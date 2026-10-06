@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -41,6 +42,7 @@ def write_capability():
             account_id="contract-account",
             entity_id="contract-order",
             environment="LIVE",
+            provider_environment="MAINNET",
             instrument_version="BTCUSDT@v1",
             observed_at=observed,
             expires_at=NOW + timedelta(hours=1),
@@ -59,12 +61,12 @@ def write_capability():
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
+    return fresh_test_admission(derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
         observed_at=NOW,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-    )
+    ))
 
 
 def durable_submission(payload, *, intent_id):
@@ -116,11 +118,12 @@ def durable_submission(payload, *, intent_id):
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
-                ExactJsonTransportResponse(raw),
+                ExactJsonTransportResponse(raw, http_status=200),
             )[1],
             sender_check=lambda _owner, _epoch: None,
             submission_scope={
                 "endpoint": prepared.endpoint,
+                "provider_environment": prepared.provider_environment,
                 "prepared_request_sha256": prepared.body_sha256,
                 "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
                 "instrument_versions": list(prepared.instrument_versions),

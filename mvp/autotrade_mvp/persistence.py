@@ -8,8 +8,9 @@ import sqlite3
 import sys
 from typing import Any
 
-from autotrade_local_filesystem import (
+from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
+    freeze_local_filesystem_path,
     require_qualified_local_filesystem_path,
 )
 
@@ -22,12 +23,12 @@ from ._persistence_impl import JournalStore as _JournalStoreImpl
 from .store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
-    connection_main_path,
     establish_database_anchor,
     freeze_database_path,
     guard_windows_database_authority,
     require_database_identity,
     require_exact_journal_store_identity,
+    same_journal_backing_object,
 )
 
 _JOURNAL_OPERATION_AUTHORITY: ContextVar[
@@ -56,13 +57,23 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Reject executable PathLike/subclass ingress before pathname
+        # interpretation or filesystem qualification can dispatch caller code.
+        if type(path) is not str and type(path) is not type(Path()):
+            raise TypeError(
+                "journal database path must be exact text or exact platform Path"
+            )
+        # Freeze caller-relative text before locality admission performs Win32
+        # I/O. A concurrent process-wide chdir after admission must not retarget
+        # durable financial state into an unclassified namespace.
+        frozen_path = freeze_local_filesystem_path(Path(path).expanduser())
         try:
-            require_qualified_local_filesystem_path(path)
+            require_qualified_local_filesystem_path(frozen_path)
         except LocalFilesystemQualificationError as error:
             raise RuntimeError(
                 "journal database path must be on a qualified local filesystem"
             ) from error
-        self.path = freeze_database_path(path)
+        self.path = freeze_database_path(frozen_path)
         self._store_identity: JournalStoreIdentity | None = None
         self._initialize()
         if self._store_identity is None:
@@ -94,6 +105,276 @@ class JournalStore(_JournalStoreImpl):
         )
         return identity
 
+    def claim_first_event(self, envelope: dict[str, Any]) -> _impl.AppendResult:
+        """Atomically establish the first whole-store durable business authority.
+
+        The claim succeeds only when the event journal, outbox, command dedupe,
+        and both projection-checkpoint stores are empty in the same
+        BEGIN IMMEDIATE transaction that writes global journal sequence 1.
+        Schema metadata is excluded because migrations describe storage shape,
+        not prior business authority.
+        """
+
+        identity = require_exact_journal_store_authority(
+            self,
+            subject="first-event claim store",
+        )
+        if type(envelope) is not dict:
+            raise TypeError("envelope must be an exact object")
+        envelope = _impl._detach_json_value(envelope)
+        _impl._validate_canonical_event_envelope_if_claimed(envelope)
+
+        event_id = _impl._require_canonical_durable_text(
+            envelope.get("event_id"), name="event_id"
+        )
+        event_type = _impl._require_canonical_durable_text(
+            envelope.get("event_type"), name="event_type"
+        )
+        aggregate_type = _impl._require_canonical_durable_text(
+            envelope.get("aggregate_type"), name="aggregate_type"
+        )
+        aggregate_id = _impl._require_canonical_durable_text(
+            envelope.get("aggregate_id"), name="aggregate_id"
+        )
+        try:
+            raw_aggregate_version = envelope["aggregate_version"]
+        except KeyError as error:
+            raise ValueError(
+                "aggregate_version must be a positive canonical integer sequence string"
+            ) from error
+        aggregate_version = _impl._sequence(
+            raw_aggregate_version,
+            name="aggregate_version",
+            positive=True,
+        )
+        if aggregate_version != 1:
+            raise ValueError("first-event claim requires aggregate_version 1")
+
+        payload = envelope.get("payload")
+        payload_json = _impl.canonical_json(payload)
+        expected_payload_hash = _impl.payload_digest(payload)
+        if envelope.get("payload_hash") != expected_payload_hash:
+            raise ValueError("payload_hash does not match payload")
+        envelope_json = _impl.canonical_json(envelope)
+        envelope_hash = _impl._event_envelope_digest(envelope_json)
+        committed_at = _impl._require_canonical_durable_text(
+            envelope.get("committed_at"), name="committed_at"
+        )
+
+        with journal_store_authority_scope(self, identity):
+            with JournalStore._connect(self) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    if JournalStore._journal_sequence_value(connection) != 0:
+                        raise ValueError(
+                            "journal store already contains durable business state"
+                        )
+                    for table in (
+                        "outbox",
+                        "command_dedupe",
+                        "projection_checkpoints",
+                        "global_projection_checkpoints",
+                    ):
+                        row = connection.execute(
+                            f"SELECT COUNT(*) AS row_count FROM {table}"
+                        ).fetchone()
+                        if row is None or type(row["row_count"]) is not int:
+                            raise RuntimeError(
+                                f"whole-store authority count failed for {table}"
+                            )
+                        if row["row_count"] != 0:
+                            raise ValueError(
+                                "journal store already contains durable business state"
+                            )
+                    if JournalStore._aggregate_version_value(
+                        connection, aggregate_type, aggregate_id
+                    ) != 0:
+                        raise ValueError(
+                            "journal store already contains durable business state"
+                        )
+
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash, committed_at,
+                            envelope_json, envelope_hash, journal_sequence
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            expected_payload_hash,
+                            committed_at,
+                            envelope_json,
+                            envelope_hash,
+                        ),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+        return _impl.AppendResult(event_id, 1, True)
+
+    def whole_store_state_cut(self) -> dict[str, Any]:
+        """Return global journal cursor and business cardinalities from one snapshot."""
+
+        identity = require_exact_journal_store_authority(
+            self,
+            subject="whole-store state cut",
+        )
+        with journal_store_authority_scope(self, identity):
+            with JournalStore._connect(self) as connection:
+                connection.execute("BEGIN")
+                try:
+                    result = {
+                        "journal_sequence": JournalStore._journal_sequence_value(
+                            connection
+                        ),
+                        "counts": _impl._whole_store_state_counts(connection),
+                    }
+                    connection.commit()
+                    return result
+                except Exception:
+                    connection.rollback()
+                    raise
+
+    def whole_store_state_counts(self) -> dict[str, int]:
+        """Return exact durable business-table cardinalities at one read cut."""
+
+        return dict(self.whole_store_state_cut()["counts"])
+
+    def outbox_delivery_state(
+        self,
+        event_id: str,
+        *,
+        topic: str,
+    ) -> dict[str, Any]:
+        """Read one event's exact outbox publication and delivery state.
+
+        Recovery code must distinguish a legitimately delivered row from a
+        missing/corrupt publication record.  This read keeps the authoritative
+        event envelope and its outbox row in one SQLite snapshot and validates
+        their exact byte binding before reporting delivery state.
+        """
+
+        identity = require_exact_journal_store_authority(
+            self,
+            subject="outbox delivery-state store",
+        )
+        event_id = _impl._require_canonical_durable_text(
+            event_id,
+            name="event_id",
+        )
+        topic = _impl._require_canonical_durable_text(
+            topic,
+            name="outbox topic",
+        )
+        with journal_store_authority_scope(self, identity):
+            with JournalStore._connect(self) as connection:
+                connection.execute("BEGIN")
+                try:
+                    row = connection.execute(
+                        """
+                        SELECT
+                            outbox.outbox_id,
+                            outbox.event_id,
+                            outbox.topic,
+                            outbox.payload_json AS outbox_payload_json,
+                            outbox.envelope_hash,
+                            outbox.delivered_at,
+                            events.event_type,
+                            events.aggregate_type,
+                            events.aggregate_id,
+                            events.aggregate_version,
+                            events.payload_json AS event_payload_json,
+                            events.payload_hash,
+                            events.committed_at,
+                            events.envelope_json AS event_envelope_json,
+                            events.envelope_hash AS event_envelope_hash,
+                            events.journal_sequence
+                        FROM outbox
+                        JOIN events ON events.event_id = outbox.event_id
+                        WHERE outbox.event_id = ? AND outbox.topic = ?
+                        """,
+                        (event_id, topic),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError(
+                            "durable outbox publication is missing for bootstrap event"
+                        )
+
+                    raw_outbox_payload = row["outbox_payload_json"]
+                    if type(raw_outbox_payload) is not str:
+                        raise ValueError("outbox payload authority is not exact text")
+                    stored_topic = _impl._require_canonical_durable_text(
+                        row["topic"],
+                        name="outbox topic",
+                    )
+                    if stored_topic != topic:
+                        raise ValueError(
+                            "outbox topic does not match requested recovery route"
+                        )
+                    actual_outbox_hash = _impl._outbox_envelope_digest(
+                        stored_topic,
+                        raw_outbox_payload,
+                    )
+                    if row["envelope_hash"] != actual_outbox_hash:
+                        raise ValueError(
+                            "outbox envelope hash does not match stored payload"
+                        )
+
+                    event_row = {
+                        "event_id": row["event_id"],
+                        "event_type": row["event_type"],
+                        "aggregate_type": row["aggregate_type"],
+                        "aggregate_id": row["aggregate_id"],
+                        "aggregate_version": row["aggregate_version"],
+                        "payload_json": row["event_payload_json"],
+                        "payload_hash": row["payload_hash"],
+                        "committed_at": row["committed_at"],
+                        "envelope_json": row["event_envelope_json"],
+                        "envelope_hash": row["event_envelope_hash"],
+                        "journal_sequence": row["journal_sequence"],
+                    }
+                    event = JournalStore._decode_event_row(event_row)
+                    authoritative_envelope = dict(event)
+                    authoritative_envelope.pop("journal_sequence", None)
+                    authoritative_envelope["aggregate_version"] = str(
+                        authoritative_envelope["aggregate_version"]
+                    )
+                    if _impl.canonical_json(authoritative_envelope) != raw_outbox_payload:
+                        raise ValueError(
+                            "outbox payload does not match authoritative journal event envelope"
+                        )
+
+                    delivered_at = row["delivered_at"]
+                    if delivered_at is not None:
+                        _impl._require_canonical_durable_text(
+                            delivered_at,
+                            name="outbox delivered_at",
+                        )
+                    stored_outbox_id = _impl._require_canonical_durable_text(
+                        row["outbox_id"],
+                        name="outbox_id",
+                    )
+                    result = {
+                        "outbox_id": stored_outbox_id,
+                        "event_id": event_id,
+                        "topic": stored_topic,
+                        "envelope_hash": actual_outbox_hash,
+                        "delivered": delivered_at is not None,
+                    }
+                    connection.commit()
+                    return result
+                except Exception:
+                    connection.rollback()
+                    raise
+
     def load_command_event_batch(
         self,
         *,
@@ -102,6 +383,7 @@ class JournalStore(_JournalStoreImpl):
         environment: str,
         idempotency_key: str,
         request: Any,
+        referenced_event_ids: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         """Read one authenticated EVENT_BATCH command and its events at one cut.
 
@@ -117,7 +399,15 @@ class JournalStore(_JournalStoreImpl):
             environment=environment,
             idempotency_key=idempotency_key,
         )
-        request_hash = _impl.payload_digest(request)
+        if type(referenced_event_ids) is not tuple or any(
+            type(event_id) is not str or not event_id or event_id != event_id.strip()
+            for event_id in referenced_event_ids
+        ):
+            raise TypeError("referenced_event_ids must be exact canonical text tuple")
+        if len(set(referenced_event_ids)) != len(referenced_event_ids):
+            raise ValueError("referenced_event_ids must be unique")
+        request_snapshot = _impl._detach_json_value(request)
+        request_hash = _impl.payload_digest(request_snapshot)
 
         with self._connect() as connection:
             connection.execute("BEGIN")
@@ -200,6 +490,32 @@ class JournalStore(_JournalStoreImpl):
                 if self.SCHEMA_VERSION >= 6:
                     self._journal_sequence_value(connection)
 
+                # Resolve immutable prior events in this same held snapshot.
+                # Owned events are not returned as references, so removing an
+                # owned event from the returned batch cannot invent recovery.
+                owned_ids = {event["event_id"] for event in decoded_events}
+                referenced_events = []
+                for event_id in referenced_event_ids:
+                    if event_id in owned_ids:
+                        continue
+                    event_row = connection.execute(
+                        "SELECT event_id, event_type, aggregate_type, aggregate_id, "
+                        "aggregate_version, payload_json, payload_hash, committed_at, "
+                        "envelope_json, envelope_hash, journal_sequence "
+                        "FROM events WHERE event_id = ?", (event_id,),
+                    ).fetchone()
+                    if event_row is None:
+                        raise ValueError("referenced command event is missing")
+                    event = self._decode_event_row(event_row)
+                    self._aggregate_version_value(
+                        connection, event["aggregate_type"], event["aggregate_id"],
+                    )
+                    if not decoded_events or event["journal_sequence"] >= min(
+                        item["journal_sequence"] for item in decoded_events
+                    ):
+                        raise ValueError("referenced event must precede command effects")
+                    referenced_events.append(event)
+
                 connection.commit()
                 return {
                     "command_id": command_id,
@@ -209,6 +525,7 @@ class JournalStore(_JournalStoreImpl):
                     "state_version": state_version,
                     "result": saved_result,
                     "events": tuple(decoded_events),
+                    **({"referenced_events": tuple(referenced_events)} if referenced_event_ids else {}),
                 }
             except Exception:
                 connection.rollback()
@@ -244,10 +561,10 @@ class JournalStore(_JournalStoreImpl):
             connection = sqlite3.connect(path, timeout=30, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
-                opened_path = connection_main_path(connection)
-                if opened_path != path:
+                opened_identity = connection_main_identity(connection)
+                if not same_journal_backing_object(opened_identity, guarded):
                     raise RuntimeError(
-                        "SQLite main database path does not match canonical journal authority"
+                        "SQLite main database does not match canonical journal authority"
                     )
                 if expected is None:
                     self._store_identity = guarded
@@ -283,9 +600,13 @@ class JournalStore(_JournalStoreImpl):
                             raise RuntimeError(
                                 "journal authority changed while connection was active"
                             )
-                        if connection_main_path(connection) != path:
+                        opened_identity = connection_main_identity(connection)
+                        if not same_journal_backing_object(
+                            opened_identity,
+                            expected,
+                        ):
                             raise RuntimeError(
-                                "SQLite main database path changed while connection was active"
+                                "SQLite main database changed while connection was active"
                             )
                 finally:
                     connection.close()

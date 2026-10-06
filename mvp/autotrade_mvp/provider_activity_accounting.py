@@ -8,12 +8,14 @@ JournalStore snapshot rather than two independent event reads.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from . import _provider_activity_accounting_impl as _impl
 from ._provider_activity_accounting_impl import *  # noqa: F401,F403
-from .persistence import JournalStore
+from .persistence import (
+    JournalStore, journal_store_authority_scope, require_exact_journal_store_authority,
+)
 
 
 def __getattr__(name: str):
@@ -24,6 +26,140 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | set(dir(_impl)))
+
+
+_original_economic_store_load_command_event_batch = (
+    _impl._economic_store_load_command_event_batch
+)
+
+
+def _economic_store_load_command_event_batch(
+    economic_book: object,
+    **kwargs: Any,
+):
+    """Require an OMS-bound EVENT_BATCH to own the OMS event it names.
+
+    JournalStore authenticates the stored EVENT_BATCH descriptors and returns
+    their integrity-checked events. Atomic fill and fill-bust requests both name
+    their canonical OMS event. Exact replay is authoritative only when command
+    provenance and the immutable OMS event join on the same durable fact.
+    """
+
+    request_value = kwargs.get("request")
+    order_value = None
+    order_field = None
+    expected_operation = None
+    if type(request_value) is dict:
+        fill_value = request_value.get("order_fill")
+        bust_value = request_value.get("order_bust")
+        if fill_value is not None and bust_value is not None:
+            raise ValueError(
+                "atomic OMS command request cannot bind fill and bust authorities together"
+            )
+        if fill_value is not None:
+            order_field = "order_fill"
+            order_value = fill_value
+            expected_operation = "RECORD_FILL"
+        elif bust_value is not None:
+            order_field = "order_bust"
+            order_value = bust_value
+            expected_operation = "BUST_FILL"
+
+    if type(order_value) is dict and type(order_value.get("event_id")) is str:
+        kwargs["referenced_event_ids"] = (order_value["event_id"],)
+    authority = _original_economic_store_load_command_event_batch(
+        economic_book,
+        **kwargs,
+    )
+    if authority is None:
+        return None
+
+    request = kwargs.get("request")
+    if not isinstance(request, Mapping) or order_field is None:
+        return authority
+    order_value = request.get(order_field)
+    if not isinstance(order_value, Mapping):
+        raise ValueError("atomic OMS command request has invalid order authority")
+
+    event_id = order_value.get("event_id")
+    event_key = order_value.get("event_key")
+    operation = order_value.get("operation")
+    order_request = order_value.get("request")
+    if (
+        not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(event_key, str)
+        or not event_key
+        or operation != expected_operation
+        or not isinstance(order_request, Mapping)
+    ):
+        raise ValueError("atomic OMS command request has invalid order authority")
+
+    raw_events = authority.get("events")
+    if not isinstance(raw_events, tuple):
+        raise ValueError("atomic OMS command authority has invalid event batch")
+    matching = tuple(
+        event
+        for event in raw_events
+        if isinstance(event, Mapping) and event.get("event_id") == event_id
+    )
+    if not matching:
+        references = authority.get("referenced_events", ())
+        matching = (
+            tuple(
+                event
+                for event in references
+                if type(event) is dict and event.get("event_id") == event_id
+            )
+            if type(references) is tuple
+            else ()
+        )
+        if (
+            len(matching) != 1
+            or not raw_events
+            or matching[0]["journal_sequence"]
+            >= min(event["journal_sequence"] for event in raw_events)
+        ):
+            raise ValueError(
+                "atomic OMS command authority does not own the referenced OMS event"
+            )
+    if len(matching) != 1:
+        raise ValueError(
+            "atomic OMS command authority does not own the referenced OMS event"
+        )
+
+    event = matching[0]
+    payload = event.get("payload")
+    if (
+        event.get("event_type") != "OrderProjectionMutationCommitted"
+        or event.get("aggregate_type") != "order_projection_book"
+        or not isinstance(payload, Mapping)
+        or payload.get("event_key") != event_key
+        or payload.get("operation") != expected_operation
+        or payload.get("request") != order_request
+        or payload_digest(
+            {
+                "request_hash": payload.get("request_hash"),
+                "evidence_refs": event.get("evidence_refs", []),
+            }
+        )
+        != order_value.get("mutation_hash")
+        or payload_digest(payload.get("snapshot"))
+        != order_value.get("snapshot_digest")
+        or payload.get("scope", {}).get("provider_id") != economic_book.provider_id
+        or payload.get("scope", {}).get("account_id") != economic_book.account_id
+        or payload.get("scope", {}).get("environment") != economic_book.environment
+    ):
+        raise ValueError("atomic OMS command authority has invalid OMS semantic owner")
+    return authority
+
+
+# The retained implementation's atomic fill replay resolves this helper through
+# its module globals. Install the stronger ownership join once at facade import
+# so provider-evidence and direct SIMULATION/REPLAY paths share one authority.
+_impl._economic_store_load_command_event_batch = (
+    _economic_store_load_command_event_batch
+)
 
 
 def book_external_provider_cash_activity(
@@ -43,10 +179,14 @@ def book_external_provider_cash_activity(
     a partial financial effect.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(activity, _impl.ProviderActivityEvidence):
-        raise TypeError("activity must be ProviderActivityEvidence")
+    store_identity = require_exact_journal_store_authority(
+        store, subject="provider cash JournalStore",
+    )
+    activity = _impl._snapshot_external_cash_activity(activity)
+
+    def durable_call(method, *args, **kwargs):
+        with journal_store_authority_scope(store, store_identity):
+            return method(store, *args, **kwargs)
 
     provider = _impl._text(provider_id, name="provider_id").upper()
     account = _impl._text(account_id, name="account_id")
@@ -197,7 +337,7 @@ def book_external_provider_cash_activity(
 
     def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
         try:
-            snapshot = store.load_command_event_batch(
+            snapshot = durable_call(JournalStore.load_command_event_batch,
                 command_id=command_identity,
                 actor=actor,
                 environment=scope,
@@ -292,7 +432,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        saved_result, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -322,10 +462,10 @@ def book_external_provider_cash_activity(
     if resolved is not None:
         return resolved
 
-    activity_version = store.next_aggregate_version(
+    activity_version = durable_call(JournalStore.next_aggregate_version,
         "provider_activity", identity
     )
-    book_version = store.next_aggregate_version("economic_book", book_id)
+    book_version = durable_call(JournalStore.next_aggregate_version,"economic_book", book_id)
 
     imported_payload = {
         **request,
@@ -364,7 +504,7 @@ def book_external_provider_cash_activity(
     }
 
     try:
-        saved_result, inserted, _ = store.commit_command(
+        saved_result, inserted, _ = durable_call(JournalStore.commit_command,
             command_id=command_identity,
             actor=actor,
             environment=scope,
@@ -399,3 +539,197 @@ def book_external_provider_cash_activity(
             )
         return resolved
     return transaction, True
+
+
+def _provider_fill_transaction_is_bound(
+    economic_book: _impl.DurableProviderEconomicBook,
+    transaction_id: str,
+) -> bool:
+    """Resolve provider-fill ownership from durable financial-binding events."""
+
+    target = _impl._text(transaction_id, name="reversed transaction_id")
+    store, store_identity = _impl._require_exact_financial_book(
+        economic_book,
+        _impl.DurableProviderEconomicBook,
+        name="economic_book",
+    )
+    with journal_store_authority_scope(store, store_identity):
+        events = JournalStore.load_events_by_aggregate_type(
+            store,
+            _impl._PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        )
+
+    matches = 0
+    for event in events:
+        if event.get("event_type") != _impl._PROVIDER_FILL_BINDING_EVENT_TYPE:
+            raise _impl.AccountingConflict(
+                "provider fill financial binding contains unsupported event type"
+            )
+        if event.get("aggregate_version") != 1:
+            raise _impl.AccountingConflict(
+                "provider fill financial binding version is invalid"
+            )
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise _impl.AccountingConflict(
+                "provider fill financial binding payload is invalid"
+            )
+        if _impl.payload_digest(payload) != event.get("payload_hash"):
+            raise _impl.AccountingConflict(
+                "provider fill financial binding payload hash is invalid"
+            )
+        request = payload.get("request")
+        if not isinstance(request, Mapping):
+            raise _impl.AccountingConflict(
+                "provider fill financial binding request is invalid"
+            )
+        request = dict(request)
+        if payload.get("request_digest") != _impl.payload_digest(request):
+            raise _impl.AccountingConflict(
+                "provider fill financial binding request digest is invalid"
+            )
+        if (
+            payload.get("provider_id") != request.get("provider_id")
+            or payload.get("account_id") != request.get("account_id")
+            or payload.get("environment") != request.get("environment")
+            or payload.get("provider_execution_id")
+            != request.get("provider_execution_id")
+        ):
+            raise _impl.AccountingConflict(
+                "provider fill financial binding scope is inconsistent"
+            )
+
+        in_scope = (
+            request.get("provider_id") == economic_book.provider_id
+            and request.get("account_id") == economic_book.account_id
+            and request.get("environment") == economic_book.environment
+        )
+        if not in_scope:
+            continue
+        if request.get("transaction_id") == target:
+            matches += 1
+
+    if matches > 1:
+        raise _impl.AccountingConflict(
+            "provider fill transaction has duplicate financial-binding ownership"
+        )
+    return matches == 1
+
+
+def _legacy_provider_fill_correction_is_already_durable(
+    economic_book: _impl.DurableProviderEconomicBook,
+    settlement_book: _impl.DurableSettlementBook,
+    *,
+    reversal: _impl.JournalTransaction,
+    replacement: _impl.JournalTransaction,
+    settlement_obligations: tuple[_impl.SettlementObligation, ...],
+    committed_at: str | None,
+) -> bool:
+    """Admit the no-reservation shape only for already-durable legacy effects."""
+
+    economic_plan = economic_book.prepare_batch_mutation(
+        (reversal, replacement),
+        committed_at=committed_at,
+    )
+    settlement_plan = settlement_book.prepare_register_mutation(
+        settlement_obligations,
+        committed_at=committed_at,
+    )
+    return economic_plan.already_committed and settlement_plan.already_committed
+
+
+def commit_economic_correction_with_settlement_replacement(
+    economic_book: _impl.DurableProviderEconomicBook,
+    settlement_book: _impl.DurableSettlementBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reversal: _impl.JournalTransaction,
+    replacement: _impl.JournalTransaction,
+    settlement_obligations: Iterable[_impl.SettlementObligation],
+    committed_at: str | None = None,
+    reservation_book: _impl.DurableReservationBook | None = None,
+    reservation_id: str | None = None,
+    provider_fill_correction_binding: _impl.PreparedProviderFillCorrectionBinding | None = None,
+) -> bool:
+    """Fence fresh generic corrections of reservation-owned provider fills."""
+
+    items = tuple(settlement_obligations)
+    if (
+        reservation_book is None
+        and provider_fill_correction_binding is None
+        and type(reversal) is _impl.JournalTransaction
+        and reversal.reverses_transaction_id is not None
+        and _provider_fill_transaction_is_bound(
+            economic_book,
+            reversal.reverses_transaction_id,
+        )
+        and not _legacy_provider_fill_correction_is_already_durable(
+            economic_book,
+            settlement_book,
+            reversal=reversal,
+            replacement=replacement,
+            settlement_obligations=items,
+            committed_at=committed_at,
+        )
+    ):
+        raise _impl.AccountingConflict(
+            "provider-fill-owned correction requires reservation-aware correction authority"
+        )
+
+    return _impl.commit_economic_correction_with_settlement_replacement(
+        economic_book,
+        settlement_book,
+        command_id=command_id,
+        idempotency_key=idempotency_key,
+        reversal=reversal,
+        replacement=replacement,
+        settlement_obligations=items,
+        committed_at=committed_at,
+        reservation_book=reservation_book,
+        reservation_id=reservation_id,
+        provider_fill_correction_binding=provider_fill_correction_binding,
+    )
+
+
+def commit_economic_batch_with_reservation_consumption(
+    economic_book: _impl.DurableProviderEconomicBook,
+    reservation_book: _impl.DurableReservationBook,
+    *,
+    command_id: str,
+    idempotency_key: str,
+    reservation_id: str,
+    usage: Mapping[str, object],
+    transactions: Iterable[_impl.JournalTransaction],
+    reservation_expected_snapshot_digest: str | None = None,
+    committed_at: str | None = None,
+    settlement_book: _impl.DurableSettlementBook | None = None,
+    settlement_obligations: Iterable[_impl.SettlementObligation] = (),
+    provider_fill_binding: _impl.PreparedProviderFillBinding | None = None,
+) -> bool:
+    """Fence generic publication of provider-fill-bound financial effects."""
+
+    if provider_fill_binding is not None:
+        raise _impl.AccountingConflict(
+            "provider-fill-bound atomic commit requires evidence-derived provider fill entrypoint"
+        )
+
+    return _impl.commit_economic_batch_with_reservation_consumption(
+        economic_book,
+        reservation_book,
+        command_id=command_id,
+        idempotency_key=idempotency_key,
+        reservation_id=reservation_id,
+        usage=usage,
+        transactions=transactions,
+        reservation_expected_snapshot_digest=reservation_expected_snapshot_digest,
+        committed_at=committed_at,
+        settlement_book=settlement_book,
+        settlement_obligations=settlement_obligations,
+        provider_fill_binding=None,
+    )
+
+
+# Install provider-fill provenance only when the financial surface is loaded.
+# Foundation-only JournalStore imports must remain independent of research.
+from . import _provider_fill_atomic_authority as _provider_fill_atomic_authority  # noqa: E402,F401

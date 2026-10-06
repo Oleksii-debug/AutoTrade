@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
-from typing import Literal
+from typing import Literal, Mapping
 
 from .exact_decimal import (
     ExactDecimalError,
+    parse_bounded_exact_decimal,
     as_fraction as _exact_as_fraction,
     bounded_fraction as _exact_bounded_fraction,
     canonical_decimal_text as _exact_canonical_decimal_text,
@@ -72,21 +73,11 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
     if isinstance(value, bool) or isinstance(value, float):
         raise PerpetualError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise PerpetualError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise PerpetualError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise PerpetualError(f"{name} exceeds the supported exact-decimal resource envelope") from error
     if positive and result <= 0:
         raise PerpetualError(f"{name} must be positive")
-    if result == 0:
-        return Decimal("0")
-    try:
-        _exact_as_fraction(result)
-    except ExactDecimalError as error:
-        raise PerpetualError(
-            f"{name} exceeds the supported exact-decimal resource envelope"
-        ) from error
     return result
 
 
@@ -605,6 +596,87 @@ class FundingLedger:
         self._periods[period_key] = (fingerprint, unit, value)
         self._balances[unit] = new_balance
         return value
+
+    def export_state(self) -> dict[str, object]:
+        """Detach this lifecycle accumulator for the canonical runtime checkpoint.
+
+        This component serialization does not issue checkpoint/financial trust;
+        the existing composite replay authority authenticates the captured state.
+        """
+        if type(self) is not FundingLedger:
+            raise TypeError("state export requires exact FundingLedger")
+        periods = {
+            (fingerprint, period): (instrument, currency, amount)
+            for (instrument, period), (fingerprint, currency, amount)
+            in self._periods.items()
+        }
+        events = []
+        # Preserve the original event order: bounded exact accumulations may
+        # reject a reordered intermediate even when their final sum fits.
+        for event_id, (fingerprint, period, currency, amount) in self._events.items():
+            owner = periods.get((fingerprint, period))
+            if owner is None or owner[1:] != (currency, amount):
+                raise PerpetualError("funding event is detached from its period state")
+            events.append({
+                "event_id": event_id, "funding_period_id": period,
+                "instrument_id": owner[0], "currency": currency,
+                "amount": canonical_decimal_text(amount),
+            })
+        state = {
+            "schema_version": "funding-ledger@1", "events": events,
+            "balances": {currency: canonical_decimal_text(amount)
+                         for currency, amount in sorted(self._balances.items())},
+        }
+        # Detect partial/mutated component state instead of publishing a
+        # checkpoint which omits a period or invents a retained balance.
+        restored = FundingLedger.from_state(state)
+        if (restored._events != self._events or restored._periods != self._periods
+                or restored._balances != self._balances):
+            raise PerpetualError("funding component state is inconsistent")
+        return state
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, object]) -> "FundingLedger":
+        """Rebuild dedupe, period membership and balances by canonical apply()."""
+        if cls is not FundingLedger:
+            raise TypeError("state restore requires exact FundingLedger")
+        if type(state) is not dict or set(state) != {"schema_version", "events", "balances"}:
+            raise PerpetualError("funding state has missing or unexpected components")
+        if type(state["schema_version"]) is not str or state["schema_version"] != "funding-ledger@1":
+            raise PerpetualError("unsupported funding state schema_version")
+        events, balances = state["events"], state["balances"]
+        if type(events) is not list or type(balances) is not dict:
+            raise PerpetualError("funding events and balances must be exact collections")
+        expected_balances = {}
+        for currency, amount in balances.items():
+            if type(currency) is not str or type(amount) is not str:
+                raise PerpetualError("serialized funding units and amounts must be exact text")
+            unit = _text(currency, "currency").upper()
+            if unit != currency:
+                raise PerpetualError("serialized funding currency is not canonical")
+            value = _decimal(amount, "balance")
+            if canonical_decimal_text(value) != amount:
+                raise PerpetualError("serialized funding balance is not canonical")
+            expected_balances[unit] = value
+        result = FundingLedger()
+        seen = set()
+        keys = {"event_id", "funding_period_id", "instrument_id", "currency", "amount"}
+        for event in events:
+            if type(event) is not dict or set(event) != keys or any(type(value) is not str for value in event.values()):
+                raise PerpetualError("serialized funding event has invalid shape")
+            if any(not event[key] or event[key] != event[key].strip()
+                   for key in keys) or event["currency"] != event["currency"].upper():
+                raise PerpetualError("serialized funding event identity is not canonical")
+            if event["event_id"] in seen:
+                raise PerpetualError("serialized funding event identity is duplicated")
+            seen.add(event["event_id"])
+            amount = _decimal(event["amount"], "amount")
+            if canonical_decimal_text(amount) != event["amount"]:
+                raise PerpetualError("serialized funding event amount is not canonical")
+            FundingLedger.apply(result, **event)
+        if result._balances != expected_balances:
+            raise PerpetualError("serialized funding balances do not match events")
+        return result
 
     def balance(self, currency: str) -> Decimal:
         return self._balances.get(_text(currency, "currency").upper(), Decimal("0"))

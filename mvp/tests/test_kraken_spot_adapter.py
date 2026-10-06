@@ -2,11 +2,15 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
+from types import MappingProxyType
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
+import mvp.autotrade_mvp.kraken_spot as kraken_spot_module
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -19,6 +23,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
+    ProviderSubmissionObservation,
     Surface,
     observe_authenticated_json_response,
     observe_submission_json_response,
@@ -42,6 +47,8 @@ from mvp.autotrade_mvp.kraken_spot import (
     pagination_page_from_observation,
     prepare_spot_order_request,
     validate_spot_client_order_id,
+    KrakenSpotBookChecksumEvidence,
+    verify_kraken_spot_v2_book_checksum,
 )
 
 
@@ -159,6 +166,78 @@ def capability(
 
 
 class KrakenSpotAdapterTests(unittest.TestCase):
+    def test_preparation_revalidates_mutated_order_intent(self):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        object.__setattr__(intent, "post_only", True)
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "post_only"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="spot-mutated-intent",
+                account_id="spot-account",
+                environment="PAPER",
+                capability=capability(),
+                at=NOW,
+            )
+
+    def test_preparation_rejects_capability_subclass_before_callback(self):
+        callbacks = []
+
+        class HostileCapability(CapabilitySnapshot):
+            def __getattribute__(self, name):
+                callbacks.append(name)
+                raise AssertionError("hostile capability callback executed")
+
+        hostile = object.__new__(HostileCapability)
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            prepare_spot_order_request(
+                intent,
+                client_order_id="spot-hostile-cap",
+                account_id="spot-account",
+                environment="PAPER",
+                capability=hostile,
+                at=NOW,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_preparation_rejects_rebound_digest_authority_before_callback(self):
+        intent = KrakenSpotOrderIntent.create(
+            instrument_version="XBTUSD:v1",
+            pair="XBTUSD",
+            side="BUY",
+            order_type="MARKET",
+            volume="0.01",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.sha256",
+            side_effect=AssertionError("rebound digest callback executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared request authority changed",
+            ):
+                prepare_spot_order_request(
+                    intent,
+                    client_order_id="spot-rebound-digest",
+                    account_id="spot-account",
+                    environment="PAPER",
+                    capability=capability(),
+                    at=NOW,
+                )
+        rebound.assert_not_called()
+
     def test_direct_prepared_request_requires_canonical_factory(self):
         with self.assertRaisesRegex(
             KrakenSpotAdapterError,
@@ -459,12 +538,40 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         self.assertNotIn("provider_environment", result["evidence"][0])
 
+    def test_add_order_rejects_noncanonical_provider_order_id(self):
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "transaction id must be canonical exact text",
+        ):
+            self._parse_submission(
+                {
+                    "error": [],
+                    "result": {"txid": [" OABC-D123-E456 "]},
+                }
+            )
+
     def test_provider_error_is_canonical_rejection_not_exception_or_success(self):
         result = self._parse_submission(
             {"error": ["EOrder:Insufficient funds"], "result": None}
         )
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
+
+    def test_provider_error_rejects_noncanonical_or_nontext_entries(self):
+        cases = (
+            [" EOrder:Insufficient funds "],
+            [123],
+            [{"code": "EOrder:Insufficient funds"}],
+        )
+        for errors in cases:
+            with self.subTest(errors=errors):
+                with self.assertRaisesRegex(
+                    KrakenSpotAdapterError,
+                    "error entries must be canonical exact text",
+                ):
+                    self._parse_submission(
+                        {"error": errors, "result": None}
+                    )
 
     def test_deadline_elapsed_is_unknown_after_durable_response_binding(self):
         result = self._parse_submission(
@@ -584,6 +691,327 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 source_uri="https://api.kraken.com/0/private/AddOrder",
                 observation={"error": [], "result": {"txid": ["forged"]}},
             )
+
+    def test_submission_consumer_ignores_exact_prepared_getattribute_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["prepared-callback-fence"]}},
+            intent_id="kraken-spot-prepared-callback-fence",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            raise AssertionError(
+                "prepared-request virtual callback executed"
+            )
+
+        with patch.object(KrakenSpotPreparedRequest, "__getattribute__", forged):
+            result = parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=observation,
+            )
+        self.assertEqual(callbacks, [])
+        self.assertEqual(result["outcome"], "ACKNOWLEDGED")
+        self.assertEqual(result["provider_order_id"], "prepared-callback-fence")
+
+    def test_submission_consumer_rejects_rebound_prepared_projection_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["prepared-helper-rebound"]}},
+            intent_id="kraken-spot-prepared-helper-rebound",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot._prepared_submission_projection",
+            side_effect=AssertionError("rebound prepared projector executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_observation_projection_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["observation-projection-rebound"]}},
+            intent_id="kraken-spot-observation-projection-rebound",
+        )
+        callbacks = []
+
+        def forged(*_args, **_kwargs):
+            callbacks.append(True)
+            return {}
+
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot._submission_projection",
+            forged,
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound.assert_not_called()
+        self.assertEqual(callbacks, [])
+
+    def test_submission_consumer_rejects_rebound_response_helpers_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["spot-response-helper-rebound"]}},
+            intent_id="kraken-spot-response-helper-rebound",
+        )
+        for helper in ("_submission_evidence", "_uuid_text"):
+            with self.subTest(helper=helper):
+                with patch(
+                    f"mvp.autotrade_mvp.kraken_spot.{helper}",
+                    side_effect=AssertionError("rebound response helper executed"),
+                ) as rebound:
+                    with self.assertRaisesRegex(
+                        KrakenSpotAdapterError,
+                        "prepared response authority is unavailable",
+                    ):
+                        parse_spot_submission_response(
+                            attempt_id=attempt,
+                            prepared_request=prepared,
+                            source_uri="https://api.kraken.com/0/private/AddOrder",
+                            observation=observation,
+                        )
+                rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_rebound_transitive_authorities(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["kraken-spot-transitive-authority-rebound"]}},
+            intent_id="kraken-spot-transitive-authority-rebound",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.uuid5",
+            side_effect=AssertionError("rebound uuid5 executed"),
+        ) as rebound_uuid5:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound_uuid5.assert_not_called()
+
+        with patch("mvp.autotrade_mvp.kraken_spot._FREE_CLIENT_ID", object()):
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+
+        with patch("mvp.autotrade_mvp.kraken_spot.NAMESPACE_URL", object()):
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+
+
+    def test_submission_authority_helpers_hide_mutable_keyword_defaults(self):
+        for helper in (
+            kraken_spot_module._prepared_submission_projection,
+            kraken_spot_module._submission_projection,
+        ):
+            with self.subTest(helper=helper.__name__):
+                self.assertIsNone(helper.__kwdefaults__)
+
+    def test_submission_consumer_rejects_rebound_issuer_verifier_without_callback(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-rebound-issuer-verifier",
+        )
+        with patch(
+            "mvp.autotrade_mvp.kraken_spot.require_canonical_kraken_spot_prepared_request",
+            side_effect=AssertionError("rebound issuer verifier executed"),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "prepared response authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=str(uuid4()),
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=None,
+                    transport_ambiguous=True,
+                )
+        rebound.assert_not_called()
+
+    def test_submission_consumer_rejects_post_mint_financial_body_retarget(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-post-mint-body-retarget",
+        )
+        forged_body = dict(object.__getattribute__(prepared, "body"))
+        forged_body["volume"] = "999"
+        object.__setattr__(
+            prepared,
+            "body",
+            MappingProxyType(forged_body),
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_consumer_rejects_post_mint_prepared_digest_retarget(self):
+        prepared = self._prepared_submission_request(
+            intent_id="kraken-spot-post-mint-digest-retarget",
+        )
+        object.__setattr__(
+            prepared,
+            "body_sha256",
+            "sha256:" + "0" * 64,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_consumer_rejects_exact_unissued_prepared_clone(self):
+        issued = self._prepared_submission_request(
+            intent_id="kraken-spot-exact-unissued-clone",
+        )
+        forged = object.__new__(KrakenSpotPreparedRequest)
+        for field_name in (
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "capability_snapshot_id",
+            "documentation_refs",
+            "instrument_version",
+            "body_sha256",
+            "_factory_token",
+        ):
+            object.__setattr__(
+                forged,
+                field_name,
+                object.__getattribute__(issued, field_name),
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "prepared request authority changed",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+
+    def test_submission_consumer_rejects_prepared_subclass_before_virtual_callback(self):
+        callbacks = []
+
+        class HostilePrepared(KrakenSpotPreparedRequest):
+            def __getattribute__(self, _name):
+                callbacks.append(True)
+                raise AssertionError(
+                    "prepared-request virtual callback executed before type verification"
+                )
+
+        forged = object.__new__(HostilePrepared)
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact KrakenSpotPreparedRequest",
+        ):
+            parse_spot_submission_response(
+                attempt_id=str(uuid4()),
+                prepared_request=forged,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=None,
+                transport_ambiguous=True,
+            )
+        self.assertEqual(callbacks, [])
+
+    def test_submission_consumer_rejects_subclass_before_virtual_callback(self):
+        attempt, prepared, _observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+            intent_id="kraken-spot-hostile-observation",
+        )
+
+        class HostileObservation(ProviderSubmissionObservation):
+            def __getattribute__(self, _name):
+                raise AssertionError(
+                    "virtual callback executed before authority verification"
+                )
+
+        forged = object.__new__(HostileObservation)
+        with self.assertRaisesRegex(
+            TypeError,
+            "durable ProviderSubmissionObservation",
+        ):
+            parse_spot_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                source_uri="https://api.kraken.com/0/private/AddOrder",
+                observation=forged,
+            )
+
+    def test_submission_consumer_rejects_rebound_require_scope_without_callback(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"error": [], "result": {"txid": ["OABC-D123-E456"]}},
+            intent_id="kraken-spot-no-virtual-scope",
+        )
+        with patch.object(
+            ProviderSubmissionObservation,
+            "require_scope",
+            side_effect=AssertionError(
+                "rebindable require_scope callback must not execute"
+            ),
+        ) as rebound:
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "provider submission observation authority is unavailable",
+            ):
+                parse_spot_submission_response(
+                    attempt_id=attempt,
+                    prepared_request=prepared,
+                    source_uri="https://api.kraken.com/0/private/AddOrder",
+                    observation=observation,
+                )
+        rebound.assert_not_called()
 
     def test_empty_txid_fails_closed(self):
         with self.assertRaisesRegex(KrakenSpotAdapterError, "transaction id"):
@@ -1417,6 +1845,191 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 account_id="paper-1",
                 environment="PAPER",)
 
+
+
+
+class KrakenSpotBookChecksumTests(unittest.TestCase):
+    EVENT_ID = "11111111-1111-4111-8111-111111111111"
+
+    @staticmethod
+    def candidate(asks, bids):
+        def canonical(value):
+            text = format(Decimal(value), "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return text or "0"
+
+        return {
+            "asks": [
+                {"price": canonical(price), "quantity": canonical(qty)}
+                for price, qty in sorted(asks, key=lambda item: Decimal(item[0]))
+            ],
+            "bids": [
+                {"price": canonical(price), "quantity": canonical(qty)}
+                for price, qty in sorted(
+                    bids,
+                    key=lambda item: Decimal(item[0]),
+                    reverse=True,
+                )
+            ],
+        }
+
+    def test_official_websocket_v2_checksum_example_matches_exact_provider_text(self):
+        asks = (
+            ("45285.2", "0.00100000"),
+            ("45286.4", "1.54571953"),
+            ("45286.6", "1.54571109"),
+            ("45289.6", "1.54560911"),
+            ("45290.2", "0.15890660"),
+            ("45291.8", "1.54553491"),
+            ("45294.7", "0.04454749"),
+            ("45296.1", "0.35380000"),
+            ("45297.5", "0.09945542"),
+            ("45299.5", "0.18772827"),
+        )
+        bids = (
+            ("45283.5", "0.10000000"),
+            ("45283.4", "1.54582015"),
+            ("45282.1", "0.10000000"),
+            ("45281.0", "0.10000000"),
+            ("45280.3", "1.54592586"),
+            ("45279.0", "0.07990000"),
+            ("45277.6", "0.03310103"),
+            ("45277.5", "0.30000000"),
+            ("45277.3", "1.54602737"),
+            ("45276.6", "0.15445238"),
+        )
+        evidence = verify_kraken_spot_v2_book_checksum(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=3310070434,
+        )
+        self.assertEqual(evidence.expected_checksum, 3310070434)
+        self.assertEqual(evidence.computed_checksum, 3310070434)
+        self.assertEqual(evidence.top_ask_count, 10)
+        self.assertEqual(evidence.top_bid_count, 10)
+        self.assertTrue(evidence.checksum_input_sha256.startswith("sha256:"))
+
+    def test_checksum_sorts_top_ten_by_provider_price_semantics(self):
+        asks = tuple(
+            (f"{45290 - index}.0", "1.00000000")
+            for index in range(12)
+        )
+        bids = tuple(
+            (f"{45270 + index}.0", "2.00000000")
+            for index in range(12)
+        )
+        # Obtain the expected value from the exact same provider text but with
+        # the semantically irrelevant tail levels removed explicitly.
+        top_asks = tuple(sorted(asks, key=lambda item: Decimal(item[0]))[:10])
+        top_bids = tuple(
+            sorted(bids, key=lambda item: Decimal(item[0]), reverse=True)[:10]
+        )
+        import zlib
+        def component(value):
+            return value.replace(".", "").lstrip("0")
+        checksum_input = "".join(
+            component(price) + component(qty)
+            for price, qty in (*top_asks, *top_bids)
+        )
+        expected = zlib.crc32(checksum_input.encode("ascii")) & 0xFFFFFFFF
+        evidence = verify_kraken_spot_v2_book_checksum(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=expected,
+        )
+        self.assertEqual(evidence.top_ask_count, 10)
+        self.assertEqual(evidence.top_bid_count, 10)
+
+    def test_checksum_preserves_trailing_zero_representation(self):
+        exact = verify_kraken_spot_v2_book_checksum
+        import zlib
+        preserved_input = "500010000000"
+        expected = zlib.crc32(preserved_input.encode("ascii")) & 0xFFFFFFFF
+        asks = (("0.05000", "0.10000000"),)
+        bids = ()
+        evidence = exact(
+            event_id=self.EVENT_ID,
+            candidate_book=self.candidate(asks, bids),
+            asks=asks,
+            bids=bids,
+            expected_checksum=expected,
+        )
+        self.assertEqual(evidence.computed_checksum, expected)
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "checksum mismatch"):
+            exact(
+                event_id=self.EVENT_ID,
+                candidate_book=self.candidate((("0.05", "0.1"),), ()),
+                asks=(("0.05", "0.1"),),
+                bids=(),
+                expected_checksum=expected,
+            )
+
+    def test_checksum_rejects_noncanonical_or_unsafe_inputs(self):
+        bad_cases = (
+            (((("1e2", "1.0"),), (), 0), "plain exact decimal"),
+            (((("1.0", "1.0"), ("1.00", "2.0")), (), 0), "duplicate prices"),
+            (((("1.0", "0"),), (), 0), "positive"),
+            (((("1.0", "1.0"),), (), True), "unsigned 32-bit"),
+        )
+        for args, message in bad_cases:
+            asks, bids, checksum = args
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                message,
+            ):
+                verify_kraken_spot_v2_book_checksum(
+                    event_id=self.EVENT_ID,
+                    candidate_book=self.candidate(asks, bids),
+                    asks=asks,
+                    bids=bids,
+                    expected_checksum=checksum,
+                )
+
+    def test_checksum_rejects_provider_representation_that_does_not_match_candidate(self):
+        asks = (("100.00", "1.00000000"),)
+        bids = (("99.00", "2.00000000"),)
+        import zlib
+        def component(value):
+            return value.replace(".", "").lstrip("0")
+        checksum_input = "".join(
+            component(price) + component(qty)
+            for price, qty in (*asks, *bids)
+        )
+        expected = zlib.crc32(checksum_input.encode("ascii")) & 0xFFFFFFFF
+        wrong_candidate = self.candidate(
+            (("100.00", "1.50000000"),),
+            bids,
+        )
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "do not match the coordinator candidate book",
+        ):
+            verify_kraken_spot_v2_book_checksum(
+                event_id=self.EVENT_ID,
+                candidate_book=wrong_candidate,
+                asks=asks,
+                bids=bids,
+                expected_checksum=expected,
+            )
+
+    def test_checksum_evidence_cannot_be_self_constructed(self):
+        with self.assertRaisesRegex(KrakenSpotAdapterError, "canonical verification"):
+            KrakenSpotBookChecksumEvidence(
+                policy_id="KRAKEN_SPOT_WS_V2_BOOK_CRC32_TOP10_V1",
+                expected_checksum=1,
+                computed_checksum=1,
+                checksum_input_sha256="sha256:" + "0" * 64,
+                provider_book_sha256="sha256:" + "0" * 64,
+                candidate_book_sha256="sha256:" + "0" * 64,
+                event_id=self.EVENT_ID,
+                top_ask_count=1,
+                top_bid_count=1,
+            )
 
 
 if __name__ == "__main__":

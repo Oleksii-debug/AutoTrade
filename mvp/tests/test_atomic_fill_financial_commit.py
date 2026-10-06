@@ -1,10 +1,18 @@
+from copy import deepcopy
 from datetime import date
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
@@ -18,7 +26,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     build_provider_fill_correction_transactions,
@@ -27,8 +35,24 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
+    commit_economic_correction_with_settlement_replacement,
     commit_provider_fill_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
+)
+from mvp.autotrade_mvp._provider_activity_accounting_impl import (
+    _cash_leg_totals,
+    _cash_outflow_usage,
+    _economic_batch_digest,
+    _exact_usage_increase,
+    _financial_scope_identity,
+    _provider_fill_correction_binding_aggregate_id,
+    _projected_fill_binding_payload,
+    _provider_fill_binding_aggregate_id,
+    _provider_fill_binding_payload,
+    _provider_fill_from_binding_payload,
+    _prepare_provider_fill_binding,
+    _scoped_identity,
+    _usage_payload,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
 from mvp.autotrade_mvp.reservations import ReservationConflict
@@ -43,7 +67,7 @@ from mvp.autotrade_mvp.settlement import (
 
 PROVIDER = "PROVIDER-A"
 ACCOUNT = "acct-1"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 
 
 def reservation_book(store: JournalStore) -> DurableReservationBook:
@@ -63,8 +87,12 @@ def economic_book(store: JournalStore) -> DurableProviderEconomicBook:
     )
 
 
+def artifact_root_for(store: JournalStore) -> Path:
+    return store.path.parent / "settlement-evidence"
+
+
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
-    return ArtifactStore(store.path.parent / "settlement-evidence")
+    return ArtifactStore(artifact_root_for(store))
 
 
 def settlement_book(store: JournalStore) -> DurableSettlementBook:
@@ -73,6 +101,7 @@ def settlement_book(store: JournalStore) -> DurableSettlementBook:
         provider_id=PROVIDER,
         account_id=ACCOUNT,
         environment=ENVIRONMENT,
+        evidence_artifact_root=artifact_root_for(store),
         evidence_artifact_store=artifact_store_for(store),
     )
 
@@ -224,6 +253,60 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             self.assertEqual(reopened_economics.position("ABC"), Decimal("1"))
             self.assertEqual(len(reopened_economics.transactions), 1)
 
+    def test_same_financial_command_isolated_by_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            domains = {}
+
+            for suffix, provider_environment in (
+                ("a", "DOMAIN-A"),
+                ("b", "DOMAIN-B"),
+            ):
+                reservation_id = f"reservation-{suffix}"
+                reservations.reserve(
+                    command_id=f"reserve-domain-{suffix}",
+                    idempotency_key=f"reserve-domain-{suffix}",
+                    reservation_id=reservation_id,
+                    intent_id=f"intent-{suffix}",
+                    requirements={"CASH:USD": "120"},
+                    available={"CASH:USD": "1000"},
+                )
+                domains[provider_environment] = (
+                    DurableProviderEconomicBook(
+                        store,
+                        provider_id=PROVIDER,
+                        account_id=ACCOUNT,
+                        environment=ENVIRONMENT,
+                        provider_environment=provider_environment,
+                    ),
+                    reservation_id,
+                )
+
+            transaction = fill_transaction()
+            for provider_environment in ("DOMAIN-A", "DOMAIN-B"):
+                economics, reservation_id = domains[provider_environment]
+                self.assertTrue(
+                    commit_economic_batch_with_reservation_consumption(
+                        economics,
+                        reservations,
+                        command_id="shared-financial-command",
+                        idempotency_key="shared-financial-idempotency",
+                        reservation_id=reservation_id,
+                        usage={"CASH:USD": "100"},
+                        transactions=(transaction,),
+                        committed_at="2026-09-25T09:00:02Z",
+                    )
+                )
+                snapshot = reservations.get(reservation_id)
+                self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("100"))
+                self.assertEqual(economics.position("ABC"), Decimal("1"))
+
+            self.assertNotEqual(
+                domains["DOMAIN-A"][0].book_id,
+                domains["DOMAIN-B"][0].book_id,
+            )
+
     def test_failure_before_shared_commit_leaves_neither_projection_mutated(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -232,17 +315,19 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit"):
                     commit_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -260,23 +345,25 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(**kwargs):
+            def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
-                result = original_commit(**kwargs)
+                result = original_commit(selected_store, **kwargs)
+                if selected_store is not store:
+                    return result
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected acknowledgement loss")
                 return result
 
-            store.commit_command = lose_ack_after_commit
+            JournalStore.commit_command = lose_ack_after_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
                     commit_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -428,18 +515,20 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             settlements = settlement_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
             injected = False
 
-            def lose_ack_after_commit(**kwargs):
+            def lose_ack_after_commit(selected_store, **kwargs):
                 nonlocal injected
-                result = original_commit(**kwargs)
+                result = original_commit(selected_store, **kwargs)
+                if selected_store is not store:
+                    return result
                 if not injected and result[1]:
                     injected = True
                     raise RuntimeError("injected settlement acknowledgement loss")
                 return result
 
-            store.commit_command = lose_ack_after_commit
+            JournalStore.commit_command = lose_ack_after_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "acknowledgement loss"):
                     commit_fill(
@@ -448,7 +537,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                         settlements=settlements,
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             reopened_reservations = reservation_book(reopened_store)
@@ -513,12 +602,14 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
             settlements = settlement_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected three-way pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit"):
                     commit_fill(
@@ -527,7 +618,7 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                         settlements=settlements,
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened_store = JournalStore(path)
             self.assertEqual(economic_book(reopened_store).transactions, ())
@@ -602,6 +693,113 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
                 reservations.get("reservation-1").remaining["CASH:USD"],
                 Decimal("120"),
             )
+
+
+class ExactFillFinancialArithmeticTests(unittest.TestCase):
+    _CONTEXTS = (
+        (6, ROUND_FLOOR),
+        (10, ROUND_CEILING),
+        (28, ROUND_HALF_EVEN),
+        (80, ROUND_HALF_EVEN),
+    )
+
+    def test_provider_fill_binding_payload_identity_ignores_ambient_context(self):
+        projected = ProjectedFillEvidence.create(
+            fill_id="exact-context-fill",
+            provider_execution_id="exact-context-execution",
+            intent_id="intent-1",
+            client_order_id="client-order-1",
+            side="BUY",
+            quantity="1000001",
+            price="1.000001",
+            provider_revision="revision-1",
+        )
+        provider = ProviderFillEvidence.create(
+            provider_id=PROVIDER,
+            account_id=ACCOUNT,
+            environment=ENVIRONMENT,
+            provider_execution_id="exact-context-execution",
+            client_order_id="client-order-1",
+            instrument="ABC",
+            quantity="1000001",
+            price="1.000001",
+            fee_amount="0.0000001",
+            fee_currency="USD",
+            trade_time="2026-09-25T08:00:00Z",
+            side="BUY",
+            evidence_refs=("provider-fill:exact-context",),
+        )
+        observed = set()
+
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    projected_payload = _projected_fill_binding_payload(projected)
+                    provider_payload = _provider_fill_binding_payload(provider)
+                self.assertEqual(projected_payload["quantity"], "1000001")
+                self.assertEqual(projected_payload["price"], "1.000001")
+                self.assertEqual(provider_payload["quantity"], "1000001")
+                self.assertEqual(provider_payload["price"], "1.000001")
+                self.assertEqual(provider_payload["fee_amount"], "0.0000001")
+                observed.add(
+                    (
+                        canonical_json(projected_payload),
+                        canonical_json(provider_payload),
+                    )
+                )
+
+        self.assertEqual(len(observed), 1)
+
+    def test_cash_usage_high_water_and_settlement_aggregation_ignore_ambient_context(self):
+        transaction = book_equity_fill(
+            transaction_id="exact-context-fill",
+            cause_event_id="exact-context-execution",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100000",
+            fee="0.0000001",
+            fee_currency="USD",
+            economic_effective_at="2026-09-25T08:00:00Z",
+            economic_order_key="provider:PROVIDER-A:execution:exact-context-execution",
+            observed_at="2026-09-25T08:00:01Z",
+        )
+        expected_usage = Decimal("100000.0000001")
+        expected_cash_effect = Decimal("-100000.0000001")
+        observed = set()
+
+        for precision, rounding in self._CONTEXTS:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    usage = _cash_outflow_usage(transaction)
+                    cash_legs = _cash_leg_totals((transaction,))
+                    additional = _exact_usage_increase(
+                        expected_usage,
+                        Decimal("100000"),
+                    )
+                    payload = _usage_payload({"CASH:USD": expected_usage})
+                self.assertEqual(usage, {"CASH:USD": expected_usage})
+                self.assertEqual(
+                    cash_legs,
+                    {("exact-context-fill", "USD"): expected_cash_effect},
+                )
+                self.assertEqual(additional, Decimal("0.0000001"))
+                self.assertEqual(payload, {"CASH:USD": "100000.0000001"})
+                observed.add(
+                    (
+                        tuple(usage.items()),
+                        tuple(cash_legs.items()),
+                        additional,
+                        tuple(payload.items()),
+                    )
+                )
+
+        self.assertEqual(len(observed), 1)
 
 
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
@@ -686,6 +884,274 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             observed_at="2026-09-25T09:00:01Z",
             committed_at="2026-09-25T09:00:02Z",
         )
+
+    def test_bybit_fill_binding_is_scoped_to_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            reservations.reserve(
+                command_id="reserve-bybit-scope",
+                idempotency_key="reserve-bybit-scope",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            snapshot = reservations.get("reservation-1")
+            projected = self.projected_fill()
+            prepared = {}
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                economics = DurableProviderEconomicBook(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                )
+                provider = ProviderFillEvidence.create(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment=provider_environment,
+                    provider_execution_id="provider-execution-1",
+                    client_order_id="client-order-1",
+                    instrument="ABC",
+                    quantity="1",
+                    price="100",
+                    fee_amount="0",
+                    fee_currency="USD",
+                    trade_time="2026-09-25T09:00:00Z",
+                    side="BUY",
+                    evidence_refs=("provider-fill:bybit-scope",),
+                )
+                plan = build_provider_fill_financial_plan(
+                    book=economics,
+                    provider_id="BYBIT",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    reservation_snapshot=snapshot,
+                    observed_at="2026-09-25T09:00:01Z",
+                )
+                binding = _prepare_provider_fill_binding(
+                    economics,
+                    plan=plan,
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+                self.assertEqual(
+                    binding.aggregate_id,
+                    _provider_fill_binding_aggregate_id(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment=provider_environment,
+                        provider_execution_id="provider-execution-1",
+                    ),
+                )
+                self.assertEqual(
+                    binding.request["provider_environment"],
+                    provider_environment,
+                )
+                self.assertEqual(
+                    binding.request["provider_fill"]["provider_environment"],
+                    provider_environment,
+                )
+                restored = _provider_fill_from_binding_payload(
+                    binding.request["provider_fill"],
+                    name="test provider fill",
+                )
+                self.assertEqual(
+                    restored.provider_environment,
+                    provider_environment,
+                )
+                self.assertEqual(
+                    binding.envelope["payload"]["provider_environment"],
+                    provider_environment,
+                )
+                prepared[provider_environment] = (plan, binding)
+
+            self.assertNotEqual(
+                prepared["TESTNET"][0].plan_digest,
+                prepared["DEMO"][0].plan_digest,
+            )
+            self.assertNotEqual(
+                prepared["TESTNET"][1].aggregate_id,
+                prepared["DEMO"][1].aggregate_id,
+            )
+            self.assertNotEqual(
+                prepared["TESTNET"][1].request["provider_fill_digest"],
+                prepared["DEMO"][1].request["provider_fill_digest"],
+            )
+            self.assertNotEqual(
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    provider_execution_id="provider-execution-1",
+                ),
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    provider_execution_id="provider-execution-1",
+                ),
+            )
+
+    def test_provider_domain_changes_batch_and_command_component_identity(self):
+        transaction = book_equity_fill(
+            transaction_id="domain-test-transaction",
+            cause_event_id="domain-test-cause",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1",
+            price="100",
+            fee="0",
+            fee_currency="USD",
+        )
+        testnet_digest = _economic_batch_digest(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            transactions=(transaction,),
+        )
+        demo_digest = _economic_batch_digest(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+            transactions=(transaction,),
+        )
+        self.assertNotEqual(testnet_digest, demo_digest)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            demo_book = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+            )
+            testnet_plan = testnet_book.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-09-25T09:00:00Z",
+            )
+            demo_plan = demo_book.prepare_batch_mutation(
+                (transaction,),
+                committed_at="2026-09-25T09:00:00Z",
+            )
+            self.assertEqual(
+                testnet_plan.request["provider_environment"],
+                "TESTNET",
+            )
+            self.assertEqual(
+                demo_plan.request["provider_environment"],
+                "DEMO",
+            )
+            self.assertNotEqual(testnet_plan.batch_digest, demo_plan.batch_digest)
+
+        testnet_key = _financial_scope_identity(
+            "atomic-fill-command",
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            tail="same-command",
+        )
+        demo_key = _financial_scope_identity(
+            "atomic-fill-command",
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+            tail="same-command",
+        )
+        self.assertNotEqual(testnet_key, demo_key)
+        self.assertEqual(
+            _financial_scope_identity(
+                "atomic-fill-command",
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="SIMULATION",
+                provider_environment="SIMULATION",
+                tail="same-command",
+            ),
+            _scoped_identity(
+                "atomic-fill-command",
+                "PROVIDER-A",
+                "acct-1",
+                "SIMULATION",
+                "same-command",
+            ),
+        )
+
+    def test_financial_plan_usage_and_digest_ignore_ambient_decimal_context(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            reservations.reserve(
+                command_id="reserve-exact-context",
+                idempotency_key="reserve-exact-context",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "100001"},
+                available={"CASH:USD": "200000"},
+            )
+            economics = economic_book(store)
+            projected = self.projected_fill(price="100000")
+            provider = self.provider_fill(
+                price="100000",
+                fee_amount="0.0000001",
+            )
+            snapshot = reservations.get("reservation-1")
+            results = set()
+
+            for precision, rounding in ExactFillFinancialArithmeticTests._CONTEXTS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        plan = build_provider_fill_financial_plan(
+                            book=economics,
+                            provider_id=PROVIDER,
+                            projected_fill=projected,
+                            provider_fill=provider,
+                            expected_instrument="ABC",
+                            settlement_currency="USD",
+                            reservation_snapshot=snapshot,
+                            observed_at="2026-09-25T09:00:01Z",
+                        )
+                    self.assertEqual(
+                        dict(plan.usage),
+                        {"CASH:USD": Decimal("100000.0000001")},
+                    )
+                    results.add(
+                        (
+                            plan.plan_digest,
+                            tuple(plan.usage_items),
+                        )
+                    )
+
+            self.assertEqual(len(results), 1)
 
     def test_usage_is_derived_from_provider_fill_not_caller_input(self):
         with TemporaryDirectory() as directory:
@@ -878,19 +1344,21 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             economics = economic_book(store)
             reserve(reservations)
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected provider-fill binding failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(
                     RuntimeError, "provider-fill binding failure"
                 ):
                     self.commit_evidenced_fill(economics, reservations)
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             self.assertEqual(
                 store.load_events_by_aggregate_type(
@@ -1274,6 +1742,108 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             replacement,
             obligation_id=obligation_id,
         )
+
+    def test_generic_correction_cannot_bypass_provider_fill_reservation_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+
+            corrected_projected = self.projected_fill(
+                quantity="1.1",
+                fill_id="fill-generic-bypass",
+                provider_revision="provider-revision-generic-bypass",
+                correction_of=original_projected.fill_id,
+            )
+            corrected_provider = self.provider_fill(quantity="1.1")
+            reversal, replacement = build_provider_fill_correction_transactions(
+                book=economics,
+                provider_id=PROVIDER,
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="ABC",
+                settlement_currency="USD",
+                correction_observed_at="2026-09-25T09:30:01Z",
+            )
+            obligation = settlement_obligation(
+                settlements.store,
+                replacement,
+                obligation_id="settlement-generic-bypass",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider-fill-owned correction requires reservation-aware correction authority",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    command_id="generic-bypass-command",
+                    idempotency_key="generic-bypass-idempotency",
+                    reversal=reversal,
+                    replacement=replacement,
+                    settlement_obligations=(obligation,),
+                    committed_at="2026-09-25T09:30:02Z",
+                )
+
+            self.assertEqual(
+                reservations.get("reservation-1"),
+                before_reservation,
+            )
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                [],
+            )
+
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="canonical-correction-command",
+                    idempotency_key="canonical-correction-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=corrected_projected,
+                    corrected_provider_fill=corrected_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T09:30:01Z",
+                    settlement_obligations=(obligation,),
+                    committed_at="2026-09-25T09:30:02Z",
+                )
+            )
+            after = reservations.get("reservation-1")
+            self.assertEqual(after.consumed["CASH:USD"], Decimal("110"))
+            self.assertEqual(after.remaining["CASH:USD"], Decimal("10"))
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_reservation_correction_binding"
+                    )
+                ),
+                1,
+            )
 
     def test_correction_decrease_then_increase_consumes_only_high_water_delta(self):
         with TemporaryDirectory() as directory:
@@ -1704,7 +2274,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             original_prepare = economics.prepare_batch_mutation
             mutated = False
 
-            def mutate_reservation_then_prepare(*args, **kwargs):
+            def mutate_reservation_then_prepare(_book, *args, **kwargs):
                 nonlocal mutated
                 if not mutated:
                     mutated = True
@@ -1716,8 +2286,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     )
                 return original_prepare(*args, **kwargs)
 
-            economics.prepare_batch_mutation = mutate_reservation_then_prepare
-            try:
+            with patch.object(type(economics), "prepare_batch_mutation", autospec=True, side_effect=mutate_reservation_then_prepare):
                 with self.assertRaisesRegex(
                     ReservationConflict,
                     "snapshot changed after provider fill plan derivation",
@@ -1739,8 +2308,6 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         settlement_obligations=(obligation,),
                         committed_at="2026-09-25T12:55:02Z",
                     )
-            finally:
-                economics.prepare_batch_mutation = original_prepare
 
             snapshot = reservations.get("reservation-1")
             self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("101"))
@@ -1756,6 +2323,748 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 "settlement_book"
             )
             self.assertEqual(len(settlement_events), 1)
+
+    def test_next_correction_cannot_retarget_prior_provider_evidence_lineage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-lineage-1",
+                provider_revision="provider-revision-lineage-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:lineage-1",),
+            )
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:30:01Z",
+                obligation_id="settlement-correction-lineage-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-lineage-1-command",
+                    idempotency_key="correction-lineage-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:30:01Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:30:02Z",
+                )
+            )
+
+            retargeted_prior_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:retargeted-prior",),
+            )
+            second_projected = self.projected_fill(
+                quantity="1.0",
+                fill_id="fill-correction-lineage-2",
+                provider_revision="provider-revision-lineage-2",
+                correction_of=first_projected.fill_id,
+            )
+            second_provider = self.provider_fill(
+                quantity="1.0",
+                evidence_refs=("provider-fill:lineage-2",),
+            )
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=first_projected,
+                original_provider=retargeted_prior_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:40:01Z",
+                obligation_id="settlement-correction-lineage-2",
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "original evidence does not match active lineage",
+            ):
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-lineage-2-command",
+                    idempotency_key="correction-lineage-2-idempotency",
+                    original_projected_fill=first_projected,
+                    original_provider_fill=retargeted_prior_provider,
+                    corrected_projected_fill=second_projected,
+                    corrected_provider_fill=second_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:40:01Z",
+                    settlement_obligations=(second_obligation,),
+                    committed_at="2026-09-25T12:40:02Z",
+                )
+
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_reservation_correction_binding"
+                    )
+                ),
+                1,
+            )
+
+    def test_rehashed_initial_binding_cannot_inflate_correction_high_water(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            corrected_projected = self.projected_fill(
+                quantity="1.1",
+                fill_id="fill-correction-forged-initial-usage",
+                provider_revision="provider-revision-forged-initial-usage",
+                correction_of=original_projected.fill_id,
+            )
+            corrected_provider = self.provider_fill(quantity="1.1")
+            obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=corrected_projected,
+                corrected_provider=corrected_provider,
+                correction_observed_at="2026-09-25T12:40:31Z",
+                obligation_id="settlement-correction-forged-initial-usage",
+            )
+
+            real_load_events = JournalStore.load_events
+
+            def load_events_with_inflated_initial_usage(
+                store_self,
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
+                if aggregate_type != "provider_fill_financial_binding" or not events:
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["derived_usage"]["CASH:USD"] = "120"
+                forged[0]["payload"]["request_digest"] = payload_digest(request)
+                forged[0]["payload_hash"] = payload_digest(forged[0]["payload"])
+                return forged
+
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+            before_correction_bindings = store.load_events_by_aggregate_type(
+                "provider_fill_reservation_correction_binding"
+            )
+            JournalStore.load_events = load_events_with_inflated_initial_usage
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "initial provider fill usage does not match durable economic transaction",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-forged-initial-usage-command",
+                        idempotency_key="correction-forged-initial-usage-idempotency",
+                        original_projected_fill=original_projected,
+                        original_provider_fill=original_provider,
+                        corrected_projected_fill=corrected_projected,
+                        corrected_provider_fill=corrected_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:40:31Z",
+                        settlement_obligations=(obligation,),
+                        committed_at="2026-09-25T12:40:32Z",
+                    )
+            finally:
+                JournalStore.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_correction_bindings,
+            )
+
+    def test_rehashed_historical_correction_cannot_inflate_conservative_usage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-forged-high-water-1",
+                provider_revision="provider-revision-forged-high-water-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(quantity="0.9")
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:40:41Z",
+                obligation_id="settlement-correction-forged-high-water-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-forged-high-water-1-command",
+                    idempotency_key="correction-forged-high-water-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:40:41Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:40:42Z",
+                )
+            )
+
+            second_projected = self.projected_fill(
+                quantity="1.1",
+                fill_id="fill-correction-forged-high-water-2",
+                provider_revision="provider-revision-forged-high-water-2",
+                correction_of=first_projected.fill_id,
+            )
+            second_provider = self.provider_fill(quantity="1.1")
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=first_projected,
+                original_provider=first_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:40:51Z",
+                obligation_id="settlement-correction-forged-high-water-2",
+            )
+
+            real_load_events = JournalStore.load_events
+
+            def load_events_with_inflated_correction_high_water(
+                store_self,
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_active_usage"]["CASH:USD"] = "120"
+                request["resulting_conservative_usage"]["CASH:USD"] = "120"
+                request["additional_usage"] = {"CASH:USD": "20"}
+                forged[0]["payload"]["request_digest"] = payload_digest(request)
+                forged[0]["payload_hash"] = payload_digest(forged[0]["payload"])
+                return forged
+
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+            before_bindings = store.load_events_by_aggregate_type(
+                "provider_fill_reservation_correction_binding"
+            )
+            JournalStore.load_events = load_events_with_inflated_correction_high_water
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "active usage does not match durable economic replacement",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-forged-high-water-2-command",
+                        idempotency_key="correction-forged-high-water-2-idempotency",
+                        original_projected_fill=first_projected,
+                        original_provider_fill=first_provider,
+                        corrected_projected_fill=second_projected,
+                        corrected_provider_fill=second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:40:51Z",
+                        settlement_obligations=(second_obligation,),
+                        committed_at="2026-09-25T12:40:52Z",
+                    )
+            finally:
+                JournalStore.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
+            )
+
+    def test_rehashed_historical_correction_cannot_retarget_provider_revision(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-revision-1",
+                provider_revision="provider-revision-genuine-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(quantity="0.9")
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:40:43Z",
+                obligation_id="settlement-correction-revision-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-revision-1-command",
+                    idempotency_key="correction-revision-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:40:43Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:40:44Z",
+                )
+            )
+
+            forged_revision = "provider-revision-forged-1"
+            forged_first_projected = replace(
+                first_projected,
+                provider_revision=forged_revision,
+            )
+            second_projected = self.projected_fill(
+                quantity="1.0",
+                fill_id="fill-correction-revision-2",
+                provider_revision="provider-revision-genuine-2",
+                correction_of=first_projected.fill_id,
+            )
+            second_provider = self.provider_fill(quantity="1.0")
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=forged_first_projected,
+                original_provider=first_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:40:53Z",
+                obligation_id="settlement-correction-revision-2",
+            )
+
+            real_load_events = JournalStore.load_events
+
+            def load_events_with_retargeted_revision(
+                store_self,
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_projected_fill"]["provider_revision"] = forged_revision
+                request["corrected_projected_fill_digest"] = payload_digest(
+                    request["corrected_projected_fill"]
+                )
+                forged[0]["payload"]["request_digest"] = payload_digest(request)
+                forged[0]["payload_hash"] = payload_digest(forged[0]["payload"])
+                return forged
+
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+            before_bindings = store.load_events_by_aggregate_type(
+                "provider_fill_reservation_correction_binding"
+            )
+            JournalStore.load_events = load_events_with_retargeted_revision
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "revision-bearing durable identity is invalid",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-revision-2-command",
+                        idempotency_key="correction-revision-2-idempotency",
+                        original_projected_fill=forged_first_projected,
+                        original_provider_fill=first_provider,
+                        corrected_projected_fill=second_projected,
+                        corrected_provider_fill=second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:40:53Z",
+                        settlement_obligations=(second_obligation,),
+                        committed_at="2026-09-25T12:40:54Z",
+                    )
+            finally:
+                JournalStore.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
+            )
+
+    def test_rehashed_historical_correction_cannot_retarget_semantic_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+            _, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+
+            first_projected = self.projected_fill(
+                quantity="0.9",
+                fill_id="fill-correction-rehash-1",
+                provider_revision="provider-revision-rehash-1",
+                correction_of=original_projected.fill_id,
+            )
+            first_provider = self.provider_fill(
+                quantity="0.9",
+                evidence_refs=("provider-fill:rehash-1",),
+            )
+            first_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=original_projected,
+                original_provider=original_provider,
+                corrected_projected=first_projected,
+                corrected_provider=first_provider,
+                correction_observed_at="2026-09-25T12:41:01Z",
+                obligation_id="settlement-correction-rehash-1",
+            )
+            self.assertTrue(
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="correction-rehash-1-command",
+                    idempotency_key="correction-rehash-1-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=first_projected,
+                    corrected_provider_fill=first_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T12:41:01Z",
+                    settlement_obligations=(first_obligation,),
+                    committed_at="2026-09-25T12:41:02Z",
+                )
+            )
+
+            retargeted_client = "client-order-retargeted"
+            retargeted_first_projected = replace(
+                first_projected,
+                client_order_id=retargeted_client,
+            )
+            retargeted_first_provider = replace(
+                first_provider,
+                client_order_id=retargeted_client,
+            )
+            second_projected = replace(
+                self.projected_fill(
+                    quantity="1.0",
+                    fill_id="fill-correction-rehash-2",
+                    provider_revision="provider-revision-rehash-2",
+                    correction_of=first_projected.fill_id,
+                ),
+                client_order_id=retargeted_client,
+            )
+            second_provider = replace(
+                self.provider_fill(
+                    quantity="1.0",
+                    evidence_refs=("provider-fill:rehash-2",),
+                ),
+                client_order_id=retargeted_client,
+            )
+            second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=retargeted_first_projected,
+                original_provider=retargeted_first_provider,
+                corrected_projected=second_projected,
+                corrected_provider=second_provider,
+                correction_observed_at="2026-09-25T12:42:01Z",
+                obligation_id="settlement-correction-rehash-2",
+            )
+
+            real_load_events = JournalStore.load_events
+
+            def load_events_with_rehashed_semantic_transplant(
+                store_self,
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_projected_fill"]["client_order_id"] = (
+                    retargeted_client
+                )
+                request["corrected_provider_fill"]["client_order_id"] = (
+                    retargeted_client
+                )
+                request["corrected_projected_fill_digest"] = payload_digest(
+                    request["corrected_projected_fill"]
+                )
+                request["corrected_provider_fill_digest"] = payload_digest(
+                    request["corrected_provider_fill"]
+                )
+                forged[0]["payload"]["request_digest"] = payload_digest(request)
+                forged[0]["payload_hash"] = payload_digest(forged[0]["payload"])
+                return forged
+
+            before_reservation = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_obligations = settlements.obligations
+            before_bindings = store.load_events_by_aggregate_type(
+                "provider_fill_reservation_correction_binding"
+            )
+            JournalStore.load_events = load_events_with_rehashed_semantic_transplant
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "corrected evidence semantics are invalid",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-rehash-2-command",
+                        idempotency_key="correction-rehash-2-idempotency",
+                        original_projected_fill=retargeted_first_projected,
+                        original_provider_fill=retargeted_first_provider,
+                        corrected_projected_fill=second_projected,
+                        corrected_provider_fill=second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:42:01Z",
+                        settlement_obligations=(second_obligation,),
+                        committed_at="2026-09-25T12:42:02Z",
+                    )
+            finally:
+                JournalStore.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
+            )
+
+            class HostileDict(dict):
+                def items(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+                def __iter__(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+                def keys(self):
+                    raise AssertionError("hostile nested mapping executed")
+
+            canonical_second_projected = replace(
+                second_projected,
+                client_order_id=first_projected.client_order_id,
+            )
+            canonical_second_provider = replace(
+                second_provider,
+                client_order_id=first_provider.client_order_id,
+            )
+            canonical_second_obligation = self.correction_obligation(
+                economics,
+                settlements,
+                original_projected=first_projected,
+                original_provider=first_provider,
+                corrected_projected=canonical_second_projected,
+                corrected_provider=canonical_second_provider,
+                correction_observed_at="2026-09-25T12:43:01Z",
+                obligation_id="settlement-correction-hostile-container",
+            )
+
+            def load_events_with_hostile_nested_container(
+                store_self,
+                aggregate_type,
+                aggregate_id,
+            ):
+                events = real_load_events(store_self, aggregate_type, aggregate_id)
+                if store_self is not store:
+                    return events
+                if (
+                    aggregate_type
+                    != "provider_fill_reservation_correction_binding"
+                    or not events
+                ):
+                    return events
+                forged = deepcopy(events)
+                request = forged[0]["payload"]["request"]
+                request["corrected_projected_fill"] = HostileDict(
+                    request["corrected_projected_fill"]
+                )
+                return forged
+
+            JournalStore.load_events = load_events_with_hostile_nested_container
+            try:
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "non-canonical JSON value",
+                ):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        reservation_book=reservations,
+                        reservation_id="reservation-1",
+                        command_id="correction-hostile-container-command",
+                        idempotency_key="correction-hostile-container-idempotency",
+                        original_projected_fill=first_projected,
+                        original_provider_fill=first_provider,
+                        corrected_projected_fill=canonical_second_projected,
+                        corrected_provider_fill=canonical_second_provider,
+                        expected_instrument="ABC",
+                        settlement_currency="USD",
+                        correction_observed_at="2026-09-25T12:43:01Z",
+                        settlement_obligations=(canonical_second_obligation,),
+                        committed_at="2026-09-25T12:43:02Z",
+                    )
+            finally:
+                JournalStore.load_events = real_load_events
+
+            self.assertEqual(reservations.get("reservation-1"), before_reservation)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations, before_obligations)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                before_bindings,
+            )
 
     def test_correction_precommit_failure_leaves_all_financial_projections_unchanged(self):
         with TemporaryDirectory() as directory:
@@ -1791,12 +3100,14 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 obligation_id="settlement-correction-failure",
             )
 
-            original_commit = store.commit_command
+            original_commit = JournalStore.commit_command
 
-            def fail_before_commit(**kwargs):
+            def fail_before_commit(selected_store, **kwargs):
+                if selected_store is not store:
+                    return original_commit(selected_store, **kwargs)
                 raise RuntimeError("injected correction pre-commit failure")
 
-            store.commit_command = fail_before_commit
+            JournalStore.commit_command = fail_before_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "pre-commit failure"):
                     commit_provider_fill_correction_with_settlement_replacement(
@@ -1817,7 +3128,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                         committed_at="2026-09-25T13:00:02Z",
                     )
             finally:
-                store.commit_command = original_commit
+                JournalStore.commit_command = original_commit
 
             reopened = JournalStore(path)
             reopened_reservations = reservation_book(reopened)

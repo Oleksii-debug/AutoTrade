@@ -8,12 +8,14 @@ import weakref
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.risk import RiskPolicy
+from mvp.autotrade_mvp.store_identity import JournalStoreIdentity
 from mvp.autotrade_mvp import risk_policy_authority as authority
 from mvp.autotrade_mvp.risk_policy_authority import (
     DurableRiskPolicyRegistry,
     RiskPolicyAuthorityError,
     RiskPolicyIdentity,
     RiskPolicyScope,
+    canonical_risk_policy,
     risk_policy_digest,
     risk_policy_payload,
 )
@@ -57,6 +59,274 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_journal_store_identity_digest_uses_windows_handle_identity_not_path(self):
+        first = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=5,
+        )
+        spelling_alias = JournalStoreIdentity(
+            canonical_path="c:/AUTOTRADE/JOURNAL.SQLITE3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=5,
+        )
+        different_file = JournalStoreIdentity(
+            canonical_path="C:/AutoTrade/journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=17,
+            windows_file_index_high=3,
+            windows_file_index_low=6,
+        )
+
+        self.assertEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(spelling_alias),
+        )
+        self.assertNotEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(different_file),
+        )
+
+    def test_journal_store_identity_digest_retains_posix_generation_path(self):
+        first = JournalStoreIdentity(
+            canonical_path="/srv/autotrade/journal.sqlite3",
+            filesystem_device=10,
+            filesystem_inode=20,
+        )
+        renamed = JournalStoreIdentity(
+            canonical_path="/srv/autotrade-renamed/journal.sqlite3",
+            filesystem_device=10,
+            filesystem_inode=20,
+        )
+
+        self.assertNotEqual(
+            authority.journal_store_identity_digest(first),
+            authority.journal_store_identity_digest(renamed),
+        )
+
+    def test_resolve_rejects_journal_cut_newer_than_durable_sequence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            current = store.current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "cannot be newer than the durable journal",
+            ):
+                registry.resolve_current(
+                    exact_scope,
+                    journal_sequence_cut=current + 1,
+                )
+
+    def test_resolve_rejects_journal_cut_scalar_subtypes(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+
+            for invalid in (True, -1):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(
+                        RiskPolicyAuthorityError,
+                        "non-negative integer",
+                    ):
+                        registry.resolve_current(
+                            exact_scope,
+                            journal_sequence_cut=invalid,
+                        )
+
+    def test_resolved_policy_cannot_be_forged_by_direct_construction(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "must be issued by DurableRiskPolicyRegistry",
+            ):
+                authority.ResolvedRiskPolicy(
+                    identity=issued.identity,
+                    policy=issued.policy,
+                    registration_event_id=issued.registration_event_id,
+                    registration_journal_sequence=issued.registration_journal_sequence,
+                    activation_event_id=issued.activation_event_id,
+                    activation_journal_sequence=issued.activation_journal_sequence,
+                    resolved_journal_sequence_cut=issued.resolved_journal_sequence_cut,
+                    journal_store_identity_digest=issued.journal_store_identity_digest,
+                )
+
+    def test_resolved_policy_use_time_seal_rejects_post_issuance_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            object.__setattr__(
+                issued.policy,
+                "max_data_age_seconds",
+                Decimal("999"),
+            )
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
+    def test_resolved_policy_cannot_reseal_mutated_content_after_issuance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(max_gross_leverage="2"),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+
+            forged_policy = policy(max_gross_leverage="9")
+            forged_identity = RiskPolicyIdentity(
+                policy_id=issued.identity.policy_id,
+                version=issued.identity.version,
+                content_digest=risk_policy_digest(forged_policy),
+                scope=issued.identity.scope,
+            )
+            object.__setattr__(issued, "policy", forged_policy)
+            object.__setattr__(issued, "identity", forged_identity)
+            object.__setattr__(
+                issued,
+                "_authority_digest",
+                authority._resolved_policy_authority_digest(issued),
+            )
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
+    def test_resolved_policy_use_time_seal_rejects_identity_raw_state_poisoning(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            issued = registry.resolve_current(exact_scope)
+            vars(issued.identity)["policy_id"] = "forged-policy"
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "changed after registry issuance",
+            ):
+                authority.require_registry_issued_resolved_policy(issued)
+
+    def test_canonical_risk_policy_detaches_exact_caller_state(self):
+        caller = policy(max_gross_leverage="2")
+        canonical = canonical_risk_policy(caller)
+        object.__setattr__(caller, "max_gross_leverage", Decimal("9"))
+        self.assertEqual(caller.max_gross_leverage, Decimal("9"))
+        self.assertEqual(canonical.max_gross_leverage, Decimal("2"))
+
+    def test_canonical_risk_policy_rejects_subclass_before_field_callbacks(self):
+        class HostileRiskPolicy(RiskPolicy):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name in {"max_abs_position", "max_gross_leverage"}:
+                    type(self).callbacks += 1
+                    raise AssertionError("RiskPolicy subclass field callback executed")
+                return super().__getattribute__(name)
+
+        base = policy()
+        hostile = HostileRiskPolicy(**vars(base))
+        with self.assertRaisesRegex(TypeError, "exact RiskPolicy"):
+            canonical_risk_policy(hostile)
+        self.assertEqual(HostileRiskPolicy.callbacks, 0)
+
     def test_scope_use_time_seal_rejects_post_construction_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

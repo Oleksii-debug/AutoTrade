@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+)
 
 
 class FinancingError(ValueError):
@@ -24,31 +29,26 @@ class FinancingConflict(FinancingError):
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in {Decimal, str, int}:
         raise FinancingError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        return parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError) as error:
         raise FinancingError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise FinancingError(f"{name} must be a finite decimal")
-    return result
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise FinancingError(f"{name} is required")
     return value.strip()
 
 
 def _utc(value: datetime, *, name: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
         raise FinancingError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    if datetime.utcoffset(value) is None:
+        raise FinancingError(f"{name} must be timezone-aware")
+    return datetime.astimezone(value, timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -64,14 +64,12 @@ class FinancingEvent:
     evidence_ref: str
 
     def __post_init__(self) -> None:
+        if type(self) is not FinancingEvent:
+            raise TypeError("FinancingEvent subclasses are not accepted")
         normalized_kind = _text(self.kind, name="kind").upper()
         if normalized_kind not in {"INDICATED", "FINAL"}:
             raise FinancingError("kind must be INDICATED or FINAL")
-        if (
-            isinstance(self.revision, bool)
-            or not isinstance(self.revision, int)
-            or self.revision < 1
-        ):
+        if type(self.revision) is not int or self.revision < 1:
             raise FinancingError("revision must be a positive integer")
         charge = _decimal(self.amount, name="amount")
         if charge < 0:
@@ -117,10 +115,12 @@ class FinancingEvent:
         source_account: str,
         evidence_ref: str,
     ) -> "FinancingEvent":
+        if cls is not FinancingEvent:
+            raise TypeError("FinancingEvent.create requires exact FinancingEvent class")
         normalized_kind = _text(kind, name="kind").upper()
         if normalized_kind not in {"INDICATED", "FINAL"}:
             raise FinancingError("kind must be INDICATED or FINAL")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        if type(revision) is not int or revision < 1:
             raise FinancingError("revision must be a positive integer")
         charge = _decimal(amount, name="amount")
         if charge < 0:
@@ -146,6 +146,42 @@ class FinancingEvent:
         return self.amount if self.kind == "FINAL" else Decimal("0")
 
 
+_FINANCING_EVENT_FIELDS = frozenset(
+    {
+        "charge_id",
+        "revision",
+        "kind",
+        "effective_at",
+        "available_at",
+        "unit",
+        "amount",
+        "source_account",
+        "evidence_ref",
+    }
+)
+
+
+def _reseal_financing_event(event: FinancingEvent) -> FinancingEvent:
+    if type(event) is not FinancingEvent:
+        raise TypeError("event must be FinancingEvent; exact FinancingEvent type required")
+    state = dict.copy(vars(event))
+    if any(type(key) is not str for key in state):
+        raise FinancingError("financing event state contains an invalid field key")
+    if set(state) != _FINANCING_EVENT_FIELDS:
+        raise FinancingError("financing event state is incomplete or has unexpected fields")
+    return FinancingEvent.create(
+        charge_id=state["charge_id"],
+        revision=state["revision"],
+        kind=state["kind"],
+        effective_at=state["effective_at"],
+        available_at=state["available_at"],
+        unit=state["unit"],
+        amount=state["amount"],
+        source_account=state["source_account"],
+        evidence_ref=state["evidence_ref"],
+    )
+
+
 @dataclass(frozen=True)
 class FinancingUpdate:
     accepted: bool
@@ -161,7 +197,13 @@ class FinancingRevisionBook:
         self._latest: dict[str, FinancingEvent] = {}
         self._final_charge: dict[str, Decimal] = {}
         self._history: list[FinancingEvent] = []
-        for event in history:
+        if type(history) is tuple:
+            snapshot = history
+        elif type(history) is list:
+            snapshot = tuple(list.copy(history))
+        else:
+            raise TypeError("history must be an exact list or tuple")
+        for event in snapshot:
             self.record(event)
 
     @property
@@ -174,8 +216,7 @@ class FinancingRevisionBook:
         return self._latest.get(_text(charge_id, name="charge_id"))
 
     def record(self, event: FinancingEvent) -> FinancingUpdate:
-        if not isinstance(event, FinancingEvent):
-            raise TypeError("event must be FinancingEvent")
+        event = _reseal_financing_event(event)
         previous = self._latest.get(event.charge_id)
         if previous is not None:
             if event.revision < previous.revision:
@@ -220,7 +261,7 @@ class FinancingRevisionBook:
         self._history.append(event)
         return FinancingUpdate(
             accepted=True,
-            economic_delta=new_final - old_final,
+            economic_delta=exact_subtract(new_final, old_final),
             current_revision=event.revision,
             current_final_charge=new_final,
         )
@@ -246,11 +287,12 @@ def book_financing_delta(
         raise FinancingError("zero financing delta has no economic posting")
     charge_unit = _text(unit, name="unit").upper()
     source = _text(source_account, name="source_account")
+    negative_delta = exact_subtract(Decimal("0"), delta)
     transaction = JournalTransaction(
         transaction_id=_text(transaction_id, name="transaction_id"),
         cause_event_id=_text(cause_event_id, name="cause_event_id"),
         postings=(
-            posting(source, charge_unit, -delta),
+            posting(source, charge_unit, negative_delta),
             posting(f"FINANCING_EXPENSE:{charge_unit}", charge_unit, delta),
         ),
     )

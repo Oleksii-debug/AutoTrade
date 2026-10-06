@@ -42,8 +42,8 @@
         "Exclusive mutation key: CONTRACT / core-schemas",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Canonical JSON Schema coverage now materializes common, event, instrument/market, information/dataset, decision/portfolio, authority/risk, execution, provider results, persistence/reconciliation, learning/science/jobs, model gateway and UI contracts; OpenAPI host entrypoint and common fixtures committed. Remaining WP-01 work: cross-language generated bindings/corpus equivalence, OpenAPI validation/codegen and version-change enforcement. Finalization repaired invalid execution JSON and added whole-schema reference resolution; no generated binding completion claimed."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via PR #1440, merge commit 57f1064fbdf0e13ecdf563da6f0ebdbf3ab0131a. Canonical contract v6 (6.0.0) now includes complete JSON Schema/OpenAPI authority, cross-language Python/C#/TypeScript conformance corpora (51 common-scalar cases, 13 DatasetManifest semantic cases, 201 closed-object shape cases across 48 definitions), major-version breaking-change enforcement, exact-numeric package identity 0.0.2, Host canonical Sequence contract/runtime convergence, MarketEvent adapter-build identity, and exact-head CI evidence generation that records source SHA, input/schema versions, tested commands and unresolved qualification limits. Historical duplicate Section-1 lineages were superseded by #1440."
     },
     {
       "id": "WP-02",
@@ -143,7 +143,7 @@
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
       "proposed_status": "IN_PROGRESS",
-      "status_note": "Exact revision/license evidence recorded for LEAN, WhiteBit.Net, CryptoExchange.Net and Alpaca C# SDK; Autosport/Nika root license absence recorded. Transitive locks, advisories, first-party contributor rights, model/data rights and release SBOM remain."
+      "status_note": "SOURCE/INTEGRATION AUTHORITY COMPLETE on main via PR #2264, merge 458cd7bb43b8457e0bb0593b523f54e35f5cd54d. Exact dependency locks/content identities, restored NuGet package-rights verification, release dependency provenance, distributed release composition-to-provenance mapping (issue #2203), SBOM dependency reachability/scope closure and canonical WP-64 supply-chain proof binding are integrated. Remaining terminal WP-03 evidence is external/fail-closed: complete first-party contributor/release-distribution rights, model/data/news rights where applicable to the selected distribution, independently reviewed production qualification trust-policy bytes/pin, exact dependency-advisory qualification, and a final frozen-release SBOM/provenance bound to the delivered release. Public repository visibility or development authorization is not release-rights evidence."
     },
     {
       "id": "WP-04",
@@ -189,8 +189,8 @@
         "Exclusive mutation key: REUSE / neutral-first-party",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Three neutral research primitives migrated from Autosport into AutoTrade with focused local 6/6 migration tests; Windows CI, full characterization and release rights qualification remain open."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as the neutral production primitive prerequisite for Section 3. Strict JSON, ResourceLock and durable publication have one neutral runtime authority under autotrade_runtime with research compatibility aliases. Historical exact-head #843 and merged #1022 each passed baseline, research-primitives and full Verify AutoTrade; current main additionally contains 13 durable-publication hardening tests, 22 ResourceLock race/Windows path-fence tests, bounded JSON size/depth/node/integer semantics, exact built-in str/bytes ingress, and the 2026-10-06 float-domain repair rejecting lossy nonzero underflow and unbounded significand/exponent lexemes. Canonical float repair commits: a2dbfa41702837163fde3dec6cdf7b1b92a3b290 and 54e8eed276296ae8f4d27e62453d06e9c97e4aa6."
     },
     {
       "id": "WP-05",
@@ -234,8 +234,8 @@
         "Exclusive mutation key: PERSISTENCE / journal-outbox",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "SQLite WAL journal/outbox and command-dedupe primitive implemented in mvp/autotrade_mvp/persistence.py with focused tests covering atomic event/outbox commit, idempotent replay, payload tamper rejection, aggregate-version gaps, event-ID conflicts, command idempotency conflicts and reopen persistence. Focused standalone suite passed 5/5 locally before commit. Remaining WP-05 work: integrate canonical EventEnvelope/UiCommand validation into the runtime, crash-at-each-commit-boundary qualification, projection rebuild equivalence, migration rollback/upgrade tests, Windows/exact-head CI and production placement under src/AutoTrade.Persistence/."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main via Section-4 closure PR #2196, merge commit c0f929e25fbfc2df1f33b2746f5f486d9819ee74. Canonical JournalStore now covers atomic journal/outbox and command effects, exact dedupe/replay identity, one-snapshot journal/checkpoint cuts, full replay versus checkpoint-tail equivalence, hard-process crash boundaries, migration rollback/upgrade, canonical EventEnvelope and UiCommand persistence admission, exact durable storage-class/text ingress, first-event ownership, and physical backing-file authority with callback-safe JournalStoreIdentity/path fencing. Historical #1577/#1612/#2030/#2163 integration roles are superseded by #2196. Hosted exact-head jobs were queued without runner assignment at closure and are not recorded as PASS; broader WP-48/WP-49 recovery remains a separate gate."
     },
     {
       "id": "WP-06",
@@ -282,8 +282,8 @@
         "Exclusive mutation key: ARTIFACT / immutable-store",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Content-addressed artifact store implemented under research/autotrade_research/artifacts/store.py using the migrated durable publication and resource-lock primitives. It verifies SHA-256 and size, enforces explicit storage/export rights, rejects immutable identity conflicts, audits missing/corrupt/unreferenced objects and removes only unreferenced objects/staging leftovers under a store lock. Focused tests cover idempotent publication, corruption, rights-aware export, orphan recovery and denied storage. Remaining WP-06 work: crash-injection qualification at every publication boundary, manifest schema/version contract, lawful dataset/model integration, Windows exact-head evidence and production integration."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main as Section 3 sealed ArtifactStore / neutral installed runtime. The selected sealed-reader source #1098 passed baseline, research-primitives and full dual-OS Verify on exact head 55d97774e8c3225374f1fff9cdb0c62f7ee157eb. Neutral materialization #1313 is a direct ancestor of current main and establishes autotrade_runtime.artifacts as the single canonical store identity with research aliases, exact-source 30-file staging and isolated python -I -S publish/authenticated-read/audit tests. Current main carries stronger root-authority generation pinning and hostile ingress tests. The current corpus includes 55 ArtifactStore tests plus crash-atomic manifest/publication, retained recovery, generation-bound read and 18 trusted-reader falsifiers. Acceptance is covered explicitly by restart_after_manifest_commit_exposes_only_verified_complete_artifact and recovery_removes_only_unreferenced_objects. #1313 GitHub artifact/WP-04 suites passed on Ubuntu/Windows before unrelated update-producer failures. Historical #1573 is fully absorbed: all 38 paths exist on main, 33 byte-identical and 5 replaced by stronger versions."
     },
     {
       "id": "WP-07",
@@ -329,8 +329,8 @@
         "Exclusive mutation key: INSTRUMENT / instrument-registry",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Immutable instrument-version registry foundation is present on main and covers stable identities, effective-dated symbol versions, calendars, exact price/quantity steps and derivative descriptors. Remaining work: provider metadata/lifecycle ingestion, broader DST/delisting/adjusted-deliverable qualification and production placement."
+      "proposed_status": "DONE",
+      "status_note": "DONE on main through Section-5 final closure PR #2155, merge commit 3e28de127dea011a73c6000e46b0513ed2ba8ea9. Canonical InstrumentRegistry now has stable immutable/effective-dated identities, causal knowledge lookup, calendars/DST evidence, exact units/price/quantity bounds, derivative descriptors, adjusted-option explicit exercise cash, immutable inverse-futures settlement conventions, and hostile executable metadata ingress rejection. WP-07 hardening #2192 was mechanically converged into #2155 with zero overlapping base hunks and is superseded."
     },
     {
       "id": "WP-08",
@@ -421,8 +421,8 @@
         "Exclusive mutation key: DATA / market-normalization",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Market normalization foundation is present on main in mvp/autotrade_mvp/market_data.py with raw evidence binding, canonical normalized events, explicit causal timestamps, exact decimal fields and sequence/conflict handling. Remaining work: provider-stream integration, broader gap/freshness qualification and production placement."
+      "proposed_status": "DONE",
+      "status_note": "DONE for the provider-free market-normalization authority used by Section 5. Main retains the #1615 canonical normalized MarketEvent/raw-evidence chronology semantics, adapter-build identity, exact decimal fields, causal timestamps, sequence/conflict handling and verified snapshot recovery behavior. Live provider acquisition/route qualification remains owned by provider WPs and is not part of WP-09 normalization closure."
     },
     {
       "id": "WP-10",
@@ -468,8 +468,8 @@
         "Exclusive mutation key: DATA / historical-vintages",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Immutable historical-vintage foundation is present on main in research/autotrade_research/data/vintages.py with point-in-time revisions/universes, explicit missingness, raw/adjusted consistency, rights-aware manifests and append-only version storage. Remaining work: deeper causal lineage hardening, large-dataset storage integration and production qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for immutable historical-vintage/source-population authority. Main retains the #1615/#1441 lineage: append-only point-in-time vintages, causal revision visibility, authenticated ArtifactStore-bound source populations, exact rights/evidence binding, deterministic population fingerprints, and authoritative fold population re-resolution. Issue #974's final caller-selected replay-fingerprint seam is closed by #2155's verified product-side runtime-cut bridge."
     },
     {
       "id": "WP-11",
@@ -514,8 +514,8 @@
         "Exclusive mutation key: INFORMATION / news-macro-claims",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Evidence-bound information-claim foundation is present on main in mvp/autotrade_mvp/information_claims.py with source documents, availability times, provenance digests, immutable claim identity and store ingestion. Remaining work: source-policy breadth, contradiction/supersession qualification and production information pipelines."
+      "proposed_status": "DONE",
+      "status_note": "DONE for evidence/time/rights-bound internal information claims. Main retains the Section-5 convergence semantics for immutable source documents/claim identity, publication and availability chronology, provenance digests, contradiction/supersession history and fail-closed evidence handling. External source breadth/feed onboarding remains a provider/information-source integration concern rather than a second claim authority."
     },
     {
       "id": "WP-12",
@@ -564,8 +564,8 @@
         "Exclusive mutation key: REPLAY / causal-feeder",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Deterministic causal replay foundation is present on main in mvp/autotrade_mvp/replay.py with availability-time ordering, frozen dataset digest, monotonic simulation clock and checkpoint/resume primitives. Remaining work: pending-event/RNG/strategy/account state completeness, hostile-process isolation and exact resume-equivalence qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 7 causal replay / deterministic whole-runtime checkpoint-resume semantics on main. Canonical CompositeReplayCheckpoint binds replay cursor/clock plus all required runtime component classes (pending queue, RNG, strategy, portfolio/accounting, execution, accrual/settlement, policy, instrument, provider, experiment), exact JournalStore identity, build SHA and protocol identity. Main-resident regressions cover uninterrupted-vs-resume equivalence, tamper/missing/stale rejection, authority-key replacement, crash after durable completion, UNKNOWN no-resend, and hostile authority ingress. Portable backup/restore reconstitution remains WP-49 and does not reopen Section 7."
     },
     {
       "id": "WP-13",
@@ -661,8 +661,8 @@
         "Exclusive mutation key: FINANCE / economic-ledger",
         "Shared schema or cross-owner changes require a separately owned contract migration; coordinate any overlapping module path."
       ],
-      "proposed_status": "IN_PROGRESS",
-      "status_note": "Provider-neutral exact double-entry accounting foundation implemented in mvp/autotrade_mvp/accounting.py with per-asset/currency conservation, cash and position projections, external flows, third-currency fees/rebates, explicit FX clearing, exact reversals and duplicate/double-reversal protection. Independent economic reference vectors cover cash round trip, linear/inverse futures, funding, split, deposit neutrality and bust/correction. Remaining WP-14 work: production journal persistence integration, lot/basis and realized/unrealized projection policy, settled/unsettled cash, full FX valuation freshness, derivative lifecycle postings, corrections from provider events and exact-head cross-platform qualification."
+      "proposed_status": "DONE",
+      "status_note": "DONE for Section 8 core economic-ledger / exact financial conservation on main. Exact accounting, FIFO basis/P&L, reversals/corrections, context-independent arithmetic, trade-date obligations vs settled spendable CASH, typed MARGIN_CREDIT separation, versioned settlement rules, provider settlement exactly-once across restart, FX settlement availability and bust/correction conservation are integrated. Current-main settlement-capital successor #2275 merged as 11da6a62888bb832546a0063ebcbbada0fed7042 with candidate/post-merge tree equality. WP-15 reservations, asset-specific lifecycle economics, hard-risk and provider qualification remain separately owned and do not reopen Section 8."
     },
     {
       "id": "WP-15",

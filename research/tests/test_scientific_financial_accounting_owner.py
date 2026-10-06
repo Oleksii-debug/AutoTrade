@@ -105,13 +105,31 @@ def _reconciliation(
         pagination_complete=True,
         provider_activity_provider_id=PROVIDER,
         provider_activity_account_id=ACCOUNT,
-        local_settled_cash=local_settled_cash,
-        provider_settled_cash=provider_settled_cash,
-        local_unsettled_receivable=local_unsettled_receivable,
-        provider_unsettled_receivable=provider_unsettled_receivable,
-        local_unsettled_payable=local_unsettled_payable,
-        provider_unsettled_payable=provider_unsettled_payable,
-        settlement_activity_complete=settlement_activity_complete,
+        local_settled_cash=(
+            {"USD": local_cash} if local_settled_cash is None else local_settled_cash
+        ),
+        provider_settled_cash=(
+            {"USD": provider_cash}
+            if provider_settled_cash is None
+            else provider_settled_cash
+        ),
+        local_unsettled_receivable=(
+            {} if local_unsettled_receivable is None else local_unsettled_receivable
+        ),
+        provider_unsettled_receivable=(
+            {}
+            if provider_unsettled_receivable is None
+            else provider_unsettled_receivable
+        ),
+        local_unsettled_payable=(
+            {} if local_unsettled_payable is None else local_unsettled_payable
+        ),
+        provider_unsettled_payable=(
+            {} if provider_unsettled_payable is None else provider_unsettled_payable
+        ),
+        settlement_activity_complete=(
+            True if settlement_activity_complete is None else settlement_activity_complete
+        ),
     )
 
 
@@ -237,6 +255,13 @@ def _bybit_reconciliation(provider_environment: str):
         pagination_complete=True,
         provider_activity_provider_id="BYBIT",
         provider_activity_account_id=ACCOUNT,
+        local_settled_cash={"USD": "900"},
+        provider_settled_cash={"USD": "900"},
+        local_unsettled_receivable={},
+        provider_unsettled_receivable={},
+        local_unsettled_payable={},
+        provider_unsettled_payable={},
+        settlement_activity_complete=True,
     )
 
 
@@ -405,6 +430,13 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
                 pagination_complete=True,
                 provider_activity_provider_id=PROVIDER,
                 provider_activity_account_id=ACCOUNT,
+                local_settled_cash={"USD": "900.0", "JPY": "0.00"},
+                provider_settled_cash={"USD": "900.0", "JPY": "0.00"},
+                local_unsettled_receivable={},
+                provider_unsettled_receivable={},
+                local_unsettled_payable={},
+                provider_unsettled_payable={},
+                settlement_activity_complete=True,
             )
             _, cut = _checkpoint_and_cut(
                 store,
@@ -460,6 +492,48 @@ class ScientificFinancialAccountingOwnerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ScientificFinancialOwnerConflict,
                 "cash_differences is non-zero",
+            ):
+                resolve_scientific_financial_accounting_owner(
+                    store=store,
+                    financial_cut=cut,
+                    scientific_registry=registry,
+                    profile=gate_profile,
+                )
+
+    def test_unrequested_settlement_cannot_authorize_financial_owner(self):
+        with TemporaryDirectory() as directory:
+            gate_profile, registry, registration = _science_owner(directory)
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            _book_matching_provider(store)
+            no_settlement = reconcile_account(
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                provider_environment=PROVIDER_ENVIRONMENT,
+                local_cash={"USD": "900"},
+                provider_cash={"USD": "900"},
+                local_positions={"ABC": "1"},
+                provider_positions={"ABC": "1"},
+                local_execution_ids=["e1"],
+                provider_fills=[_fill()],
+                snapshot_consistency=_snapshot(),
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                provider_activity_provider_id=PROVIDER,
+                provider_activity_account_id=ACCOUNT,
+            )
+            self.assertFalse(no_settlement.settlement_reconciliation_performed)
+            _, cut = _checkpoint_and_cut(
+                store,
+                gate_profile=gate_profile,
+                registration=registration,
+                reconciliation=no_settlement,
+            )
+
+            with self.assertRaisesRegex(
+                ScientificFinancialOwnerConflict,
+                "requires performed settlement reconciliation",
             ):
                 resolve_scientific_financial_accounting_owner(
                     store=store,

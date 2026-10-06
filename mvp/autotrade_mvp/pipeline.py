@@ -27,6 +27,10 @@ from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
+CHECKPOINT_SCHEMA_VERSION = 1
+RUN_CONFIGURATION_SCHEMA_VERSION = 1
+RUN_CONFIGURATION_FILENAME = "run-configuration.json"
+STRATEGY_CONFIGURATION = {"name": "moving_average", "fast": 2, "slow": 3}
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -193,6 +197,67 @@ def _atomic_json(path: Path, payload: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _run_configuration(
+    *,
+    symbol: str,
+    initial_cash: Decimal,
+    order_quantity: Decimal,
+    max_abs_position: Decimal,
+    max_notional: Decimal,
+    fee_rate: Decimal,
+) -> dict:
+    payload = {
+        "schema_version": RUN_CONFIGURATION_SCHEMA_VERSION,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "symbol": symbol,
+        "initial_cash": str(initial_cash),
+        "order_quantity": str(order_quantity),
+        "max_abs_position": str(max_abs_position),
+        "max_notional": str(max_notional),
+        "fee_rate": str(fee_rate),
+        "strategy": dict(STRATEGY_CONFIGURATION),
+    }
+    return {**payload, "configuration_digest": _stable_hash(payload)}
+
+
+def _read_json_object(path: Path, *, description: str) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Corrupt {description} JSON") from error
+    if type(value) is not dict:
+        raise ValueError(f"Corrupt {description} structure")
+    return value
+
+
+def _ensure_run_configuration(
+    root: Path,
+    checkpoint_path: Path,
+    expected: dict,
+) -> str:
+    configuration_path = root / RUN_CONFIGURATION_FILENAME
+    if configuration_path.exists():
+        stored = _read_json_object(configuration_path, description="run configuration")
+        stored_digest = stored.get("configuration_digest")
+        unsigned = {key: value for key, value in stored.items() if key != "configuration_digest"}
+        if (
+            type(stored_digest) is not str
+            or stored_digest != _stable_hash(unsigned)
+            or stored != expected
+        ):
+            raise ValueError("Incompatible durable run configuration")
+        return stored_digest
+
+    if checkpoint_path.exists():
+        raise ValueError(
+            "Legacy checkpoint lacks financial configuration identity; "
+            "explicit migration or a new run is required"
+        )
+
+    _atomic_json(configuration_path, expected)
+    return expected["configuration_digest"]
 
 
 @dataclass(frozen=True)
@@ -384,7 +449,7 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         raise ValueError("Corrupt checkpoint JSON") from error
     if not isinstance(data, dict):
         raise ValueError("Corrupt checkpoint structure")
-    if data.get("schema_version") != 1:
+    if data.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("Unsupported or corrupt checkpoint schema")
     if not isinstance(data.get("postings"), list) or not isinstance(data.get("fills"), dict):
         raise ValueError("Corrupt checkpoint ledger or fills")
@@ -515,13 +580,29 @@ def run_vertical_slice(
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
+    expected_configuration = _run_configuration(
+        symbol=symbol,
+        initial_cash=starting_cash,
+        order_quantity=quantity,
+        max_abs_position=position_limit,
+        max_notional=notional_limit,
+        fee_rate=rate,
+    )
+    configuration_digest = _ensure_run_configuration(
+        root, checkpoint_path, expected_configuration
+    )
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
-    if resumed and state.get("symbol", symbol) != symbol:
-        raise ValueError("Checkpoint belongs to another symbol")
+    if resumed:
+        if state.get("symbol") != symbol:
+            raise ValueError("Checkpoint belongs to another symbol")
+        if state.get("configuration_digest") != configuration_digest:
+            raise ValueError("Checkpoint financial configuration identity mismatch")
     try:
         restored_initial_cash = _exact_decimal(
             state["initial_cash"], name="checkpoint initial_cash"
         )
+        if restored_initial_cash != starting_cash:
+            raise ValueError("Checkpoint initial cash conflicts with run configuration")
         restored_fills = {
             key: Fill(
                 fill_id=value["fill_id"],
@@ -606,7 +687,8 @@ def run_vertical_slice(
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "configuration_digest": configuration_digest,
         "symbol": symbol,
         "initial_cash": str(ledger.initial_cash),
         "postings": ledger.postings,

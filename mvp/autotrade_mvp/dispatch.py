@@ -2581,6 +2581,24 @@ class GuardedDispatcher:
             decoder_json_loads_kwdefaults.items()
         )
         decoder_json_decoder = decoder_json_namespace_get("JSONDecoder")
+        decoder_json_decoder_methods = snapshot_tuple(
+            (
+                method_name,
+                snapshot_getattr(decoder_json_decoder, method_name, None),
+            )
+            for method_name in ("__init__", "decode", "raw_decode")
+        )
+        decoder_json_decoder_method_codes = snapshot_tuple(
+            snapshot_getattr(method, "__code__", None)
+            for _method_name, method in decoder_json_decoder_methods
+        )
+        if (
+            any(method is None for _name, method in decoder_json_decoder_methods)
+            or any(code is None for code in decoder_json_decoder_method_codes)
+        ):
+            raise RuntimeError(
+                "exact JSON decoder method authority is unavailable"
+            )
         decoder_json_decode_error = decoder_json_namespace_get(
             "JSONDecodeError"
         )
@@ -2627,6 +2645,13 @@ class GuardedDispatcher:
         exact_response_code_bindings = (
             (exact_response_snapshot, snapshot_code),
             (decoder_json_loads, decoder_json_loads_code),
+            *snapshot_tuple(
+                (method, code)
+                for (_name, method), code in zip(
+                    decoder_json_decoder_methods,
+                    decoder_json_decoder_method_codes,
+                )
+            ),
             *snapshot_tuple(
                 (dependency, code)
                 for dependency, code in zip(
@@ -2725,6 +2750,21 @@ class GuardedDispatcher:
             if decoder_json_namespace_get("JSONDecoder") is not decoder_json_decoder:
                 decoder_json_namespace_set("JSONDecoder", decoder_json_decoder)
                 changed = True
+            for method_name, expected_method in decoder_json_decoder_methods:
+                if (
+                    snapshot_getattr(
+                        decoder_json_decoder,
+                        method_name,
+                        None,
+                    )
+                    is not expected_method
+                ):
+                    snapshot_setattr(
+                        decoder_json_decoder,
+                        method_name,
+                        expected_method,
+                    )
+                    changed = True
             if (
                 decoder_json_namespace_get("JSONDecodeError")
                 is not decoder_json_decode_error

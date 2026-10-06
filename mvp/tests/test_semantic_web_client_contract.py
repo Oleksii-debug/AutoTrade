@@ -2053,6 +2053,54 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("for (const expired of retained.slice(100)) expired.remove();", render)
         self.assertNotIn("body.lastElementChild.remove()", render)
 
+    def test_fresh_auth_rejection_discards_only_definitively_unaccepted_identity(self):
+        js = APP.read_text(encoding="utf-8")
+        classifier = js[
+            js.index("function isCommandAuthRejection"):
+            js.index("function reportSnapshotBusy")
+        ]
+        self.assertIn("error.status === 403", classifier)
+        self.assertIn(
+            'error.code === "AUTHENTICATION_OR_AUTHORIZATION_FAILED"',
+            classifier,
+        )
+        self.assertNotIn("error.status === 401", classifier)
+
+        transport = js[
+            js.index("async function submitCanonicalCommand"):
+            js.index("function text(")
+        ]
+        self.assertIn('contentType.includes("application/json")', transport)
+        self.assertIn("errorBody = await response.json()", transport)
+        self.assertIn("error.code = errorBody.error", transport)
+
+        submit = js[
+            js.index("async function submitCommand(event)"):
+            js.index("async function refreshStateFromUser")
+        ]
+        catch = submit.index("} catch (error) {")
+        definitive = submit.index(
+            "if (!recovering && isCommandAuthRejection(error))",
+            catch,
+        )
+        clear = submit.index("clearConfirmedCommand(payload)", definitive)
+        ambiguous = submit.index(
+            "could not be confirmed. Its original command_id and idempotency_key "
+            "are retained for exact retry",
+            definitive,
+        )
+        self.assertLess(definitive, clear)
+        self.assertLess(clear, ambiguous)
+        self.assertIn(
+            "was not accepted because the authenticated host session was rejected "
+            "before command acceptance",
+            submit[definitive:ambiguous],
+        )
+        self.assertIn(
+            "A retry is different: its prior attempt may already be durable",
+            submit[definitive:ambiguous],
+        )
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -419,5 +419,79 @@ class DispatchCrashMatrixCurrentTests(unittest.TestCase):
             )
 
 
+    def test_death_after_exact_ambiguous_unknown_commit_replays_reason(self):
+        with TemporaryDirectory() as directory:
+            path = self._path(directory)
+            dispatcher = self._dispatcher(path)
+            real_append = JournalStore.append_event
+            outbound = 0
+            response = ExactJsonTransportResponse(
+                b'{"retCode":10000}',
+                http_status=200,
+                requires_reconciliation=True,
+                ambiguity_reason="provider_ack_ambiguous",
+            )
+
+            def die_after_unknown(store, envelope, *, outbox_topic=None):
+                result = real_append(store, envelope, outbox_topic=outbox_topic)
+                if envelope["event_type"] == "SubmissionUnknown":
+                    raise SimulatedProcessDeath("after exact Unknown commit")
+                return result
+
+            def transport(_client_order_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return response
+
+            with patch.object(JournalStore, "append_event", new=die_after_unknown):
+                with self.assertRaisesRegex(
+                    SimulatedProcessDeath,
+                    "after exact Unknown commit",
+                ):
+                    self._dispatch(
+                        dispatcher,
+                        attempt_id="crash-after-exact-unknown",
+                        now="2026-10-06T16:38:00Z",
+                        transport=transport,
+                    )
+
+            self.assertEqual(outbound, 1)
+            events = JournalStore(path).load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("crash-after-exact-unknown"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            terminal_payload = events[-1]["payload"]
+            self.assertEqual(terminal_payload["reason"], "provider_ack_ambiguous")
+            self.assertEqual(
+                terminal_payload["retry_disposition"],
+                "RECONCILE_FIRST",
+            )
+            self.assertEqual(
+                terminal_payload["response_sha256"],
+                response.response_sha256,
+            )
+            self.assertEqual(terminal_payload["response_text"], response.response_text)
+
+            restarted = self._dispatcher(path, owner_token="owner-b")
+            recovered = self._dispatch(
+                restarted,
+                attempt_id="crash-after-exact-unknown",
+                now="2026-10-06T16:38:01Z",
+                transport=self._forbidden_transport,
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            self.assertEqual(recovered.reason, "provider_ack_ambiguous")
+            self.assertEqual(outbound, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

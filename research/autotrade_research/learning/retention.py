@@ -46,23 +46,35 @@ def _regime_tuple(value: object, *, name: str) -> tuple[str, ...]:
     return normalized
 
 
+def _detached_dataclass_state(
+    value: object,
+    expected_type: type,
+    *,
+    name: str,
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be exact {expected_type.__name__}")
+    state = object.__getattribute__(value, "__dict__")
+    expected_fields = {field.name for field in fields(expected_type)}
+    if type(state) is not dict or set(state) != expected_fields:
+        raise TypeError(f"{name} has unexpected state fields")
+    return {field_name: state[field_name] for field_name in expected_fields}
+
+
 def _metrics_snapshot(metrics: object) -> dict[str, "RegimeMetric"]:
     if type(metrics) is not dict:
         raise TypeError("metrics must be an exact dict")
     snapshot: dict[str, RegimeMetric] = {}
-    for key, metric in metrics.items():
+    for key, metric in tuple(dict.items(metrics)):
         if type(key) is not str:
             raise TypeError("metric keys must be exact text")
-        if type(metric) is not RegimeMetric:
-            raise TypeError("metric values must be exact RegimeMetric")
-        canonical_key = _regime_text(key, name="metric key")
-        canonical_metric = RegimeMetric(
-            regime=metric.regime,
-            champion_net_score=metric.champion_net_score,
-            candidate_net_score=metric.candidate_net_score,
-            observations=metric.observations,
-            label_complete=metric.label_complete,
+        metric_state = _detached_dataclass_state(
+            metric,
+            RegimeMetric,
+            name="metric value",
         )
+        canonical_key = _regime_text(key, name="metric key")
+        canonical_metric = RegimeMetric(**metric_state)
         if canonical_metric.regime != canonical_key:
             raise ValueError(f"metric key/regime mismatch for {canonical_key}")
         snapshot[canonical_key] = canonical_metric
@@ -90,16 +102,28 @@ def _inert_manifest_value(value: object, *, name: str):
 def _population_snapshot(
     population: object,
 ) -> PopulationCoverageManifest:
-    if type(population) is not PopulationCoverageManifest:
-        raise TypeError("population must be exact PopulationCoverageManifest")
+    state = _detached_dataclass_state(
+        population,
+        PopulationCoverageManifest,
+        name="population",
+    )
     payload = {
         field.name: _inert_manifest_value(
-            getattr(population, field.name),
+            state[field.name],
             name=f"population.{field.name}",
         )
         for field in fields(PopulationCoverageManifest)
     }
     return PopulationCoverageManifest(**payload)
+
+
+def _policy_snapshot(policy: object) -> "RetentionPolicy":
+    state = _detached_dataclass_state(
+        policy,
+        RetentionPolicy,
+        name="policy",
+    )
+    return RetentionPolicy(**state)
 
 
 @dataclass(frozen=True)
@@ -287,19 +311,7 @@ def evaluate_retention(
     metrics: Mapping[str, RegimeMetric],
     policy: RetentionPolicy,
 ) -> RetentionDecision:
-    if type(policy) is not RetentionPolicy:
-        raise TypeError("policy must be exact RetentionPolicy")
-    canonical_policy = RetentionPolicy(
-        protected_regimes=policy.protected_regimes,
-        recent_regimes=policy.recent_regimes,
-        max_protected_degradation=policy.max_protected_degradation,
-        max_recent_degradation=policy.max_recent_degradation,
-        min_recent_improvement=policy.min_recent_improvement,
-        min_observations_per_regime=policy.min_observations_per_regime,
-        require_complete_labels=policy.require_complete_labels,
-        independent_science_gate_passed=policy.independent_science_gate_passed,
-        risk_gate_passed=policy.risk_gate_passed,
-    )
+    canonical_policy = _policy_snapshot(policy)
     metric_snapshot = _metrics_snapshot(metrics)
     required = set(canonical_policy.protected_regimes) | set(canonical_policy.recent_regimes)
     missing = sorted(required - set(metric_snapshot))
@@ -396,19 +408,7 @@ def evaluate_population_bound_retention(
     """
 
     canonical_population = _population_snapshot(population)
-    if type(policy) is not RetentionPolicy:
-        raise TypeError("policy must be exact RetentionPolicy")
-    canonical_policy = RetentionPolicy(
-        protected_regimes=policy.protected_regimes,
-        recent_regimes=policy.recent_regimes,
-        max_protected_degradation=policy.max_protected_degradation,
-        max_recent_degradation=policy.max_recent_degradation,
-        min_recent_improvement=policy.min_recent_improvement,
-        min_observations_per_regime=policy.min_observations_per_regime,
-        require_complete_labels=policy.require_complete_labels,
-        independent_science_gate_passed=policy.independent_science_gate_passed,
-        risk_gate_passed=policy.risk_gate_passed,
-    )
+    canonical_policy = _policy_snapshot(policy)
     metric_snapshot = _metrics_snapshot(metrics)
     base = evaluate_retention(metric_snapshot, canonical_policy)
     reasons = list(base.reasons)

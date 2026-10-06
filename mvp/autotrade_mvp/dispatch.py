@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
-import re
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -433,19 +432,34 @@ class SubmissionResponseBinding:
                 raise ValueError(f"{name} is required")
         if (
             type(self.request_hash) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.request_hash) is None
+            or len(self.request_hash) != 71
+            or not self.request_hash.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.request_hash[7:]
+            )
         ):
             raise ValueError("request_hash must be a canonical SHA-256 digest")
         if (
             type(self.submission_scope_hash) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.submission_scope_hash) is None
+            or len(self.submission_scope_hash) != 71
+            or not self.submission_scope_hash.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.submission_scope_hash[7:]
+            )
         ):
             raise ValueError(
                 "submission_scope_hash must be a canonical SHA-256 digest"
             )
         if (
             type(self.response_sha256) is not str
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None
+            or len(self.response_sha256) != 71
+            or not self.response_sha256.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.response_sha256[7:]
+            )
         ):
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
         if (
@@ -1043,9 +1057,151 @@ def _install_submission_response_binding_authority(loader):
     binding_init_code = canonical_binding_init.__code__
     binding_post_init_code = canonical_binding_post_init.__code__
     canonical_json_function = canonical_json
+    canonical_json_code = canonical_getattr(
+        canonical_json_function, "__code__", None
+    )
+    canonical_json_globals = canonical_getattr(
+        canonical_json_function, "__globals__", None
+    )
+    if canonical_type(canonical_json_globals) is not canonical_dict:
+        raise RuntimeError("canonical JSON global authority is unavailable")
     canonical_json_module = json
-    canonical_re_module = re
+    canonical_json_module_type = canonical_type(canonical_json_module)
+    canonical_vars = vars
+    canonical_json_namespace = canonical_vars(canonical_json_module)
+    if canonical_type(canonical_json_namespace) is not canonical_dict:
+        raise RuntimeError("JSON decoder namespace authority is unavailable")
+    canonical_json_loads = canonical_dict.get(canonical_json_namespace, "loads")
+    canonical_json_loads_code = canonical_getattr(
+        canonical_json_loads, "__code__", None
+    )
+    canonical_json_loads_defaults = canonical_getattr(
+        canonical_json_loads, "__defaults__", None
+    )
+    canonical_json_loads_kwdefaults = canonical_getattr(
+        canonical_json_loads, "__kwdefaults__", None
+    )
+    if canonical_type(canonical_json_loads_kwdefaults) is canonical_dict:
+        canonical_json_loads_kwdefaults_fingerprint = canonical_tuple(
+            (canonical_id(key), canonical_id(value))
+            for key, value in canonical_dict.items(
+                canonical_json_loads_kwdefaults
+            )
+        )
+    else:
+        canonical_json_loads_kwdefaults_fingerprint = None
+    canonical_json_decode_error = canonical_dict.get(
+        canonical_json_namespace, "JSONDecodeError"
+    )
+    canonical_json_decoder = canonical_dict.get(
+        canonical_json_namespace, "JSONDecoder"
+    )
+    canonical_json_decoder_surface = canonical_tuple(
+        canonical_json_decoder.__dict__.items()
+    )
+    canonical_json_decoder_codes = canonical_tuple(
+        (
+            member,
+            canonical_getattr(member, "__code__", None),
+            canonical_getattr(member, "__defaults__", None),
+            canonical_getattr(member, "__kwdefaults__", None),
+            (
+                canonical_tuple(
+                    (canonical_id(key), canonical_id(value))
+                    for key, value in canonical_dict.items(
+                        canonical_getattr(member, "__kwdefaults__", None)
+                    )
+                )
+                if canonical_type(
+                    canonical_getattr(member, "__kwdefaults__", None)
+                )
+                is canonical_dict
+                else None
+            ),
+        )
+        for name, member in canonical_json_decoder_surface
+        if name in {"__init__", "decode", "raw_decode"}
+    )
+    canonical_json_decoder_init = canonical_json_decoder.__dict__.get("__init__")
+    canonical_json_decoder_globals = canonical_getattr(
+        canonical_json_decoder_init, "__globals__", None
+    )
+    if canonical_type(canonical_json_decoder_globals) is not canonical_dict:
+        raise RuntimeError("JSON decoder global authority is unavailable")
+    canonical_json_decoder_global_bindings = canonical_tuple(
+        (
+            name,
+            canonical_dict.get(canonical_json_decoder_globals, name),
+        )
+        for name in (
+            "scanner",
+            "JSONObject",
+            "JSONArray",
+            "scanstring",
+            "JSONDecodeError",
+            "WHITESPACE",
+        )
+    )
+    canonical_json_scanner = canonical_dict.get(
+        canonical_json_decoder_globals, "scanner"
+    )
+    canonical_json_scanner_type = canonical_type(canonical_json_scanner)
+    canonical_json_scanner_namespace = canonical_vars(canonical_json_scanner)
+    if canonical_type(canonical_json_scanner_namespace) is not canonical_dict:
+        raise RuntimeError("JSON scanner namespace authority is unavailable")
+    canonical_json_make_scanner = canonical_dict.get(
+        canonical_json_scanner_namespace, "make_scanner"
+    )
+    canonical_json_make_scanner_code = canonical_getattr(
+        canonical_json_make_scanner, "__code__", None
+    )
+    canonical_json_dumps = canonical_dict.get(
+        canonical_json_namespace, "dumps"
+    )
+    canonical_json_dumps_code = canonical_getattr(
+        canonical_json_dumps, "__code__", None
+    )
+    canonical_json_dumps_defaults = canonical_getattr(
+        canonical_json_dumps, "__defaults__", None
+    )
+    canonical_json_dumps_kwdefaults = canonical_getattr(
+        canonical_json_dumps, "__kwdefaults__", None
+    )
+    if canonical_type(canonical_json_dumps_kwdefaults) is canonical_dict:
+        canonical_json_dumps_kwdefaults_fingerprint = canonical_tuple(
+            (canonical_id(key), canonical_id(value))
+            for key, value in canonical_dict.items(
+                canonical_json_dumps_kwdefaults
+            )
+        )
+    else:
+        canonical_json_dumps_kwdefaults_fingerprint = None
+    canonical_json_encoder = canonical_dict.get(
+        canonical_json_namespace, "JSONEncoder"
+    )
+    canonical_json_encoder_surface = canonical_tuple(
+        canonical_json_encoder.__dict__.items()
+    )
+    canonical_json_encoder_codes = canonical_tuple(
+        (
+            member,
+            canonical_getattr(member, "__code__", None),
+            canonical_getattr(member, "__defaults__", None),
+            canonical_getattr(member, "__kwdefaults__", None),
+        )
+        for name, member in canonical_json_encoder_surface
+        if name in {"__init__", "encode", "iterencode", "default"}
+    )
     canonical_sha256 = sha256
+    canonical_number_parser = parse_bounded_json_number_token
+    number_parser_code = canonical_getattr(
+        canonical_number_parser, "__code__", None
+    )
+    canonical_integer_parser = parse_bounded_json_integer_token
+    integer_parser_code = canonical_getattr(
+        canonical_integer_parser, "__code__", None
+    )
+    canonical_exact_decimal_error = ExactDecimalError
     canonical_attempt_id = submission_attempt_aggregate_id
     attempt_id_code = canonical_attempt_id.__code__
     canonical_decode = _decode_exact_json_bytes
@@ -1187,9 +1343,163 @@ def _install_submission_response_binding_authority(loader):
             or canonical_getattr(canonical_binding_post_init, "__code__", None)
             is not binding_post_init_code
             or canonical_json is not canonical_json_function
+            or canonical_getattr(canonical_json_function, "__code__", None)
+            is not canonical_json_code
+            or canonical_getattr(canonical_json_function, "__globals__", None)
+            is not canonical_json_globals
+            or canonical_dict.get(canonical_json_globals, "json")
+            is not canonical_json_module
             or json is not canonical_json_module
-            or re is not canonical_re_module
+            or vars is not canonical_vars
+            or canonical_type(canonical_json_module) is not canonical_json_module_type
+            or canonical_vars(canonical_json_module) is not canonical_json_namespace
+            or canonical_dict.get(canonical_json_namespace, "loads")
+            is not canonical_json_loads
+            or canonical_getattr(canonical_json_loads, "__code__", None)
+            is not canonical_json_loads_code
+            or canonical_getattr(canonical_json_loads, "__defaults__", None)
+            is not canonical_json_loads_defaults
+            or canonical_getattr(canonical_json_loads, "__kwdefaults__", None)
+            is not canonical_json_loads_kwdefaults
+            or (
+                canonical_json_loads_kwdefaults_fingerprint is not None
+                and (
+                    canonical_type(canonical_json_loads_kwdefaults)
+                    is not canonical_dict
+                    or canonical_tuple(
+                        (canonical_id(key), canonical_id(value))
+                        for key, value in canonical_dict.items(
+                            canonical_json_loads_kwdefaults
+                        )
+                    )
+                    != canonical_json_loads_kwdefaults_fingerprint
+                )
+            )
+            or canonical_dict.get(canonical_json_namespace, "JSONDecodeError")
+            is not canonical_json_decode_error
+            or canonical_dict.get(canonical_json_namespace, "JSONDecoder")
+            is not canonical_json_decoder
+            or canonical_len(canonical_json_decoder.__dict__)
+            != canonical_len(canonical_json_decoder_surface)
+            or canonical_any(
+                name not in canonical_json_decoder.__dict__
+                or canonical_json_decoder.__dict__[name] is not member
+                for name, member in canonical_json_decoder_surface
+            )
+            or canonical_any(
+                (
+                    code is not None
+                    and canonical_getattr(member, "__code__", None) is not code
+                )
+                or canonical_getattr(member, "__defaults__", None)
+                is not defaults
+                or canonical_getattr(member, "__kwdefaults__", None)
+                is not kwdefaults
+                or (
+                    kwdefaults_fingerprint is not None
+                    and (
+                        canonical_type(kwdefaults) is not canonical_dict
+                        or canonical_tuple(
+                            (canonical_id(key), canonical_id(value))
+                            for key, value in canonical_dict.items(kwdefaults)
+                        )
+                        != kwdefaults_fingerprint
+                    )
+                )
+                for (
+                    member,
+                    code,
+                    defaults,
+                    kwdefaults,
+                    kwdefaults_fingerprint,
+                )
+                in canonical_json_decoder_codes
+            )
+            or canonical_getattr(
+                canonical_json_decoder_init, "__globals__", None
+            )
+            is not canonical_json_decoder_globals
+            or canonical_any(
+                canonical_dict.get(canonical_json_decoder_globals, name)
+                is not expected
+                for name, expected in canonical_json_decoder_global_bindings
+            )
+            or canonical_type(canonical_json_scanner)
+            is not canonical_json_scanner_type
+            or canonical_vars(canonical_json_scanner)
+            is not canonical_json_scanner_namespace
+            or canonical_dict.get(
+                canonical_json_scanner_namespace, "make_scanner"
+            )
+            is not canonical_json_make_scanner
+            or (
+                canonical_json_make_scanner_code is not None
+                and canonical_getattr(
+                    canonical_json_make_scanner, "__code__", None
+                )
+                is not canonical_json_make_scanner_code
+            )
+            or canonical_dict.get(canonical_json_namespace, "dumps")
+            is not canonical_json_dumps
+            or canonical_getattr(canonical_json_dumps, "__code__", None)
+            is not canonical_json_dumps_code
+            or canonical_getattr(canonical_json_dumps, "__defaults__", None)
+            is not canonical_json_dumps_defaults
+            or canonical_getattr(canonical_json_dumps, "__kwdefaults__", None)
+            is not canonical_json_dumps_kwdefaults
+            or (
+                canonical_json_dumps_kwdefaults_fingerprint is not None
+                and (
+                    canonical_type(canonical_json_dumps_kwdefaults)
+                    is not canonical_dict
+                    or canonical_tuple(
+                        (canonical_id(key), canonical_id(value))
+                        for key, value in canonical_dict.items(
+                            canonical_json_dumps_kwdefaults
+                        )
+                    )
+                    != canonical_json_dumps_kwdefaults_fingerprint
+                )
+            )
+            or canonical_dict.get(canonical_json_namespace, "JSONEncoder")
+            is not canonical_json_encoder
+            or canonical_len(canonical_json_encoder.__dict__)
+            != canonical_len(canonical_json_encoder_surface)
+            or canonical_any(
+                name not in canonical_json_encoder.__dict__
+                or canonical_json_encoder.__dict__[name] is not member
+                for name, member in canonical_json_encoder_surface
+            )
+            or canonical_any(
+                (
+                    code is not None
+                    and canonical_getattr(member, "__code__", None) is not code
+                )
+                or canonical_getattr(member, "__defaults__", None)
+                is not defaults
+                or canonical_getattr(member, "__kwdefaults__", None)
+                is not kwdefaults
+                for member, code, defaults, kwdefaults
+                in canonical_json_encoder_codes
+            )
             or sha256 is not canonical_sha256
+            or parse_bounded_json_number_token is not canonical_number_parser
+            or (
+                number_parser_code is not None
+                and canonical_getattr(
+                    canonical_number_parser, "__code__", None
+                )
+                is not number_parser_code
+            )
+            or parse_bounded_json_integer_token is not canonical_integer_parser
+            or (
+                integer_parser_code is not None
+                and canonical_getattr(
+                    canonical_integer_parser, "__code__", None
+                )
+                is not integer_parser_code
+            )
+            or ExactDecimalError is not canonical_exact_decimal_error
             or submission_attempt_aggregate_id is not canonical_attempt_id
             or canonical_getattr(canonical_attempt_id, "__code__", None)
             is not attempt_id_code
@@ -2512,8 +2822,16 @@ class GuardedDispatcher:
                 ) from error
             barrier_passed = True
 
+        # Seal the response classification surface before invoking provider
+        # code.  A transport callback is external to dispatcher authority and
+        # may mutate module globals after the irreversible Sending commit.
+        # Classification must therefore use the exact type/builtins selected
+        # before transport and reject a rebound response class without running
+        # its metaclass hooks.
         exact_response_snapshot = _snapshot_exact_transport_response
         exact_response_type = ExactJsonTransportResponse
+        response_type_builtin = type
+        response_isinstance_builtin = isinstance
         snapshot_getattr = getattr
         snapshot_setattr = setattr
         snapshot_type = type
@@ -3360,7 +3678,14 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if type(response) is ExactJsonTransportResponse:
+            if (
+                ExactJsonTransportResponse is not exact_response_type
+                or _snapshot_exact_transport_response is not exact_response_snapshot
+            ):
+                raise ValueError(
+                    "exact transport response authority changed after send"
+                )
+            if response_type_builtin(response) is exact_response_type:
                 # Revalidate raw exact state now. Frozen dataclass construction
                 # is not sufficient authority because object.__setattr__ can
                 # alter fields after __post_init__ and before transport returns.
@@ -3395,7 +3720,7 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
+            elif response_isinstance_builtin(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")

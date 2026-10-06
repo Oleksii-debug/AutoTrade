@@ -285,22 +285,39 @@ def _install_ibkr_brokerage_session_observation_authority():
             raise IbkrWebAdapterError(
                 "brokerage session status payload must be an exact provider object"
             )
+        if set(payload) != {"success"}:
+            raise IbkrWebAdapterError(
+                "brokerage session status requires documented success envelope"
+            )
+        success = payload["success"]
+        if (
+            canonical_type(success) is not mapping_proxy_type
+            or set(success) != {"value"}
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage session status requires documented success.value envelope"
+            )
+        status_payload = success["value"]
+        if canonical_type(status_payload) is not mapping_proxy_type:
+            raise IbkrWebAdapterError(
+                "brokerage session status value must be an exact provider object"
+            )
 
         flags: dict[str, bool] = {}
         for name in ("connected", "authenticated", "established", "competing"):
-            if name not in payload:
+            if name not in status_payload:
                 raise IbkrWebAdapterError(
                     f"brokerage session status is missing {name}"
                 )
-            value = payload[name]
+            value = status_payload[name]
             if canonical_type(value) is not bool:
                 raise IbkrWebAdapterError(
                     f"brokerage session status {name} must be exact boolean"
                 )
             flags[name] = value
 
-        if "fail" in payload:
-            failure = payload["fail"]
+        if "fail" in status_payload:
+            failure = status_payload["fail"]
             if failure is not None:
                 if (
                     canonical_type(failure) is not str

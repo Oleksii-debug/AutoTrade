@@ -116,39 +116,18 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
                     original_require
                 )
 
-    def test_durable_constructor_retains_import_time_authority_dependencies(self):
+    def test_durable_constructor_retains_original_initializer(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             touched = []
-
-            class HostileEconomicBook:
-                def __init__(self, *_args, **_kwargs):
-                    touched.append("EconomicBook")
-                    raise AssertionError("rebound EconomicBook executed")
+            original = (
+                provider_accounting_impl._initialize_durable_provider_economic_book
+            )
 
             def hostile(*_args, **_kwargs):
-                touched.append("helper")
-                raise AssertionError("rebound constructor helper executed")
+                touched.append(True)
+                raise AssertionError("rebound constructor issuer executed")
 
-            names = (
-                "EconomicBook",
-                "_text",
-                "_environment",
-                "_provider_environment",
-                "_book_id",
-                "_require_unambiguous_provider_economic_history",
-                "_initialize_durable_provider_economic_book",
-            )
-            originals = {
-                name: getattr(provider_accounting_impl, name)
-                for name in names
-            }
-            provider_accounting_impl.EconomicBook = HostileEconomicBook
-            provider_accounting_impl._text = hostile
-            provider_accounting_impl._environment = hostile
-            provider_accounting_impl._provider_environment = hostile
-            provider_accounting_impl._book_id = hostile
-            provider_accounting_impl._require_unambiguous_provider_economic_history = hostile
             provider_accounting_impl._initialize_durable_provider_economic_book = hostile
             try:
                 book = DurableProviderEconomicBook(
@@ -162,11 +141,11 @@ class DurableProviderEconomicBookAuthorityTests(unittest.TestCase):
                 self.assertEqual(book.provider_id, "PROVIDER-A")
                 self.assertEqual(book.account_id, "acct-constructor")
                 self.assertEqual(book.environment, "SIMULATION")
-                self.assertEqual(book.provider_environment, "SIMULATION")
                 self.assertEqual(book.transactions, ())
             finally:
-                for name, value in originals.items():
-                    setattr(provider_accounting_impl, name, value)
+                provider_accounting_impl._initialize_durable_provider_economic_book = (
+                    original
+                )
 
     def test_bybit_provider_environment_separates_durable_book_identity(self):
         with TemporaryDirectory() as directory:

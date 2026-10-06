@@ -1996,33 +1996,6 @@ def _economic_projection_digest(value: object) -> str:
 def _install_durable_provider_economic_book_authority():
     """Keep original composition behind callback-free weak process state."""
 
-    # Capture construction/verification dependencies once, while module import
-    # still owns the canonical classes and helpers. Later same-name module
-    # rebinding must not become durable financial authority.
-    durable_type = DurableProviderEconomicBook
-    journal_store_type = JournalStore
-    economic_book_type = EconomicBook
-    authority_type = _DurableProviderEconomicBookAuthority
-    normalize_text = _text
-    normalize_environment = _environment
-    normalize_provider_environment = _provider_environment
-    build_book_id = _book_id
-    require_unambiguous_history = _require_unambiguous_provider_economic_history
-    projection_digest = _economic_projection_digest
-    require_store_authority = require_exact_journal_store_authority
-    store_authority_scope = journal_store_authority_scope
-    store_load_events = JournalStore.load_events
-    exact_type = type
-    object_identity = id
-    getattribute = object.__getattribute__
-    setattr_exact = object.__setattr__
-    tuple_factory = tuple
-    text_type = str
-    weakref_ref = weakref.ref
-    conflict_type = AccountingConflict
-    type_error = TypeError
-    runtime_error = RuntimeError
-
     authorities: dict[
         int,
         tuple[weakref.ReferenceType, _DurableProviderEconomicBookAuthority],
@@ -2040,7 +2013,7 @@ def _install_durable_provider_economic_book_authority():
     def registered_authority(
         value: object,
     ) -> _DurableProviderEconomicBookAuthority | None:
-        entry = authorities.get(object_identity(value))
+        entry = authorities.get(id(value))
         if entry is None:
             return None
         value_ref, authority = entry
@@ -2048,9 +2021,9 @@ def _install_durable_provider_economic_book_authority():
         if current is value:
             return authority
         if current is None:
-            authorities.pop(object_identity(value), None)
+            authorities.pop(id(value), None)
             return None
-        raise conflict_type(
+        raise AccountingConflict(
             "durable economic-book binding identity collision"
         )
 
@@ -2058,39 +2031,39 @@ def _install_durable_provider_economic_book_authority():
         try:
             prune_dead()
             return registered_authority(value) is not None
-        except type_error:
+        except TypeError:
             return False
 
     def bound_authority(
         value: object,
     ) -> _DurableProviderEconomicBookAuthority:
-        if exact_type(value) is not durable_type:
-            raise type_error("economic_book must be exact DurableProviderEconomicBook")
+        if type(value) is not DurableProviderEconomicBook:
+            raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         prune_dead()
         authority = registered_authority(value)
         if authority is None:
-            raise conflict_type(
+            raise AccountingConflict(
                 "durable economic-book authority is not established"
             )
 
-        state = getattribute(value, "__dict__")
-        state_keys = tuple_factory(state)
-        if any(exact_type(name) is not text_type for name in state_keys):
-            raise conflict_type(
+        state = object.__getattribute__(value, "__dict__")
+        state_keys = tuple(state)
+        if any(type(name) is not str for name in state_keys):
+            raise AccountingConflict(
                 "durable economic-book instance state keys must be exact str"
             )
         class_owned_names = {
             name
-            for base in durable_type.__mro__
+            for base in DurableProviderEconomicBook.__mro__
             for name in base.__dict__
         }
         if class_owned_names.intersection(state_keys):
-            raise conflict_type(
+            raise AccountingConflict(
                 "durable economic-book instance state is shadowed"
             )
 
         if state.get("store") is not authority.store:
-            raise conflict_type("durable economic-book JournalStore changed")
+            raise AccountingConflict("durable economic-book JournalStore changed")
         if (
             state.get("provider_id") != authority.provider_id
             or state.get("account_id") != authority.account_id
@@ -2098,22 +2071,22 @@ def _install_durable_provider_economic_book_authority():
             or state.get("provider_environment") != authority.provider_environment
             or state.get("book_id") != authority.book_id
         ):
-            raise conflict_type(
+            raise AccountingConflict(
                 "durable economic-book financial scope changed"
             )
 
         projection = state.get("_book")
-        if projection_digest(projection) != authority.projection_digest:
-            raise conflict_type(
+        if _economic_projection_digest(projection) != authority.projection_digest:
+            raise AccountingConflict(
                 "durable economic projection changed outside canonical reload"
             )
 
-        current_identity = require_store_authority(
+        current_identity = require_exact_journal_store_authority(
             authority.store,
             subject="durable provider economic JournalStore",
         )
         if current_identity != authority.store_identity:
-            raise runtime_error(
+            raise RuntimeError(
                 "durable economic-book JournalStore generation changed"
             )
         return authority
@@ -2122,7 +2095,7 @@ def _install_durable_provider_economic_book_authority():
         value: object,
     ) -> _DurableProviderEconomicBookAuthority:
         authority = bound_authority(value)
-        return authority_type(
+        return _DurableProviderEconomicBookAuthority(
             store=authority.store,
             store_identity=authority.store_identity,
             provider_id=authority.provider_id,
@@ -2135,19 +2108,19 @@ def _install_durable_provider_economic_book_authority():
 
     def reload_projection(value: object) -> None:
         authority = bound_authority(value)
-        with store_authority_scope(
+        with journal_store_authority_scope(
             authority.store,
             authority.store_identity,
         ):
-            events = store_load_events(
+            events = JournalStore.load_events(
                 authority.store,
                 "economic_book",
                 authority.book_id,
             )
-        candidate = durable_type._replay(value, events)
-        projection = getattribute(candidate, "_book")
-        setattr_exact(value, "_book", projection)
-        authority.projection_digest = projection_digest(projection)
+        candidate = DurableProviderEconomicBook._replay(value, events)
+        projection = object.__getattribute__(candidate, "_book")
+        object.__setattr__(value, "_book", projection)
+        authority.projection_digest = _economic_projection_digest(projection)
 
     def initialize(
         value: object,
@@ -2158,60 +2131,60 @@ def _install_durable_provider_economic_book_authority():
         environment: str,
         provider_environment: str | None = None,
     ) -> None:
-        if exact_type(value) is not durable_type:
-            raise type_error("economic_book must be exact DurableProviderEconomicBook")
+        if type(value) is not DurableProviderEconomicBook:
+            raise TypeError("economic_book must be exact DurableProviderEconomicBook")
         prune_dead()
         if registered_authority(value) is not None:
-            raise conflict_type(
+            raise AccountingConflict(
                 "durable economic-book authority is already established"
             )
-        if exact_type(store) is not journal_store_type:
-            raise type_error("store must be exact JournalStore")
-        identity = require_store_authority(
+        if type(store) is not JournalStore:
+            raise TypeError("store must be exact JournalStore")
+        identity = require_exact_journal_store_authority(
             store,
             subject="durable provider economic JournalStore",
         )
 
-        setattr_exact(value, "store", store)
-        setattr_exact(
+        object.__setattr__(value, "store", store)
+        object.__setattr__(
             value,
             "provider_id",
-            normalize_text(provider_id, name="provider_id").upper(),
+            _text(provider_id, name="provider_id").upper(),
         )
-        normalized_environment = normalize_environment(environment)
-        normalized_account_id = normalize_text(account_id, name="account_id")
-        setattr_exact(value, "environment", normalized_environment)
-        setattr_exact(value, "account_id", normalized_account_id)
-        setattr_exact(value, "_book", economic_book_type())
-        provider_environment_value = normalize_provider_environment(
-            provider_id=getattribute(value, "provider_id"),
-            environment=getattribute(value, "environment"),
+        normalized_environment = _environment(environment)
+        normalized_account_id = _text(account_id, name="account_id")
+        object.__setattr__(value, "environment", normalized_environment)
+        object.__setattr__(value, "account_id", normalized_account_id)
+        object.__setattr__(value, "_book", EconomicBook())
+        provider_environment_value = _provider_environment(
+            provider_id=object.__getattribute__(value, "provider_id"),
+            environment=object.__getattribute__(value, "environment"),
             provider_environment=provider_environment,
         )
-        setattr_exact(value, "provider_environment", provider_environment_value)
-        setattr_exact(
+        object.__setattr__(value, "provider_environment", provider_environment_value)
+        object.__setattr__(
             value,
             "book_id",
-            build_book_id(
-                provider_id=getattribute(value, "provider_id"),
-                account_id=getattribute(value, "account_id"),
-                environment=getattribute(value, "environment"),
+            _book_id(
+                provider_id=object.__getattribute__(value, "provider_id"),
+                account_id=object.__getattribute__(value, "account_id"),
+                environment=object.__getattribute__(value, "environment"),
                 provider_environment=provider_environment_value,
             ),
         )
-        require_unambiguous_history(
+        _require_unambiguous_provider_economic_history(
             store,
             identity,
-            provider_id=getattribute(value, "provider_id"),
-            account_id=getattribute(value, "account_id"),
-            environment=getattribute(value, "environment"),
-            scoped_book_id=getattribute(value, "book_id"),
+            provider_id=object.__getattribute__(value, "provider_id"),
+            account_id=object.__getattribute__(value, "account_id"),
+            environment=object.__getattribute__(value, "environment"),
+            scoped_book_id=object.__getattribute__(value, "book_id"),
         )
-        state = getattribute(value, "__dict__")
-        object_id = object_identity(value)
+        state = object.__getattribute__(value, "__dict__")
+        object_id = id(value)
         authorities[object_id] = (
-            weakref_ref(value),
-            authority_type(
+            weakref.ref(value),
+            _DurableProviderEconomicBookAuthority(
                 store=store,
                 store_identity=identity,
                 provider_id=state["provider_id"],
@@ -2219,7 +2192,7 @@ def _install_durable_provider_economic_book_authority():
                 environment=state["environment"],
                 provider_environment=state["provider_environment"],
                 book_id=state["book_id"],
-                projection_digest=projection_digest(state["_book"]),
+                projection_digest=_economic_projection_digest(state["_book"]),
             ),
         )
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from hashlib import sha512
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,7 +14,8 @@ from tools.dotnet_package_rights import (
 )
 
 
-_HASH = base64.b64encode(b"x" * 64).decode("ascii")
+_NUPKG_BYTES = b"canonical example nupkg payload\n"
+_HASH = base64.b64encode(sha512(_NUPKG_BYTES).digest()).decode("ascii")
 _LICENSE = """Copyright (C) Example Corporation. All rights reserved.
 
 Redistribution in binary form is permitted when this notice is retained.
@@ -109,6 +111,7 @@ def _write_restored_package(root: Path, *, license_text: str = _LICENSE) -> Path
         _HASH,
         encoding="ascii",
     )
+    (package / "example.package.1.2.3.nupkg").write_bytes(_NUPKG_BYTES)
     (package / "LICENSE.txt").write_text(license_text, encoding="utf-8")
     (package / "NOTICE.txt").write_text("required notice\n", encoding="utf-8")
     (package / "example.package.nuspec").write_text(
@@ -242,6 +245,50 @@ class DotnetPackageRightsTests(unittest.TestCase):
                 root=root,
                 projects=[project],
             )
+
+    def test_restored_nupkg_payload_must_match_lock_hash(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            (
+                packages
+                / "example.package"
+                / "1.2.3"
+                / "example.package.1.2.3.nupkg"
+            ).write_bytes(b"tampered package payload\n")
+            with self.assertRaisesRegex(ValueError, "payload hash mismatch"):
+                verify_restored_package_rights(
+                    packages,
+                    root=root,
+                    projects=[project],
+                )
+
+    def test_restored_nuspec_identity_must_match_locked_artifact(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = _write_project(root)
+            _write_policy(root)
+            packages = _write_restored_package(root)
+            nuspec = (
+                packages
+                / "example.package"
+                / "1.2.3"
+                / "example.package.nuspec"
+            )
+            nuspec.write_text(
+                "<?xml version=\"1.0\"?>\n"
+                "<package><metadata><id>Other.Package</id><version>9.9.9</version>"
+                "<license type=\"file\">LICENSE.txt</license></metadata></package>\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "nuspec id mismatch"):
+                verify_restored_package_rights(
+                    packages,
+                    root=root,
+                    projects=[project],
+                )
 
     def test_restored_license_drift_fails_even_with_same_policy(self):
         with TemporaryDirectory() as directory:

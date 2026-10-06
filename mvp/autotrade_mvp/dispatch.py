@@ -2928,6 +2928,9 @@ class GuardedDispatcher:
         snapshot_postsend_builtin_state = snapshot_tuple(
             snapshot_dict.items(snapshot_builtin_namespace)
         )
+        snapshot_postsend_builtin_names = snapshot_frozenset(
+            name for name, _value in snapshot_postsend_builtin_state
+        )
         if any(
             snapshot_type(name) is not snapshot_str
             for name, _value in snapshot_postsend_builtin_state
@@ -3875,6 +3878,24 @@ class GuardedDispatcher:
 
         def restore_postsend_builtin_namespace() -> bool:
             changed = False
+            # Restore namespace shape as well as values that existed at the
+            # invocation cut. Otherwise a provider callback can leave a new
+            # exact-string builtin behind and the next dispatch would trust the
+            # polluted namespace as its fresh baseline.
+            current_names = snapshot_tuple(
+                snapshot_dict.keys(snapshot_builtin_namespace)
+            )
+            for name in current_names:
+                if snapshot_type(name) is not snapshot_str:
+                    # Do not hash attacker-controlled exotic keys while
+                    # recovering. Mark the cut changed; snapshot preflight on a
+                    # subsequent dispatch remains fail-closed until such an
+                    # externally injected non-string key is removed.
+                    changed = True
+                    continue
+                if name not in snapshot_postsend_builtin_names:
+                    snapshot_dict.pop(snapshot_builtin_namespace, name, None)
+                    changed = True
             for name, expected in snapshot_postsend_builtin_state:
                 current = snapshot_dict.get(
                     snapshot_builtin_namespace,

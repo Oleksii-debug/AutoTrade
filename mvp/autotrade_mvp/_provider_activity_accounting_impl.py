@@ -2951,6 +2951,10 @@ def commit_economic_batch_with_reservation_consumption(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != _text(
                 reservation_id, name="reservation_id"
             )
@@ -2975,6 +2979,8 @@ def commit_economic_batch_with_reservation_consumption(
             settlement_book.scope.provider_id != economic_book.provider_id
             or settlement_book.scope.account_id != economic_book.account_id
             or settlement_book.scope.environment != economic_book.environment
+            or settlement_book.scope.provider_environment
+            != economic_book.provider_environment
         ):
             raise ValueError(
                 "settlement book must share provider/account/environment scope"
@@ -3532,6 +3538,8 @@ def commit_economic_correction_with_settlement_replacement(
         settlement_book.scope.provider_id != economic_book.provider_id
         or settlement_book.scope.account_id != economic_book.account_id
         or settlement_book.scope.environment != economic_book.environment
+        or settlement_book.scope.provider_environment
+        != economic_book.provider_environment
     ):
         raise ValueError(
             "settlement book must share provider/account/environment scope"
@@ -3570,6 +3578,10 @@ def commit_economic_correction_with_settlement_replacement(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("reservation_id") != rid
         ):
             raise AccountingConflict(
@@ -4233,6 +4245,10 @@ def commit_provider_fill_bust_with_economic_reversal(
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_request.get(
+                "provider_environment",
+                economic_book.environment,
+            ) != economic_book.provider_environment
             or binding_request.get("provider_execution_id")
             != projected_fill.provider_execution_id
             or binding_request.get("reservation_id") != rid
@@ -4592,6 +4608,10 @@ def commit_provider_fill_bust_with_economic_reversal(
                 and payload.get("provider_id") == economic_book.provider_id
                 and payload.get("account_id") == economic_book.account_id
                 and payload.get("environment") == economic_book.environment
+                and payload.get(
+                    "provider_environment",
+                    economic_book.environment,
+                ) == economic_book.provider_environment
                 and payload.get("batch_digest") == economic_plan.batch_digest
                 and payload.get("transactions")
                 == [

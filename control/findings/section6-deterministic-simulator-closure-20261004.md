@@ -1,4 +1,4 @@
-# Section 6 deterministic simulator closure candidate
+# Section 6 deterministic simulator closure — DONE
 
 Initial date: 2026-10-04
 Latest closure review: 2026-10-06
@@ -261,3 +261,49 @@ remain stable unless exact-head CI or review proves a concrete defect. Closure
 requires terminal baseline + Verify + reconvergence-integrity success on that
 stable head, clean review, 0-behind current-main topology, merge, and post-merge
 readback.
+
+
+## 2026-10-06 final integration closure
+
+Section 6 provider-free deterministic simulator / exact execution-model authority is
+**DONE on main**.
+
+Accepted source:
+- closure PR: #1617;
+- accepted exact head: `3a45ee494bed07b1b637d95b9e03636aa2f36cf3`;
+- accepted Git tree: `f85a4fa2dddd5e05482de9f04582df2bf0eff871`;
+- merge commit: `a66acd4b80fbb179246888b42b05440eb116ed71`;
+- merge Git tree: `f85a4fa2dddd5e05482de9f04582df2bf0eff871`;
+- merge-tree equality with the accepted candidate: PASS.
+
+Post-merge/current-main non-regression proof:
+- the accepted Section-6 head is an ancestor of current main;
+- all 15 declared Section-6 mutation paths are still byte-identical to the accepted head;
+- later Section-0, Section-4 and Section-5 convergence therefore did not replace or
+  weaken the accepted Section-6 simulator/execution authority.
+
+The closed source authority includes:
+- deterministic frozen simulation-time policy;
+- exact/detached simulator ingress;
+- exact instrument-grid MARKET projection with adverse BUY/SELL rounding;
+- independent MARKET/LIMIT/STOP_LIMIT conservative oracle reconstruction;
+- trigger-state monotonicity and causal BAR ambiguity rules;
+- canonical InstrumentVersion asset/lot/quantity/price/effective-interval checks;
+- authenticated immutable instrument-metadata evidence bound to the order-time cut;
+- single authenticated execution-qualification snapshot;
+- crash/restart continuation for partial fills;
+- expired durable Prepared -> zero-wire BLOCKED recovery before the send barrier;
+- Sending-or-later ambiguity -> UNKNOWN with no blind resend;
+- exact Prepared lease chronology and stale-owner send fencing;
+- Prepared/send race convergence without fabricated zero-wire claims.
+
+Exact-head hosted baseline and Verify runs on the final PR head remained queued because
+GitHub did not assign runners. They are not recorded as PASS. Closure here is the
+canonical source/integration closure proven by exact expected source, merge and
+post-merge byte readback. Provider/PAPER/LIVE qualification, economic-edge evidence,
+signed release and physical Windows/NVDA qualification remain separate gates.
+
+This Section-6 closure is intentionally narrower than WP-13 as a whole. WP-13 remains
+IN_PROGRESS for terminal per-asset/provider/data-quality execution-realism
+qualification and independent economic validation; that broader work does not reopen
+the completed provider-free deterministic-simulator section.

@@ -1650,6 +1650,32 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
         self.assertEqual(observation.query_binding.account_id, "account-a")
 
+    def test_execution_rejects_noncanonical_present_fee_currency(self):
+        base = {
+            "execId": "exec-fee-currency-canonical",
+            "orderLinkId": "",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.01",
+            "execPrice": "65000",
+            "execFee": "0.5",
+            "execTime": "1790280000000",
+        }
+        for malformed in (" USDT ", 123):
+            with self.subTest(feeCurrency=malformed):
+                row = dict(base, feeCurrency=malformed)
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "fee currency must be canonical exact text",
+                ):
+                    parse_executions(
+                        bound_execution_response(
+                            {"retCode": 0, "result": {"list": [row]}}
+                        ),
+                        instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                        qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+                    )
+
     def test_documented_linear_execution_requires_qualified_fee_currency(self):
         response = {"retCode": 0, "result": {"category": "linear", "list": [{
             "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",

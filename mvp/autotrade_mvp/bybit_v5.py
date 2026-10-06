@@ -1292,9 +1292,7 @@ def parse_executions(
             )
 
         provider_fee_currency = row.get("feeCurrency")
-        if isinstance(provider_fee_currency, str) and provider_fee_currency.strip():
-            fee_currency = provider_fee_currency.strip()
-        else:
+        if provider_fee_currency is None or provider_fee_currency == "":
             if qualified_fee_currencies is None:
                 raise ProviderCoreError(
                     "Bybit execution fee currency is unresolved; qualified "
@@ -1310,6 +1308,15 @@ def parse_executions(
                 fee_currency,
                 name="qualified fee currency",
             )
+        else:
+            if (
+                type(provider_fee_currency) is not str
+                or provider_fee_currency != provider_fee_currency.strip()
+            ):
+                raise ProviderCoreError(
+                    "Bybit execution fee currency must be canonical exact text"
+                )
+            fee_currency = provider_fee_currency
 
         side = _text(row.get("side"), name="side").upper()
         if side not in {"BUY", "SELL"}:

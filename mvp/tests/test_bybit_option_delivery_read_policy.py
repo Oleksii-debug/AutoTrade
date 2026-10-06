@@ -116,7 +116,10 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             "cursor": "132791%3A0%2C132791%3A0",
         }
         signed = sign(query)
-        self.assertEqual(dict(parse_qsl(urlsplit(signed.url).query)), query)
+        decoded_query = dict(parse_qsl(urlsplit(signed.url).query))
+        expected_decoded = dict(query)
+        expected_decoded["cursor"] = "132791:0,132791:0"
+        self.assertEqual(decoded_query, expected_decoded)
         self.assertIn(
             "cursor=132791%3A0%2C132791%3A0",
             urlsplit(signed.url).query,
@@ -199,6 +202,7 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
             "00DEC22",
             "31APR22",
             "30FEB22",
+            "29FEB23",
             "29dec22",
             "29XYZ22",
             "29DEC2022",
@@ -210,6 +214,13 @@ class BybitOptionDeliveryReadPolicyTests(unittest.TestCase):
                     "expDate must use DDMMMYY",
                 ):
                     sign({"category": "option", "expDate": exp_date})
+
+    def test_expiry_date_accepts_real_leap_day(self):
+        signed = sign({"category": "option", "expDate": "29FEB24"})
+        self.assertEqual(
+            dict(parse_qsl(urlsplit(signed.url).query)),
+            {"category": "option", "expDate": "29FEB24"},
+        )
 
     def test_cursor_is_nonempty_canonical_opaque_text(self):
         for cursor in (

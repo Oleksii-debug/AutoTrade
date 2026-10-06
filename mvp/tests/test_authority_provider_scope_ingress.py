@@ -123,6 +123,26 @@ def _snapshot_values():
     }
 
 
+def _capital_payload():
+    return {
+        "schema_version": "settlement-capital-cut.v1",
+        "journal_sequence": 1,
+        "provider_id": "BYBIT",
+        "account_id": "account-1",
+        "environment": "PAPER",
+        "provider_environment": "TESTNET",
+        "settlement_scope_id": "settlement:testnet",
+        "economic_book_id": "economic:testnet",
+        "resources": {
+            "CASH:USD": {
+                "provider_available": "100",
+                "local_available": "80",
+                "effective_available": "80",
+            }
+        },
+    }
+
+
 class ProviderScopeIngressTests(unittest.TestCase):
     def setUp(self):
         _ExplosiveText.calls = 0
@@ -210,6 +230,113 @@ class ProviderScopeIngressTests(unittest.TestCase):
         ):
             authority_module._authoritative_risk_provider_scope(snapshot)
         self.assertEqual(_ExplosiveDict.calls, 0)
+
+
+    def test_settlement_capital_rejects_polymorphic_top_level_mapping_before_callbacks(self):
+        payload = _ExplosiveDict(_capital_payload())
+        with self.assertRaisesRegex(
+            authority_module.AuthorityConflict,
+            "settlement capital adjustment is malformed",
+        ):
+            authority_module._canonical_settlement_capital_adjustment(
+                payload,
+                provider_available={"CASH:USD": "100"},
+                required_resources=("CASH:USD",),
+                provider_id="BYBIT",
+                account_id="account-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_ExplosiveDict.calls, 0)
+
+    def test_settlement_capital_rejects_polymorphic_nested_mappings_before_callbacks(self):
+        cases = ("resources", "resource_adjustment", "provider_available")
+        for case in cases:
+            with self.subTest(case=case):
+                _ExplosiveDict.calls = 0
+                payload = _capital_payload()
+                provider_available = {"CASH:USD": "100"}
+                if case == "resources":
+                    payload["resources"] = _ExplosiveDict(payload["resources"])
+                elif case == "resource_adjustment":
+                    payload["resources"]["CASH:USD"] = _ExplosiveDict(
+                        payload["resources"]["CASH:USD"]
+                    )
+                else:
+                    provider_available = _ExplosiveDict(provider_available)
+                with self.assertRaises(authority_module.AuthorityConflict):
+                    authority_module._canonical_settlement_capital_adjustment(
+                        payload,
+                        provider_available=provider_available,
+                        required_resources=("CASH:USD",),
+                        provider_id="BYBIT",
+                        account_id="account-1",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    )
+                self.assertEqual(_ExplosiveDict.calls, 0)
+
+    def test_settlement_capital_rejects_polymorphic_scope_text_before_callbacks(self):
+        for field in (
+            "provider_id",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "settlement_scope_id",
+            "economic_book_id",
+        ):
+            with self.subTest(field=field):
+                _ExplosiveText.calls = 0
+                payload = _capital_payload()
+                payload[field] = _ExplosiveText(str(payload[field]))
+                with self.assertRaisesRegex(TypeError, "must be exact text"):
+                    authority_module._canonical_settlement_capital_adjustment(
+                        payload,
+                        provider_available={"CASH:USD": "100"},
+                        required_resources=("CASH:USD",),
+                        provider_id="BYBIT",
+                        account_id="account-1",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    )
+                self.assertEqual(_ExplosiveText.calls, 0)
+
+    def test_settlement_capital_rejects_polymorphic_numeric_text_before_callbacks(self):
+        payload = _capital_payload()
+        payload["resources"]["CASH:USD"]["provider_available"] = _ExplosiveText(
+            "100"
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "must use exact Decimal, string or integer input",
+        ):
+            authority_module._canonical_settlement_capital_adjustment(
+                payload,
+                provider_available={"CASH:USD": "100"},
+                required_resources=("CASH:USD",),
+                provider_id="BYBIT",
+                account_id="account-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+        self.assertEqual(_ExplosiveText.calls, 0)
+
+    def test_settlement_capital_accepts_exact_canonical_provider_domain(self):
+        canonical, effective = (
+            authority_module._canonical_settlement_capital_adjustment(
+                _capital_payload(),
+                provider_available={"CASH:USD": "100"},
+                required_resources=("CASH:USD",),
+                provider_id="BYBIT",
+                account_id="account-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+        )
+        self.assertEqual(canonical["provider_environment"], "TESTNET")
+        self.assertEqual(canonical["resources"]["CASH:USD"]["effective_available"], "80")
+        self.assertEqual(str(effective["CASH:USD"]), "80")
+
 
 
 if __name__ == "__main__":

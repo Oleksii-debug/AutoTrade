@@ -42,12 +42,13 @@ IBKR_WEB_DOCS = MappingProxyType(
 
 _COID = re.compile(r"^[\x21-\x7e]{1,64}$")
 _CONIDEX = re.compile(r"^(?P<conid>[1-9][0-9]*)@(?P<exchange>[A-Za-z0-9._-]+)$")
-_ORDER_TYPES = {
+_ORDER_TYPES = MappingProxyType({
     "MARKET": "MKT",
     "LIMIT": "LMT",
     "STOP": "STP",
     "STOP_LIMIT": "STP LMT",
-}
+})
+_PROVIDER_ORDER_TYPES = frozenset(_ORDER_TYPES.values())
 _TIFS = frozenset({"DAY", "GTC", "IOC"})
 _SIDES = frozenset({"BUY", "SELL"})
 _PERMANENT_ORDER_ID = re.compile(r"^(?:0|[1-9][0-9]*)$")
@@ -421,7 +422,7 @@ class IbkrNormalizedOrder:
                 "normalized order endpoint does not match account"
             )
         order_type = _text(raw_fields["orderType"], name="fields.orderType")
-        if order_type not in set(_ORDER_TYPES.values()):
+        if order_type not in _PROVIDER_ORDER_TYPES:
             raise IbkrWebAdapterError("unsupported provider orderType")
         side = _text(raw_fields["side"], name="fields.side")
         if side not in _SIDES:

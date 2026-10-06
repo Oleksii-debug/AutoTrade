@@ -719,6 +719,10 @@ def _require_checkpoint_evidence_financial_state(
     *,
     symbol: str,
     financial_configuration_hash: str,
+    order_quantity: Decimal,
+    fee_rate: Decimal,
+    max_abs_position: Decimal,
+    max_notional: Decimal,
     restored_fills: dict[str, Fill],
     ledger: EconomicLedger,
 ) -> None:
@@ -736,6 +740,7 @@ def _require_checkpoint_evidence_financial_state(
         return
 
     observed_order_ids: set[str] = set()
+    evidence_by_order_id: dict[str, dict] = {}
     ordered: list[tuple[datetime, str, dict]] = []
     for evidence_id in ids:
         if type(evidence_id) is not str or not evidence_id:
@@ -768,11 +773,63 @@ def _require_checkpoint_evidence_financial_state(
                 raise ValueError(
                     "Checkpoint replay intent identity is not causally bound"
                 )
+            evidence_by_order_id[order_id] = record
             observed_order_ids.add(order_id)
         ordered.append((timestamp, evidence_id, record))
 
     if observed_order_ids != set(restored_fills):
         raise ValueError("Checkpoint replay evidence does not cover restored fills")
+
+    fills_by_id = {fill.fill_id: fill for fill in restored_fills.values()}
+    if len(fills_by_id) != len(restored_fills):
+        raise ValueError("Checkpoint replay reuses one durable fill identity")
+    risk_replay_ledger = EconomicLedger(ledger.initial_cash)
+    for posting in ledger.postings:
+        if type(posting) is not dict or type(posting.get("fill_id")) is not str:
+            raise ValueError("Corrupt checkpoint posting identity")
+        fill = fills_by_id.get(posting["fill_id"])
+        if fill is None:
+            raise ValueError("Checkpoint posting lacks restored fill authority")
+        record = evidence_by_order_id.get(fill.client_order_id)
+        if record is None:
+            raise ValueError("Checkpoint fill lacks replay evidence authority")
+        try:
+            valuation_price = _checkpoint_decimal(
+                record["valuation_price"],
+                name="evidence valuation_price",
+            )
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            raise ValueError("Corrupt checkpoint replay evidence") from error
+        if fill.quantity != order_quantity or fill.price != valuation_price:
+            raise ValueError(
+                "Checkpoint replay fill conflicts with bound strategy inputs"
+            )
+        admitted, replay_reason = handle_risk(
+            Decision(
+                side=fill.side,
+                quantity=fill.quantity,
+                price=fill.price,
+                reason=record["decision_reason"],
+            ),
+            risk_replay_ledger.position,
+            risk_replay_ledger.cash,
+            fee_rate,
+            max_abs_position,
+            max_notional,
+        )
+        if not admitted or replay_reason != "admitted" or record["risk_outcome"] != "admitted":
+            raise ValueError(
+                "Checkpoint replay fill violates bound risk admission"
+            )
+        if not risk_replay_ledger.apply_fill(fill):
+            raise ValueError("Checkpoint replay duplicates one fill")
+    if risk_replay_ledger.postings != ledger.postings:
+        raise ValueError("Checkpoint replay postings are not canonical")
+    if (
+        risk_replay_ledger.cash != ledger.cash
+        or risk_replay_ledger.position != ledger.position
+    ):
+        raise ValueError("Checkpoint replay financial path does not match final state")
 
     latest_instant = max(item[0] for item in ordered)
     latest = [item for item in ordered if item[0] == latest_instant]
@@ -1390,6 +1447,31 @@ def verify_replay(state_dir: str | Path) -> bool:
                     or fill.fill_id != fill_id
                     or order_id in replayed_order_ids
                     or fill_id in replayed_fill_ids
+                ):
+                    return False
+                valuation_price = _checkpoint_decimal(
+                    record["valuation_price"],
+                    name="evidence valuation_price",
+                )
+                if fill.quantity != order_quantity or fill.price != valuation_price:
+                    return False
+                admitted, replay_reason = handle_risk(
+                    Decision(
+                        side=fill.side,
+                        quantity=fill.quantity,
+                        price=fill.price,
+                        reason=record["decision_reason"],
+                    ),
+                    replay_ledger.position,
+                    replay_ledger.cash,
+                    fee_rate,
+                    max_abs_position,
+                    max_notional,
+                )
+                if (
+                    not admitted
+                    or replay_reason != "admitted"
+                    or record["risk_outcome"] != "admitted"
                     or not replay_ledger.apply_fill(fill)
                 ):
                     return False
@@ -1492,6 +1574,10 @@ def run_vertical_slice(
             state,
             symbol=symbol,
             financial_configuration_hash=financial_configuration_hash,
+            order_quantity=quantity,
+            fee_rate=rate,
+            max_abs_position=position_limit,
+            max_notional=notional_limit,
             restored_fills=preflight_fills,
             ledger=preflight_ledger,
         )

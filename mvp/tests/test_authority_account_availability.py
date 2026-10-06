@@ -54,6 +54,20 @@ class _ExplosiveAdmissionText(str):
     __eq__ = _explode
 
 
+class _ExplosiveAdmissionInt(int):
+    calls = 0
+
+    def _explode(self, *_args, **_kwargs):
+        type(self).calls += 1
+        raise AssertionError("financial admission invoked polymorphic integer")
+
+    __lt__ = _explode
+    __le__ = _explode
+    __eq__ = _explode
+    __int__ = _explode
+    __index__ = _explode
+
+
 class _ExplosiveAdmissionDict(dict):
     calls = 0
 
@@ -340,6 +354,8 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "reservation_id",
                 "reservation_checkpoint_event_id",
                 "reservation_provider_id",
+                "reservation_max_age_seconds",
+                "confirmation_id",
                 "now",
             )
             for field in fields:
@@ -352,6 +368,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                         "now": NOW,
                         "reservation_provider_id": PROVIDER_ID,
                         "reservation_checkpoint_event_id": checkpoint["event_id"],
+                        "reservation_max_age_seconds": "60",
                         "instrument_id": INSTRUMENT_ID,
                     }.get(field, f"hostile-{field}")
                     with self.assertRaises(TypeError):
@@ -366,6 +383,35 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                         reservations.total_reserved("CASH:USD"),
                         Decimal("0"),
                     )
+
+    def test_financial_admission_rejects_polymorphic_instrument_version_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(store, available_cash="1000")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            _ExplosiveAdmissionInt.calls = 0
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "instrument_version must be an exact integer",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    instrument_version=_ExplosiveAdmissionInt(1),
+                )
+            self.assertEqual(_ExplosiveAdmissionInt.calls, 0)
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
 
     def test_financial_admission_rejects_reservation_book_subclass_before_store_access(self):
         with TemporaryDirectory() as directory:

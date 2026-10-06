@@ -20,13 +20,18 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .exact_decimal import (
-    as_fraction, bounded_fraction, parse_bounded_exact_decimal,
-    round_fraction_to_quantum, terminating_decimal,
+    as_fraction, bounded_fraction, canonical_decimal_text,
+    parse_bounded_exact_decimal, round_fraction_to_quantum, terminating_decimal,
 )
 from .persistence import JournalStore, payload_digest
 
 
 MONEY_QUANTUM = Decimal("0.00000001")
+CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_CONFIGURATION_VERSION = 1
+SIMULATION_STRATEGY_ID = "moving_average_v1"
+SIMULATION_STRATEGY_FAST = 2
+SIMULATION_STRATEGY_SLOW = 3
 
 
 def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
@@ -85,7 +90,9 @@ def handle_market_data(prices: Iterable[float | int | str | Decimal]) -> list[De
 
 
 def handle_strategy(prices: list[Decimal], quantity: Decimal) -> Decision:
-    return MovingAverageStrategy().decide(prices, quantity)
+    return MovingAverageStrategy(
+        SIMULATION_STRATEGY_FAST, SIMULATION_STRATEGY_SLOW
+    ).decide(prices, quantity)
 
 
 def handle_risk(decision: Decision, current_position: Decimal, current_cash: Decimal, fee_rate: Decimal, max_abs_position: Decimal, max_notional: Decimal) -> tuple[bool, str]:
@@ -186,6 +193,47 @@ def handle_journal_event(root: Path, symbol: str, evidence: dict) -> None:
 def _stable_hash(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _checkpoint_configuration(
+    *,
+    symbol: str,
+    initial_cash: Decimal,
+    order_quantity: Decimal,
+    max_abs_position: Decimal,
+    max_notional: Decimal,
+    fee_rate: Decimal,
+) -> dict:
+    return {
+        "configuration_version": CHECKPOINT_CONFIGURATION_VERSION,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "symbol": symbol,
+        "initial_cash": canonical_decimal_text(initial_cash),
+        "order_quantity": canonical_decimal_text(order_quantity),
+        "max_abs_position": canonical_decimal_text(max_abs_position),
+        "max_notional": canonical_decimal_text(max_notional),
+        "fee_rate": canonical_decimal_text(fee_rate),
+        "strategy": {
+            "id": SIMULATION_STRATEGY_ID,
+            "fast": SIMULATION_STRATEGY_FAST,
+            "slow": SIMULATION_STRATEGY_SLOW,
+        },
+    }
+
+
+def _validate_checkpoint_configuration(
+    state: dict,
+    expected_configuration: dict,
+    expected_digest: str,
+) -> None:
+    stored_configuration = state.get("checkpoint_configuration")
+    stored_digest = state.get("checkpoint_configuration_digest")
+    if type(stored_configuration) is not dict or type(stored_digest) is not str:
+        raise ValueError("Checkpoint configuration identity is missing or corrupt")
+    if _stable_hash(stored_configuration) != stored_digest:
+        raise ValueError("Checkpoint configuration identity is corrupt")
+    if stored_configuration != expected_configuration or stored_digest != expected_digest:
+        raise ValueError("Checkpoint financial configuration is incompatible with this resume")
 
 
 def _atomic_json(path: Path, payload: object) -> None:
@@ -382,9 +430,12 @@ def _read_state(path: Path, initial_cash: Decimal) -> tuple[dict, bool]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("Corrupt checkpoint JSON") from error
-    if not isinstance(data, dict):
+    if type(data) is not dict:
         raise ValueError("Corrupt checkpoint structure")
-    if data.get("schema_version") != 1:
+    schema_version = data.get("schema_version")
+    if type(schema_version) is int and schema_version == 1:
+        raise ValueError("Legacy checkpoint requires explicit migration before resume")
+    if type(schema_version) is not int or schema_version != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("Unsupported or corrupt checkpoint schema")
     if not isinstance(data.get("postings"), list) or not isinstance(data.get("fills"), dict):
         raise ValueError("Corrupt checkpoint ledger or fills")
@@ -512,12 +563,40 @@ def run_vertical_slice(
         raise ValueError("Cash, order quantity and risk limits must be positive")
     if rate < 0 or rate >= 1:
         raise ValueError("Fee rate must be finite and between zero and one")
+    checkpoint_configuration = _checkpoint_configuration(
+        symbol=symbol,
+        initial_cash=starting_cash,
+        order_quantity=quantity,
+        max_abs_position=position_limit,
+        max_notional=notional_limit,
+        fee_rate=rate,
+    )
+    checkpoint_configuration_digest = _stable_hash(checkpoint_configuration)
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
     state, resumed = handle_restart_recovery(state_dir, starting_cash)
-    if resumed and state.get("symbol", symbol) != symbol:
-        raise ValueError("Checkpoint belongs to another symbol")
+    if resumed:
+        _validate_checkpoint_configuration(
+            state, checkpoint_configuration, checkpoint_configuration_digest
+        )
+        if state.get("symbol", symbol) != symbol:
+            raise ValueError("Checkpoint belongs to another symbol")
+    else:
+        state = {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "checkpoint_configuration": checkpoint_configuration,
+            "checkpoint_configuration_digest": checkpoint_configuration_digest,
+            "symbol": symbol,
+            "initial_cash": canonical_decimal_text(starting_cash),
+            "postings": [],
+            "fills": {},
+            "evidence_ids": [],
+            "evidence_records": {},
+        }
+        # Persist the exact financial/runtime configuration before any durable
+        # order intent, fill, ledger, evidence or journal mutation can occur.
+        _atomic_json(checkpoint_path, state)
     try:
         restored_initial_cash = _exact_decimal(
             state["initial_cash"], name="checkpoint initial_cash"
@@ -536,6 +615,12 @@ def run_vertical_slice(
         }
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("Corrupt checkpoint financial scalar") from error
+    if (
+        resumed
+        and canonical_decimal_text(restored_initial_cash)
+        != checkpoint_configuration["initial_cash"]
+    ):
+        raise ValueError("Checkpoint initial cash conflicts with configuration identity")
     ledger = EconomicLedger(restored_initial_cash, list(state.get("postings", [])))
     provider = SimulatedProvider(restored_fills)
     _reconcile(provider, ledger)
@@ -551,6 +636,7 @@ def run_vertical_slice(
             "quantity": str(decision.quantity),
             "price": str(decision.price),
             "input_hash": _stable_hash([str(item) for item in normalized]),
+            "checkpoint_configuration_digest": checkpoint_configuration_digest,
         }
         intent = OrderIntent(
             client_order_id="intent-" + _stable_hash(intent_payload)[:20], symbol=symbol, side=decision.side,
@@ -573,12 +659,15 @@ def run_vertical_slice(
     evidence_ids = set(state.get("evidence_ids", []))
     evidence_records = dict(state.get("evidence_records", {}))
     evidence_id = "evidence-" + _stable_hash({
-        "symbol": symbol, "input": [str(x) for x in normalized],
+        "symbol": symbol,
+        "input": [str(x) for x in normalized],
         "intent": intent.client_order_id if intent else None,
+        "checkpoint_configuration_digest": checkpoint_configuration_digest,
     })[:20]
     fresh_evidence = {
         "schema_version": 1,
         "evidence_id": evidence_id,
+        "checkpoint_configuration_digest": checkpoint_configuration_digest,
         "input_hash": _stable_hash([str(item) for item in normalized]),
         "decision": decision.side,
         "decision_reason": decision.reason,
@@ -600,15 +689,19 @@ def run_vertical_slice(
     else:
         evidence = fresh_evidence
     if (evidence.get("input_hash") != fresh_evidence["input_hash"]
+            or evidence.get("checkpoint_configuration_digest")
+            != checkpoint_configuration_digest
             or evidence.get("order_id") != fresh_evidence["order_id"]
             or evidence.get("fill_id") != fresh_evidence["fill_id"]):
         raise ValueError("Checkpoint evidence conflicts with this episode")
     evidence_ids.add(evidence["evidence_id"])
     evidence_records[evidence_id] = evidence
     checkpoint = {
-        "schema_version": 1,
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "checkpoint_configuration": checkpoint_configuration,
+        "checkpoint_configuration_digest": checkpoint_configuration_digest,
         "symbol": symbol,
-        "initial_cash": str(ledger.initial_cash),
+        "initial_cash": canonical_decimal_text(ledger.initial_cash),
         "postings": ledger.postings,
         "fills": {key: {**asdict(value), "quantity": str(value.quantity), "price": str(value.price), "fee": str(value.fee)} for key, value in provider.fills.items()},
         "evidence_ids": sorted(evidence_ids),

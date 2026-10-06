@@ -5,7 +5,13 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.pipeline import (
+    CHECKPOINT_CONFIGURATION_VERSION,
+    CHECKPOINT_SCHEMA_VERSION,
+    SIMULATION_STRATEGY_FAST,
+    SIMULATION_STRATEGY_ID,
+    SIMULATION_STRATEGY_SLOW,
     EconomicLedger,
+    _stable_hash,
     handle_market_data,
     handle_portfolio,
     run_vertical_slice,
@@ -17,8 +23,25 @@ class HostileDecimal(Decimal):
 
 
 def _checkpoint(*, initial_cash="10000", postings=None, fills=None):
+    configuration = {
+        "configuration_version": CHECKPOINT_CONFIGURATION_VERSION,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "symbol": "SIM",
+        "initial_cash": "10000",
+        "order_quantity": "1",
+        "max_abs_position": "10",
+        "max_notional": "5000",
+        "fee_rate": "0.001",
+        "strategy": {
+            "id": SIMULATION_STRATEGY_ID,
+            "fast": SIMULATION_STRATEGY_FAST,
+            "slow": SIMULATION_STRATEGY_SLOW,
+        },
+    }
     return {
-        "schema_version": 1,
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "checkpoint_configuration": configuration,
+        "checkpoint_configuration_digest": _stable_hash(configuration),
         "symbol": "SIM",
         "initial_cash": initial_cash,
         "postings": [] if postings is None else postings,

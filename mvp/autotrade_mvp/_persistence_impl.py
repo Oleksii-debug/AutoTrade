@@ -2238,14 +2238,22 @@ class JournalStore:
                 raise ValueError(
                     "outbox payload does not match authoritative journal event envelope"
                 )
+            outbox_id = _require_canonical_durable_text(
+                row["outbox_id"],
+                name="outbox_id",
+            )
+            created_at = _require_canonical_durable_text(
+                row["created_at"],
+                name="outbox created_at",
+            )
             pending.append(
                 {
-                    "outbox_id": row["outbox_id"],
-                    "event_id": row["event_id"],
-                    "topic": row["topic"],
+                    "outbox_id": outbox_id,
+                    "event_id": event["event_id"],
+                    "topic": topic,
                     "payload": outbox_payload,
-                    "created_at": row["created_at"],
-                    "envelope_hash": row["envelope_hash"],
+                    "created_at": created_at,
+                    "envelope_hash": actual_outbox_hash,
                 }
             )
         return pending

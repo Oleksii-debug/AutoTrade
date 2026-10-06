@@ -774,6 +774,40 @@ class BybitV5AdapterTests(unittest.TestCase):
                     observation=invalid,
                 )
 
+    def test_submission_parser_rejects_unissued_exact_observation_before_financial_properties(self):
+        attempt, prepared, observation = self._durable_write_observation(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "orderId": "provider-1",
+                    "orderLinkId": "__CLIENT__",
+                },
+                "time": 1790280000123,
+            }
+        )
+
+        forged = object.__new__(ProviderSubmissionObservation)
+        with self.assertRaisesRegex(ProviderCoreError, "authority is unavailable"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=forged,
+            )
+
+        class Impostor(ProviderSubmissionObservation):
+            @property
+            def response_binding(self):
+                raise AssertionError("forged property must not execute")
+
+        subclass = object.__new__(Impostor)
+        with self.assertRaisesRegex(TypeError, "exact ProviderSubmissionObservation"):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=prepared,
+                observation=subclass,
+            )
+
     def test_ambiguous_bybit_codes_require_reconciliation(self):
         for code in (429, 10000, 10014, 10016):
             with self.subTest(code=code):

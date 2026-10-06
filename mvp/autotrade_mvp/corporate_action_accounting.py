@@ -29,6 +29,7 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    authoritative_corporate_action_projection,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
 from .persistence import (
@@ -39,6 +40,7 @@ from .persistence import (
     require_exact_journal_store_authority,
 )
 from .provider_activity_accounting import DurableProviderEconomicBook
+from .reconciliation import ProviderActivityEvidence
 
 
 _SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
@@ -63,6 +65,151 @@ def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
         accepted.external_event_id,
         accepted.provenance_digest,
         suffix,
+    )
+
+
+def _corporate_action_reconciliation_id(
+    payload: Mapping[str, object],
+) -> str:
+    """Bind one reconciliation identity to exact provider revision/provenance."""
+
+    required_text = (
+        "provider_id",
+        "account_id",
+        "environment",
+        "external_event_id",
+        "provider_revision",
+        "provenance_digest",
+    )
+    for name in required_text:
+        if type(payload.get(name)) is not str or not payload[name]:
+            raise CorporateActionEvidenceConflict(
+                f"corporate-action reconciliation {name} is invalid"
+            )
+    correction = payload.get("corrects_external_event_id")
+    if correction is not None and (
+        type(correction) is not str or not correction
+    ):
+        raise CorporateActionEvidenceConflict(
+            "corporate-action reconciliation correction identity is invalid"
+        )
+    return _identity(
+        "corporate-action-reconciliation",
+        payload["provider_id"],
+        payload["account_id"],
+        payload["environment"],
+        payload["external_event_id"],
+        payload["provider_revision"],
+        payload["provenance_digest"],
+        "" if correction is None else correction,
+    )
+
+
+def corporate_action_reconciliation_inputs(
+    evidence_store: DurableCorporateActionEvidenceStore,
+    *,
+    provider_actions: tuple[AuthoritativeCorporateAction, ...],
+) -> tuple[tuple[str, ...], tuple[ProviderActivityEvidence, ...]]:
+    """Project WP-31 history into the existing account-reconciliation authority.
+
+    Local identities come only from durable accepted evidence. Provider-side
+    activities come only from issuer-verified AuthoritativeCorporateAction
+    objects. Revision/provenance changes therefore become ordinary
+    missing/unexpected activity mismatches in reconcile_account(); no second
+    reconciliation ledger or verdict engine is introduced here.
+
+    Complete-history/coverage authority remains owned by the caller's existing
+    provider reconciliation cut. This helper deliberately does not fabricate
+    pagination, consistency or provider-origin coverage.
+    """
+
+    if type(evidence_store) is not DurableCorporateActionEvidenceStore:
+        raise TypeError(
+            "evidence_store must be exact DurableCorporateActionEvidenceStore"
+        )
+    if type(provider_actions) is not tuple:
+        raise TypeError("provider_actions must be an exact tuple")
+
+    (
+        _store,
+        _store_identity,
+        provider_id,
+        account_id,
+        environment,
+        _aggregate_id,
+    ) = DurableCorporateActionEvidenceStore._composition(evidence_store)
+
+    local_ids = tuple(
+        sorted(
+            _corporate_action_reconciliation_id(
+                DurableCorporateActionEvidenceStore._payload(event)
+            )
+            for event in DurableCorporateActionEvidenceStore._events(
+                evidence_store
+            )
+        )
+    )
+    if len(local_ids) != len(set(local_ids)):
+        raise CorporateActionEvidenceConflict(
+            "durable corporate-action reconciliation identities are not unique"
+        )
+
+    activities_by_id: dict[str, ProviderActivityEvidence] = {}
+    for action in provider_actions:
+        if type(action) is not AuthoritativeCorporateAction:
+            raise TypeError(
+                "provider_actions must contain exact AuthoritativeCorporateAction"
+            )
+        projection = authoritative_corporate_action_projection(action)
+        if (
+            projection["provider_id"] != provider_id
+            or projection["account_id"] != account_id
+            or projection["environment"] != environment
+        ):
+            raise CorporateActionEvidenceConflict(
+                "provider corporate-action reconciliation scope mismatch"
+            )
+        if provider_id == "BYBIT":
+            raise CorporateActionEvidenceConflict(
+                "BYBIT corporate-action reconciliation requires explicit "
+                "provider_environment authority"
+            )
+
+        activity_id = _corporate_action_reconciliation_id(projection)
+        payload = projection["payload"]
+        if not isinstance(payload, Mapping):
+            raise CorporateActionEvidenceConflict(
+                "provider corporate-action payload projection is invalid"
+            )
+        currency = payload.get("currency")
+        if currency is not None and type(currency) is not str:
+            raise CorporateActionEvidenceConflict(
+                "provider corporate-action currency must be exact text"
+            )
+        activity = ProviderActivityEvidence(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            activity_id=activity_id,
+            activity_type=f"CORPORATE_ACTION:{projection['kind']}",
+            origin="EXTERNAL",
+            occurred_at=projection["observed_at"],
+            instrument=projection["instrument_id"],
+            currency=currency,
+        )
+        prior = activities_by_id.get(activity_id)
+        if prior is not None and prior != activity:
+            raise CorporateActionEvidenceConflict(
+                "provider corporate-action reconciliation identity conflicts"
+            )
+        activities_by_id[activity_id] = activity
+
+    return (
+        local_ids,
+        tuple(
+            activities_by_id[key]
+            for key in sorted(activities_by_id)
+        ),
     )
 
 

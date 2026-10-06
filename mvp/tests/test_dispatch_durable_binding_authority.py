@@ -2779,6 +2779,63 @@ class DurableSubmissionBindingAuthorityTests(unittest.TestCase):
                 ["x", "y"],
             )
 
+    def test_post_send_legacy_response_rejects_polymorphic_json_without_callbacks(self):
+        class TrapDict(dict):
+            callbacks = 0
+
+            def items(self):
+                type(self).callbacks += 1
+                raise AssertionError("provider response items executed")
+
+            def __iter__(self):
+                type(self).callbacks += 1
+                raise AssertionError("provider response iteration executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            def transport(_client_order_id, _request, guard):
+                guard()
+                return {"provider": TrapDict({"accepted": True})}
+
+            result = dispatcher.dispatch(
+                attempt_id="post-send-response-callback-a1",
+                intent_id="intent-1",
+                intent_hash="sha256:" + "1" * 64,
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-10-06T14:00:00Z",
+                authority_check=lambda *_args: (True, "allowed"),
+                transport_send=transport,
+            )
+
+            self.assertEqual(TrapDict.callbacks, 0)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(result.reason, "sent_response_persistence_failed")
+            events = JournalStore.load_events(
+                store,
+                "submission_attempt",
+                dispatcher._aggregate_id("post-send-response-callback-a1"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionSending",
+                    "SubmissionUnknown",
+                ],
+            )
+            self.assertEqual(
+                events[-1]["payload"]["reason"],
+                "sent_response_persistence_failed:TypeError",
+            )
+
     def test_dispatch_rejects_polymorphic_timestamp_before_timestamp_methods_execute(self):
         class TrapTimestamp(str):
             def strip(self, *args, **kwargs):

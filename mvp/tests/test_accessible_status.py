@@ -238,5 +238,42 @@ class AccessibleStatusTests(unittest.TestCase):
         self.assertNotIn("\t", text)
 
 
+    def test_accessible_cli_returns_failure_for_unknown_state(self):
+        output = io.StringIO()
+        canonical = {
+            "status": {"status": "future_state"},
+            "economic_report": None,
+        }
+        with patch(
+            "mvp.autotrade_mvp.cli._read_canonical_state",
+            return_value=canonical,
+        ):
+            with patch("sys.stdout", output):
+                self.assertEqual(
+                    main(["--state-dir", "unused", "--accessible-status"]),
+                    2,
+                )
+        text = output.getvalue()
+        self.assertIn("System state: Corrupt or unreadable state", text)
+        self.assertIn("Economic edge: unproven", text)
+
+    def test_accessible_cli_keeps_known_nonerror_state_successful(self):
+        output = io.StringIO()
+        canonical = {
+            "status": {"status": "not_started"},
+            "economic_report": None,
+        }
+        with patch(
+            "mvp.autotrade_mvp.cli._read_canonical_state",
+            return_value=canonical,
+        ):
+            with patch("sys.stdout", output):
+                self.assertEqual(
+                    main(["--state-dir", "unused", "--accessible-status"]),
+                    0,
+                )
+        self.assertIn("System state: Not started", output.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

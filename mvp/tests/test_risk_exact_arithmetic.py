@@ -1143,6 +1143,217 @@ class RiskExactArithmeticTests(unittest.TestCase):
                 outcomes.add(risk_decision_fingerprint(decision))
         self.assertEqual(len(outcomes), 1)
 
+    def test_liquidation_verifier_rejects_evidence_subclass_before_reads(self):
+        base = LiquidationHeadroomEvidence(
+            headroom="10",
+            state_version=7,
+            provider_id="PROVIDER",
+            account_id="ACCOUNT",
+            environment="PAPER",
+            margin_mode="CROSS",
+            risk_tier_version="v1",
+            observed_at=datetime(2026, 10, 3, 20, 0, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 10, 3, 20, 1, tzinfo=timezone.utc),
+            artifact_id="00000000-0000-0000-0000-000000000001",
+            sha256="sha256:" + "1" * 64,
+        )
+        touched = []
+
+        class HostileEvidence(LiquidationHeadroomEvidence):
+            def __getattribute__(self, name):
+                if name in {"scope", "state_version", "observed_at", "expires_at", "artifact_id"}:
+                    touched.append(name)
+                    raise AssertionError("hostile liquidation evidence read")
+                return object.__getattribute__(self, name)
+
+        hostile = object.__new__(HostileEvidence)
+        for name, value in vars(base).items():
+            object.__setattr__(hostile, name, value)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            verified = risk_module._verify_liquidation_headroom_evidence(
+                evidence=hostile,
+                expected_scope=base.scope,
+                expected_state_version=7,
+                decision_time=datetime(2026, 10, 3, 20, 0, 30, tzinfo=timezone.utc),
+                evidence_store=store,
+            )
+
+        self.assertFalse(verified)
+        self.assertEqual(touched, [])
+
+
+    def test_large_factor_cancellation_retains_tiny_exact_residual(self):
+        large = "1234567890123456789012345678"
+        intent = RiskIntent.create(
+            symbol="TINY",
+            side="BUY",
+            quantity="0.1",
+            price="1",
+            expected_state_version=7,
+        )
+        configured = policy(max_abs_factor_exposure="0.05")
+        outcomes = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            RiskContext.create(
+                                state_version=7,
+                                equity="9999999999999999999999999999",
+                                positions={
+                                    "LONG": large,
+                                    "SHORT": "-" + large,
+                                },
+                                marks={
+                                    "LONG": "1",
+                                    "SHORT": "1",
+                                    "TINY": "1",
+                                },
+                                reserved_position_delta={},
+                                daily_pnl="0",
+                                drawdown_fraction="0",
+                                market_data_age_seconds="0",
+                                fx_age_seconds={},
+                                margin_headroom="1",
+                                capability_allowed=True,
+                                borrow_available=True,
+                                stress_scenarios=(
+                                    {"LONG": "0", "SHORT": "0", "TINY": "0"},
+                                ),
+                                factor_loadings={
+                                    "LONG": {"SYSTEMATIC": "1"},
+                                    "SHORT": {"SYSTEMATIC": "1"},
+                                    "TINY": {"SYSTEMATIC": "1"},
+                                },
+                                instrument_types={
+                                    "LONG": "GENERIC",
+                                    "SHORT": "GENERIC",
+                                },
+                            ),
+                            configured,
+                        )
+                    factor_rule = next(
+                        item
+                        for item in decision.rules
+                        if item.rule == "factor_exposure"
+                    )
+                    self.assertFalse(factor_rule.passed)
+                    self.assertEqual(factor_rule.observed, "0.1")
+                    self.assertEqual(factor_rule.limit, "0.05")
+                    self.assertFalse(decision.admitted)
+                    outcomes.add(
+                        (
+                            factor_rule.observed,
+                            factor_rule.limit,
+                            decision.input_fingerprint,
+                            risk_decision_fingerprint(decision),
+                        )
+                    )
+        self.assertEqual(len(outcomes), 1)
+
+    def test_protective_reduce_only_is_context_independent_at_hard_limits(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="SELL",
+            quantity="1",
+            price="1",
+            expected_state_version=7,
+            reduce_only=True,
+            action="REDUCE",
+        )
+        configured = policy(
+            max_abs_position="5",
+            max_single_notional="5",
+            max_gross_leverage="0.5",
+            max_net_leverage="0.5",
+            max_stress_loss="5",
+        )
+        outcomes = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        decision = evaluate_risk(
+                            intent,
+                            RiskContext.create(
+                                state_version=7,
+                                equity="10",
+                                positions={"ABC": "10"},
+                                marks={"ABC": "1"},
+                                reserved_position_delta={},
+                                daily_pnl="0",
+                                drawdown_fraction="0",
+                                market_data_age_seconds="0",
+                                fx_age_seconds={},
+                                margin_headroom="1",
+                                capability_allowed=True,
+                                borrow_available=True,
+                                stress_scenarios=({"ABC": "-1"},),
+                                instrument_types={"ABC": "GENERIC"},
+                            ),
+                            configured,
+                        )
+                    rules = {item.rule: item for item in decision.rules}
+                    self.assertTrue(decision.admitted)
+                    self.assertEqual(decision.resulting_position, Decimal("9"))
+                    for rule_name in (
+                        "position_limit",
+                        "single_notional",
+                        "gross_leverage",
+                        "net_leverage",
+                        "stress_loss",
+                        "reduce_only",
+                    ):
+                        self.assertTrue(rules[rule_name].passed, rule_name)
+                    outcomes.add(
+                        (
+                            decision.input_fingerprint,
+                            risk_decision_fingerprint(decision),
+                            tuple(
+                                (item.rule, item.passed, item.observed, item.limit)
+                                for item in decision.rules
+                            ),
+                        )
+                    )
+        self.assertEqual(len(outcomes), 1)
+
+    def test_exact_product_resource_boundary_is_context_independent(self):
+        at_limit = Decimal("9" * 128)
+        over_limit = Decimal("9" * 129)
+        expected = Decimal(str(int("9" * 128) * int("9" * 128)))
+        admitted = set()
+        failures = set()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        product = risk_module._risk_product(at_limit, at_limit)
+                        self.assertEqual(product, expected)
+                        admitted.add(risk_module._canonical_decimal_text(product))
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "risk product exceeds the exact arithmetic resource envelope",
+                        ) as captured:
+                            risk_module._risk_product(over_limit, at_limit)
+                        failures.add(str(captured.exception))
+        self.assertEqual(len(admitted), 1)
+        self.assertEqual(len(next(iter(admitted))), 256)
+        self.assertEqual(
+            failures,
+            {"risk product exceeds the exact arithmetic resource envelope"},
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

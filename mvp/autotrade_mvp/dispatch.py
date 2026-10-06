@@ -2351,6 +2351,10 @@ class GuardedDispatcher:
         )
         dispatch_authority_changed_error = _DispatchAuthorityChanged
         dispatch_blocked_error = DispatchBlocked
+        dispatch_exception_error = Exception
+        dispatch_value_error = ValueError
+        dispatch_type_error = TypeError
+        dispatch_runtime_error = RuntimeError
         # External callbacks run inside dispatch.  Capture the exact module,
         # builtin, class and helper execution surface before the first callback;
         # later validation must not itself dispatch through caller-rebound
@@ -2394,6 +2398,11 @@ class GuardedDispatcher:
             "max",
             "range",
             "enumerate",
+            "Exception",
+            "ValueError",
+            "TypeError",
+            "RuntimeError",
+            "PermissionError",
         )
         dispatch_builtin_overrides = authority_tuple(
             (
@@ -2437,6 +2446,7 @@ class GuardedDispatcher:
             "json",
             "DispatchBlocked",
             "_DispatchAuthorityChanged",
+            "DispatchOutcome",
         )
         helper_authority = []
         for helper_name in critical_helper_names:
@@ -2829,7 +2839,7 @@ class GuardedDispatcher:
                 self.owner_epoch,
                 self.prepared_lease_seconds,
             ) = expected
-            raise _DispatchAuthorityChanged(
+            raise dispatch_authority_changed_error(
                 "dispatcher authority changed during dispatch"
             )
 
@@ -2840,7 +2850,7 @@ class GuardedDispatcher:
             (provider, "provider"),
         ):
             if type(value) is not str or not value.strip():
-                raise ValueError(f"{name} is required")
+                raise dispatch_value_error(f"{name} is required")
         # Stable client-order identity already treats surrounding whitespace as
         # non-semantic.  Freeze the same canonical text into the durable
         # attempt so restart/provider-observation authority cannot disagree
@@ -2849,7 +2859,7 @@ class GuardedDispatcher:
         intent_id = intent_id.strip()
         provider = provider.strip()
         if type(request) is not dict:
-            raise TypeError("request must be an exact dict")
+            raise dispatch_type_error("request must be an exact dict")
         _instant(now)
         request_dict = _detach_submission_json(request)
         request_canonical = canonical_json(request_dict)
@@ -2859,7 +2869,7 @@ class GuardedDispatcher:
             scope_dict: dict[str, Any] = {}
         else:
             if type(submission_scope) is not dict:
-                raise TypeError("submission_scope must be an exact dict")
+                raise dispatch_type_error("submission_scope must be an exact dict")
             scope_dict = _detach_submission_json(submission_scope)
         scope_canonical = canonical_json(scope_dict)
         submission_scope_hash = (
@@ -2900,7 +2910,7 @@ class GuardedDispatcher:
                 prepared.get(key) != value
                 for key, value in expected_prepared.items()
             ):
-                raise ValueError("attempt_id conflicts with existing submission content")
+                raise dispatch_value_error("attempt_id conflicts with existing submission content")
             return self._recover_existing(
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
@@ -2940,7 +2950,7 @@ class GuardedDispatcher:
 
         try:
             authority_result = authority_check(intent_hash, now)
-        except Exception as error:
+        except dispatch_exception_error as error:
             require_dispatch_call_authority()
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
@@ -2989,7 +2999,7 @@ class GuardedDispatcher:
         def final_guard() -> None:
             nonlocal guard_called, barrier_passed, barrier_now
             if guard_called:
-                raise RuntimeError("final send guard may be consumed only once")
+                raise dispatch_runtime_error("final send guard may be consumed only once")
             guard_called = True
             require_dispatch_call_authority()
             # request_frozen is a recursively immutable canonical JSON snapshot.
@@ -2999,7 +3009,7 @@ class GuardedDispatcher:
                 try:
                     barrier_now = final_barrier_clock()
                     parsed_barrier_now = _instant(barrier_now)
-                except Exception as error:
+                except dispatch_exception_error as error:
                     require_dispatch_call_authority()
                     barrier_now = now
                     reason = (
@@ -3016,7 +3026,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked(reason) from error
+                    raise dispatch_blocked_error(reason) from error
                 require_dispatch_call_authority()
                 if parsed_barrier_now < _instant(now):
                     barrier_now = now
@@ -3030,7 +3040,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked("final_barrier_clock_moved_backwards")
+                    raise dispatch_blocked_error("final_barrier_clock_moved_backwards")
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -3045,14 +3055,14 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             if sender_check is not None:
                 try:
                     sender_check(self.owner_token, self.owner_epoch)
                     require_dispatch_call_authority()
                 except dispatch_authority_changed_error:
                     raise
-                except Exception as error:
+                except dispatch_exception_error as error:
                     require_dispatch_call_authority()
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -3067,12 +3077,12 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                    raise DispatchBlocked(barrier_reason) from error
+                    raise dispatch_blocked_error(barrier_reason) from error
             try:
                 authority_result = authority_check(intent_hash, barrier_now)
             except dispatch_authority_changed_error:
                 raise
-            except Exception as error:
+            except dispatch_exception_error as error:
                 require_dispatch_call_authority()
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"
@@ -3085,7 +3095,7 @@ class GuardedDispatcher:
                     payload={"client_order_id": client_order_id, "reason": barrier_reason},
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason) from error
+                raise dispatch_blocked_error(barrier_reason) from error
             require_dispatch_call_authority()
             allowed_now, barrier_reason = _validated_authority_result(authority_result)
             if not allowed_now:
@@ -3096,7 +3106,7 @@ class GuardedDispatcher:
                     payload={"client_order_id": client_order_id, "reason": barrier_reason},
                     now=barrier_now,
                 )
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             durable_before_send = self._events(attempt_id)
             if (
                 not durable_before_send
@@ -3108,7 +3118,7 @@ class GuardedDispatcher:
                     expected_prepared=prepared_payload,
                 )
             ):
-                raise DispatchBlocked(
+                raise dispatch_blocked_error(
                     "submission_changed_during_final_send_validation"
                 )
             durable_prepared_payload = durable_before_send[0].get("payload")
@@ -3116,7 +3126,7 @@ class GuardedDispatcher:
                 type(durable_prepared_payload) is not dict
                 or type(durable_prepared_payload.get("prepared_at")) is not str
             ):
-                raise DispatchBlocked("submission_prepared_chronology_invalid")
+                raise dispatch_blocked_error("submission_prepared_chronology_invalid")
             lease_state = _prepared_lease_state(
                 prepared_at=durable_prepared_payload["prepared_at"],
                 now=barrier_now,
@@ -3141,11 +3151,11 @@ class GuardedDispatcher:
                         },
                         now=barrier_now if lease_state == "EXPIRED" else now,
                     )
-                except ValueError:
+                except dispatch_value_error:
                     # Another owner may have won the same version-2 race. The
                     # outer DispatchBlocked handler re-reads that durable truth.
                     pass
-                raise DispatchBlocked(barrier_reason)
+                raise dispatch_blocked_error(barrier_reason)
             try:
                 self._append(
                     attempt_id=attempt_id,
@@ -3159,7 +3169,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-            except ValueError as error:
+            except dispatch_value_error as error:
                 # A concurrent recovery may have terminalized the Prepared
                 # attempt as zero-wire BLOCKED after its lease expired. Never
                 # let a stale final_guard cross that durable fence.
@@ -3176,7 +3186,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                raise DispatchBlocked(
+                raise dispatch_blocked_error(
                     "submission_changed_during_final_send_validation"
                 ) from error
             barrier_passed = True
@@ -3237,7 +3247,7 @@ class GuardedDispatcher:
                         expected_prepared=expected_prepared,
                     )
             return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
-        except Exception as error:
+        except dispatch_exception_error as error:
             try:
                 require_dispatch_call_authority()
             except dispatch_authority_changed_error:
@@ -3277,7 +3287,7 @@ class GuardedDispatcher:
                         },
                         now=barrier_now,
                     )
-                except ValueError:
+                except dispatch_value_error:
                     current = self._events(attempt_id)
                     return self._terminal_outcome_from_existing_history(
                         events=current,
@@ -3426,7 +3436,7 @@ class GuardedDispatcher:
                 ExactJsonTransportResponse is not exact_response_type
                 or _snapshot_exact_transport_response is not exact_response_snapshot
             ):
-                raise ValueError(
+                raise dispatch_value_error(
                     "exact transport response authority changed after send"
                 )
             if response_type_builtin(response) is exact_response_type:
@@ -3460,7 +3470,7 @@ class GuardedDispatcher:
             elif response_isinstance_builtin(response, exact_response_type):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
-                raise TypeError("exact provider response subtype is forbidden")
+                raise dispatch_type_error("exact provider response subtype is forbidden")
             else:
                 # Legacy provider wrappers may still return decoded JSON rather
                 # than ExactJsonTransportResponse. Detach that graph before
@@ -3483,7 +3493,7 @@ class GuardedDispatcher:
                 payload=sent_payload,
                 now=barrier_now,
             )
-        except Exception as persistence_error:
+        except dispatch_exception_error as persistence_error:
             # The outbound request has already crossed the final barrier.
             # Never make this state safe to retry merely because the provider
             # response could not be journaled.
@@ -3501,7 +3511,7 @@ class GuardedDispatcher:
                     },
                     now=barrier_now,
                 )
-            except Exception:
+            except dispatch_exception_error:
                 current = self._events(attempt_id)
                 if current and current[-1]["event_type"] in {
                     "SubmissionSent",

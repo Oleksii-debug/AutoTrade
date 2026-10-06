@@ -1164,7 +1164,11 @@ class DurableOptionLifecycleAuthority:
             "observed_at": _utc_text(observation.observed_at),
             "provider_revision": observation.provider_revision,
             "raw_evidence_digest": observation.raw_evidence_digest,
-            "provider_evidence_ref": provider_evidence.evidence_ref,
+            "provider_evidence_ref": (
+                qualified_provider_evidence.evidence_ref
+                if qualified_provider_evidence is not None
+                else provider_evidence.evidence_ref
+            ),
             "provider_evidence_digest": provider_evidence_digest,
             "provider_evidence": provider_evidence_payload,
             "observation_digest": observation_digest,

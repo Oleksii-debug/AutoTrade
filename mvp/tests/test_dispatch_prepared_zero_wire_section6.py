@@ -328,6 +328,60 @@ class PreparedZeroWireSection6Tests(unittest.TestCase):
                 [event["event_type"] for event in events],
             )
 
+    def test_sending_recovery_clock_cannot_move_terminal_before_send_barrier(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = self._dispatcher(store, owner="original-owner")
+            recovery = self._dispatcher(store, owner="recovery-owner")
+
+            def crash_after_guard(_client_order_id, _request, final_guard):
+                final_guard()
+                raise _ProcessDeath("crash-after-final-send-guard")
+
+            with self.assertRaisesRegex(
+                _ProcessDeath,
+                "crash-after-final-send-guard",
+            ):
+                original.dispatch(
+                    attempt_id="section6-sending-clock",
+                    intent_id="section6-sending-clock-intent",
+                    intent_hash="section6-sending-clock-hash",
+                    provider="simulated",
+                    request={"quantity": "1"},
+                    now="2026-10-06T10:00:00Z",
+                    authority_check=self.authority,
+                    transport_send=crash_after_guard,
+                )
+
+            recovered = recovery.dispatch(
+                attempt_id="section6-sending-clock",
+                intent_id="section6-sending-clock-intent",
+                intent_hash="section6-sending-clock-hash",
+                provider="simulated",
+                request={"quantity": "1"},
+                now="2026-10-06T09:59:00Z",
+                authority_check=lambda *_args: self.fail(
+                    "Sending recovery repeated authority"
+                ),
+                transport_send=lambda *_args: self.fail(
+                    "Sending recovery reached provider transport"
+                ),
+            )
+            self.assertEqual(recovered.status, "UNKNOWN")
+            events = original._events("section6-sending-clock")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertEqual(
+                events[2]["committed_at"],
+                events[1]["committed_at"],
+            )
+            self.assertGreaterEqual(
+                events[2]["journal_sequence"],
+                events[1]["journal_sequence"],
+            )
+
     def test_concurrent_sending_recoveries_converge_on_one_unknown_terminal(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

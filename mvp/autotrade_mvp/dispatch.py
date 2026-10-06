@@ -704,6 +704,15 @@ class GuardedDispatcher:
         if last["event_type"] in {"SubmissionSent", "SubmissionBlocked", "SubmissionUnknown"}:
             return self._outcome_from_terminal(last, client_order_id)
         if last["event_type"] == "SubmissionSending":
+            # Recovery time is caller/process input, but the durable Sending row
+            # is already a causal lower bound. Never let a restarted or skewed
+            # clock place terminal UNKNOWN chronologically before the send
+            # barrier it is resolving.
+            sending_at = _instant(last["committed_at"])
+            recovery_at = _instant(now)
+            terminal_at = max(sending_at, recovery_at).isoformat().replace(
+                "+00:00", "Z"
+            )
             try:
                 self._append(
                     attempt_id=attempt_id,
@@ -713,7 +722,7 @@ class GuardedDispatcher:
                         "client_order_id": client_order_id,
                         "reason": "recovered_after_send_barrier_without_terminal_result",
                     },
-                    now=now,
+                    now=terminal_at,
                 )
             except ValueError:
                 # Multiple recovery owners may observe the same Sending cut.

@@ -12,6 +12,7 @@ from decimal import Decimal, Inexact, Rounded, ROUND_CEILING, localcontext
 from fractions import Fraction
 from hashlib import sha256
 import json
+import weakref
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -153,9 +154,12 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str:
         raise ValueError(f"{name} is required")
-    return value.strip()
+    normalized = str.strip(value)
+    if not normalized:
+        raise ValueError(f"{name} is required")
+    return normalized
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -1659,49 +1663,359 @@ _ALLOWED_ALLOCATION_EVIDENCE_KINDS = frozenset(
 )
 
 
-def _canonical_evidence_value(value):
-    """Detach caller evidence without executing polymorphic container/scalar code."""
-    value_type = type(value)
-    if value_type is Decimal:
-        return str(value)
-    if value is None or value_type in (bool, str, int):
-        return value
-    if value_type is float:
-        raise TypeError("allocation evidence cannot contain binary floating-point values")
-    if value_type is dict:
-        normalized = {}
-        for raw_key, raw_value in value.items():
-            if type(raw_key) is not str:
-                raise TypeError("allocation evidence payload keys must be exact strings")
-            key = _text(raw_key, name="allocation evidence payload key")
-            if key in normalized:
-                raise ValueError("allocation evidence payload keys must be unique")
-            normalized[key] = _canonical_evidence_value(raw_value)
-        return normalized
-    if value_type in (list, tuple):
-        return [_canonical_evidence_value(item) for item in value]
-    raise TypeError(f"unsupported allocation evidence value type: {value_type.__name__}")
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
 
 
-def _freeze_evidence_value(value):
-    value_type = type(value)
-    if value_type is dict:
-        return MappingProxyType(
-            {key: _freeze_evidence_value(item) for key, item in value.items()}
+def _make_allocation_payload_sealer(
+    _mapping_proxy_type=MappingProxyType,
+    _weakref_ref=weakref.ref,
+    _json_dumps=json.dumps,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+    _json_encoder=json.JSONEncoder,
+    _json_encoder_bases=json.JSONEncoder.__bases__,
+    _json_encoder_init=json.JSONEncoder.__init__,
+    _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
+    _json_encoder_default=json.JSONEncoder.default,
+    _json_encoder_default_code=getattr(json.JSONEncoder.default, "__code__", None),
+    _json_encoder_encode=json.JSONEncoder.encode,
+    _json_encoder_encode_code=getattr(json.JSONEncoder.encode, "__code__", None),
+    _json_encoder_iterencode=json.JSONEncoder.iterencode,
+    _json_encoder_iterencode_code=getattr(json.JSONEncoder.iterencode, "__code__", None),
+    _json_encoder_globals=getattr(json.JSONEncoder.iterencode, "__globals__", None),
+    _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
+        "encode_basestring"
+    ),
+    _json_infinity=json.JSONEncoder.iterencode.__globals__.get("INFINITY"),
+    _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
+        "c_make_encoder"
+    ),
+    _json_make_iterencode=json.JSONEncoder.iterencode.__globals__.get(
+        "_make_iterencode"
+    ),
+    _json_make_iterencode_code=getattr(
+        json.JSONEncoder.iterencode.__globals__.get("_make_iterencode"),
+        "__code__",
+        None,
+    ),
+):
+    """Create closure-private provenance for canonical frozen mapping nodes."""
+
+    registry: dict[int, tuple[weakref.ReferenceType, object, str]] = {}
+
+    class SealedAllocationPayload:
+        # The owner is only a liveness anchor.  In particular it deliberately
+        # exposes no proxy property: the owner type is reachable through an
+        # evidence object's private owner tuple, and consulting a mutable class
+        # descriptor here would execute caller code inside provenance lookup.
+        __slots__ = ("__weakref__",)
+
+        def __setattr__(self, name, value) -> None:
+            raise AttributeError(
+                "sealed allocation payload provenance is read-only"
+            )
+
+    def lookup(value):
+        if type(value) is not _mapping_proxy_type:
+            return None
+        entry = registry.get(id(value))
+        if entry is None:
+            return None
+        reference, registered_proxy, canonical_json = entry
+        owner = reference()
+        if owner is None or registered_proxy is not value:
+            return None
+        return owner, canonical_json
+
+    def freeze(value):
+        if type(value) is dict:
+            frozen_items = {}
+            owners = []
+            for key, item in dict.items(value):
+                frozen_item, nested_owners = freeze(item)
+                frozen_items[key] = frozen_item
+                owners.extend(nested_owners)
+            proxy = _mapping_proxy_type(frozen_items)
+            encoder_type_dict = type.__getattribute__(_json_encoder, "__dict__")
+            if (
+                getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+                or type(_json_encoder) is not type
+                or type.__getattribute__(_json_encoder, "__bases__") is not _json_encoder_bases
+                or "__new__" in encoder_type_dict
+                or "__getattribute__" in encoder_type_dict
+                or "__getattr__" in encoder_type_dict
+                or "__setattr__" in encoder_type_dict
+                or encoder_type_dict.get("__init__") is not _json_encoder_init
+                or getattr(_json_encoder_init, "__code__", None)
+                is not _json_encoder_init_code
+                or encoder_type_dict.get("default") is not _json_encoder_default
+                or getattr(_json_encoder_default, "__code__", None)
+                is not _json_encoder_default_code
+                or encoder_type_dict.get("encode") is not _json_encoder_encode
+                or getattr(_json_encoder_encode, "__code__", None)
+                is not _json_encoder_encode_code
+                or encoder_type_dict.get("iterencode") is not _json_encoder_iterencode
+                or getattr(_json_encoder_iterencode, "__code__", None)
+                is not _json_encoder_iterencode_code
+                or getattr(_json_encoder_iterencode, "__globals__", None)
+                is not _json_encoder_globals
+                or type(_json_encoder_globals) is not dict
+                or dict.get(_json_encoder_globals, "encode_basestring")
+                is not _json_encode_basestring
+                or dict.get(_json_encoder_globals, "INFINITY") is not _json_infinity
+                or dict.get(_json_encoder_globals, "c_make_encoder")
+                is not _json_c_make_encoder
+                or dict.get(_json_encoder_globals, "_make_iterencode")
+                is not _json_make_iterencode
+                or getattr(_json_make_iterencode, "__code__", None)
+                is not _json_make_iterencode_code
+            ):
+                raise ValueError(
+                    "allocation evidence serializer authority changed after binding"
+                )
+            canonical_json = _json_dumps(
+                value,
+                skipkeys=False,
+                ensure_ascii=False,
+                check_circular=True,
+                allow_nan=False,
+                cls=_json_encoder,
+                indent=None,
+                separators=(",", ":"),
+                default=None,
+                sort_keys=True,
+            )
+            owner = SealedAllocationPayload()
+            key = id(proxy)
+
+            def cleanup(reference, *, key=key) -> None:
+                entry = registry.get(key)
+                if entry is not None and entry[0] is reference:
+                    registry.pop(key, None)
+
+            # Keep the exact mappingproxy itself in the closure entry while
+            # the weak owner is alive.  This makes the identity check a plain
+            # built-in `is` comparison and prevents reachable owner-class
+            # descriptors from participating in trust use.
+            registry[key] = (_weakref_ref(owner, cleanup), proxy, canonical_json)
+            owners.append(owner)
+            return proxy, tuple(owners)
+        if type(value) is list:
+            frozen_items = []
+            owners = []
+            for item in value:
+                frozen_item, nested_owners = freeze(item)
+                frozen_items.append(frozen_item)
+                owners.extend(nested_owners)
+            return tuple(frozen_items), tuple(owners)
+        return value, ()
+
+    return lookup, freeze
+
+
+_registered_allocation_payload, _freeze_evidence_value = (
+    _make_allocation_payload_sealer()
+)
+del _make_allocation_payload_sealer
+
+
+def _canonical_evidence_value(
+    value,
+    _sealed_lookup=_registered_allocation_payload,
+    _mapping_proxy_type=MappingProxyType,
+    _decimal_type=Decimal,
+    _json_decoder=json.JSONDecoder,
+    _json_decoder_bases=json.JSONDecoder.__bases__,
+    _json_default_decoder=json.loads.__globals__.get("_default_decoder"),
+    _json_decoder_decode=json.JSONDecoder.decode,
+    _json_decoder_decode_code=getattr(json.JSONDecoder.decode, "__code__", None),
+    _json_decoder_decode_defaults=json.JSONDecoder.decode.__defaults__,
+    _json_decoder_raw_decode=json.JSONDecoder.raw_decode,
+    _json_decoder_raw_decode_code=getattr(
+        json.JSONDecoder.raw_decode,
+        "__code__",
+        None,
+    ),
+    _json_decoder_scan_once=getattr(
+        json.loads.__globals__.get("_default_decoder"),
+        "scan_once",
+        None,
+    ),
+):
+    """Reduce untrusted evidence to exact built-in JSON-domain values.
+
+    Mapping provenance is checked before any mapping operation.  Recursive
+    normalization stays inside this invocation so post-import rebinding of the
+    module helper cannot retarget already-issued evidence.
+    """
+
+    def canonicalize(item):
+        if type(item) is _decimal_type:
+            return str(item)
+        if item is None or type(item) is bool:
+            return item
+        if type(item) is str or type(item) is int:
+            return item
+        if type(item) is float:
+            raise TypeError(
+                "allocation evidence cannot contain binary floating-point values"
+            )
+        if type(item) is dict:
+            normalized = {}
+            for raw_key, raw_value in dict.items(item):
+                if type(raw_key) is not str:
+                    raise TypeError(
+                        "allocation evidence payload keys must be exact strings"
+                    )
+                key = str.strip(raw_key)
+                if not key:
+                    raise ValueError(
+                        "allocation evidence payload keys must be non-empty"
+                    )
+                if key in normalized:
+                    raise ValueError(
+                        "allocation evidence payload keys must be unique"
+                    )
+                normalized[key] = canonicalize(raw_value)
+            return normalized
+        if type(item) is _mapping_proxy_type:
+            sealed = _sealed_lookup(item)
+            if sealed is None:
+                raise TypeError(
+                    "allocation evidence mappingproxy lacks sealed canonical provenance"
+                )
+            _, canonical_json = sealed
+            decoder_type_dict = type.__getattribute__(_json_decoder, "__dict__")
+            default_decoder_dict = object.__getattribute__(
+                _json_default_decoder,
+                "__dict__",
+            )
+            if (
+                type(_json_default_decoder) is not _json_decoder
+                or type(_json_decoder) is not type
+                or type.__getattribute__(_json_decoder, "__bases__") is not _json_decoder_bases
+                or "__getattribute__" in decoder_type_dict
+                or "__getattr__" in decoder_type_dict
+                or "decode" in default_decoder_dict
+                or "raw_decode" in default_decoder_dict
+                or dict.get(default_decoder_dict, "scan_once")
+                is not _json_decoder_scan_once
+                or decoder_type_dict.get("decode") is not _json_decoder_decode
+                or getattr(_json_decoder_decode, "__code__", None)
+                is not _json_decoder_decode_code
+                or getattr(_json_decoder_decode, "__defaults__", None)
+                is not _json_decoder_decode_defaults
+                or decoder_type_dict.get("raw_decode")
+                is not _json_decoder_raw_decode
+                or getattr(_json_decoder_raw_decode, "__code__", None)
+                is not _json_decoder_raw_decode_code
+            ):
+                raise ValueError(
+                    "allocation evidence decoder authority changed after binding"
+                )
+            decoded = _json_decoder_decode(
+                _json_default_decoder,
+                canonical_json,
+            )
+            if type(decoded) is not dict:
+                raise RuntimeError("sealed allocation payload provenance is invalid")
+            return decoded
+        if type(item) is list or type(item) is tuple:
+            return [canonicalize(nested) for nested in item]
+        raise TypeError(
+            f"unsupported allocation evidence value type: {type(item).__name__}"
         )
-    if value_type is list:
-        return tuple(_freeze_evidence_value(item) for item in value)
-    return value
 
+    return canonicalize(value)
 
-def _canonical_evidence_json(value) -> str:
-    return json.dumps(
-        _canonical_evidence_value(value),
-        sort_keys=True,
-        separators=(",", ":"),
+def _canonical_evidence_json(
+    value,
+    _json_dumps=json.dumps,
+    _canonicalize=_canonical_evidence_value,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+    _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
+    _json_encoder=json.JSONEncoder,
+    _json_encoder_bases=json.JSONEncoder.__bases__,
+    _json_encoder_init=json.JSONEncoder.__init__,
+    _json_encoder_init_code=getattr(json.JSONEncoder.__init__, "__code__", None),
+    _json_encoder_default=json.JSONEncoder.default,
+    _json_encoder_default_code=getattr(json.JSONEncoder.default, "__code__", None),
+    _json_encoder_encode=json.JSONEncoder.encode,
+    _json_encoder_encode_code=getattr(json.JSONEncoder.encode, "__code__", None),
+    _json_encoder_iterencode=json.JSONEncoder.iterencode,
+    _json_encoder_iterencode_code=getattr(json.JSONEncoder.iterencode, "__code__", None),
+    _json_encoder_globals=getattr(json.JSONEncoder.iterencode, "__globals__", None),
+    _json_encode_basestring=json.JSONEncoder.iterencode.__globals__.get(
+        "encode_basestring"
+    ),
+    _json_infinity=json.JSONEncoder.iterencode.__globals__.get("INFINITY"),
+    _json_c_make_encoder=json.JSONEncoder.iterencode.__globals__.get(
+        "c_make_encoder"
+    ),
+    _json_make_iterencode=json.JSONEncoder.iterencode.__globals__.get(
+        "_make_iterencode"
+    ),
+    _json_make_iterencode_code=getattr(
+        json.JSONEncoder.iterencode.__globals__.get("_make_iterencode"),
+        "__code__",
+        None,
+    ),
+) -> str:
+    encoder_type_dict = type.__getattribute__(_json_encoder, "__dict__")
+    if (
+        getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+        or getattr(_canonicalize, "__code__", None) is not _canonicalize_code
+    ):
+        raise ValueError(
+            "allocation evidence canonicalizer executable changed after binding"
+        )
+    if (
+        type(_json_encoder) is not type
+        or type.__getattribute__(_json_encoder, "__bases__") is not _json_encoder_bases
+        or "__new__" in encoder_type_dict
+        or "__getattribute__" in encoder_type_dict
+        or "__getattr__" in encoder_type_dict
+        or "__setattr__" in encoder_type_dict
+        or encoder_type_dict.get("__init__") is not _json_encoder_init
+        or getattr(_json_encoder_init, "__code__", None)
+        is not _json_encoder_init_code
+        or encoder_type_dict.get("default") is not _json_encoder_default
+        or getattr(_json_encoder_default, "__code__", None)
+        is not _json_encoder_default_code
+        or encoder_type_dict.get("encode") is not _json_encoder_encode
+        or getattr(_json_encoder_encode, "__code__", None)
+        is not _json_encoder_encode_code
+        or encoder_type_dict.get("iterencode") is not _json_encoder_iterencode
+        or getattr(_json_encoder_iterencode, "__code__", None)
+        is not _json_encoder_iterencode_code
+        or getattr(_json_encoder_iterencode, "__globals__", None)
+        is not _json_encoder_globals
+        or type(_json_encoder_globals) is not dict
+        or dict.get(_json_encoder_globals, "encode_basestring")
+        is not _json_encode_basestring
+        or dict.get(_json_encoder_globals, "INFINITY") is not _json_infinity
+        or dict.get(_json_encoder_globals, "c_make_encoder")
+        is not _json_c_make_encoder
+        or dict.get(_json_encoder_globals, "_make_iterencode")
+        is not _json_make_iterencode
+        or getattr(_json_make_iterencode, "__code__", None)
+        is not _json_make_iterencode_code
+    ):
+        raise ValueError(
+            "allocation evidence serializer authority changed after binding"
+        )
+    return _json_dumps(
+        _canonicalize(value),
+        skipkeys=False,
         ensure_ascii=False,
+        check_circular=True,
         allow_nan=False,
+        cls=_json_encoder,
+        indent=None,
+        separators=(",", ":"),
+        default=None,
+        sort_keys=True,
     )
+
 
 
 def _allocation_evidence_digest(
@@ -1713,7 +2027,14 @@ def _allocation_evidence_digest(
     observed_at: str,
     valid_until: str,
     payload: Mapping[str, object],
+    _canonical_json=_canonical_evidence_json,
+    _sha256=sha256,
+    _canonical_json_code=getattr(_canonical_evidence_json, "__code__", None),
 ) -> str:
+    if getattr(_canonical_json, "__code__", None) is not _canonical_json_code:
+        raise ValueError(
+            "allocation evidence digest canonicalizer executable changed after binding"
+        )
     body = {
         "evidence_id": evidence_id,
         "kind": kind,
@@ -1723,7 +2044,7 @@ def _allocation_evidence_digest(
         "valid_until": valid_until,
         "payload": payload,
     }
-    return sha256(_canonical_evidence_json(body).encode("utf-8")).hexdigest()
+    return _sha256(_canonical_json(body).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1743,7 +2064,11 @@ class ImmutableAllocationEvidence:
     valid_until: str
     payload: Mapping[str, object]
     digest: str
-    _sealed_payload_json: str = field(init=False, repr=False, compare=False)
+    _payload_owners: tuple[object, ...] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         evidence_id = _text(self.evidence_id, name="allocation evidence_id")
@@ -1764,11 +2089,9 @@ class ImmutableAllocationEvidence:
         valid_until = _instant(self.valid_until, name="allocation evidence valid_until")
         if valid_until < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
-        if type(self.payload) is not dict or not self.payload:
-            raise ValueError("allocation evidence payload must be a non-empty exact dict")
         normalized_payload = _canonical_evidence_value(self.payload)
-        if type(normalized_payload) is not dict:
-            raise TypeError("allocation evidence payload must normalize to an object")
+        if type(normalized_payload) is not dict or not normalized_payload:
+            raise ValueError("allocation evidence payload must be a non-empty mapping")
         digest = _text(self.digest, name="allocation evidence digest")
         if (
             len(digest) != 64
@@ -1795,40 +2118,10 @@ class ImmutableAllocationEvidence:
         object.__setattr__(self, "schema_version", schema_version)
         object.__setattr__(self, "observed_at", normalized_observed)
         object.__setattr__(self, "valid_until", normalized_valid_until)
-        sealed_payload_json = json.dumps(
-            normalized_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        object.__setattr__(self, "payload", _freeze_evidence_value(normalized_payload))
-        object.__setattr__(self, "_sealed_payload_json", sealed_payload_json)
+        frozen_payload, payload_owners = _freeze_evidence_value(normalized_payload)
+        object.__setattr__(self, "payload", frozen_payload)
+        object.__setattr__(self, "_payload_owners", payload_owners)
         object.__setattr__(self, "digest", digest)
-
-    def canonical_payload_snapshot(self) -> dict[str, object]:
-        """Return one detached exact-builtins payload proven by this evidence digest."""
-        if type(self._sealed_payload_json) is not str:
-            raise TypeError("allocation evidence sealed payload must be exact text")
-        try:
-            parsed = json.loads(self._sealed_payload_json)
-        except (TypeError, ValueError) as error:
-            raise ValueError("allocation evidence sealed payload is invalid") from error
-        normalized_payload = _canonical_evidence_value(parsed)
-        if type(normalized_payload) is not dict or not normalized_payload:
-            raise ValueError("allocation evidence sealed payload must be a non-empty object")
-        expected = _allocation_evidence_digest(
-            evidence_id=self.evidence_id,
-            kind=self.kind,
-            environment=self.environment,
-            schema_version=self.schema_version,
-            observed_at=self.observed_at,
-            valid_until=self.valid_until,
-            payload=normalized_payload,
-        )
-        if expected != self.digest:
-            raise ValueError("allocation evidence sealed payload no longer matches digest")
-        return normalized_payload
 
     @classmethod
     def create(
@@ -1856,8 +2149,6 @@ class ImmutableAllocationEvidence:
         valid = _instant(valid_until, name="allocation evidence valid_until")
         if valid < observed:
             raise ValueError("allocation evidence valid_until must not precede observed_at")
-        if type(payload) is not dict or not payload:
-            raise ValueError("allocation evidence payload must be a non-empty exact dict")
         normalized_payload = _canonical_evidence_value(payload)
         if type(normalized_payload) is not dict or not normalized_payload:
             raise ValueError("allocation evidence payload must be a non-empty mapping")
@@ -1892,6 +2183,101 @@ class ImmutableAllocationEvidence:
         )
 
 
+def _verified_allocation_payload_owner(
+    evidence: ImmutableAllocationEvidence,
+    _sealed_lookup=_registered_allocation_payload,
+    _evidence_type=ImmutableAllocationEvidence,
+    _canonicalize=_canonical_evidence_value,
+    _digest=_allocation_evidence_digest,
+    _canonicalize_code=getattr(_canonical_evidence_value, "__code__", None),
+    _digest_code=getattr(_allocation_evidence_digest, "__code__", None),
+):
+    """Verify canonical issuer provenance before any payload mapping method."""
+
+    if type(evidence) is not _evidence_type:
+        raise TypeError("allocation evidence must use the canonical evidence type")
+    payload = object.__getattribute__(evidence, "payload")
+    sealed = _sealed_lookup(payload)
+    owners = object.__getattribute__(evidence, "_payload_owners")
+    if sealed is None:
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    if type(owners) is not tuple:
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    owner, _canonical_json = sealed
+    if not any(candidate is owner for candidate in owners):
+        raise ValueError("allocation evidence payload provenance is not sealed")
+    if (
+        getattr(_canonicalize, "__code__", None) is not _canonicalize_code
+        or getattr(_digest, "__code__", None) is not _digest_code
+    ):
+        raise ValueError(
+            "allocation evidence trust helper executable changed after binding"
+        )
+    decoded = _canonicalize(payload)
+    if type(decoded) is not dict:
+        raise RuntimeError("sealed allocation payload provenance is invalid")
+    expected_digest = _digest(
+        evidence_id=object.__getattribute__(evidence, "evidence_id"),
+        kind=object.__getattribute__(evidence, "kind"),
+        environment=object.__getattribute__(evidence, "environment"),
+        schema_version=object.__getattribute__(evidence, "schema_version"),
+        observed_at=object.__getattribute__(evidence, "observed_at"),
+        valid_until=object.__getattribute__(evidence, "valid_until"),
+        payload=decoded,
+    )
+    if expected_digest != object.__getattribute__(evidence, "digest"):
+        raise ValueError("allocation evidence payload provenance digest mismatch")
+    return owner, decoded
+
+
+def _allocation_evidence_valid_at(
+    evidence: ImmutableAllocationEvidence,
+    instant: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _getattribute=object.__getattribute__,
+    _datetime_type=datetime,
+    _utc=timezone.utc,
+) -> bool:
+    """Evaluate evidence validity without mutable evidence-class dispatch."""
+
+    if type(evidence) is not _evidence_type:
+        raise TypeError("allocation evidence must use the canonical evidence type")
+
+    def parse(value, *, name: str):
+        if type(value) is not str:
+            raise ValueError(f"{name} must be an exact ISO timestamp string")
+        try:
+            parsed = _datetime_type.fromisoformat(
+                str.replace(value, "Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ValueError(f"{name} must be an ISO timestamp") from error
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{name} must include timezone")
+        return parsed.astimezone(_utc)
+
+    point = parse(instant, name="allocation evidence decision time")
+    observed = parse(
+        _getattribute(evidence, "observed_at"),
+        name="allocation evidence observed_at",
+    )
+    valid_until = parse(
+        _getattribute(evidence, "valid_until"),
+        name="allocation evidence valid_until",
+    )
+    return observed <= point <= valid_until
+
+
+def _allocation_payload_snapshot(
+    evidence: ImmutableAllocationEvidence,
+    _verify=_verified_allocation_payload_owner,
+) -> dict[str, object]:
+    """Return a detached exact-dict snapshot only from this issuer's seal."""
+
+    _, decoded = _verify(evidence)
+    return decoded
+
+
 @dataclass(frozen=True)
 class EvidenceBoundObjectiveAllocationResult:
     objective: ObjectiveAllocationResult
@@ -1914,24 +2300,49 @@ class EvidenceBoundObjectiveAllocationResult:
     base_currency: str
 
 
-def _payload_text(evidence: ImmutableAllocationEvidence, key: str) -> str:
-    value = evidence.payload.get(key)
-    return _text(value, name=f"{evidence.kind} payload {key}")
+def _payload_text(
+    evidence: ImmutableAllocationEvidence,
+    key: str,
+    _getattribute=object.__getattribute__,
+    _text_helper=_text,
+    _text_code=getattr(_text, "__code__", None),
+) -> str:
+    if getattr(_text_helper, "__code__", None) is not _text_code:
+        raise ValueError("allocation payload text helper executable changed after binding")
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    value = payload.get(key)
+    return _text_helper(value, name=f"{kind} payload {key}")
 
 
-def _payload_decimal(evidence: ImmutableAllocationEvidence, key: str) -> Decimal:
-    if key not in evidence.payload:
-        raise ValueError(f"{evidence.kind} payload is missing {key}")
-    return _decimal(evidence.payload[key], name=f"{evidence.kind} payload {key}")
+def _payload_decimal(
+    evidence: ImmutableAllocationEvidence,
+    key: str,
+    _getattribute=object.__getattribute__,
+    _decimal_helper=_decimal,
+    _decimal_code=getattr(_decimal, "__code__", None),
+) -> Decimal:
+    if getattr(_decimal_helper, "__code__", None) is not _decimal_code:
+        raise ValueError(
+            "allocation payload decimal helper executable changed after binding"
+        )
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    if key not in payload:
+        raise ValueError(f"{kind} payload is missing {key}")
+    return _decimal_helper(payload[key], name=f"{kind} payload {key}")
 
 
 def _payload_nonnegative_int(
     evidence: ImmutableAllocationEvidence,
     key: str,
+    _getattribute=object.__getattribute__,
 ) -> int:
-    value = evidence.payload.get(key)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{evidence.kind} payload {key} must be a non-negative integer")
+    payload = _getattribute(evidence, "payload")
+    kind = _getattribute(evidence, "kind")
+    value = payload.get(key)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{kind} payload {key} must be a non-negative exact integer")
     return value
 
 
@@ -1942,38 +2353,61 @@ def _resolve_allocation_evidence(
     expected_kind: str,
     expected_environment: str,
     at: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _verify=_verified_allocation_payload_owner,
+    _verify_code=getattr(_verified_allocation_payload_owner, "__code__", None),
+    _valid_at=_allocation_evidence_valid_at,
+    _valid_at_code=getattr(_allocation_evidence_valid_at, "__code__", None),
+    _getattribute=object.__getattribute__,
 ) -> ImmutableAllocationEvidence:
-    if not isinstance(evidence, ImmutableAllocationEvidence):
-        raise TypeError("allocation evidence values must be ImmutableAllocationEvidence")
-    if evidence.kind != expected_kind:
+    if type(evidence) is not _evidence_type:
+        raise TypeError("allocation evidence values must use the canonical evidence type")
+    if (
+        getattr(_verify, "__code__", None) is not _verify_code
+        or getattr(_valid_at, "__code__", None) is not _valid_at_code
+    ):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} has kind {evidence.kind}, "
+            "allocation evidence resolver trust helper executable changed after binding"
+        )
+    _verify(evidence)
+    evidence_id = _getattribute(evidence, "evidence_id")
+    evidence_kind = _getattribute(evidence, "kind")
+    evidence_environment = _getattribute(evidence, "environment")
+    evidence_digest = _getattribute(evidence, "digest")
+    if evidence_kind != expected_kind:
+        raise ValueError(
+            f"allocation evidence {evidence_id} has kind {evidence_kind}, "
             f"expected {expected_kind}"
         )
-    if evidence.environment != expected_environment:
+    if evidence_environment != expected_environment:
+        raise ValueError(f"allocation evidence {evidence_id} environment mismatch")
+    if not _valid_at(evidence, at):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} environment mismatch"
+            f"allocation evidence {evidence_id} is stale or not yet observable"
         )
-    if not evidence.valid_at(at):
+    resolved = resolved_evidence.get(evidence_id)
+    if type(resolved) is not _evidence_type:
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} is stale or not yet observable"
+            f"allocation evidence {evidence_id} cannot be resolved authoritatively"
         )
-    resolved = resolved_evidence.get(evidence.evidence_id)
-    if not isinstance(resolved, ImmutableAllocationEvidence):
+    _verify(resolved)
+    resolved_digest = _getattribute(resolved, "digest")
+    resolved_kind = _getattribute(resolved, "kind")
+    resolved_environment = _getattribute(resolved, "environment")
+    if resolved_digest != evidence_digest:
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} cannot be resolved authoritatively"
+            f"allocation evidence {evidence_id} digest does not match authoritative content"
         )
-    if resolved.digest != evidence.digest:
+    if (
+        resolved_kind != expected_kind
+        or resolved_environment != expected_environment
+    ):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} digest does not match authoritative content"
+            f"allocation evidence {evidence_id} authoritative scope mismatch"
         )
-    if resolved.kind != expected_kind or resolved.environment != expected_environment:
+    if not _valid_at(resolved, at):
         raise ValueError(
-            f"allocation evidence {evidence.evidence_id} authoritative scope mismatch"
-        )
-    if not resolved.valid_at(at):
-        raise ValueError(
-            f"allocation evidence {evidence.evidence_id} authoritative record is stale"
+            f"allocation evidence {evidence_id} authoritative record is stale"
         )
     return resolved
 
@@ -2220,6 +2654,194 @@ def allocate_evidence_bound_objective_targets(
     cannot be compared against a return rate from a different time interval.
     """
 
+    module_namespace = globals()
+    raw_dict_getitem = dict.__getitem__
+    raw_getattribute = object.__getattribute__
+    builtin_dict = dict
+    builtin_tuple = tuple
+    builtin_type = type
+    builtin_str = str
+    builtin_isinstance = isinstance
+    builtin_type_error = TypeError
+    builtin_value_error = ValueError
+    mapping_type = Mapping
+
+    trust_callables = (
+        ("_text", _text, raw_getattribute(_text, "__code__")),
+        ("_instant", _instant, raw_getattribute(_instant, "__code__")),
+        (
+            "_resolve_allocation_evidence",
+            _resolve_allocation_evidence,
+            raw_getattribute(_resolve_allocation_evidence, "__code__"),
+        ),
+        (
+            "_candidate_evidence_matches",
+            _candidate_evidence_matches,
+            raw_getattribute(_candidate_evidence_matches, "__code__"),
+        ),
+        (
+            "_payload_text",
+            _payload_text,
+            raw_getattribute(_payload_text, "__code__"),
+        ),
+        (
+            "_payload_decimal",
+            _payload_decimal,
+            raw_getattribute(_payload_decimal, "__code__"),
+        ),
+        (
+            "_payload_nonnegative_int",
+            _payload_nonnegative_int,
+            raw_getattribute(_payload_nonnegative_int, "__code__"),
+        ),
+        ("_decimal", _decimal, raw_getattribute(_decimal, "__code__")),
+        (
+            "normalize_allocation_valuation",
+            normalize_allocation_valuation,
+            raw_getattribute(normalize_allocation_valuation, "__code__"),
+        ),
+        (
+            "_allocation_payload_snapshot",
+            _allocation_payload_snapshot,
+            raw_getattribute(_allocation_payload_snapshot, "__code__"),
+        ),
+        (
+            "_exact_fx_monetary_conversion",
+            _exact_fx_monetary_conversion,
+            raw_getattribute(_exact_fx_monetary_conversion, "__code__"),
+        ),
+        ("_exact_add", _exact_add, raw_getattribute(_exact_add, "__code__")),
+        ("_exact_sum", _exact_sum, raw_getattribute(_exact_sum, "__code__")),
+        (
+            "allocate_objective_targets",
+            allocate_objective_targets,
+            raw_getattribute(allocate_objective_targets, "__code__"),
+        ),
+        (
+            "_allocation_policy_digest",
+            _allocation_policy_digest,
+            raw_getattribute(_allocation_policy_digest, "__code__"),
+        ),
+        (
+            "_objective_search_config_digest",
+            _objective_search_config_digest,
+            raw_getattribute(_objective_search_config_digest, "__code__"),
+        ),
+        (
+            "_allocation_decision_digest",
+            _allocation_decision_digest,
+            raw_getattribute(_allocation_decision_digest, "__code__"),
+        ),
+        (
+            "_normalize_current_scope_mapping",
+            _normalize_current_scope_mapping,
+            raw_getattribute(_normalize_current_scope_mapping, "__code__"),
+        ),
+    )
+    trust_types = (
+        ("AllocationPolicy", AllocationPolicy),
+        ("ObjectiveCandidate", ObjectiveCandidate),
+        ("AllocationCandidate", AllocationCandidate),
+        (
+            "EvidenceBoundObjectiveAllocationResult",
+            EvidenceBoundObjectiveAllocationResult,
+        ),
+    )
+
+    def snapshot_mapping(
+        value,
+        *,
+        name: str,
+        _mapping_type=mapping_type,
+        _dict_type=builtin_dict,
+        _type=builtin_type,
+        _str_type=builtin_str,
+        _isinstance=builtin_isinstance,
+        _type_error=builtin_type_error,
+    ):
+        if not _isinstance(value, _mapping_type):
+            raise _type_error(f"{name} must be a mapping")
+        snapshot = _dict_type(value)
+        for key in _dict_type.keys(snapshot):
+            if _type(key) is not _str_type:
+                raise _type_error(f"{name} keys must be exact built-in strings")
+        return snapshot
+
+    # Materialize every caller-owned container before validating any evidence.
+    # Callback-capable inputs may mutate data while being copied, but cannot run
+    # later between a successful provenance check and financial use.
+    objective_evidence = snapshot_mapping(
+        objective_evidence,
+        name="objective_evidence",
+    )
+    market_evidence = snapshot_mapping(
+        market_evidence,
+        name="market_evidence",
+    )
+    valuation_evidence = snapshot_mapping(
+        valuation_evidence,
+        name="valuation_evidence",
+    )
+    resolved_evidence = snapshot_mapping(
+        resolved_evidence,
+        name="resolved_evidence",
+    )
+    stress_source_evidence = builtin_tuple(stress_source_evidence)
+    materialized = builtin_tuple(candidates)
+
+    # Snapshotting caller-owned mappings/sequences is intentionally allowed to
+    # execute their protocol callbacks. Those callbacks must not be able to
+    # retarget the financial/provenance helpers that run after the snapshot.
+    # Built-ins used below are resolved through Python's module/builtins lookup.
+    # A snapshot callback must not be able to create a module shadow that gains
+    # execution after this trust checkpoint.
+    for builtin_name in (
+        "any",
+        "dict",
+        "isinstance",
+        "iter",
+        "len",
+        "next",
+        "set",
+        "sorted",
+        "str",
+        "tuple",
+        "type",
+        "TypeError",
+        "ValueError",
+    ):
+        if builtin_name in module_namespace:
+            raise builtin_value_error(
+                "allocation proposal builtin authority changed during input snapshot: "
+                + builtin_name
+            )
+
+    for binding_name, authority, authority_code in trust_callables:
+        if (
+            raw_dict_getitem(module_namespace, binding_name) is not authority
+            or raw_getattribute(authority, "__code__") is not authority_code
+        ):
+            raise builtin_value_error(
+                "allocation proposal trust helper changed during input snapshot: "
+                + binding_name
+            )
+    for binding_name, authority in trust_types:
+        if raw_dict_getitem(module_namespace, binding_name) is not authority:
+            raise builtin_value_error(
+                "allocation proposal trust type changed during input snapshot: "
+                + binding_name
+            )
+
+    if builtin_type(policy) is not AllocationPolicy:
+        raise TypeError("policy must be exact AllocationPolicy")
+    for item in materialized:
+        if builtin_type(item) is not ObjectiveCandidate:
+            raise TypeError("all candidates must be exact ObjectiveCandidate values")
+        if builtin_type(item.candidate) is not AllocationCandidate:
+            raise TypeError(
+                "objective candidate must contain exact AllocationCandidate"
+            )
+
     normalized_environment = _text(environment, name="allocation environment").upper()
     if normalized_environment not in _ALLOWED_EVIDENCE_ENVIRONMENTS:
         raise ValueError(f"unsupported allocation environment: {normalized_environment}")
@@ -2232,10 +2854,6 @@ def allocate_evidence_bound_objective_targets(
         decision_time,
         name="allocation decision_time",
     ).isoformat().replace("+00:00", "Z")
-    if not isinstance(resolved_evidence, Mapping):
-        raise TypeError("resolved_evidence must be a mapping")
-
-    materialized = tuple(candidates)
     symbols = tuple(item.candidate.symbol for item in materialized)
     if len(symbols) != len(set(symbols)):
         raise ValueError("objective candidate symbols must be unique")
@@ -2442,8 +3060,10 @@ def allocate_evidence_bound_objective_targets(
         try:
             normalized = normalize_allocation_valuation(
                 symbol=symbol,
-                market_payload=resolved_market[symbol].canonical_payload_snapshot(),
-                valuation_payload=valuation.canonical_payload_snapshot(),
+                market_payload=_allocation_payload_snapshot(
+                    resolved_market[symbol]
+                ),
+                valuation_payload=_allocation_payload_snapshot(valuation),
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,
@@ -2749,107 +3369,152 @@ def revalidate_evidence_bound_allocation(
     current_account_state_version: int,
     current_reservation_state_version: int,
     current_reservation_state_digest: str,
+    _evidence_type=ImmutableAllocationEvidence,
+    _verify_evidence=_verified_allocation_payload_owner,
+    _verify_evidence_code=getattr(_verified_allocation_payload_owner, "__code__", None),
+    _evidence_valid_at=_allocation_evidence_valid_at,
+    _evidence_valid_at_code=getattr(_allocation_evidence_valid_at, "__code__", None),
+    _result_type=EvidenceBoundObjectiveAllocationResult,
+    _policy_type=AllocationPolicy,
+    _getattribute=object.__getattribute__,
 ) -> bool:
     """Fail closed if evidence or reconciled capital state changed after proposal."""
 
-    if not isinstance(result, EvidenceBoundObjectiveAllocationResult):
-        raise TypeError("result must be EvidenceBoundObjectiveAllocationResult")
+    def snapshot_mapping(value, *, name: str):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping")
+        snapshot = dict(value)
+        for key in dict.keys(snapshot):
+            if type(key) is not str:
+                raise TypeError(f"{name} keys must be exact built-in strings")
+        return snapshot
+
+    # Freeze every callback-capable authority input before checking the result.
+    resolved_evidence = snapshot_mapping(
+        resolved_evidence,
+        name="resolved_evidence",
+    )
+    current_instrument_versions = snapshot_mapping(
+        current_instrument_versions,
+        name="current_instrument_versions",
+    )
+    current_capability_snapshot_ids = snapshot_mapping(
+        current_capability_snapshot_ids,
+        name="current_capability_snapshot_ids",
+    )
+
+    if (
+        getattr(_verify_evidence, "__code__", None) is not _verify_evidence_code
+        or getattr(_evidence_valid_at, "__code__", None)
+        is not _evidence_valid_at_code
+    ):
+        raise ValueError(
+            "allocation admission evidence verifier executable changed after binding"
+        )
+
+    if type(result) is not _result_type:
+        raise TypeError("result must be exact EvidenceBoundObjectiveAllocationResult")
+    if type(current_policy) is not _policy_type:
+        raise TypeError("current_policy must be exact AllocationPolicy")
     normalized_environment = _text(environment, name="allocation environment").upper()
-    if normalized_environment != result.environment:
+    if normalized_environment != _getattribute(result, "environment"):
         raise ValueError("allocation result environment does not match authority environment")
     point_instant = _instant(as_of, name="allocation revalidation time")
     decision_instant = _instant(
-        result.decision_time,
+        _getattribute(result, "decision_time"),
         name="allocation proposal decision_time",
     )
     if point_instant < decision_instant:
         raise ValueError("allocation revalidation time precedes proposal decision_time")
     point = point_instant.isoformat().replace("+00:00", "Z")
-    if _text(current_policy_version, name="current_policy_version") != result.policy_version:
+    if _text(current_policy_version, name="current_policy_version") != _getattribute(result, "policy_version"):
         raise ValueError("policy version changed after allocation proposal")
-    if _allocation_policy_digest(current_policy) != result.policy_config_digest:
+    if _allocation_policy_digest(current_policy) != _getattribute(result, "policy_config_digest"):
         raise ValueError("allocation policy configuration changed after proposal")
     if (
         _objective_search_config_digest(current_max_candidate_sets)
-        != result.objective_search_config_digest
+        != _getattribute(result, "objective_search_config_digest")
     ):
         raise ValueError("objective search configuration changed after proposal")
-    if _text(current_provider_id, name="current_provider_id") != result.provider_id:
+    if _text(current_provider_id, name="current_provider_id") != _getattribute(result, "provider_id"):
         raise ValueError("provider identity changed after allocation proposal")
     if _normalize_current_scope_mapping(
         current_instrument_versions,
         name="current_instrument_versions",
-    ) != result.instrument_versions:
+    ) != _getattribute(result, "instrument_versions"):
         raise ValueError("instrument version scope changed after allocation proposal")
     if _normalize_current_scope_mapping(
         current_capability_snapshot_ids,
         name="current_capability_snapshot_ids",
-    ) != result.capability_snapshot_ids:
+    ) != _getattribute(result, "capability_snapshot_ids"):
         raise ValueError("capability snapshot scope changed after allocation proposal")
-    if _text(current_account_id, name="current_account_id") != result.account_id:
+    if _text(current_account_id, name="current_account_id") != _getattribute(result, "account_id"):
         raise ValueError("account identity does not match allocation proposal")
     if _text(
         current_account_snapshot_id,
         name="current_account_snapshot_id",
-    ) != result.account_snapshot_id:
+    ) != _getattribute(result, "account_snapshot_id"):
         raise ValueError("account snapshot identity advanced after allocation proposal")
     if _text(
         current_reconciliation_run_id,
         name="current_reconciliation_run_id",
-    ) != result.reconciliation_run_id:
+    ) != _getattribute(result, "reconciliation_run_id"):
         raise ValueError("reconciliation identity advanced after allocation proposal")
     if _text(
         current_reservation_state_digest,
         name="current_reservation_state_digest",
-    ) != result.reservation_state_digest:
+    ) != _getattribute(result, "reservation_state_digest"):
         raise ValueError("reservation state digest changed after allocation proposal")
     for name, actual, expected in (
         (
             "account state version",
             current_account_state_version,
-            result.account_state_version,
+            _getattribute(result, "account_state_version"),
         ),
         (
             "reservation state version",
             current_reservation_state_version,
-            result.reservation_state_version,
+            _getattribute(result, "reservation_state_version"),
         ),
     ):
-        if not isinstance(actual, int) or isinstance(actual, bool) or actual < 0:
-            raise ValueError(f"current {name} must be a non-negative integer")
+        if type(actual) is not int or actual < 0:
+            raise ValueError(f"current {name} must be a non-negative exact integer")
         if actual != expected:
             raise ValueError(f"{name} advanced after allocation proposal")
 
-    for evidence_id, digest in result.evidence_refs:
+    for evidence_id, digest in _getattribute(result, "evidence_refs"):
         evidence = resolved_evidence.get(evidence_id)
-        if not isinstance(evidence, ImmutableAllocationEvidence):
+        if type(evidence) is not _evidence_type:
             raise ValueError(f"allocation evidence {evidence_id} no longer resolves")
-        if evidence.digest != digest:
+        _verify_evidence(evidence)
+        evidence_digest = _getattribute(evidence, "digest")
+        evidence_environment = _getattribute(evidence, "environment")
+        if evidence_digest != digest:
             raise ValueError(f"allocation evidence {evidence_id} changed after proposal")
-        if evidence.environment != result.environment:
+        if evidence_environment != _getattribute(result, "environment"):
             raise ValueError(f"allocation evidence {evidence_id} environment changed")
-        if not evidence.valid_at(point):
+        if not _evidence_valid_at(evidence, point):
             raise ValueError(f"allocation evidence {evidence_id} is stale at admission")
 
     expected_digest = _allocation_decision_digest(
-        result.objective,
-        evidence_refs=result.evidence_refs,
-        environment=result.environment,
-        policy_version=result.policy_version,
-        policy_config_digest=result.policy_config_digest,
-        objective_search_config_digest=result.objective_search_config_digest,
-        decision_time=result.decision_time,
-        provider_id=result.provider_id,
-        account_id=result.account_id,
-        instrument_versions=result.instrument_versions,
-        capability_snapshot_ids=result.capability_snapshot_ids,
-        account_snapshot_id=result.account_snapshot_id,
-        reconciliation_run_id=result.reconciliation_run_id,
-        account_state_version=result.account_state_version,
-        reservation_state_version=result.reservation_state_version,
-        reservation_state_digest=result.reservation_state_digest,
-        base_currency=result.base_currency,
+        _getattribute(result, "objective"),
+        evidence_refs=_getattribute(result, "evidence_refs"),
+        environment=_getattribute(result, "environment"),
+        policy_version=_getattribute(result, "policy_version"),
+        policy_config_digest=_getattribute(result, "policy_config_digest"),
+        objective_search_config_digest=_getattribute(result, "objective_search_config_digest"),
+        decision_time=_getattribute(result, "decision_time"),
+        provider_id=_getattribute(result, "provider_id"),
+        account_id=_getattribute(result, "account_id"),
+        instrument_versions=_getattribute(result, "instrument_versions"),
+        capability_snapshot_ids=_getattribute(result, "capability_snapshot_ids"),
+        account_snapshot_id=_getattribute(result, "account_snapshot_id"),
+        reconciliation_run_id=_getattribute(result, "reconciliation_run_id"),
+        account_state_version=_getattribute(result, "account_state_version"),
+        reservation_state_version=_getattribute(result, "reservation_state_version"),
+        reservation_state_digest=_getattribute(result, "reservation_state_digest"),
+        base_currency=_getattribute(result, "base_currency"),
     )
-    if expected_digest != result.decision_digest:
+    if expected_digest != _getattribute(result, "decision_digest"):
         raise ValueError("allocation decision digest does not match result content")
     return True
